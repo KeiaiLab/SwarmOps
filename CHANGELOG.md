@@ -91,6 +91,23 @@ collects the changes on `stable` that no release holds yet, until the next relea
   next sync lands under their new ids. `push` of a branch or a tag moves it there by
   compare-and-swap with its ids kept, a tag only when absent; a `push` of `main` or `release/*`
   is `E_INVALID_ARG` `land_with_sync`. `sync status` reads the tracking ref.
+- `swarmops_store::MetaRead::resolve_prefix_hits` and `by_delta_hash_hits` say whether the index cut
+  the answer at 4,096 changesets (`IdHits`); `LookupHits` is exported.
+- `swarmops_git::GitOid::of` gives the id git gives an object's bytes, and `None` for bytes git's
+  collision detection flags; `git_hash` still gives the null oid for them. `swarmops_git::GitTarget`
+  is re-exported at the crate root.
+- Test kit: `RecordedCall::RemoveDirAll`; `Watched`, `HoldThenFail` and `FsyncModelFs` forward
+  `crash_point` and `lead_wait`; `store::layout_of` panics on a `FORMAT` it cannot read or that
+  names no format.
+- CI runs actionlint over every workflow, and compiles bench/compare on every push
+  (`just check-compare`).
+- `just quiet-window` waits for a quiet host (load averages and no CI job) before a measurement, and
+  exits 1 when none comes.
+- `scripts/perf-window.py` runs the release measurements one step at a time, each on a quiet host,
+  and keeps each step's whole log (the v0.5.0 driver, now in the repository).
+- Fuzz targets `serve_entry` and `serve_hook_input` cover serve's ssh command and CGI path parsers
+  and the push hooks' pkt-line, proc-receive and pre-receive input, with seed corpora;
+  `swarmops-ops` gains a `fuzzing` feature that exposes the two private parsers to them (issue #36).
 
 ### Changed
 
@@ -114,6 +131,75 @@ collects the changes on `stable` that no release holds yet, until the next relea
   is refused by `fetch`, `push` and `sync` until it is removed and added again without the user,
   and `remote list` shows its user as `***`. An ssh URL keeps its user; a token goes by
   `--token-env` or git's credential helper.
+- `git import` and `git export` refuse a partial clone (`E_GIT_UNSUPPORTED`, `reason`
+  `partial_clone`, `details.remote`) and a repository that needs an extension they do not know
+  (`reason` `extension`, `details.extension`) as they open it, before anything is written; a partial
+  clone used to fail with `E_GIT_READ` at its first missing blob, after the frames before it had
+  committed.
+- `verify --deep` says what a wrong git export memo holds: no oid (a memo shorter than one), or the
+  right oid in a value whose length, flag byte or MAC is wrong; before, both read as a wrong oid.
+  The finding's keys are unchanged.
+- Error texts say what holds: `git import --gitlinks refuse` no longer hints `--lossy gitlinks`
+  alone, a missing object's hint names the fetch a partial clone needs, `bad_objects` names a
+  corrupt object in the store's mirror, and a commit whose ref exists without a parent is no longer
+  told the ref moved.
+- A failed `verify --deep` hints `swarmops repair` before a restore from backup; `git import --help`
+  and `GitImportResp.skipped` say what `skipped` counts; `push`'s `<ref>` help names FORMAT 2
+  branches; `mcp --help` lists every served tool, `rebase`, `ref_txn` and the workspace tools among
+  them; `derive --follow`'s help says a caught-up follower prints nothing.
+- `clone --human` writes `1 changeset` for one changeset, and its next step names the program it was
+  run as, `so ws create NAME` or `swarmops ws create NAME` (the git-familiar command design, §3
+  "Text shapes").
+- `serve`: a refused push's `ng` line ends in ` [<reason>]` (the envelope's `details.reason`) when
+  the refusal has one; a serve record's `exit` reads as unknown when absent, and its two times add
+  up to the connection's length on the monotonic clock; the pack cache's key names the git beneath a
+  `SWARMOPS_GIT` wrapper script.
+- `ws commit`: content sent inline is moved into the request, not copied; a commit near the 64 MiB
+  inline budget holds about half the memory it did.
+- A write that commits several journal frames encodes each frame once, not twice.
+- The pinned toolchain and the minimum supported Rust version move to Rust 1.100.0; building from
+  source needs Rust 1.100 or newer.
+- The reference pages of `gc`, `repair` and `upgrade` show a recorded CLI example, and `repair`'s
+  page and the verify-and-repair guide show `journal.off` rebuilt from the journal; a missing
+  `journal.off` is documented as `E_IO` at open, `repair` included.
+- The limits reference lists five more internal bounds: the claimed write wait (60 s), the write
+  queue's manifest, the two `git/serve.lock` waits (10 s) and a workspace commit's inline content
+  (64 MiB).
+- Docs: the roadmap lists signed commits as not planned (a non-goal, as the goals page says),
+  records M2's decision on the commit path, names the sync floor ref of the git mirror and M16's two
+  acceptance exceptions; the architecture page names the writes the batch queue leaves out and when
+  they get `E_BUSY`; G4's goal row gives the closed-loop lands per second.
+- Docs: known limitations list what the reviews left unrecorded (a commit's parent resolved before
+  its reads, gc's unnamed blob-put objects and orphaned keyed memos, compaction's in-memory tail,
+  unsigned packages, the sync floor's push rule and unrelated remotes, the import's last-step
+  flushes, the hooks' thread bound by transport, the import's memo cost, a refused write's
+  `E_WS_DIRTY`); SECURITY.md names the request-memory case; troubleshooting says how that
+  `E_WS_DIRTY` clears.
+- Docs: known limitations' "Commit-path costs" states decision 18's verdict (commit path kept; the
+  reflog walk over its 1 ms bound, revisited with FORMAT 3), and the never-moved ref log entry names
+  that bound; docs/perf.md applies the decision to the `history` bench: the interpolation search
+  stays (1M hit 64 % below bisection), the index-tail scan stays (0.05 % of a lock pass), and
+  `reflog(100)` (30.9 ms at 200k, 154 ms at 1M, against 1 ms) stays a known limitation until a
+  `FORMAT 3`.
+- Docs: the bug report form's "What happened" field renders Markdown instead of one shell block, and
+  CONTRIBUTING lists every step of `just perf`.
+- The weekly git matrix keeps its build between runs: each git builds into a directory of the
+  host's, mounted into the job's container, instead of compiling from nothing.
+- The weekly host-repositories job names no repository: the list is the host's file alone, and a
+  host without it fails the job with an error that names the file.
+- Tests: the host-repository round trip runs one test per mirror (`host_repos::mirror_<slot>`, eight
+  slots), so each mirror meets the test deadline alone; `host_repos::slots_hold_every_mirror` fails
+  when there are more mirrors than slots.
+- Tests: the served-load perf cases hold every count their lines print against the records' own
+  count and the clients' schedule, and the landing lanes' claim attribution and lane choice are
+  pinned by tests.
+- Tests: the CLI contention measurement's summary names a child count other than its default 32 (as
+  `just perf`'s 50-process run sets), and the default gate now checks its `E_BUSY` count of both
+  causes and how it files each commit's outcome.
+- Tests: the MCP test of a commit's relative or stdio client file runs on a store whose `main` names
+  a commit, so a refusal made after the store is opened would show in `meta.resolved`.
+- bench/compare: a test runs W4's open against a stub harness, and the end-to-end first-open test
+  kills a harness still running after five minutes.
 
 ### Fixed
 
@@ -140,6 +226,72 @@ collects the changes on `stable` that no release holds yet, until the next relea
   `main`. `git gc --auto` runs after a refresh lets the lock go.
 - `derive --follow` starts at the journal's last committed frame, read under the writers' lock,
   where a frame cut after it started could end it with `E_INVALID_ARG` and `details.after`.
+- A write whose request the write queue's leader claimed no longer waits without end when that
+  leader stops or hangs: 60 s past its lock wait it fails with `E_BUSY`. That `E_BUSY` does not say
+  the write was not recorded: the leader, once it runs again, commits it.
+- A keyed land no longer lands its change again when a damaged or crafted `meta/idx/gen.col` lowers
+  a generation above its earlier land: the walk of the target checks the generation it stops at and
+  fails with `E_STORE_CORRUPT`.
+- A land or commit waiting in the write queue whose leader meets an error it would meet alone (a key
+  reused, a missing target or parent, a moved ref) gets that error in its answer, without waiting
+  for the lock a second time.
+- A land that finds its earlier landing, or nothing to land, now takes a turn at the write queue: it
+  serves the writers waiting there and removes what dead writers left in `meta/queue/`.
+- A create over a `meta/` that holds no journal fails with a message that names `meta/journal.log`,
+  not its absolute path; "`meta` exists already" names no host path either.
+- A create removes a crashed create's `meta.tmp/` through the `FsOps` seam
+  (`FsOps::remove_dir_all`), so the crash, I/O-error and power-loss tests reach that removal.
+  `details.fs_op` is `remove_dir_all`, as before.
+- Replay no longer runs the index's tail check (five `fstat`s) for a frame without changesets.
+- The object store's `stat` refuses a header that records a payload past 512 MiB as `BadHeader`, as
+  `get` does, instead of reporting that length.
+- `verify --deep` reports a `git_oid` export memo of another length than its 21 bytes, or whose
+  `kept` byte is neither 0 nor 1, as a `derived_mismatch`. `repair` drops such a memo; the verify
+  passed over it before.
+- A tag export refused because the tag names another commit is `E_EXISTS` (`details.reason`
+  `tag_exists`, with `ref`), not `E_INTERNAL`.
+- A git ref tip whose loose object file holds another object is reported as damaged (`E_GIT_READ`),
+  no longer as `E_GIT_REF_NOT_FOUND`; an `E_GIT_READ` message for a ref git's reader cannot decode
+  is cut at 1 KiB instead of quoting the ref file whole.
+- `blob put -` with a regular file as stdin is refused by the file's length, before any read, when
+  it is past what a put holds (it read 512 MiB first).
+- `ws create` without `--path` in a working directory that is not UTF-8 names the workspace
+  (`details.name`), not the name as a relative path.
+- `ws`: an `E_IO` for a directory that would not open names it once (it read
+  `d1: d1: Permission denied`).
+- `ws create`, `ws delete`: a file or link put where the workspace's own directory was is
+  `E_WS_DIRTY` naming `.`, with a hint to move the workspace's directory aside; it named the
+  directory's name in its parent.
+- `land --human` over a conflict report cut at its budget ends with `truncated: true`; it printed
+  only the listed files before (operations spec §0).
+- `swarmops serve` refuses a git older than 2.39 before it starts any git child, and a git it cannot
+  start is no longer reported as `E_IO` on `serve.git`; git's own error lines mask the store's path
+  as `<path>`, as every other line `serve` sends.
+- `swarmops serve` no longer sends host paths to the client when the serving binary is replaced or
+  removed during a connection: the push and fetch hooks refuse with a line of their own (issue #35).
+  Every entrance now checks the access file and git before it refreshes `serve.git`.
+- `serve`'s push hook no longer writes a partial report when one report line is too long for a
+  pkt-line; the whole report is refused.
+- `swarmops serve`: a refresh scoped to named refs leaves a ref under a served branch's name out
+  with a `not_served` warning, as a full refresh does, instead of failing `E_GIT_WRITE`.
+- `swarmops serve`: a push's deletion whose `serve.git` ref moved outside `serve.lock` is reported
+  `ok`; the next refresh removes the ref.
+- `swarmops serve`: a land push's conflict counts every conflicting path, and a land whose export
+  then failed says it landed, as which changeset, and that the same push again replays it.
+- `swarmops serve` reads at most one byte past the 1 MiB limit of `access.toml`, so a file that
+  grows while it is read is refused without being held in full.
+- The `serve.git` preparation after a ref move no longer waits up to 10 s on a missing or damaged
+  `serve.git`, passes store and seed paths that start with `-` intact, seeds only a `git import`
+  into `main`, still refreshes when its seed fetch fails (warning `seed_failed`), and now also runs
+  after `revert`.
+- The commit latency bench prints the syncing calls per commit only for `fsync_less_syncs`, the one
+  variant that counts them; it printed 0.0 for the others.
+- Test kit: `Stats::per_window` returns no windows for a window of 0 instead of panicking, and the
+  landing `SyncTimer` times FORMAT 2 and 3 journal and ref-file syncs (`journal2.*`, `refs2/`).
+- Tests: a herd's waves are cut by the mark each land was due at, so a land late under host load no
+  longer splits the herd case into a third wave.
+- The gate's doc runs write to a fresh directory of their own below the target directory instead of
+  removing the shared doc directory, so two gates sharing a target directory no longer race.
 
 ### Security
 
@@ -150,6 +302,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
   the check took it for a user name (0.2.0 to 0.11.0). No user part is taken now, so no shape of
   token passes. A token stored this way stays in `remotes.toml` until the remote is removed:
   remove the remote, add it again without the user, and revoke the token.
+- A store's files are created with mode `0600` and its directories with `0700`, whatever the umask:
+  the journal, the index columns, the sorted views, the derived values and `meta/lock` no longer
+  follow it, nor do the directories a create makes, the missing ones above a new store included. A
+  store made before keeps its modes (`chmod -R go-rwx <store>` narrows it). The `meta/queue/`
+  directory and the maintenance lease file still follow the umask.
 
 ## [0.11.0] - 2026-11-09
 
