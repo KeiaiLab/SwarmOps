@@ -348,8 +348,10 @@ impl Recording<'_> {
         cred.token_env.clone_from(&remote.token_env);
         let git = GitCli::find().map_err(failed)?;
 
-        // 2. git fetch into the incoming refs, their objects checked whole. A failure returns
-        //    here: nothing imported, no tracking ref moved.
+        // 2. git fetch into the incoming refs, then the closure check of their tips: every
+        //    object they reach and no other ref does is in the mirror, none checked against its
+        //    id (step 3's import checks what it reads). A failure returns here: nothing
+        //    imported, no tracking ref moved.
         let branches = mirror.branches(name).map_err(error::mirror_error)?;
         let tags = mirror.tags(name).map_err(error::mirror_error)?;
         git.fetch(mirror.git_dir(), &url, &cred, &refspecs(name))
