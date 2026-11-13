@@ -44,7 +44,7 @@ use std::time::{Duration, Instant, SystemTime};
 use camino::Utf8PathBuf;
 use swarmops_api::{ErrorCode, OpError};
 use swarmops_core::{ChangesetId, ObjectId};
-use swarmops_git::export::export_in;
+use swarmops_git::export::{export, export_in};
 use swarmops_git::serve::refmap::to_git;
 use swarmops_git::serve::repo::{ServeError, ServeLock, ServeRepo};
 use swarmops_git::transport::{GitCli, Transport as _};
@@ -83,7 +83,9 @@ const COVERED_KEY: &str = "covered ";
 /// The `covered` of a state no full refresh wrote: it covers nothing.
 const NOTHING_COVERED: u64 = 0;
 
-/// Where a branch and a tag are in git.
+/// Where a branch and a tag are in git, as the ref map (`swarmops_git::serve::refmap`) places
+/// them: read here only to cut a served git ref down to the name an export takes
+/// ([`short_name`]).
 const HEADS: &str = "refs/heads/";
 const TAGS: &str = "refs/tags/";
 
@@ -494,7 +496,7 @@ fn export_from(
     let _counted = Counted::start();
     let snapshot = (read, recovered);
     for (full, (store, kind)) in &wanted {
-        let Some(report) = export_one(ops, repo, snapshot, full, (store, *kind))? else {
+        let Some(report) = export_one(ops, repo, Some(snapshot), full, (store, *kind))? else {
             let current = repo.refs().map_err(serve_error)?;
             if let Some(oid) = current.get(full) {
                 delete(repo, lock, full, *oid)?;
@@ -594,21 +596,27 @@ fn git_ref_of(name: &str) -> Option<String> {
     to_git(ref_kind(name)?, name)
 }
 
+/// The name an export takes for the served git ref `full`, a branch's or a tag's: what follows
+/// `refs/heads/` or `refs/tags/`. `short_name("refs/heads/release/1")` is `release/1`.
+pub(super) fn short_name(full: &str) -> &str {
+    full.strip_prefix(HEADS)
+        .or_else(|| full.strip_prefix(TAGS))
+        .unwrap_or(full)
+}
+
 /// Exports the store ref `store` of kind `kind` into `full` of `repo`, forced, by
-/// compare-and-swap, on `snapshot` (a committed one and its tail repair), again on a fresh
+/// compare-and-swap, under `serve.lock`, which the caller holds: on `snapshot` (a committed one
+/// and its tail repair) when given, else on a committed snapshot of its own; again on a fresh
 /// committed snapshot while another writer moves it, [`SERVE_REFRESH_ATTEMPTS`] times at most;
-/// `None` when the store no longer has the ref.
-fn export_one(
+/// `None` when the store no longer has the ref. A refresh's, a push's and a land's export.
+pub(super) fn export_one(
     ops: &LocalOps,
     repo: &ServeRepo,
-    snapshot: (&RepoRead<'_, FsObjectStore>, TailRepair),
+    snapshot: Option<(&RepoRead<'_, FsObjectStore>, TailRepair)>,
     full: &str,
     (store, kind): (&str, RefKind),
 ) -> Result<Option<ExportReport>, OpError> {
-    let short = full
-        .strip_prefix(HEADS)
-        .or_else(|| full.strip_prefix(TAGS))
-        .unwrap_or(full);
+    let short = short_name(full);
     let mut req = match kind {
         RefKind::Tag => ExportRequest::tag(store, short),
         _ => ExportRequest::new(store, short),
@@ -618,8 +626,8 @@ fn export_one(
     let failed = |e: ExportError| error::git_export_error(e, SERVE_GIT, store, short);
 
     // Each attempt opens serve.git afresh: what gix cached of its refs is not read again. The
-    // first exports on the caller's snapshot, a retry on a committed snapshot of its own.
-    let (read, recovered) = snapshot;
+    // first exports on the caller's snapshot, if any; a retry on a committed snapshot of its own.
+    let mut snapshot = snapshot;
     let mut attempt = 0;
     loop {
         attempt += 1;
@@ -632,11 +640,9 @@ fn export_one(
             .branch(MAIN)
             .map_err(|e| serve_error(ServeError::Sink(e)))?;
         req.held = main.into_iter().collect();
-        let exported = if attempt == 1 {
-            export_in(&ops.repo, read, recovered, &mut sink, &req)
-        } else {
-            let (fresh, repaired) = ops.repo.snapshot_committed().map_err(error::op)?;
-            export_in(&ops.repo, &fresh, repaired, &mut sink, &req)
+        let exported = match snapshot.take() {
+            Some((read, recovered)) => export_in(&ops.repo, read, recovered, &mut sink, &req),
+            None => export(&ops.repo, &mut sink, &req),
         };
         match exported {
             Ok(report) => return Ok(Some(report)),

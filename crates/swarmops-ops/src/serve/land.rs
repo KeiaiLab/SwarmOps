@@ -44,18 +44,15 @@ use swarmops_api::{
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_git::serve::land_key::land_key;
 use swarmops_git::serve::proc_receive::{Command, Report};
-use swarmops_git::serve::repo::ServeError;
-use swarmops_git::{
-    CatFileSource, DivergedReason, ExportError, ExportRequest, GitOid, GitSource as _, GixSink,
-    ImportError, ImportRequest, RawCommit, export, import,
-};
+use swarmops_git::serve::refmap::to_git;
+use swarmops_git::{CatFileSource, GitOid, GitSource as _, ImportError, RawCommit};
+use swarmops_store::ref_kind;
 
 use super::access::{Access, Action};
 use super::guard::Redactor;
 use super::hook::{HookCtx, Judged, Objects, ng};
-use super::refresh::{
-    SERVE_LOCK_WAIT, SERVE_REFRESH_ATTEMPTS, StateUpdates, serve_error, write_state,
-};
+use super::push::{TagTip, import_tip};
+use super::refresh::{SERVE_LOCK_WAIT, StateUpdates, export_one, serve_error, write_state};
 use crate::{LocalOps, error};
 
 /// The most conflicting paths a land's report lists, then `… and <k> more`.
@@ -63,9 +60,6 @@ pub const MAX_CONFLICT_LINES: usize = 50;
 
 /// The name the texts give the serving repository: never its host path.
 const SERVE_GIT: &str = "serve.git";
-
-/// Where a branch is in git: a land's target is one.
-const HEADS: &str = "refs/heads/";
 
 /// The reason of the `ng` of a land that conflicts: the report follows on stderr.
 const CONFLICT: &str = "conflict";
@@ -116,7 +110,7 @@ fn judged(
     ctx.access.check(ctx.who, Action::Land, target)?;
 
     // 2. The tip's history into the store, no ref moved.
-    let tip = import_tip(ctx, objects, new)?;
+    let tip = import_tip(ctx, objects, new, TagTip::Peeled)?;
     Ok(Judged::Land {
         target: target.to_owned(),
         tip,
@@ -313,22 +307,6 @@ fn lines(side: &LinesOut) -> String {
     format!("{}-{}", side.first, side.last)
 }
 
-/// The changeset of the commit `new`, read through `objects`, its history imported into the
-/// store objects-only.
-fn import_tip(
-    ctx: &HookCtx<'_>,
-    objects: Objects<'_>,
-    new: GitOid,
-) -> Result<ChangesetId, OpError> {
-    let hex = new.to_string();
-    let failed = |e: ImportError| error::git_import_error(e, SERVE_GIT, &hex);
-    let source = objects.source(ctx.repo).map_err(|e| failed(e.into()))?;
-    let mut request = ImportRequest::objects_only(hex.as_str());
-    request.memo_key.clone_from(&ctx.ops.memo_key);
-    let report = import(&ctx.ops.repo, &source, &request).map_err(failed)?;
-    Ok(report.head)
-}
-
 /// The commit `id`, a changeset on `target`'s first parents, exports to, with `target` exported
 /// into `serve.git` first: `None` when `target` is gone, or no longer reaches `id` that way.
 fn served_oid(ctx: &HookCtx<'_>, target: &str, id: ChangesetId) -> Result<Option<GitOid>, OpError> {
@@ -367,38 +345,29 @@ fn served_oid(ctx: &HookCtx<'_>, target: &str, id: ChangesetId) -> Result<Option
 }
 
 /// Exports the store branch `target` into `serve.git`'s branch of the same name, forced, under
-/// `serve.lock`, again while another writer moves it, [`SERVE_REFRESH_ATTEMPTS`] times at most:
-/// its head and that head's export, or `None` when the store has no such branch.
+/// `serve.lock` (the refresh's own export of a ref, on a committed snapshot of its own): its
+/// head and that head's export, or `None` when the store has no such branch.
 fn export_target(ctx: &HookCtx<'_>, target: &str) -> Result<Option<Head>, OpError> {
-    let lock = ctx.repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
-    let mut req = ExportRequest::new(target, target);
-    req.force = true;
-    req.memo_key.clone_from(&ctx.ops.memo_key);
-    let failed = |e: ExportError| error::git_export_error(e, SERVE_GIT, target, target);
+    // 1. The git ref the target is served as: the ref map's, none for a name it serves no
+    //    branch for.
+    let Some(kind) = ref_kind(target) else {
+        return Ok(None);
+    };
+    let Some(full) = to_git(kind, target) else {
+        return Ok(None);
+    };
 
-    // Each attempt opens serve.git afresh: what gix cached of its refs is not read again.
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let mut sink = GixSink::open(ctx.repo.git_dir().as_std_path())
-            .map_err(|e| serve_error(ServeError::Sink(e)))?;
-        match export(&ctx.ops.repo, &mut sink, &req) {
-            Ok(report) => {
-                // The state names the export, written last: a write that fails is passed
-                // over, and the next connection refreshes.
-                let head = (report.head, report.head_oid);
-                let full = format!("{HEADS}{target}");
-                let _ = write_state(ctx.repo, &lock, &StateUpdates::from([(full, Some(head))]));
-                return Ok(Some(head));
-            }
-            Err(ExportError::SourceRef(_)) => return Ok(None),
-            Err(ExportError::Diverged {
-                reason: DivergedReason::MovedDuringExport { .. },
-                ..
-            }) if attempt < SERVE_REFRESH_ATTEMPTS => {}
-            Err(e) => return Err(failed(e)),
-        }
-    }
+    // 2. Its export under serve.lock.
+    let lock = ctx.repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
+    let Some(report) = export_one(ctx.ops, ctx.repo, None, &full, (target, kind))? else {
+        return Ok(None);
+    };
+
+    // 3. The state names the export, written last: a write that fails is passed over, and the
+    //    next connection refreshes.
+    let head = (report.head, report.head_oid);
+    let _ = write_state(ctx.repo, &lock, &StateUpdates::from([(full, Some(head))]));
+    Ok(Some(head))
 }
 
 /// `serve.git`, to read commits from, its pack maps bounded.

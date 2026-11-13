@@ -38,8 +38,8 @@ use swarmops_git::serve::refmap::{Mapped, Refusal, from_git};
 use swarmops_git::serve::repo::{ServeError, ServeLock};
 use swarmops_git::transport::{GitCli, Transport as _};
 use swarmops_git::{
-    BranchUpdate, DivergedReason, ExportError, ExportRequest, GitOid, GitSink as _, GitSource as _,
-    GixSink, ImportError, ImportRequest, RawKind, export, import,
+    BranchUpdate, GitOid, GitSink as _, GitSource as _, GixSink, ImportError, ImportRequest,
+    RawKind, import,
 };
 use swarmops_repo::RepoError;
 use swarmops_store::{RefKind, check_move};
@@ -47,15 +47,9 @@ use swarmops_store::{RefKind, check_move};
 use super::access::Action;
 use super::hook::{HookCtx, Judged, Objects, ng};
 use super::refresh::{
-    SERVE_LOCK_WAIT, SERVE_REFRESH_ATTEMPTS, StateUpdates, serve_error, write_state,
+    SERVE_LOCK_WAIT, StateUpdates, export_one, serve_error, short_name, write_state,
 };
 use crate::error;
-
-/// Where a branch is in git.
-const HEADS: &str = "refs/heads/";
-
-/// Where a tag is in git.
-const TAGS: &str = "refs/tags/";
 
 /// The name the texts give the serving repository: never its host path.
 const SERVE_GIT: &str = "serve.git";
@@ -73,6 +67,15 @@ const NEW_OID: &str = "new-oid";
 
 /// A store ref's head and the commit it exports to.
 type Head = (ChangesetId, GitOid);
+
+/// What [`import_tip`] does with a tip that is an annotated tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TagTip {
+    /// Refused (`annotated_tag`): a ref would name the tag, which is no changeset.
+    Refused,
+    /// Imported as the commit it names: a land squashes that commit's change.
+    Peeled,
+}
 
 /// The phase log's line before what a push did under `serve.lock` (test hooks).
 #[cfg(feature = "test-hooks")]
@@ -179,7 +182,7 @@ fn judged(ctx: &HookCtx<'_>, command: &Command, objects: Objects<'_>) -> Result<
     ctx.access.check(ctx.who, Action::Push, &store)?;
 
     // 3. The tip's history into the store, no ref moved.
-    let tip = import_tip(ctx, objects, new)?;
+    let tip = import_tip(ctx, objects, new, TagTip::Refused)?;
 
     // 3b. The store's own move rules: a tag never moves.
     let rules = check_move(format, &store, now, Some(tip));
@@ -198,10 +201,7 @@ fn judged(ctx: &HookCtx<'_>, command: &Command, objects: Objects<'_>) -> Result<
         }
         return Ok(Judged::Move { store, kind, tip });
     }
-    let short = command
-        .refname
-        .strip_prefix(HEADS)
-        .unwrap_or(&command.refname);
+    let short = short_name(&command.refname);
     let failed = |e| error::transport_error(e, SERVE_GIT, error::Phase::Push);
     let sink = GixSink::open(ctx.repo.git_dir().as_std_path())
         .map_err(|e| serve_error(ServeError::Sink(e)))?;
@@ -338,18 +338,19 @@ fn unset(ctx: &HookCtx<'_>, lock: &ServeLock, full: &str, oid: GitOid) -> Result
 }
 
 /// The changeset of the commit `new`, read through `objects`, its history imported into the
-/// store objects-only. An annotated tag is refused (`annotated_tag`): it is no changeset, and
-/// the import would peel it to its commit.
-fn import_tip(
+/// store objects-only: a push's tip and a land's. An annotated tag is no changeset, and the
+/// import peels it to its commit: `tag` says whether that is refused (`annotated_tag`).
+pub(super) fn import_tip(
     ctx: &HookCtx<'_>,
     objects: Objects<'_>,
     new: GitOid,
+    tag: TagTip,
 ) -> Result<ChangesetId, OpError> {
     let hex = new.to_string();
     let failed = |e: ImportError| error::git_import_error(e, SERVE_GIT, &hex);
     let source = objects.source(ctx.repo).map_err(|e| failed(e.into()))?;
-    let (object, _) = source.header(new).map_err(|e| failed(e.into()))?;
-    if object == RawKind::Tag {
+    let refused = tag == TagTip::Refused;
+    if refused && source.header(new).map_err(|e| failed(e.into()))?.0 == RawKind::Tag {
         return Err(super::refused(
             ErrorCode::InvalidArg,
             "annotated_tag",
@@ -364,49 +365,17 @@ fn import_tip(
     Ok(report.head)
 }
 
-/// Exports the store ref `store` of kind `kind` into `full` of `serve.git`, forced, again while
-/// another writer moves it, [`SERVE_REFRESH_ATTEMPTS`] times at most: its head and that head's
-/// export, or `None` when the store has no such ref.
+/// Exports the store ref `store` of kind `kind` into `full` of `serve.git`, forced, under
+/// `serve.lock` (the refresh's own export of a ref, on a committed snapshot of its own): its
+/// head and that head's export, or `None` when the store has no such ref.
 fn export_ref(
     ctx: &HookCtx<'_>,
     full: &str,
     store: &str,
     kind: RefKind,
 ) -> Result<Option<Head>, OpError> {
-    let (short, mut req) = if kind == RefKind::Tag {
-        let short = full.strip_prefix(TAGS).unwrap_or(full);
-        (short, ExportRequest::tag(store, short))
-    } else {
-        let short = full.strip_prefix(HEADS).unwrap_or(full);
-        (short, ExportRequest::new(store, short))
-    };
-    req.force = true;
-    req.memo_key.clone_from(&ctx.ops.memo_key);
-    let failed = |e: ExportError| error::git_export_error(e, SERVE_GIT, store, short);
-
-    // Each attempt opens serve.git afresh: what gix cached of its refs is not read again.
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let mut sink = GixSink::open(ctx.repo.git_dir().as_std_path())
-            .map_err(|e| serve_error(swarmops_git::serve::repo::ServeError::Sink(e)))?;
-
-        // serve.git's main holds its history: a branch new there stops at its fork, not at the
-        // first packed commit (a walk as long as the loose history, under serve.lock).
-        let main = sink
-            .branch(MAIN)
-            .map_err(|e| serve_error(ServeError::Sink(e)))?;
-        req.held = main.into_iter().collect();
-        match export(&ctx.ops.repo, &mut sink, &req) {
-            Ok(report) => return Ok(Some((report.head, report.head_oid))),
-            Err(ExportError::SourceRef(_)) => return Ok(None),
-            Err(ExportError::Diverged {
-                reason: DivergedReason::MovedDuringExport { .. },
-                ..
-            }) if attempt < SERVE_REFRESH_ATTEMPTS => {}
-            Err(e) => return Err(failed(e)),
-        }
-    }
+    let exported = export_one(ctx.ops, ctx.repo, None, full, (store, kind))?;
+    Ok(exported.map(|report| (report.head, report.head_oid)))
 }
 
 /// Whether `to` moves `store` forward from `from` (each a changeset and its commit): along first
