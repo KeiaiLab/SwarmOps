@@ -211,7 +211,7 @@ function OnThisPage({ toc }: { toc: TOCItemType[] }) {
 
   return (
     <nav aria-label="On this page" className="mt-10 pt-2">
-      <p className={cn(CAP, 'mb-2.5')}>On this page</p>
+      <p className={cn(CAP, 'mb-2')}>On this page</p>
       <ol className="list-none p-0">
         {sections.map((item) => (
           <li key={item.url}>

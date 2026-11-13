@@ -48,7 +48,7 @@ function LookupHit({ name }: { name: string }) {
   return (
     <span className="flex items-center justify-between gap-3">
       <span className="font-mono">{name}</span>
-      <span className="rounded border border-fd-border px-1.5 font-mono text-xs uppercase tracking-wide text-fd-muted-foreground">
+      <span className="rounded border border-fd-border px-2 font-mono text-xs uppercase tracking-wide text-fd-muted-foreground">
         {LOOKUP_KIND}
       </span>
     </span>

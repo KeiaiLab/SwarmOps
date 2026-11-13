@@ -49,6 +49,10 @@
   --verdict-missed: var(--destructive);
   --verdict-open: var(--muted-foreground);
   --rule-strong: var(--input);
+  /* Code colours of a hand-coloured sample: source.config.ts's light palette. */
+  --code-string: #116b3d;
+  --code-flag: #5a3bd6;
+  --code-variable: #9a4500;
 
   /* Page geometry: one width, one side margin, two vertical distances, one prose measure. */
   --page-max: 1120px;
@@ -99,6 +103,9 @@
   --sidebar-border: #2a2e36;
   --sidebar-ring: #f5a524;
   --verdict-met: #6fd39a;
+  --code-string: #7fd19b;
+  --code-flag: #b9a8ff;
+  --code-variable: #f0a35a;
 }
 
 /* Tailwind utilities for the shadcn components (bg-primary, text-muted-foreground, ...). */
@@ -153,6 +160,9 @@
   --color-verdict-missed: var(--verdict-missed);
   --color-verdict-open: var(--verdict-open);
   --color-rule-strong: var(--rule-strong);
+  --color-code-string: var(--code-string);
+  --color-code-flag: var(--code-flag);
+  --color-code-variable: var(--code-variable);
 }
 
 /* Ledger utilities: the page column, a section's distance, a row label, a figure. */

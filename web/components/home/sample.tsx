@@ -6,11 +6,12 @@ import { C, H2, LINK, PARA, Section } from './parts';
 
 type Token = 'str' | 'flag' | 'var' | 'com';
 
-// The docs' code colours (source.config.ts gives them to Shiki); comments in muted.
+// The docs' code colours (source.config.ts gives them to Shiki, global.css to these tokens);
+// comments in muted.
 const TOKEN_CLASS: Record<Token, string> = {
-  str: 'text-[#116b3d] dark:text-[#7fd19b]',
-  flag: 'text-[#5a3bd6] dark:text-[#b9a8ff]',
-  var: 'text-[#9a4500] dark:text-[#f0a35a]',
+  str: 'text-code-string',
+  flag: 'text-code-flag',
+  var: 'text-code-variable',
   com: 'text-muted-foreground',
 };
 

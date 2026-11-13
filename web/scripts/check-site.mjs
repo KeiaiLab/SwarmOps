@@ -1392,6 +1392,8 @@ const RULES = [
 const ENFORCED = new Set([
   'header-links',
   'lookup',
+  'literal-size',
+  'literal-space',
   'footer-map',
   'release-links',
   'home-order',

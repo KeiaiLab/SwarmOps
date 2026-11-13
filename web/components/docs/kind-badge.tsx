@@ -8,7 +8,7 @@ export function KindBadge({ kind }: { kind: DocKind }) {
       <span className="sr-only">Page kind: </span>
       <span
         data-doc-kind={kind}
-        className="inline-flex items-center rounded border border-fd-border px-2 py-0.5 font-mono text-xs uppercase tracking-wide text-fd-muted-foreground"
+        className="inline-flex items-center rounded border border-fd-border h-6 px-2 font-mono text-xs uppercase tracking-wide text-fd-muted-foreground"
       >
         {kind}
       </span>
