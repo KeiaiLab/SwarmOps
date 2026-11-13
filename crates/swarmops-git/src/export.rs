@@ -18,7 +18,8 @@
 //!    a memo key ([`ExportRequest::memo_key`]), a memo whose MAC under the key checks is taken,
 //!    and the history below it is not read (one whose MAC does not check is refused the same
 //!    way). Every export oid the steps after it compare a branch with, name as a commit's parent
-//!    or move the branch to is one of these.
+//!    or move the branch to is one of these. An object git's collision detection flags has no
+//!    oid: [`ExportError::Flagged`] names the first changeset to hold it and its path.
 //! 3. A branch at the head's export is up to date: nothing is written, and it does not move.
 //! 4. A branch that exists must name the export of the head or of an ancestor of it, over every
 //!    parent: the base, found through the external id index (the changeset it names for the
@@ -391,6 +392,23 @@ pub enum ExportError {
     /// Objects written before the failure stay, loose, and the branch is as it was.
     #[error(transparent)]
     Repo(#[from] RepoError),
+    /// An object of the source's history whose bytes git's collision detection flags as a SHA-1
+    /// collision attack: git refuses to read such an object, so no history that holds it can be
+    /// exported. Found in step 2, before anything is written.
+    #[error(
+        "git's collision detection flags the {kind}{} of changeset {changeset} as a SHA-1 \
+         collision attack, an object git refuses to read",
+        place(path.as_deref())
+    )]
+    Flagged {
+        /// The changeset whose tree or commit is the first, parents first, to hold it.
+        changeset: ChangesetId,
+        /// The object's kind: a blob, a tree, or the changeset's commit itself.
+        kind: RawKind,
+        /// Its path in the changeset's tree, a file's or a directory's (empty for the root);
+        /// `None` for the commit.
+        path: Option<Vec<u8>>,
+    },
     /// What can only be a bug: a commit whose rendering does not hash to its export oid, an
     /// object the repository wrote under another oid, an external id entry naming another
     /// changeset for a commit the export wrote, a variant of another crate's enum newer than this
@@ -400,6 +418,16 @@ pub enum ExportError {
         /// What was found.
         reason: String,
     },
+}
+
+/// Where [`ExportError::Flagged`]'s object is, for its message: `" at <path>"`, `" at the root"`,
+/// or nothing for a commit.
+fn place(path: Option<&[u8]>) -> String {
+    match path {
+        None => String::new(),
+        Some([]) => " at the root".to_owned(),
+        Some(path) => format!(" at {}", String::from_utf8_lossy(path)),
+    }
 }
 
 /// The [`ExportError::Bug`] of a `match` on enum `ty` of another crate that found a variant
@@ -549,7 +577,7 @@ fn export_on(
     let old = target_at(sink, req)?;
     count(Work::Export);
     let mut run = Run::new(repo, read, sink, (head, req.memo_key.as_ref()));
-    let head_oid = run.export_of(head)?.git_oid();
+    let head_oid = run.head_oid(head)?;
     let object = tag_object(repo, read, req, (head, head_oid))?;
     let tag_oid = object.as_ref().map(|object| object.oid);
     // What the branch or tag names once exported: the tag object, else the head's commit.
@@ -931,6 +959,126 @@ impl<'a, 'r> Run<'a, 'r> {
             store: self.repo.derived_store(),
         };
         Ok(self.exports.of(self.read, &reader, &self.cache, id)?)
+    }
+
+    /// Step 2: `head`'s export oid; a failure from content git flags is [`ExportError::Flagged`].
+    fn head_oid(&mut self, head: ChangesetId) -> Result<GitOid, ExportError> {
+        match self.export_of(head) {
+            Ok(exported) => Ok(exported.git_oid()),
+            Err(e) => Err(self.flagged_or(head, e)),
+        }
+    }
+
+    /// Step 2's failure `e` as [`ExportError::Flagged`] when it is an object of `head`'s history
+    /// that git's collision detection flags; `e` as it is otherwise, or when the search fails.
+    fn flagged_or(&mut self, head: ChangesetId, e: ExportError) -> ExportError {
+        if !matches!(e, ExportError::Repo(RepoError::Derived { .. })) {
+            return e;
+        }
+        match self.find_flagged(head) {
+            Ok(Some(flagged)) => flagged,
+            Ok(None) | Err(_) => e,
+        }
+    }
+
+    /// The first changeset of `head`'s history, parents first, whose export oid fails, and the
+    /// object of it git's collision detection flags, if that is why ([`Run::flagged_in`]).
+    fn find_flagged(&mut self, head: ChangesetId) -> Result<Option<ExportError>, ExportError> {
+        // 1. Every changeset of the history, oldest generation first: parents before children.
+        let mut history = Vec::new();
+        let mut met = HashSet::from([head]);
+        let mut pending = vec![head];
+        while let Some(id) = pending.pop() {
+            let node = self.node(id)?;
+            history.push((node.generation, id));
+            for &parent in &node.parents.clone() {
+                if met.insert(parent) {
+                    pending.push(parent);
+                }
+            }
+        }
+        history.sort_unstable();
+
+        // 2. The first whose export oid fails: its parents' do not, so the cause is its own.
+        for (_, id) in history {
+            if self.export_of(id).is_err() {
+                return self.flagged_in(id);
+            }
+        }
+        Ok(None)
+    }
+
+    /// The object of changeset `id`, whose parents' export oids hold, that git's collision
+    /// detection flags: a file or a directory of its tree, by path, else its commit.
+    fn flagged_in(&mut self, id: ChangesetId) -> Result<Option<ExportError>, ExportError> {
+        self.current = id;
+        let node = self.node(id)?;
+        let (root, parents) = (node.root, node.parents.clone());
+        let flagged = |kind, path| ExportError::Flagged {
+            changeset: id,
+            kind,
+            path,
+        };
+        if self.tree_git_oid(root).is_err() {
+            let found = self.flagged_below(root)?;
+            return Ok(found.map(|(kind, path)| flagged(kind, Some(path))));
+        }
+
+        // The tree holds: the commit, rendered as the export oid's derivation renders it.
+        let mut oids = Vec::with_capacity(parents.len());
+        for parent in parents {
+            oids.push(self.export_of(parent)?.git_oid());
+        }
+        let tree = self.tree_git_oid(root)?;
+        let stored =
+            (self.read.changeset(id)?).ok_or_else(|| RepoError::NotFound(id.to_string()))?;
+        let bytes = native::render_commit(id, &stored.changeset, &oids, tree);
+        let commit = oid::checked_hash(RawKind::Commit, &bytes);
+        Ok(commit.is_none().then(|| flagged(RawKind::Commit, None)))
+    }
+
+    /// The object below tree `root`, whose oid fails, that git's collision detection flags, and
+    /// its path: a file whose oid fails, else the first directory whose oid fails, descended,
+    /// else the tree itself. `None` when what failed is not flagged.
+    fn flagged_below(&self, root: TreeId) -> Result<Option<(RawKind, Vec<u8>)>, ExportError> {
+        let (mut tree_id, mut path) = (root, Vec::new());
+        loop {
+            let tree = self.read.tree(tree_id)?;
+            let mut failing = None;
+            for entry in tree.entries() {
+                let mut at = path.clone();
+                if !at.is_empty() {
+                    at.push(b'/');
+                }
+                at.extend_from_slice(entry.name.as_bytes());
+                match entry.target {
+                    EntryTarget::Leaf(_, blob) => {
+                        if self.blob_git_oid(blob).is_ok() {
+                            continue;
+                        }
+                        let bytes = self.read.blob(blob)?;
+                        if oid::checked_hash(RawKind::Blob, &bytes).is_none() {
+                            return Ok(Some((RawKind::Blob, at)));
+                        }
+                    }
+                    EntryTarget::Dir(dir) => {
+                        if failing.is_none() && self.tree_git_oid(dir).is_err() {
+                            failing = Some((dir, at));
+                        }
+                    }
+                    _ => return Err(unknown_variant("EntryTarget")),
+                }
+            }
+
+            // No file is flagged here: down the failing directory, else this tree's own bytes.
+            if let Some((dir, at)) = failing {
+                (tree_id, path) = (dir, at);
+                continue;
+            }
+            let bytes = self.rendered_tree(&tree)?;
+            let flagged = oid::checked_hash(RawKind::Tree, &bytes).is_none();
+            return Ok(flagged.then_some((RawKind::Tree, path)));
+        }
     }
 
     /// Reads changeset `id`'s record and object into [`Run::nodes`], once; `false` when the
@@ -1472,4 +1620,126 @@ fn entry_named<'t>(tree: &'t Tree, name: &[u8]) -> Option<&'t TreeEntry> {
     let entries = tree.entries();
     let at = entries.binary_search_by(|entry| entry.name.as_bytes().cmp(name));
     at.ok().map(|at| &entries[at])
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use swarmops_repo::{CasResult, Change};
+    use swarmops_testkit::git::empty_repository;
+    use swarmops_testkit::repo::{new_repo, put, request};
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::oid::flagged;
+    use crate::{ExportOid, GixSink, register};
+
+    /// Who moves `main` in these tests.
+    const ACTOR: &str = "test/exporter";
+    /// The content of the file the tests have git's collision detection flag.
+    const FLAGGED: &[u8] = b"flagged\n";
+
+    /// Commits `changes` on `main`'s head and moves `main` there: the new changeset.
+    fn on_main(repo: &LocalRepo, changes: Vec<Change>, message: &str) -> ChangesetId {
+        let head = repo.get_ref("main").unwrap().map(|state| state.target);
+        let id = repo
+            .commit(request(head.as_slice(), changes, message))
+            .unwrap()
+            .id;
+        let moved = repo.cas_ref("main", head, Some(id), ACTOR).unwrap();
+        assert!(
+            matches!(moved.result, CasResult::Applied { .. }),
+            "{moved:?}"
+        );
+        id
+    }
+
+    /// A store whose `main` holds a root changeset with `a`, then one that adds [`FLAGGED`] at
+    /// `dir/sub/f`: the store and the two changesets.
+    fn flagged_history() -> (TempDir, LocalRepo, [ChangesetId; 2]) {
+        let (dir, _, mut repo) = new_repo();
+        register(&mut repo).unwrap();
+        let root = on_main(&repo, vec![put("a", b"a\n")], "a\n");
+        let child = on_main(&repo, vec![put("dir/sub/f", FLAGGED)], "f\n");
+        (dir, repo, [root, child])
+    }
+
+    /// How many loose objects the repository at `dir` holds.
+    fn loose_objects(dir: &Path) -> usize {
+        let fanouts = fs::read_dir(dir.join("objects")).unwrap();
+        let fanouts = fanouts
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_name().len() == 2);
+        fanouts
+            .map(|fanout| fs::read_dir(fanout.path()).unwrap().count())
+            .sum()
+    }
+
+    /// Exports `main` into a new empty repository, which must refuse as
+    /// [`ExportError::Flagged`]: its changeset, kind and path. Nothing is written, and no branch
+    /// made.
+    #[track_caller]
+    fn refused(repo: &LocalRepo) -> (ChangesetId, RawKind, Option<Vec<u8>>) {
+        let destination = empty_repository();
+        let mut sink = GixSink::open(&destination.dir).unwrap();
+        let error = export(repo, &mut sink, &ExportRequest::new("main", "main")).unwrap_err();
+        assert_eq!(loose_objects(&destination.dir), 0, "{error}");
+        assert_eq!(sink.branch("main"), Ok(None), "{error}");
+        let ExportError::Flagged {
+            changeset,
+            kind,
+            path,
+        } = error
+        else {
+            panic!("a flagged object's refusal, not {error:?}");
+        };
+        (changeset, kind, path)
+    }
+
+    /// A flagged blob is refused as the file it is: the changeset that adds it, and its path.
+    #[test]
+    fn a_flagged_file_is_refused_by_its_path() {
+        let (_dir, repo, [_, child]) = flagged_history();
+        flagged::flag(RawKind::Blob, FLAGGED);
+        let found = refused(&repo);
+        assert_eq!(found, (child, RawKind::Blob, Some(b"dir/sub/f".to_vec())));
+        let shown = ExportError::Flagged {
+            changeset: found.0,
+            kind: found.1,
+            path: found.2,
+        };
+        assert!(shown.to_string().contains("blob at dir/sub/f"), "{shown}");
+    }
+
+    /// A flagged tree is refused as the directory it is.
+    #[test]
+    fn a_flagged_directory_is_refused_by_its_path() {
+        let (_dir, repo, [_, child]) = flagged_history();
+        // The directory `dir/sub`, which holds `f` alone, as git writes it.
+        let sub = [
+            b"100644 f\0".as_slice(),
+            &oid::git_hash(RawKind::Blob, FLAGGED).0,
+        ];
+        flagged::flag(RawKind::Tree, &sub.concat());
+        let found = refused(&repo);
+        assert_eq!(found, (child, RawKind::Tree, Some(b"dir/sub".to_vec())));
+    }
+
+    /// A flagged commit is refused as its changeset's, with no path.
+    #[test]
+    fn a_flagged_commit_is_refused_as_its_changeset() {
+        let (_dir, repo, [root, child]) = flagged_history();
+        let read = repo.snapshot().unwrap();
+        let cs = read.changeset(child).unwrap().unwrap().changeset;
+        let parent = repo.derived::<ExportOid>(root, &()).unwrap().git_oid();
+        let reader = ExportReader::new(&read, repo.derived_store());
+        let tree = export_oid::tree_oid(&reader, cs.root).unwrap();
+        flagged::flag(
+            RawKind::Commit,
+            &native::render_commit(child, &cs, &[parent], tree),
+        );
+        assert_eq!(refused(&repo), (child, RawKind::Commit, None));
+    }
 }

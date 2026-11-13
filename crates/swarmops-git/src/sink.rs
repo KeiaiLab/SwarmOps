@@ -32,10 +32,12 @@ pub trait GitSink {
     /// decode or do not hash to `oid`, [`SinkError::Missing`] when the repository lacks it.
     fn read(&self, oid: GitOid) -> Result<(RawKind, Vec<u8>), SinkError>;
 
-    /// Writes `bytes` as an object of `kind`, and returns its id,
-    /// [`git_hash(kind, bytes)`](crate::git_hash): as a loose file, unless the repository holds the
-    /// object already; a loose file of that name that does not read back as the object is
-    /// replaced. Not durable until [`sync`](GitSink::sync) names it.
+    /// Writes `bytes` as an object of `kind`, and returns its id, the one
+    /// [`GitOid::of`] gives: as a loose file, unless the repository holds the object already; a
+    /// loose file of that name that does not read back as the object is replaced. Bytes git's
+    /// collision detection flags as a SHA-1 collision attack have no id, and are refused
+    /// ([`SinkError::Write`]) before anything is written. Not durable until
+    /// [`sync`](GitSink::sync) names it.
     fn write_object(&mut self, kind: RawKind, bytes: &[u8]) -> Result<GitOid, SinkError>;
 
     /// Makes durable the loose files of exactly the objects `oids`, the fan-out directories that

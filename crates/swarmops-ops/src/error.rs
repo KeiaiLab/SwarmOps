@@ -1008,6 +1008,27 @@ pub(crate) fn git_export_error(
         }
         ExportError::Sink(e) => sink_error(e, message, git_path, branch),
         ExportError::Repo(e) => op(e),
+        ExportError::Flagged {
+            changeset,
+            kind,
+            path,
+        } => {
+            // The content's refusal, not a bug: git reads no such object.
+            let mut found = details([
+                ("reason", "collision".into()),
+                ("kind", kind.as_str().into()),
+                ("changeset", changeset.to_string().into()),
+            ]);
+            if let Some(path) = path {
+                put_path(&mut found, &path);
+            }
+            error(ErrorCode::GitUnsupported, message)
+                .with_details(found)
+                .with_hint(hint(
+                    "git refuses to read such an object, so no history that holds it exports; \
+                     export a ref whose history does not hold it",
+                ))
+        }
         ExportError::Bug { .. } => error(ErrorCode::Internal, message),
         _ => unmapped(message),
     }
@@ -3085,6 +3106,54 @@ mod tests {
         assert!(
             hint.contains("refs/tags/v1") && hint.contains("--force"),
             "{hint}"
+        );
+    }
+
+    /// An object git's collision detection flags is the content's refusal, not a bug:
+    /// `E_GIT_UNSUPPORTED` `collision`, naming its kind, its changeset and, but for a commit,
+    /// its path (with the exact bytes of one that is no UTF-8).
+    #[test]
+    fn a_flagged_object_is_e_git_unsupported() {
+        use serde_json::json;
+        use swarmops_git::RawKind;
+
+        let changeset = ChangesetId::new(ObjectId::new([7; 32]));
+        let flagged = |kind, path: Option<&[u8]>| ExportError::Flagged {
+            changeset,
+            kind,
+            path: path.map(<[u8]>::to_vec),
+        };
+
+        // 1. A file, by its path; one that is no UTF-8 with its bytes too.
+        let file = export_maps(
+            flagged(RawKind::Blob, Some(b"dir/f")),
+            ErrorCode::GitUnsupported,
+            &json!({
+                "reason": "collision",
+                "kind": "blob",
+                "changeset": changeset.to_string(),
+                "path": "dir/f",
+            }),
+        );
+        assert!(file.message.contains("blob at dir/f"), "{file:?}");
+        assert!(file.hint.is_some(), "{file:?}");
+        let raw = git_export_error(
+            flagged(RawKind::Blob, Some(b"d/\xff")),
+            GIT_PATH,
+            "main",
+            "main",
+        );
+        assert_eq!(raw.details["path_base64"], "ZC//", "{raw:?}");
+
+        // 2. A commit has no path.
+        export_maps(
+            flagged(RawKind::Commit, None),
+            ErrorCode::GitUnsupported,
+            &json!({
+                "reason": "collision",
+                "kind": "commit",
+                "changeset": changeset.to_string(),
+            }),
         );
     }
 
