@@ -1423,3 +1423,77 @@ fn a_phase_log_names_every_phase() {
     let expected = ["push.export", "push.git", "export.derive", "export.memo"];
     assert_eq!(named, expected, "{pushed}");
 }
+
+/// The phase log of `log`: each line's phase and count, in the log's order.
+#[cfg(feature = "test-hooks")]
+fn phase_counts(log: &Path) -> Vec<(String, u64)> {
+    let written = fs::read_to_string(log).expect("the phase log is written");
+    written
+        .lines()
+        .map(|line| {
+            let fields: Vec<&str> = line.split(' ').collect();
+            assert_eq!(fields.len(), 3, "{line:?} in {written}");
+            (fields[0].to_owned(), fields[2].parse().expect("a count"))
+        })
+        .collect()
+}
+
+/// The phase log's counts (the M18 design §2.2), which the perf ledger's figures rest on: a sync
+/// of one land onto a remote that gained one commit counts one of each step, and the git crate's
+/// inner marks count each object derived and each memo read or written (a mark dropped from a
+/// blob's or a tree's derive, or from a memo read, changes them); a sync that ends before its
+/// published changes writes no `sync.publish` line.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn a_phase_log_counts_what_each_phase_did() {
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let synced_with = |name: &str, args: &[&str]| {
+        let log = store.tmp().join(name);
+        let log_text = path_text(&log);
+        let hook = [(PHASE_LOG_ENV, log_text.as_str())];
+        let synced = sync_with(&remote, &store, args, &hook).ok();
+        (synced, phase_counts(&log))
+    };
+
+    // 1. Both sides move by one change: each of the sync's steps once.
+    land(&store, "mine.txt", "mine\n");
+    remote.commit("theirs", &[("theirs.txt", "theirs\n")]);
+    let (synced, first) = synced_with("first.log", &[]);
+    assert_eq!(synced["status"], "pushed", "{synced}");
+    let expected = [
+        ("sync.fetch", 1),
+        ("sync.plan", 1),
+        ("sync.recognise", 0),
+        ("sync.relocate", 1),
+        ("sync.move", 1),
+        ("sync.publish", 1),
+        ("push.export", 1),
+        ("push.git", 1),
+        ("export.derive", FIRST_DERIVED),
+        ("export.memo", FIRST_MEMOS),
+        ("import.convert", 1),
+    ];
+    let expected: Vec<(String, u64)> = expected
+        .iter()
+        .map(|&(phase, count)| (phase.to_owned(), count))
+        .collect();
+    assert_eq!(first, expected);
+
+    // 2. Nothing to do: the fetch and the plan alone, and no published step.
+    let (synced, idle) = synced_with("idle.log", &[]);
+    assert_eq!(synced["status"], "up_to_date", "{synced}");
+    let named: Vec<&str> = idle.iter().map(|(phase, _)| phase.as_str()).collect();
+    assert!(!named.contains(&"sync.publish"), "{idle:?}");
+    assert_eq!(&idle[..2], [("sync.fetch".to_owned(), 0), ("sync.plan".to_owned(), 0)]);
+}
+
+/// The objects the first sync of [`a_phase_log_counts_what_each_phase_did`] derives, the fetch's
+/// import, the published change and the push's export added up: 5 changesets, 2 trees and 5
+/// blobs (measured with each mark removed in turn).
+#[cfg(feature = "test-hooks")]
+const FIRST_DERIVED: u64 = 12;
+
+/// The memos that sync reads and writes, 5 of them the memo key's reads (measured the same way).
+#[cfg(feature = "test-hooks")]
+const FIRST_MEMOS: u64 = 29;
