@@ -314,10 +314,11 @@ jobs:
 
   # This host's repositories, which tests read only with SWARMOPS_HOST_REPOS=1: bare mirrors in
   # /data/swarmops/host-repos, refreshed by scripts/host-repos.py from the list file there (one
-  # source path a line, written with the defaults below when missing; edit it on the host). A
-  # partial clone is passed over, with a warning. The sources are only read. Then
-  # `host_repos::every_mirror_round_trips` imports each mirror's HEAD, verifies the store deep,
-  # exports into an empty repository, has git fsck --strict it and imports the export again:
+  # source path a line). The list is the host's alone: this file names none of its repositories,
+  # and a host without the list fails the job. A partial clone is passed over, with a warning.
+  # The sources are only read. Then the `host_repos::` tests, one per mirror, import each
+  # mirror's HEAD, verify the store deep, export into an empty repository, have git fsck
+  # --strict it and import the export again:
   # about 9 minutes for 3 mirrors and 2,324 commits at load 100, hence the ci-slow profile.
   host-repos:
     name: host repositories
@@ -341,14 +342,13 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146
           fallback: none
-      - name: Write the list of this host's repositories, if missing
+      - name: Check that the list of this host's repositories is there
         run: |
-          mkdir -p "$HOST_REPOS"
           if [ ! -f "$HOST_REPOS/list.txt" ]; then
-            printf '/home/evo/dev/%s\n' traders agents upbit-broker ctrader-broker keiailab-mcp \
-              >"$HOST_REPOS/list.txt"
+            echo "::error::the runner's host lacks $HOST_REPOS/list.txt (one source path a line)"
+            exit 1
           fi
-          cat "$HOST_REPOS/list.txt"
+          echo "$(grep -cvE '^[[:space:]]*(#|$)' "$HOST_REPOS/list.txt") repositories listed"
       - name: Refresh the mirrors
         run: uv run --script scripts/host-repos.py "$HOST_REPOS/list.txt" "$HOST_REPOS"
       - name: Round-trip every mirror
