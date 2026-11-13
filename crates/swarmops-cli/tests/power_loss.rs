@@ -2178,11 +2178,13 @@ fn the_prefix_oracle_takes_a_land_and_its_undo_whole() {
 }
 
 /// The recovery oracle's own check ([`recovered_as_imaged`]): it takes a report of exactly what
-/// the next commit's write repaired, and refuses one that misstates the cut or the frames listed,
-/// or that lists a frame the run had not begun to write by the cut.
+/// the next commit's write repaired, and refuses one that misstates the cut (where it starts or
+/// how long it is) or the frames listed, or that lists a frame the run had not begun to write by
+/// the cut: past the frames `journal.off` listed already, and a `Compacted` frame counted from
+/// its write on.
 #[test]
 fn the_recovery_oracle_refuses_a_report_that_misstates_the_repair() {
-    let rec = one_advancing_commit();
+    let mut rec = one_advancing_commit();
     let write = rec.frames[0].write;
     // The image holds the frame whole and unlisted, then 8 torn bytes: the next commit lists the
     // frame, cuts the 8 bytes, and lands where they began.
@@ -2199,6 +2201,7 @@ fn the_recovery_oracle_refuses_a_report_that_misstates_the_repair() {
     for wrong in [
         Value::Null,
         json!({"frames_listed": 1}),
+        json!({"log_cut": {"at": 91, "bytes": 8}, "frames_listed": 1}),
         json!({"log_cut": {"at": 92, "bytes": 7}, "frames_listed": 1}),
         json!({"log_cut": {"at": 92, "bytes": 8}}),
         json!({"log_cut": {"at": 92, "bytes": 8}, "frames_listed": 2}),
@@ -2219,6 +2222,116 @@ fn the_recovery_oracle_refuses_a_report_that_misstates_the_repair() {
         Ok(())
     );
     assert!(recovered_as_imaged(&rec, write + 1, &exact, clean, 92).is_err());
+
+    // With one frame listed already, a second whole one is there to list only once the run began
+    // to write it: not while the run's one frame is all it began, and, for a `Compacted` frame
+    // written at step `compacted`, from the cut after that step on.
+    let second = Imaged {
+        whole: 2,
+        entries: 1,
+        ..torn
+    };
+    let compacted = write + 2;
+    assert!(recovered_as_imaged(&rec, compacted + 1, &exact, second, 92).is_err());
+    rec.compacted.push(compacted);
+    assert!(recovered_as_imaged(&rec, compacted, &exact, second, 92).is_err());
+    assert_eq!(
+        recovered_as_imaged(&rec, compacted + 1, &exact, second, 92),
+        Ok(())
+    );
+}
+
+/// The land and undo sweep's own check ([`LAND_UNDO_RUN`]), each oracle fed what it exists to
+/// refuse. The prefix oracle ([`allowed`]) refuses the land's frame, and the undo's, found
+/// before its write began or missing after its sync. No prefix of the run is the state of a
+/// store that holds the landed changeset without the target's move to it, or the move at a
+/// version the run never gave it ([`Seen::is_after`]). And [`lands_once`], on the stores of two
+/// images through the binary, refuses a land run again that lands where the recorded land
+/// should replay (a lost land, or a replay that does not find it) and one that replays where
+/// the state holds no land; it takes the replay of a land the store holds, and the land on a
+/// store that lacks it.
+#[test]
+fn the_land_and_undo_oracles_refuse_half_a_land_and_a_wrong_replay() {
+    let rec = record_ops(DEFAULT_INIT_FORMAT, LAND_UNDO_RUN);
+    let (land, undo) = (rec.frames[4], rec.frames[5]);
+
+    // 1. The prefix oracle at each of the two frames: `before` frames come before it.
+    let holding = |frames: usize| {
+        Ok(Observed {
+            found: Found::Prefix(frames),
+            held: Vec::new(),
+            relanded: Vec::new(),
+        })
+    };
+    for (before, frame) in [(4, land), (5, undo)] {
+        let (without, with) = (holding(before), holding(before + 1));
+        // Its write not begun: it cannot be there.
+        assert_eq!(allowed(&rec, frame.write, &without), Ok(()));
+        assert!(allowed(&rec, frame.write, &with).is_err(), "{frame:?}");
+        // Written, not synced: there or not.
+        assert_eq!(allowed(&rec, frame.write + 1, &without), Ok(()));
+        assert_eq!(allowed(&rec, frame.write + 1, &with), Ok(()));
+        // Synced: it cannot be gone.
+        assert!(
+            allowed(&rec, frame.write + 2, &without).is_err(),
+            "{frame:?}"
+        );
+        assert_eq!(allowed(&rec, frame.write + 2, &with), Ok(()));
+    }
+
+    // 2. The states a store may show: the land whole (after 5 frames) and undone (after 6),
+    // and neither half of the land, nor a version the run never gave the target.
+    let prefixes = |release: usize, version: u64| -> Vec<usize> {
+        let at = |n: usize, version: u64| (rec.commits[n].clone(), version);
+        let seen = Seen {
+            state: State {
+                changesets: 3,
+                refs: BTreeMap::from([
+                    ("main".to_owned(), at(0, 1)),
+                    (RELEASE.to_owned(), at(release, version)),
+                ]),
+            },
+            shown: vec![(2, Some(2))],
+            history: rec.history(&rec.commits[2]),
+        };
+        (0..=rec.frames.len())
+            .filter(|&frames| seen.is_after(&rec, frames))
+            .collect()
+    };
+    assert_eq!(prefixes(2, 2), [5]);
+    assert_eq!(prefixes(0, 3), [6]);
+    assert!(prefixes(0, 1).is_empty(), "the landed changeset, unmoved");
+    assert!(prefixes(2, 3).is_empty(), "a version the run never gave");
+
+    // 3. The land run again, on the store of the image before the land's write and on that of
+    // the image after its sync, each with everything kept.
+    let store_of = |cut: usize| {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let image = image_losing(&rec, cut, &[]);
+        image.materialize(dir.path()).expect("write the image");
+        dir
+    };
+    let again = |cut: usize, frames: usize| {
+        let dir = store_of(cut);
+        let store = dir.path().join("store");
+        let store = store.to_str().expect("UTF-8 temp paths");
+        lands_once(&rec, store, &rec.state_after(frames))
+    };
+    let (lacking, holding) = (land.write, land.write + 2);
+    assert_eq!(again(holding, 5), Ok(vec!["replayed".to_owned()]));
+    assert_eq!(again(lacking, 4), Ok(vec!["landed".to_owned()]));
+    let lost = again(lacking, 5);
+    assert!(
+        lost.as_ref().is_err_and(|why| why.contains("not replayed")),
+        "a store without the land the state holds: {lost:?}"
+    );
+    let unknown = again(holding, 4);
+    assert!(
+        unknown
+            .as_ref()
+            .is_err_and(|why| why.contains("not landed")),
+        "a store with a land the state lacks: {unknown:?}"
+    );
 }
 
 /// The external-id oracle's own check ([`allowed`]): an image that lacks an external id passes at
@@ -2758,7 +2871,9 @@ mod batch_loss {
         from: usize,
         /// The steps of the batch's one append to `journal.log`: its write, then its sync.
         append: std::ops::Range<usize>,
-        /// Each key, and the step at which its land had returned.
+        /// Each key, and the step at which its land had returned: the first step that is known
+        /// to follow its answer. The queue's files, the answers among them, are not written
+        /// through [`FsOps`], so the run records no step of an answer's write.
         returned: BTreeMap<String, usize>,
         /// `journal.log`, relative to the base.
         log: String,
@@ -2970,15 +3085,68 @@ mod batch_loss {
         Ok(())
     }
 
+    /// The batch oracle's own check ([`allowed`]) on runs made up for it, the batch's write at
+    /// step 10 and its sync at step 11: it refuses frames that are no prefix of the batch's, a
+    /// frame before the write and a missing one after the sync; and it refuses a land that had
+    /// returned and is gone by that clause alone, on a run whose lands returned before the sync
+    /// (a store that answers before its commit point), where the other clauses take the image.
+    #[test]
+    fn the_batch_oracle_refuses_an_answered_land_that_is_gone() {
+        let keys: Vec<String> = (0..LANDERS).map(key).collect();
+        let run = |returned: usize| Run {
+            timeline: Timeline::new(Path::new(""), &[]),
+            t0: String::new(),
+            keys: keys.clone(),
+            from: 0,
+            append: 10..12,
+            returned: (keys.iter().cloned()).map(|key| (key, returned)).collect(),
+            log: String::new(),
+        };
+        let honest = run(14);
+
+        // 1. A prefix of the batch's frames: none before the write, all after the sync.
+        assert_eq!(allowed(&honest, 10, &[]), Ok(()));
+        assert!(allowed(&honest, 10, &keys[..1]).is_err());
+        for held in 0..=LANDERS {
+            assert_eq!(allowed(&honest, 11, &keys[..held]), Ok(()));
+        }
+        assert!(allowed(&honest, 11, &keys[1..2]).is_err());
+        assert!(allowed(&honest, 12, &keys[..2]).is_err());
+        assert_eq!(allowed(&honest, 12, &keys), Ok(()));
+
+        // 2. Lands that returned at step 11, before the sync ended: an image of that cut which
+        // lacks one is refused, for the answered land alone.
+        let early = run(11);
+        let lost = allowed(&early, 11, &keys[..2]);
+        assert!(
+            lost.as_ref().is_err_and(|why| why.contains("answered")),
+            "{lost:?}"
+        );
+        assert_eq!(allowed(&early, 11, &keys), Ok(()));
+    }
+
     per_format! {
     /// A batch of three lands loses no answered member to a power loss (the M18 D2 design §4,
     /// D1): over every cut from the first lander's preparation and [`SEEDS`], and two torn
     /// writes of the batch's frames (the bytes before its first or second 512 B boundary
     /// kept), each image verifies clean, holds a prefix of the batch's frames on `main`, none
     /// before their write, all of them after its sync, and every land whose call had returned.
+    /// In the run itself no land returns before the batch's sync, so in the images the last
+    /// clause follows from the one before it; [`allowed`] judges it by itself all the same
+    /// (`the_batch_oracle_refuses_an_answered_land_that_is_gone`).
     /// Images that hold the same files are checked once.
     fn power_loss_in_a_batch_never_loses_an_answered_member(format) {
         let (_dir, run) = record_run(format);
+
+        // 0. D1 in the run itself: no land returned before the batch's sync.
+        let early: Vec<(&String, &usize)> = (run.returned.iter())
+            .filter(|&(_, &at)| at < run.append.end)
+            .collect();
+        assert!(
+            early.is_empty(),
+            "lands that returned before the batch's sync ended at step {}: {early:?}",
+            run.append.end
+        );
 
         // 1. Every cut and seed, each distinct image once.
         let mut distinct: HashMap<u64, (usize, u64)> = HashMap::new();
