@@ -32,6 +32,8 @@ const MACOS = 'macOS';
 const GLIBC = 'glibc 2.34 or newer';
 const INSTALL_GUIDE_URL = '/docs/guides/install';
 const INSTALLER_URL = '/install.sh';
+// Each release since v0.8.0 also carries a .deb and an .rpm for each architecture.
+const PACKAGES_URL = '/docs/guides/install#how-do-i-install-the-deb-or-rpm-package';
 const GOAL_G8_URL = '/docs/goals#goals';
 const ROADMAP_URL = '/docs/roadmap';
 // The ledger section holding the measured figure beside the benefit sentence.
@@ -125,8 +127,11 @@ function InstallFacts() {
         <li className="border-b border-border py-2">Run it again to update</li>
       </ul>
 
-      {/* 2. The other ways in, and the script itself. */}
+      {/* 2. The other ways in, the packages first, and the script itself. */}
       <p className="mt-2 flex flex-wrap gap-x-6">
+        <a className={LINK_44} href={PACKAGES_URL}>
+          .deb and .rpm packages
+        </a>
         <a className={LINK_44} href={INSTALL_GUIDE_URL}>
           Other install methods
         </a>
