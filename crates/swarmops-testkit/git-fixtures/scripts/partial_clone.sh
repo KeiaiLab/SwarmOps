@@ -1,7 +1,8 @@
 # partial_clone: a partial clone without its blobs: repo.git is `git clone --bare
 # --filter=blob:none` of a three-commit repository the script makes first, which allows the
 # filter (uploadpack.allowFilter); it holds every commit and tree and no blob. Its remote, the
-# promisor git would fetch a missing blob from, names no repository. Refused (E_GIT_READ).
+# promisor git would fetch a missing blob from, names no repository. Refused as it opens
+# (E_GIT_UNSUPPORTED).
 
 . "$(dirname "$0")/lib.sh"
 

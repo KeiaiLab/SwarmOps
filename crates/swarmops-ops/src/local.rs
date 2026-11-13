@@ -469,15 +469,15 @@ const MAX_LAND_KEY: usize = 64;
 ///   object that is no commit; the hint lists its refs (`git -C <path> for-each-ref`).
 /// - `E_GIT_UNSUPPORTED` `{reason, …}`: a repository the import does not read as it is, refused
 ///   before anything past its configuration is read: `reason` `object_format`
-///   `{object_format}`, `ref_storage` `{ref_storage}`, or `shallow`, whose hint deepens it
-///   (`git -C <path> fetch --unshallow`); `special_file` `{file}`, a FIFO, a socket or a device
+///   `{object_format}`, `ref_storage` `{ref_storage}`, `partial_clone` `{remote}`, `extension`
+///   `{extension}`, or `shallow`, whose hint deepens it (`git -C <path> fetch --unshallow`);
+///   `special_file` `{file}`, a FIFO, a socket or a device
 ///   (or a symlink to one) where it reads a file of the git directory, named by its path there
 ///   and refused before any file is read; `file_too_long` `{file, size, max}`, a file it reads
 ///   whole there (a ref, `config`, `config.worktree`, `objects/info/alternates`) longer than
 ///   16 MiB, refused unread; or a commit no lossy class covers: `parents`
 ///   `{commit, parents, max}`, more than 255 of them, or `mode` `{commit, path, mode}`.
-/// - `E_GIT_READ` `{reason, object?}`: an object the repository lacks (`missing`, as a partial
-///   clone lacks blobs), whose bytes are not its id's (`corrupt`) or do not parse (`malformed`),
+/// - `E_GIT_READ` `{reason, object?}`: an object the repository lacks (`missing`), whose bytes are not its id's (`corrupt`) or do not parse (`malformed`),
 ///   each with the hint `git -C <path> fsck`; or a read that failed (`io`).
 /// - `E_GIT_IMPORT_LOSSY` `{commit, class, path, path_base64?}`: content of a lossy class the
 ///   request does not allow; `path` is empty for `nonstandard`, and a path that is not UTF-8 is

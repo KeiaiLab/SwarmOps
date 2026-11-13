@@ -538,10 +538,10 @@ lossily, and `lossy_total` counts them all.
 | **`empty_trees`** | An entry naming an empty tree (an empty directory). | Dropped. |
 | **`nonstandard`** | A commit whose bytes its fields cannot give back: a signature line, time or header line that renders back differently, no blank line before the message, or a parent listed twice. | Kept as its fields hold it; a parent listed twice is kept once. |
 
-Some repositories are not read at all. A SHA-256 repository, reftable refs and a shallow clone are
-refused with `E_GIT_UNSUPPORTED`, and so are a commit of more than 255 parents and an entry whose
-mode is no kind of entry. An object the repository lacks, as a partial clone lacks blobs, is
-`E_GIT_READ`.
+Some repositories are not read at all. A SHA-256 repository, reftable refs, a shallow clone, a
+partial clone and an extension the import does not know are refused with `E_GIT_UNSUPPORTED`, and
+so are a commit of more than 255 parents and an entry whose mode is no kind of entry. An object
+the repository lacks is `E_GIT_READ`.
 
 > ### A lossy import changes what comes back
 >

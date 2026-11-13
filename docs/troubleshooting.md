@@ -1111,6 +1111,8 @@ Exit 1, not retryable. A repository the import does not read as it is; `details.
 | `shallow` | A shallow clone, whose oldest commits lack their parents. | `git -C <path> fetch --unshallow` (the hint) |
 | `object_format` | A SHA-256 repository. | Not supported. |
 | `ref_storage` | reftable refs. | Not supported. |
+| `partial_clone` | A partial clone, which lacks objects its promisor remote holds (`details.remote`). | Import from a full clone. |
+| `extension` | An extension the import does not know (`details.extension`). | Not supported. |
 | `special_file` | A FIFO, a socket or a device where a file of the git directory should be (`details.file`). | Replace it with the file. |
 | `file_too_long` | A ref, `config` or alternates file over 16 MiB (`details.file`, `size`, `max`). | Check the file. |
 | `parents` | A commit of more than 255 parents (`details.commit`). | Not supported. |
@@ -1120,19 +1122,19 @@ Exit 1, not retryable. A repository the import does not read as it is; `details.
 {"ok":false,"op":"git_import","api":1,"error":{"code":"E_GIT_UNSUPPORTED","message":"the repository is not read as it is: it is a shallow clone, whose oldest commits lack their parents","retryable":false,"exit":1,"details":{"reason":"shallow"},"hint":"git -C shallow.git fetch --unshallow"},"meta":{"repo":"acme","elapsed_ms":0,"resolved":{},"auth":"trust"}}
 ```
 
-`git export` refuses the same first five for the repository it writes.
+`git export` refuses the same first seven for the repository it writes.
 
 ### `E_GIT_READ`
 
-Exit 1, not retryable. An object the import needs is missing (`missing`, as in a partial clone,
-which lacks blobs), does not hash to its id (`corrupt`) or does not parse (`malformed`), or a read
-failed (`io`). A `--filter=blob:none` clone, into a new store:
+Exit 1, not retryable. An object the import needs is missing (`missing`), does not hash to its id
+(`corrupt`) or does not parse (`malformed`), or a read failed (`io`). A damaged loose object, into a
+new store:
 
 ```text
-{"ok":false,"op":"git_import","api":1,"error":{"code":"E_GIT_READ","message":"the repository lacks object 5626abf0…","retryable":false,"exit":1,"details":{"object":"5626abf0…","reason":"missing"},"hint":"git -C partial.git fsck"},"meta":{"repo":"fresh","elapsed_ms":1,"resolved":{},"auth":"trust"}}
+{"ok":false,"op":"git_import","api":1,"error":{"code":"E_GIT_READ","message":"object 56cc3626… is damaged: its bytes, a blob, hash to e45c9c26…","retryable":false,"exit":1,"details":{"object":"56cc3626…","reason":"corrupt"},"hint":"git -C acme.git fsck"},"meta":{"repo":"fresh","elapsed_ms":1,"resolved":{},"auth":"trust"}}
 ```
 
-Import from a full clone. For damage, `git fsck` (the hint) says what git thinks of it.
+`git fsck` (the hint) says what git thinks of it.
 
 ### `E_GIT_IMPORT_LOSSY`
 
