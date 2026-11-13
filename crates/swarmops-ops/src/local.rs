@@ -1615,8 +1615,7 @@ impl<'a> Recording<'a> {
         let read = self.snapshot()?;
         let landed = stored(&read, outcome.landed)?;
         let reverted = metadata_text(&landed.changeset.metadata, REVERTS)
-            .map(|ids| ids.split_whitespace().map(str::to_owned).collect())
-            .unwrap_or_default();
+            .map_or_default(|ids| ids.split_whitespace().map(str::to_owned).collect());
         drop(read);
         Ok(RevertResp::new(reverted, land_resp(outcome, target)?))
     }
@@ -2266,11 +2265,9 @@ impl StoreOps for Recording<'_> {
         out.lander = lander(&changeset.metadata);
         out.land_key = metadata_text(&changeset.metadata, LAND_KEY_KEY);
         out.squashed_from = (metadata_text(&changeset.metadata, SQUASHED_FROM_KEY))
-            .map(|chain| chain.split_whitespace().map(str::to_owned).collect())
-            .unwrap_or_default();
+            .map_or_default(|chain| chain.split_whitespace().map(str::to_owned).collect());
         out.reverts = (metadata_text(&changeset.metadata, REVERTS))
-            .map(|ids| ids.split_whitespace().map(str::to_owned).collect())
-            .unwrap_or_default();
+            .map_or_default(|ids| ids.split_whitespace().map(str::to_owned).collect());
         out.revert_reason = metadata_text(&changeset.metadata, REVERT_REASON);
         Ok(out)
     }

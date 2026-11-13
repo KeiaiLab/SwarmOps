@@ -496,7 +496,7 @@ proptest! {
                     if model.iter().any(|meta| meta.id.0.0 == key) {
                         continue; // the index holds each changeset once
                     }
-                    let parents = model.last().map(|last| vec![last.id]).unwrap_or_default();
+                    let parents = model.last().map_or_default(|last| vec![last.id]);
                     let generation = to_u64(model.len()) + 1;
                     let meta = meta(cs(key), generation, [n; 32], parents);
                     prop_assert_eq!(index.append(&meta).unwrap(), to_u64(model.len()));

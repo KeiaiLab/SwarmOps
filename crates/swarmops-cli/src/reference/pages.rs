@@ -227,7 +227,7 @@ pub(super) fn slug(heading: &str) -> String {
 
 /// The command's one-line help.
 pub(super) fn about_short(cmd: &clap::Command) -> String {
-    cmd.get_about().map(ToString::to_string).unwrap_or_default()
+    cmd.get_about().map_or_default(ToString::to_string)
 }
 
 /// Whether `arg` is clap's own `--help` or `--version`.
@@ -267,7 +267,7 @@ pub(super) fn long_helps(out: &mut String, args: &[&Arg]) {
 
 /// An argument's short help, and the values it takes when they are a fixed list.
 pub(super) fn arg_help(arg: &Arg) -> String {
-    let help = arg.get_help().map(ToString::to_string).unwrap_or_default();
+    let help = arg.get_help().map_or_default(ToString::to_string);
     let help = sentence(&help);
     let values = possible_values(arg);
     if values.is_empty() {

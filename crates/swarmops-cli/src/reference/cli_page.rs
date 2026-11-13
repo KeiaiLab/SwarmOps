@@ -99,10 +99,7 @@ fn group_section(out: &mut String, root: &clap::Command, leaves: &[Leaf], group:
         }
     }
     for parent in parents {
-        let about = root
-            .find_subcommand(parent)
-            .map(about_short)
-            .unwrap_or_default();
+        let about = root.find_subcommand(parent).map_or_default(about_short);
         let _ = writeln!(out, "### {BIN} {parent}\n");
         let _ = writeln!(out, "{}\n", cell(&sentence(&about)));
         for leaf in members.iter().filter(|leaf| leaf.path[0] == parent) {

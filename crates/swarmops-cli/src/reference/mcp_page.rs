@@ -828,15 +828,13 @@ fn input_schema(out: &mut String, spec: &Spec, schema: &Value, citations: Citati
         Some(properties) if !properties.is_empty() => {
             let required: Vec<&str> = schema["required"]
                 .as_array()
-                .map(|names| names.iter().filter_map(Value::as_str).collect())
-                .unwrap_or_default();
+                .map_or_default(|names| names.iter().filter_map(Value::as_str).collect());
             let _ = writeln!(out, "| Field | Type | Required | Default | Description |");
             let _ = writeln!(out, "| --- | --- | --- | --- | --- |");
             for (field, property) in properties {
                 let default = property
                     .get("default")
-                    .map(|value| format!("`{}`", cell_code(&value.to_string())))
-                    .unwrap_or_default();
+                    .map_or_default(|value| format!("`{}`", cell_code(&value.to_string())));
                 let _ = writeln!(
                     out,
                     "| `{field}` | {} | {} | {default} | {} |",

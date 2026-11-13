@@ -71,7 +71,7 @@ pub(crate) fn check(
     }
 
     // 3. Paths one name apart in case, where the volume folds case.
-    let pairs = case_set.map(collisions).unwrap_or_default();
+    let pairs = case_set.map_or_default(collisions);
     if pairs.is_empty() {
         return Ok(());
     }

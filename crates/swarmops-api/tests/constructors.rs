@@ -39,8 +39,7 @@ fn reads_back<T: Serialize + DeserializeOwned + JsonSchema + PartialEq + Debug>(
     let schema = schemars::schema_for!(T).to_value();
     let required: Vec<&str> = schema["required"]
         .as_array()
-        .map(|names| names.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+        .map_or_default(|names| names.iter().filter_map(Value::as_str).collect());
 
     // 2. Only those fields, read back.
     let Value::Object(mut fields) = serde_json::to_value(built).unwrap() else {

@@ -953,8 +953,7 @@ fn render(leaf: &Leaf, leaves: &[Leaf], golden: &Golden) -> String {
         .cmd
         .get_long_about()
         .or(leaf.cmd.get_about())
-        .map(ToString::to_string)
-        .unwrap_or_default();
+        .map_or_default(ToString::to_string);
     paragraphs(&mut out, &sentence(&about));
     metadata(&mut out, &command);
 
@@ -982,8 +981,7 @@ fn metadata(out: &mut String, command: &Entry<'_>) {
         .leaf
         .cmd
         .get_about()
-        .map(ToString::to_string)
-        .unwrap_or_default();
+        .map_or_default(ToString::to_string);
     let codes: Vec<&str> = command.codes.iter().map(ErrorCode::as_str).collect();
     let exits: Vec<String> = command.exits.iter().map(ToString::to_string).collect();
 
@@ -1280,8 +1278,7 @@ fn result_fields(out: &mut String, name: &str) {
     };
     let required: Vec<&str> = schema["required"]
         .as_array()
-        .map(|names| names.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+        .map_or_default(|names| names.iter().filter_map(Value::as_str).collect());
     let _ = writeln!(out, "| Field | Type | Required | Description |");
     let _ = writeln!(out, "| --- | --- | --- | --- |");
     for (field, property) in properties {

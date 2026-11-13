@@ -1166,8 +1166,7 @@ impl ObjectReads {
 fn last_two(path: &std::path::Path) -> (String, String) {
     let name = |p: Option<&std::path::Path>| {
         p.and_then(std::path::Path::file_name)
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
+            .map_or_default(|name| name.to_string_lossy().into_owned())
     };
     (name(path.parent()), name(Some(path)))
 }

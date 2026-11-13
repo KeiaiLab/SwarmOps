@@ -593,8 +593,7 @@ pub fn watch_syncs<T>(dropped: Option<usize>, run: impl FnOnce() -> T) -> (T, Ve
     let out = run();
     let calls = SYNC_WATCH
         .with(|watch| watch.borrow_mut().take())
-        .map(|watch| watch.calls)
-        .unwrap_or_default();
+        .map_or_default(|watch| watch.calls);
     (out, calls)
 }
 

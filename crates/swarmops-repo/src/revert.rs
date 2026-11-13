@@ -272,7 +272,7 @@ fn default_message<O: ObjectStore>(
             Some(first) => read.first_parent(first)?,
             None => None,
         };
-        let since = since.map(short).unwrap_or_default();
+        let since = since.map_or_default(short);
         let subject = format!("Revert {} changesets {since}..{}", range.len(), short(x));
         return Ok(format!("{subject}\n\n{}\n", req.reason).into_bytes());
     }

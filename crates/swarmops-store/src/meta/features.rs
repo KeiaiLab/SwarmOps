@@ -274,14 +274,11 @@ pub(crate) fn known_kinds() -> Vec<FactKind> {
 /// Whether this build supports feature `name`: [`SUPPORTED_FEATURES`], and in a build with the
 /// test hooks the names `supported_for_tests` adds.
 fn supported(name: &str) -> bool {
-    if SUPPORTED_FEATURES.contains(&name) {
-        return true;
-    }
     #[cfg(feature = "test-hooks")]
     if lock(&FOR_TESTS).iter().any(|added| added == name) {
         return true;
     }
-    false
+    SUPPORTED_FEATURES.contains(&name)
 }
 
 /// A new nonce for a FORMAT 3 frame: eight bytes from the operating system's random source

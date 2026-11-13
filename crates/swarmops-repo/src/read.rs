@@ -412,9 +412,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
         dir: Option<&RepoPath>,
     ) -> Result<Option<Vec<TreeEntry>>, RepoError> {
         let root = self.root_of(cs)?;
-        let components: Vec<&str> = dir
-            .map(|dir| dir.components().collect())
-            .unwrap_or_default();
+        let components: Vec<&str> = dir.map_or_default(|dir| dir.components().collect());
         match self.repo.descend(root, &components)? {
             Some(tree) => Ok(Some(self.tree(tree)?.entries().to_vec())),
             None => Ok(None),
@@ -479,9 +477,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
         limit: usize,
     ) -> Result<Option<TreePage>, RepoError> {
         let root = self.root_of(cs)?;
-        let components: Vec<&str> = dir
-            .map(|dir| dir.components().collect())
-            .unwrap_or_default();
+        let components: Vec<&str> = dir.map_or_default(|dir| dir.components().collect());
         let Some(listed) = self.repo.descend(root, &components)? else {
             return Ok(None);
         };

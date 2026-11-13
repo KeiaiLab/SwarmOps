@@ -433,10 +433,7 @@ fn assert_windows(side: &str, what: &str, records: &[Vec<LandRecord>], whole: &S
 /// Every client's branch, as `origin` lists it, names the commit its last acknowledged push
 /// set: no push lost, none made that its client was not told of.
 fn assert_acknowledged(clients: &[GitClient<'_>]) {
-    let heads = clients
-        .first()
-        .map(GitClient::remote_heads)
-        .unwrap_or_default();
+    let heads = clients.first().map_or_default(GitClient::remote_heads);
     for client in clients {
         let branch = client.branch();
         assert_eq!(

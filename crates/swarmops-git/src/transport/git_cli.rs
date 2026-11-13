@@ -484,7 +484,7 @@ impl Transport for GitCli {
 
         // 1. The lease (the branch's expected commit, empty: absent) and one refspec, never `+`.
         let dst = format!("{HEADS}{}", update.branch);
-        let expect = update.expect.map(|oid| oid.to_string()).unwrap_or_default();
+        let expect = update.expect.map_or_default(|oid| oid.to_string());
         let mut argv: Vec<OsString> = PUSH_FLAGS.iter().map(OsString::from).collect();
         argv.extend([
             OsString::from(format!("--force-with-lease={dst}:{expect}")),
@@ -1173,7 +1173,7 @@ fn run(command: &mut Command, input: &Input) -> Result<Ran, TransportError> {
             }
             out
         });
-        let err = stderr.as_mut().map(read_end).unwrap_or_default();
+        let err = stderr.as_mut().map_or_default(read_end);
         (reader.join().unwrap_or_default(), err)
     });
 
