@@ -1324,6 +1324,21 @@ fn usage_error_exits_2_with_envelope() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// A bare `blob has` names no blob: refused as a usage error under its own op, never an empty
+/// answer.
+#[test]
+fn a_bare_blob_has_is_a_usage_error() {
+    let mut s = Session::new();
+    let usage = s.run(&["blob", "has"]);
+
+    assert_eq!((usage.exit, usage.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(usage["op"], "blob_has");
+    assert_eq!(
+        usage["error"]["message"],
+        "the following required arguments were not provided: <ID>..."
+    );
+}
+
 /// `commit --advance`'s help says what an agent acts on before and after a lost race: the
 /// changeset and the move are recorded together or not at all, only while REF still names
 /// `--parent`, and after `E_CAS_MISMATCH` nothing was recorded, so the change is committed again
