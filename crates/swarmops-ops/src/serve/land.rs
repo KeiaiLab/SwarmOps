@@ -10,6 +10,11 @@
 //!      any other error   ─▶ ng <CODE>: <message>
 //! ```
 //!
+//! Step 4 failing after step 3 landed is still `ng`, though the change is on the target: the
+//! reason says so, names the changeset, and says that the same push again replays the land,
+//! which writes nothing. `serve.git` is behind the store until then, or until the next
+//! connection's refresh.
+//!
 //! `pre-receive` judges steps 1 and 2 inside git's quarantine, `proc-receive` again once git has
 //! moved the pack into `serve.git` (M16 design §7): a conflict or a lost race is step 3's, an
 //! `ng` of this command alone, its objects left in `serve.git` with no ref naming them.
@@ -67,6 +72,13 @@ const CONFLICT: &str = "conflict";
 
 /// How many hex digits of a commit the conflict report shows.
 const SHORT_OID: usize = 7;
+
+/// How the message of a land whose export failed ends: what the client does next.
+const REPLAYS: &str = ": the same push again replays it";
+
+/// What follows the count of conflicting paths in a conflict's message, which counts every one
+/// (`swarmops_api::ConflictReport::files`).
+const COUNTED_PATHS: &str = " path(s) ";
 
 /// A store ref's head and the commit it exports to.
 type Head = (ChangesetId, GitOid);
@@ -151,7 +163,8 @@ fn land(
     // 4. The target exported, and the client told which commit landed (no option refname: the
     //    module documentation).
     let id = changeset_id(&landed.landed)?;
-    if let Some(oid) = served_oid(ctx, target, id)? {
+    let served = served_oid(ctx, target, id).map_err(|e| unexported(e, target, &landed.landed))?;
+    if let Some(oid) = served {
         let status = match landed.status {
             LandStatus::Replayed => "landed already",
             _ => "landed",
@@ -164,6 +177,17 @@ fn land(
         );
     }
     Ok(Report::ok(command.refname.clone()))
+}
+
+/// The error of a land onto `target` that landed as the changeset `landed`, and whose export
+/// then failed with `e`: `e`, its message saying first that the change landed and last that the
+/// same push again replays it.
+fn unexported(mut e: OpError, target: &str, landed: &str) -> OpError {
+    e.message = format!(
+        "landed onto {target} as changeset {landed}, but its export failed ({}){REPLAYS}",
+        e.message
+    );
+    e
 }
 
 /// Step 3's land of `req` onto `target` for `who`, `access.toml` read again before each attempt
@@ -202,8 +226,10 @@ fn conflict(
     };
     let at = &at[..SHORT_OID];
 
-    // 3. The report on stderr, for the client.
-    say(ctx, conflict_lines(&report, target, at));
+    // 3. The report on stderr, for the client, counting every path: a report cut within its
+    //    bound names fewer files than conflict.
+    let paths = counted(&e.message, report.files.len());
+    say(ctx, conflict_lines(&report, paths, target, at));
     Ok(Report::ng(command.refname.clone(), CONFLICT))
 }
 
@@ -220,25 +246,35 @@ fn say(ctx: &HookCtx<'_>, lines: impl IntoIterator<Item = String>) {
     }
 }
 
+/// How many paths conflict, as the conflict's `message` counts them (`<n> path(s) of the change
+/// conflict …`): never fewer than the `listed` files its report names, and `listed` when the
+/// message starts with no count.
+fn counted(message: &str, listed: usize) -> usize {
+    let count = message.split_once(COUNTED_PATHS);
+    let count = count.and_then(|(n, _)| n.parse::<usize>().ok());
+    count.map_or(listed, |n| n.max(listed))
+}
+
 /// The lines of a conflict `report` of a land onto `target`, whose head the client fetches as
-/// `at`: the count, a line per path up to [`MAX_CONFLICT_LINES`], what to do.
+/// `at`, `paths` conflicting in all (a report cut within its bound names fewer): the count, a
+/// line per path up to [`MAX_CONFLICT_LINES`], how many more there are, what to do.
 ///
 /// ```text
 /// E_CONFLICT: 1 path conflicts with main at 1a2b3c4
 ///   src/a.rs: both changed lines 3-4; main's change by agent/bob
 /// resolve it on top of main, then push again
 /// ```
-fn conflict_lines(report: &ConflictReport, target: &str, at: &str) -> Vec<String> {
-    let n = report.files.len();
-    let count = match n {
+fn conflict_lines(report: &ConflictReport, paths: usize, target: &str, at: &str) -> Vec<String> {
+    let count = match paths {
         1 => "1 path conflicts".to_owned(),
         n => format!("{n} paths conflict"),
     };
     let mut lines = vec![format!("E_CONFLICT: {count} with {target} at {at}")];
-    let listed = report.files.iter().take(MAX_CONFLICT_LINES);
-    lines.extend(listed.map(|file| path_line(file, target)));
-    if n > MAX_CONFLICT_LINES {
-        lines.push(format!("  … and {} more", n - MAX_CONFLICT_LINES));
+    let listed = report.files.len().min(MAX_CONFLICT_LINES);
+    let files = report.files.iter().take(listed);
+    lines.extend(files.map(|file| path_line(file, target)));
+    if paths > listed {
+        lines.push(format!("  … and {} more", paths - listed));
     }
     lines.push(format!("resolve it on top of {target}, then push again"));
     lines
@@ -396,7 +432,7 @@ fn changeset_id(hex: &str) -> Result<ChangesetId, OpError> {
 mod tests {
     use swarmops_api::{ConflictKindOut, ConflictReport, FileConflictOut, HunkOut, LinesOut};
 
-    use super::{MAX_CONFLICT_LINES, conflict_lines};
+    use super::{MAX_CONFLICT_LINES, conflict_lines, counted};
 
     /// The changeset ids a report names, which its lines do not show.
     const ID: &str = "00";
@@ -421,7 +457,7 @@ mod tests {
     fn one_path_report() {
         let report = report(vec![edited("src/a.rs", 3, 4, "agent/bob")]);
         assert_eq!(
-            conflict_lines(&report, "main", "1a2b3c4"),
+            conflict_lines(&report, 1, "main", "1a2b3c4"),
             [
                 "E_CONFLICT: 1 path conflicts with main at 1a2b3c4",
                 "  src/a.rs: both changed lines 3-4; main's change by agent/bob",
@@ -433,10 +469,11 @@ mod tests {
     /// Past MAX_CONFLICT_LINES paths, the rest is counted, not listed.
     #[test]
     fn long_report_is_cut() {
-        let files = (0..=MAX_CONFLICT_LINES)
+        let files: Vec<FileConflictOut> = (0..=MAX_CONFLICT_LINES)
             .map(|n| edited(&format!("f{n:02}"), 1, 1, "agent/bob"))
             .collect();
-        let lines = conflict_lines(&report(files), "release/1", "1a2b3c4");
+        let paths = files.len();
+        let lines = conflict_lines(&report(files), paths, "release/1", "1a2b3c4");
         assert_eq!(lines.len(), MAX_CONFLICT_LINES + 3, "{lines:#?}");
         assert_eq!(
             lines[0],
@@ -452,12 +489,40 @@ mod tests {
         assert_eq!(lines[MAX_CONFLICT_LINES + 1], "  … and 1 more");
     }
 
+    /// A report cut within its bound names fewer files than conflict: the count is the
+    /// message's, and the rest is every path the lines do not list.
+    #[test]
+    fn a_cut_report_counts_every_path() {
+        let report = report(vec![edited("src/a.rs", 3, 4, "agent/bob")]);
+        let message = "300 path(s) of the change conflict with the target's head 00: nothing \
+                       was recorded";
+        let paths = counted(message, report.files.len());
+        let lines = conflict_lines(&report, paths, "main", "1a2b3c4");
+        assert_eq!(
+            lines,
+            [
+                "E_CONFLICT: 300 paths conflict with main at 1a2b3c4",
+                "  src/a.rs: both changed lines 3-4; main's change by agent/bob",
+                "  … and 299 more",
+                "resolve it on top of main, then push again",
+            ]
+        );
+    }
+
+    /// A message that starts with no count, or a lower one, leaves the count to the report.
+    #[test]
+    fn a_message_without_a_count_counts_the_report() {
+        assert_eq!(counted("the sides conflict", 2), 2);
+        assert_eq!(counted("1 path(s) of the change conflict", 2), 2);
+        assert_eq!(counted("many path(s) of the change conflict", 2), 2);
+    }
+
     /// A conflict without hunks says how the sides changed the file.
     #[test]
     fn kinds_without_hunks() {
         let mut deleted = FileConflictOut::new("gone.txt", ConflictKindOut::ModifyDelete);
         deleted.theirs_agent = None;
-        let lines = conflict_lines(&report(vec![deleted]), "main", "1a2b3c4");
+        let lines = conflict_lines(&report(vec![deleted]), 1, "main", "1a2b3c4");
         assert_eq!(lines[1], "  gone.txt: changed by the push, deleted on main");
     }
 
@@ -512,6 +577,9 @@ mod tests {
 
         /// The ref a push lands onto, as the hook gets it.
         const LAND_REF: &str = "refs/land/main";
+
+        /// How the error of a land whose export failed ends.
+        const REPLAYS: &str = ": the same push again replays it";
 
         /// What the race does to `access.toml` beside its move of `main`.
         #[derive(Clone, Copy)]
@@ -852,6 +920,47 @@ mod tests {
             assert_eq!(ops.repo_info(InfoReq::default()).unwrap().main, main);
             assert_eq!(last_op(&ops), before, "no frame");
             assert_eq!(object_count(&race.root), objects, "no object");
+        }
+
+        /// Through the hook: a land that landed and whose export into `serve.git` then failed
+        /// is refused with an error that says it landed, as which changeset, and that the same
+        /// push again replays it; that push, once `serve.git` opens again, is `ok` and writes
+        /// no frame.
+        #[test]
+        fn a_land_whose_export_fails_says_it_landed() {
+            let (_dir, ops, _racing, race, land_req) = raced_land(Meanwhile::Kept);
+            let tip = pushed(&ops, &race.root, land_req.head.as_str());
+            let access = Access::load(&ops).unwrap();
+
+            // 1. The push judged, its tip imported; then serve.git, which no git opens while
+            //    its HEAD is away.
+            let repo = ServeRepo::open(&race.root).unwrap();
+            let who = Identity::parse(LANDER).unwrap();
+            let ctx = HookCtx::new(&ops, &repo, &who, &access);
+            let command = Command::new(None, Some(tip), LAND_REF);
+            let judged = judged(&ctx, &command, "main", Objects::Served).unwrap();
+            let Judged::Land { target, tip: head } = judged else {
+                panic!("a land judged {judged:?}");
+            };
+            let head_file = repo.git_dir().join("HEAD");
+            let away = repo.git_dir().join("HEAD.away");
+            std::fs::rename(&head_file, &away).unwrap();
+
+            // 2. The land lands; its export fails, and the error says what landed.
+            let error = land(&ctx, &command, &target, head).unwrap_err();
+            let main = ops.repo_info(InfoReq::default()).unwrap().main.unwrap();
+            assert_ne!(main, land_req.head.as_str(), "a squash landed");
+            let said = format!("landed onto main as changeset {main}, but its export failed");
+            assert!(error.message.starts_with(&said), "{error:?}");
+            assert!(error.message.ends_with(REPLAYS), "{error:?}");
+
+            // 3. The same push again replays it.
+            std::fs::rename(&away, &head_file).unwrap();
+            let before = last_op(&ops);
+            let report = hooked(&ops, &access, tip).unwrap();
+            assert!(matches!(report, Report::Ok { .. }), "{report:?}");
+            assert_eq!(last_op(&ops), before, "no frame");
+            assert_eq!(ops.repo_info(InfoReq::default()).unwrap().main, Some(main));
         }
 
         /// Through the hook: a pusher without a grant is refused before the pushed commit is

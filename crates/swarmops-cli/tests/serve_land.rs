@@ -1,8 +1,9 @@
 //! Pushes to `refs/land/<target>` through `swarmops serve` (M14 design §7), as stock git makes
 //! them over ssh through the test kit's forced-command stand-in: the hook imports the pushed tip
 //! and lands it onto the target with a key of who pushed which tip where, so that the same push
-//! again replays; the client's tracking branch moves to the landed commit, and a conflict is
-//! reported on `remote:` lines with nothing written.
+//! again replays; the client reads which commit landed on a `remote:` line, and its tracking
+//! branch moves there on its next fetch (the landed commit is a squash it does not hold); a
+//! conflict is reported on `remote:` lines with nothing written.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use std::thread;
 use serde_json::Value;
 use swarmops_git::oid::GitOid;
 use swarmops_git::serve::land_key::land_key;
+use swarmops_ops::serve::land::MAX_CONFLICT_LINES;
 use swarmops_testkit::git::fixture;
 use swarmops_testkit::serve::ServeSite;
 use swarmops_testkit::store::layout_of;
@@ -45,6 +47,10 @@ const LAND_MAIN: &str = "HEAD:refs/land/main";
 /// criterion 4's case.
 const PUSHERS: usize = 8;
 const LANDERS: usize = 4;
+
+/// How many paths conflict in the cut report's case: more than a conflict report holds entries
+/// for within its bound (24 KiB of entries), so the report the land carries is cut.
+const MANY: usize = 300;
 
 /// A served root with the store [`STORE`] holding the `linear` fixture as `main`, under
 /// [`ACCESS`], and a directory for clients.
@@ -169,6 +175,16 @@ impl Site {
         fs::write(dir.join(path), content).unwrap();
         self.git(dir, &["add", path]);
         self.git(dir, &["commit", "--quiet", "-m", path]);
+        self.rev(dir, "HEAD")
+    }
+
+    /// A commit writing `content` to [`MANY`] files of the clone `dir`, on its branch; its id.
+    fn commit_many(&self, dir: &Path, content: &str) -> String {
+        for n in 0..MANY {
+            fs::write(dir.join(format!("shared-{n:03}.txt")), content).unwrap();
+        }
+        self.git(dir, &["add", "."]);
+        self.git(dir, &["commit", "--quiet", "-m", "many"]);
         self.rev(dir, "HEAD")
     }
 
@@ -300,6 +316,38 @@ fn land_push_conflict_writes_nothing() {
         stderr.contains("remote: resolve it on top of main, then push again"),
         "{stderr}"
     );
+}
+
+/// A conflict over more paths than its report holds entries for is counted whole: the first
+/// `remote:` line says how many paths conflict, [`MANY`], and the line after the paths listed
+/// ([`MAX_CONFLICT_LINES`] at most) how many more there are, though the report the land carries
+/// names fewer.
+#[test]
+fn land_push_conflict_counts_every_path() {
+    let site = Site::new();
+    let theirs = site.clone("theirs");
+    let ours = site.clone("ours");
+
+    // 1. main adds the files; the change to land adds them otherwise.
+    let moved = site.commit_many(&theirs, "theirs\n");
+    site.git(&theirs, &["push", "--quiet", "origin", "main"]);
+    site.commit_many(&ours, "ours\n");
+
+    // 2. The push: refused as a conflict.
+    let pushed = site.git_as(AGENT, &ours, &["push", "origin", LAND_MAIN]);
+    let stderr = text(&pushed.stderr);
+    assert!(!pushed.status.success(), "{stderr}");
+    assert!(stderr.contains("(conflict)"), "{stderr}");
+
+    // 3. Every path counted on the first line; the paths listed, fewer than conflict, and the
+    //    rest counted after them.
+    let short = &moved[..7];
+    let first = format!("remote: E_CONFLICT: {MANY} paths conflict with main at {short}");
+    assert!(stderr.contains(&first), "{stderr}");
+    let listed = stderr.matches("remote:   shared-").count();
+    assert!((1..=MAX_CONFLICT_LINES).contains(&listed), "{stderr}");
+    let rest = format!("remote:   … and {} more", MANY - listed);
+    assert!(stderr.contains(&rest), "{stderr}");
 }
 
 /// A target the caller may not land onto, a tag as a target, and a tip `main` holds already:
