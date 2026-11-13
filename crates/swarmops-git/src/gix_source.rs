@@ -239,7 +239,7 @@ fn checked(oid: GitOid, kind: RawKind, bytes: Vec<u8>) -> Result<(RawKind, Vec<u
 /// Why `bytes`, read as the object `oid` of `kind`, are not that object: they hash to another
 /// id, or git's collision detection flags them. `None` when they hash to `oid`.
 pub(crate) fn not_the_object(oid: GitOid, kind: RawKind, bytes: &[u8]) -> Option<String> {
-    match object_sha1(kind, bytes) {
+    match crate::oid::checked_hash(kind, bytes) {
         Some(hashed) if hashed == oid => None,
         Some(hashed) => Some(format!("its bytes, a {kind}, hash to {hashed}")),
         None => {
@@ -698,5 +698,51 @@ mod tests {
                 "{kind}"
             );
         }
+    }
+
+    /// Bytes git's collision detection flags are corrupt under the id they hash to.
+    #[test]
+    fn flagged_bytes_are_corrupt() {
+        let bytes = b"flagged\n";
+        let oid = crate::git_hash(RawKind::Blob, bytes);
+        crate::oid::flagged::flag(RawKind::Blob, bytes);
+        let got = checked(oid, RawKind::Blob, bytes.to_vec());
+        assert!(
+            matches!(&got, Err(SourceError::Corrupt { oid: named, reason })
+                if *named == oid && reason.contains("collision detection")),
+            "{got:?}"
+        );
+    }
+
+    /// A failed read gix does not class as damaged data is `Io`, naming the object.
+    #[test]
+    fn an_unclassed_read_failure_is_io() {
+        let oid = crate::git_hash(RawKind::Blob, b"x\n");
+        let failed = gix::Error::from_error(std::io::Error::other("the disk failed"));
+        let want = format!("reading object {oid}: the disk failed");
+        assert_eq!(damaged(oid, &failed), SourceError::Io { reason: want });
+    }
+
+    /// An error that says what its source says.
+    #[derive(Debug)]
+    struct Echo(std::io::Error);
+
+    impl fmt::Display for Echo {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            self.0.fmt(f)
+        }
+    }
+
+    impl std::error::Error for Echo {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    /// A message the chain repeats is kept once.
+    #[test]
+    fn a_repeated_message_is_kept_once() {
+        let echo = gix::Error::from_error(Echo(std::io::Error::other("lost")));
+        assert_eq!(reason(&echo), "lost");
     }
 }
