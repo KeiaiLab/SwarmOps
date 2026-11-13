@@ -283,7 +283,8 @@ first; it reports how many values it derived, how many the store held already, a
 frame it read, after which the next call goes on. `swarmops derive --follow` runs until it is
 killed, from the journal's end (from its first frame with `--from-start`, or after `--after N`): it
 looks again every `--interval-ms` once it has caught up, and prints one envelope a line for each run
-that derived something. A commit derives nothing, so commits keep their latency and their filesystem
+that derived something, and nothing for a run that derived nothing, so a follower that has caught
+up prints nothing. A commit derives nothing, so commits keep their latency and their filesystem
 calls, and a value no follower has derived yet is derived by the first reader that asks for it.
 `derive` writes only the cache of derived values, so it needs no identity, and it has no MCP tool:
 each read fills that cache itself, so it changes no result an agent reads.
@@ -844,7 +845,8 @@ compare-and-swap, `main` only forward.
 
 Every run of `swarmops` prints exactly one envelope on stdout (only `--help` and `--version` print
 plain text, `mcp`, below, speaks MCP there instead, `serve` git's protocol, and `derive --follow`
-prints one envelope a line for each run that derived something):
+prints one envelope a line for each run that derived something, and nothing for a run that derived
+nothing, so a follower that has caught up prints nothing):
 
 ```text
 {"ok": …, "op": …, "api": 1, "result": … | "error": {code, message, retryable, exit, details, hint}, "meta": {repo, elapsed_ms, resolved, auth, recovered}}
