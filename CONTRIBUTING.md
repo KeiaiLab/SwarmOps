@@ -127,7 +127,10 @@ A change is done when `just check` passes on it. It runs, in order:
     release archives and its packages read back by readers of the test's own, with no network
     and without dpkg or rpm.
 11. `scripts/check-docs.py`, its `selftest` first: the public Markdown's relative links and
-    anchors resolve as GitHub reads them, and it carries no host path or tool attribution.
+    anchors resolve as GitHub reads them, and it carries no host path or tool attribution;
+12. `scripts/golden-frozen.py selftest`: the release cut's golden check (`just golden-frozen`,
+    which the release workflow runs on a pushed tag) still catches a changed or deleted golden
+    file of the previous release and a tag that does not resolve.
 
 The third lockfile, `bench/compare/Cargo.lock`, which `just check` does not build, is checked
 where it is built, by `just bench-compare` and the weekly scheduled run, with a policy of its

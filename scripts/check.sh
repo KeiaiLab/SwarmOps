@@ -60,3 +60,6 @@ python3 -I scripts/check-docs.py selftest
 python3 -I scripts/check-docs.py
 # The benchmark gate (`just bench`) still finds each kind of failure it is for.
 python3 -I scripts/bench-gate.py selftest
+# The release cut's golden check (`just golden-frozen`) still catches a changed, a deleted
+# golden file and an unresolvable tag.
+python3 -I scripts/golden-frozen.py selftest

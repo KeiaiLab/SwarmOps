@@ -92,7 +92,8 @@ default: check
 # offline, and checks that web/public/install.sh is the same file; scripts/test-packages.py packs
 # fake release archives with scripts/packages.py and reads the .deb and .rpm back, offline.
 # Then scripts/bench-gate.py's selftest shows that the benchmark gate still finds what it is for,
-# and scripts/repo-settings.py's that each rule over .github/repo-settings.json does, offline.
+# scripts/repo-settings.py's that each rule over .github/repo-settings.json does, offline, and
+# scripts/golden-frozen.py's that the release cut's golden check (`golden-frozen`) still does.
 # The definition of done: fmt, clippy, tests, hook proof, docs, deny, notices, script checks.
 check:
     cargo fmt --all --check
@@ -125,6 +126,16 @@ check:
     python3 -I scripts/check-docs.py
     python3 -I scripts/bench-gate.py selftest
     python3 -I scripts/repo-settings.py selftest
+    python3 -I scripts/golden-frozen.py selftest
+
+# The release cut (.github/workflows/release.yml) runs this: every golden file of the previous
+# release tag (the hash contract's, FORMAT 3's confirmed ones; not `golden3/provisional/`) is
+# still present and byte-identical, so a released byte layout never changes in place (the FORMAT 3
+# design, amendment G8). An unresolvable tag fails; a tag without the paths passes. Without an
+# argument the previous release is the newest `v*` tag merged into HEAD that is not HEAD's own.
+# The released golden files are unchanged since the previous release tag (or `tag`).
+golden-frozen tag="":
+    python3 -I scripts/golden-frozen.py check {{ tag }}
 
 # The test hooks are on (`--all-features`), as in `just check`. The ignored switches that rewrite
 # or rebuild fixtures on purpose (`regenerate_golden`, `regenerate_git_fixtures`,

@@ -20,8 +20,9 @@ GitHub's hosted runners.
    `Cargo.toml` (`v0.1.0` for `version = "0.1.0"`); `CHANGELOG.md` has a non-empty
    `## [X.Y.Z] - YYYY-MM-DD` section, which becomes the release notes (its relative links made
    absolute, to the tag's files, then a line on checking a download against `SHA256SUMS`; at
-   most the 125,000 characters a release takes); and `stable` holds the tagged commit. No other
-   job starts unless these pass.
+   most the 125,000 characters a release takes); `stable` holds the tagged commit; and every
+   golden file of the previous release tag is unchanged (`just golden-frozen`). No other job
+   starts unless these pass.
 2. **Runs the release gate** (job `just check`): `just check` on the tagged commit, with the tools
    and versions of CI's `check` job but without its cache or the runner's target directory, so
    that it builds from clean.
@@ -121,7 +122,9 @@ installs the same tool versions as `ci.yml`'s: move them together.
    The release workflow runs only `just check` again, on a runner that shares the host with
    CI's other runners: too contended for the 32-process measurements and `just perf`.
 3. **Check the public surfaces** against the last release (`git diff <last tag>..HEAD`):
-   - the golden vectors in `crates/swarmops-core/tests/golden/` did not change;
+   - the golden vectors in `crates/swarmops-core/tests/golden/` and FORMAT 3's confirmed ones in
+     `crates/swarmops-store/tests/golden3/` (not `provisional/`) did not change: `just
+     golden-frozen` checks it, and the release workflow runs it on a pushed tag;
    - `FORMAT` was bumped if the store layout changed;
    - every change to `crates/swarmops-cli/tests/snapshots/` (the schema, the MCP tools, the CLI
      output) is intended and in the changelog;
