@@ -76,6 +76,11 @@ const PACK_OBJECTS: &str = "pack-objects";
 const SHALLOW_LINE: &str = "--shallow ";
 const NOT_LINE: &str = "--not";
 
+/// The variable that names the git binary a [`GitCli`] runs, and what a file begins with when
+/// it is a script, which runs a git and is none.
+const GIT_ENV: &str = "SWARMOPS_GIT";
+const SCRIPT_MAGIC: [u8; 2] = *b"#!";
+
 /// The test hook that bounds the cache or skips the reachability check (`bound=<bytes>`,
 /// `no-reach-check`), read only in a build with the `test-hooks` feature.
 #[cfg(feature = "test-hooks")]
@@ -168,7 +173,8 @@ pub(crate) fn send(
     }
 
     // 3. The key, of everything the pack depends on.
-    let identity = git_identity(&git)?;
+    let env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let identity = git_identity(&git, &env)?;
     let key = request_key(&identity, line, stdin)?;
 
     // 4. The entry, when it is there and sound; without a cache directory, the pack alone.
@@ -219,12 +225,34 @@ fn served(git: &GitCli, repo: &ServeRepo, wants: &[GitOid]) -> Result<bool, OpEr
 
 /// The identity of the git binary `git` runs, which the key names in place of its version: its
 /// canonical path, length, modification time in nanoseconds, device and inode. A binary
-/// replaced or moved has another.
-fn git_identity(git: &GitCli) -> Result<String, OpError> {
+/// replaced or moved has another. A script, as `SWARMOPS_GIT` may name, is no git but runs
+/// one: the git that `PATH` of `env` finds is named after it, when it is another file, so
+/// that an upgrade of that git changes the key though the script stays. No git is run.
+fn git_identity(git: &GitCli, env: &[(OsString, OsString)]) -> Result<String, OpError> {
+    // 1. The binary named.
     let unread =
         |e: io::Error| OpError::new(ErrorCode::Io, format!("git: its binary: {}", e.kind()));
     let path = fs::canonicalize(git.binary()).map_err(unread)?;
-    let meta = fs::metadata(&path).map_err(unread)?;
+    let named = file_identity(&path).map_err(unread)?;
+    if !is_script(&path) {
+        return Ok(named);
+    }
+
+    // 2. Beneath a script: the git PATH finds, when there is one and it is not the script.
+    let beneath = path_git(env)
+        .and_then(|found| fs::canonicalize(found).ok())
+        .filter(|found| *found != path)
+        .and_then(|found| file_identity(&found).ok());
+    Ok(match beneath {
+        Some(beneath) => format!("{named}\n{beneath}"),
+        None => named,
+    })
+}
+
+/// The identity of the file at the canonical `path`: its device, inode, length, modification
+/// time in nanoseconds and path.
+fn file_identity(path: &Path) -> io::Result<String> {
+    let meta = fs::metadata(path)?;
     let mtime_ns = i128::from(meta.mtime()) * NANOS_PER_SEC + i128::from(meta.mtime_nsec());
     Ok(format!(
         "{} {} {} {mtime_ns} {}",
@@ -233,6 +261,20 @@ fn git_identity(git: &GitCli) -> Result<String, OpError> {
         meta.len(),
         path.to_string_lossy()
     ))
+}
+
+/// Whether the file at `path` begins as a script does; one that cannot be read is none.
+fn is_script(path: &Path) -> bool {
+    let mut magic = [0; SCRIPT_MAGIC.len()];
+    let read = File::open(path).and_then(|mut file| file.read_exact(&mut magic));
+    read.is_ok() && magic == SCRIPT_MAGIC
+}
+
+/// The git `PATH` of `env` finds, whatever [`GIT_ENV`] names.
+fn path_git(env: &[(OsString, OsString)]) -> Option<PathBuf> {
+    let unnamed = env.iter().filter(|(key, _)| key != GIT_ENV).cloned();
+    let git = GitCli::find_with_env(unnamed).ok()?;
+    Some(git.binary().to_path_buf())
 }
 
 /// The line after `git` in `args`, which must be `git [--shallow-file <file>] pack-objects`
@@ -610,13 +652,10 @@ mod tests {
     use swarmops_git::transport::GitCli;
 
     use super::{
-        Found, HEADER_LEN, Keep, PACK_OBJECTS, PackDigest, SHALLOW_FILE, evict, git_identity,
-        header, keep_entry, look_up, pack_line, parse_header, produce, request_key, service_of,
-        wants,
+        Found, GIT_ENV, HEADER_LEN, Keep, PACK_OBJECTS, PackDigest, SHALLOW_FILE, evict,
+        git_identity, header, keep_entry, look_up, pack_line, parse_header, produce, request_key,
+        service_of, wants,
     };
-
-    /// The variable that names the git binary a [`GitCli`] runs.
-    const GIT_ENV: &str = "SWARMOPS_GIT";
 
     /// A stand-in for git at `dir/git`, a shell script of `body`; the [`GitCli`] that runs it.
     fn stand_in(dir: &Path, body: &str) -> GitCli {
@@ -864,11 +903,37 @@ mod tests {
         // 3. Its identity: another for a binary elsewhere, and for one replaced where it was.
         let (first, second) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let git = stand_in(first.path(), "exit 0");
-        let before = git_identity(&git).unwrap();
-        assert_eq!(before, git_identity(&git).unwrap());
+        let before = git_identity(&git, &[]).unwrap();
+        assert_eq!(before, git_identity(&git, &[]).unwrap());
         let elsewhere = stand_in(second.path(), "exit 0");
-        assert_ne!(before, git_identity(&elsewhere).unwrap());
+        assert_ne!(before, git_identity(&elsewhere, &[]).unwrap());
         let replaced = stand_in(first.path(), "exit 0 # replaced");
-        assert_ne!(before, git_identity(&replaced).unwrap());
+        assert_ne!(before, git_identity(&replaced, &[]).unwrap());
+    }
+
+    /// A script named in `SWARMOPS_GIT` is not the git that packs: the key also names the git
+    /// `PATH` finds beneath it, so that one replaced where it was has another identity though
+    /// the script stays as it is. Without a git on `PATH`, the script alone is named.
+    #[test]
+    fn a_wrapper_s_key_names_the_git_beneath() {
+        // 1. A wrapper, and beneath it the git PATH finds.
+        let (wrapper_dir, path_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let wrapper = stand_in(wrapper_dir.path(), "exec git \"$@\"");
+        let path = [(OsString::from("PATH"), path_dir.path().into())];
+        let alone = git_identity(&wrapper, &path).unwrap();
+        assert_eq!(alone, git_identity(&wrapper, &[]).unwrap());
+
+        // 2. The git beneath, then replaced where it was: another identity each time.
+        stand_in(path_dir.path(), "exit 0");
+        let beneath = git_identity(&wrapper, &path).unwrap();
+        assert_ne!(alone, beneath, "the git beneath is not named");
+        assert_eq!(beneath, git_identity(&wrapper, &path).unwrap());
+        stand_in(path_dir.path(), "exit 0 # upgraded");
+        let upgraded = git_identity(&wrapper, &path).unwrap();
+        assert_ne!(beneath, upgraded, "an upgrade beneath kept the identity");
+
+        // 3. A wrapper that is the git PATH finds names itself once.
+        let own = [(OsString::from("PATH"), wrapper_dir.path().into())];
+        assert_eq!(alone, git_identity(&wrapper, &own).unwrap());
     }
 }
