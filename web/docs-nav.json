@@ -21,6 +21,7 @@
         "docs/guides/history-and-undo.md",
         "docs/guides/git-round-trip.md",
         "docs/guides/github-remote.md",
+        "docs/guides/store-remote.md",
         "docs/guides/claude-code.md"
       ],
       "dirs": ["docs/guides/"]

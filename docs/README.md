@@ -62,6 +62,7 @@ item.
 | [History and undo](guides/history-and-undo.md) | Read history and diffs, and take an operation back. |
 | [Git round trip](guides/git-round-trip.md) | Import a git repository, and export the work back for review and CI. |
 | [GitHub as a remote](guides/github-remote.md) | Clone, fetch, push and sync with GitHub; pull requests, tokens in CI, commit authors, a sync that stops. |
+| [A store as a remote](guides/store-remote.md) | Clone, fetch, push and sync another store that `swarmops serve` serves; what crosses between stores and what stays. |
 | [Claude Code](guides/claude-code.md) | Give Claude Code agents the store through MCP. |
 
 ### Develop
