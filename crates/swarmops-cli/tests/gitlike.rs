@@ -432,34 +432,45 @@ const HINTED: &[(&[&str], At, &str)] = &[
     ),
 ];
 
-/// Each alias runs its target in the fixture: the envelope's `op` is the target's, and the line
-/// is not refused as a usage error. `clone` runs with no identity (refused before any
-/// connection), `fetch`, `push` and `remote rm` on a store with no remote.
+/// The aliases of [`ALIASES`] that name a remote: on the fixture's store, which has none, each
+/// is refused for that before any connection.
+const NO_REMOTE: &[&[&str]] = &[&["remote", "rm", "origin"], &["fetch"], &["push"]];
+
+/// Each alias runs its target in the fixture, by either binary: the envelope's `op` is the
+/// target's, and the line is not refused as a usage error. `clone` runs with no identity
+/// (refused before any connection), `fetch`, `push` and `remote rm` on a store with no remote.
 #[test]
 fn every_alias_runs_its_target() {
-    let fx = Fixture::new();
-    write(&fx.ws, "a.txt", "edited\n");
-    write(&fx.ws, "new.txt", "new\n");
+    for bin in [SO, BIN] {
+        // 1. A fixture of its own: the table commits and restores.
+        let fx = Fixture::new();
+        write(&fx.ws, "a.txt", "edited\n");
+        write(&fx.ws, "new.txt", "new\n");
 
-    for &(line, at, op) in ALIASES {
-        let out = fx.run_as(BIN, at, line);
-        let envelope = out.envelope();
-        assert_eq!(envelope["op"], op, "{out}");
-        assert_ne!(envelope["error"]["code"], "E_INVALID_ARG", "{out}");
+        // 2. Each alias: its target's op; a remote's alias the remote's absence.
+        for &(line, at, op) in ALIASES {
+            let out = fx.run_as(bin, at, line);
+            let envelope = out.envelope();
+            assert_eq!(envelope["op"], op, "{out}");
+            assert_ne!(envelope["error"]["code"], "E_INVALID_ARG", "{out}");
+            if NO_REMOTE.contains(&line) {
+                assert_eq!(envelope["error"]["code"], "E_REMOTE_NOT_FOUND", "{out}");
+            }
+        }
+
+        // 3. `clone URL DIR`: the identity is asked for before any connection.
+        let clone = fx.run(bin, At::Elsewhere, &["clone", URL, "copy"]);
+        let envelope = clone.envelope();
+        assert_eq!(
+            (clone.exit, &envelope["op"], &envelope["error"]["code"]),
+            (
+                5,
+                &Value::from("clone_repo"),
+                &Value::from("E_IDENTITY_REQUIRED")
+            ),
+            "{clone}"
+        );
     }
-
-    // `clone URL DIR`: the identity is asked for before any connection.
-    let clone = fx.run(BIN, At::Elsewhere, &["clone", URL, "copy"]);
-    let envelope = clone.envelope();
-    assert_eq!(
-        (clone.exit, &envelope["op"], &envelope["error"]["code"]),
-        (
-            5,
-            &Value::from("clone_repo"),
-            &Value::from("E_IDENTITY_REQUIRED")
-        ),
-        "{clone}"
-    );
 }
 
 /// Outside a workspace the bare forms of `diff`, `commit` and `rebase` stay their commands'

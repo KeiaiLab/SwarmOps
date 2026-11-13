@@ -1870,10 +1870,29 @@ mod tests {
     /// A reader of the line, as [`parse`].
     type Reader<'a> = &'a dyn Fn(&[OsString], &dyn Fn() -> Place) -> Parsed;
 
+    /// The grammar's lines that `cli::parse` refuses with their placeholders filled, so that
+    /// [`shadowed`] cannot check them; each named, so that a new one is seen. A group without
+    /// its subcommand, or a leaf that needs one flag of a group, or a value other than `x`.
+    const SKIPPED: &[&str] = &[
+        "",
+        "blob",
+        "ws",
+        "ws resolve",
+        "ws hook x",
+        "ref",
+        "ref set x x",
+        "ref txn --move x",
+        "op",
+        "git",
+        "remote",
+        "serve",
+    ];
+
     /// The grammar's lines that `cli::parse` reads, at any place, and that `parse` reads
     /// otherwise.
     fn shadowed(parse: Reader<'_>) -> Vec<String> {
         let mut found = Vec::new();
+        let mut skipped = Vec::new();
         let mut read = 0;
         for line in grammar_lines() {
             let args: Vec<OsString> = std::iter::once("so")
@@ -1882,6 +1901,7 @@ mod tests {
                 .collect();
             let today = cli::parse(&args);
             if matches!(today, Parsed::Usage { .. }) {
+                skipped.push(line.join(" "));
                 continue;
             }
             read += 1;
@@ -1892,6 +1912,7 @@ mod tests {
             }
         }
         assert!(read > 150, "only {read} of the grammar's lines parse");
+        assert_eq!(skipped, SKIPPED, "the grammar's lines refused as filled");
         found
     }
 
