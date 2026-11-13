@@ -1391,6 +1391,7 @@ const RULES = [
 // then joins this list. None leaves it.
 const ENFORCED = new Set([
   'header-links',
+  'lookup',
   'footer-map',
   'release-links',
   'home-order',
