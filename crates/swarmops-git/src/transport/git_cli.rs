@@ -180,8 +180,9 @@ impl GitCli {
         Ok(Child { command, secrets })
     }
 
-    /// git with the cleaned environment, stdin closed, and nothing of a call's own.
-    fn base_command(&self) -> Command {
+    /// git with the cleaned environment, stdin closed, and nothing of a call's own. Native sync
+    /// reads its environment for the ssh it spawns, so that both wires give ssh the same one.
+    pub fn base_command(&self) -> Command {
         let mut command = Command::new(&self.binary);
         command
             .env_clear()
