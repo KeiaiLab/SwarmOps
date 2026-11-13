@@ -10,9 +10,14 @@
 //!   request 2 (by id) ──▶ frame 2, on what frames 0 and 1 queued
 //!   claim ──▶ the staged objects, one put and one flush ──▶ one append of every frame
 //!   answers: Landed or an insert that queued (a frame); Moved, Replayed, an insert that
-//!   queued nothing, or a final error (none); a member the leader cannot plan otherwise is
-//!   declined, and its writer makes it again alone
+//!   queued nothing, a target's head, or a final error (none); a member the leader cannot plan
+//!   otherwise is declined, and its writer makes it again alone
 //! ```
+//!
+//! A land settled without a publish (a replay its walk found, or nothing to land) reads its
+//! target's head under the lock as a turn of its own ([`Repo::lead_head`]): leading, it serves
+//! the waiting requests and runs the queue's cleanup of what dead writers left; waiting, it is
+//! answered the head its leader read, on the frames planned before it.
 //!
 //! A final error is one a run of the member alone would meet again, on what the batch commits
 //! (a key reused, a target or a parent missing, a ref moved): its answer carries it, so that its
@@ -65,9 +70,18 @@ enum Request {
     Publish(PublishRequest),
     /// A commit's insert.
     Insert(InsertRequest),
-    /// A group land's publish (the M18 design §6.3): last, so that the two kinds before it
+    /// A group land's publish (the M18 design §6.3): after the kinds before it, so that they
     /// keep their encoding.
     Group(GroupRequest),
+    /// A settled land's read of its target's head under the lock: last, so that the kinds before
+    /// it keep their encoding.
+    Head(HeadRequest),
+}
+
+/// A read of ref `target` under the lock.
+#[derive(Serialize, Deserialize)]
+struct HeadRequest {
+    target: String,
 }
 
 /// A publish's request: every field of [`Publication`] but its two changesets, named by id.
@@ -229,6 +243,8 @@ enum Member {
     /// An insert: its frame closed if it queued anything ([`InsertPlan::queued`]), else
     /// dropped.
     Inserted(InsertPlan),
+    /// A head read: what the target names, nothing queued.
+    Head(ChangesetId),
     /// It failed: its frame dropped.
     Failed(RepoError),
 }
@@ -239,7 +255,7 @@ impl Member {
         match self {
             Member::Queued(_) => true,
             Member::Inserted(plan) => plan.queued(),
-            Member::Done(_) | Member::Failed(_) => false,
+            Member::Done(_) | Member::Head(_) | Member::Failed(_) => false,
         }
     }
 }
@@ -294,7 +310,7 @@ impl<O: ObjectStore> Repo<O> {
         let plan = match mine {
             Member::Inserted(plan) => plan,
             Member::Failed(e) => return Err(e),
-            Member::Queued(_) | Member::Done(_) => {
+            Member::Queued(_) | Member::Done(_) | Member::Head(_) => {
                 return Err(RepoError::Internal(
                     "an insert's lead planned a publish".to_owned(),
                 ));
@@ -317,6 +333,20 @@ impl<O: ObjectStore> Repo<O> {
             _ => {}
         }
         Ok((plan.insert, plan.advanced, warnings, recovered))
+    }
+
+    /// [`Repo::lead`] for a read of ref `target`'s head (the [module documentation](self)): what
+    /// it names in `lead`'s write, before any member is planned; [`RepoError::NotFound`] if the
+    /// ref does not exist. The read records nothing, so nothing of the batch's commit is its.
+    pub(crate) fn lead_head(&self, lead: Lead<'_>, target: &str) -> Result<ChangesetId, RepoError> {
+        let Led { mine, .. } = self.lead_with(lead, |write, _| plan_head_member(write, target))?;
+        match mine {
+            Member::Head(head) => Ok(head),
+            Member::Failed(e) => Err(e),
+            Member::Queued(_) | Member::Done(_) | Member::Inserted(_) => Err(RepoError::Internal(
+                "a head read's lead planned a write".to_owned(),
+            )),
+        }
     }
 
     /// Leads a batch with `lead`, its own request planned by `own` as frame 0: then each waiting
@@ -357,6 +387,7 @@ impl<O: ObjectStore> Repo<O> {
                     Ok(g) => plan_group_member(lead.write(), &staged, &g),
                     Err(e) => Member::Failed(e),
                 },
+                Ok(Request::Head(wire)) => plan_head_member(lead.write(), &wire.target),
                 Err(e) => Member::Failed(e),
             };
             let has_frame = member.framed();
@@ -366,6 +397,7 @@ impl<O: ObjectStore> Repo<O> {
                 }
                 Member::Done(published) => Some(encode_answer(&Ok(wire_of(&published)))?),
                 Member::Inserted(plan) => Some(encode(&Reply::Ok(insert_answer(&plan)?))?),
+                Member::Head(head) => Some(encode(&Reply::Ok(bytes(head)))?),
                 // A final error answers its member, frameless; any other declines it.
                 Member::Failed(e) => match Refusal::of(&e) {
                     Some(refusal) => Some(encode(&Reply::<()>::Err(refusal))?),
@@ -575,6 +607,18 @@ fn plan_insert_member(
     }
 }
 
+/// Reads ref `target` in `write`, its frame dropped: what it names, or
+/// [`RepoError::NotFound`].
+fn plan_head_member(write: &mut MetaWrite<'_>, target: &str) -> Member {
+    let named = write.get_ref(target).map_err(repo::ref_error);
+    write.drop_frame();
+    match named {
+        Ok(Some(head)) => Member::Head(head),
+        Ok(None) => Member::Failed(RepoError::NotFound(target.to_owned())),
+        Err(e) => Member::Failed(e),
+    }
+}
+
 /// The insert `wire` asks for: the index record, numbered by the store, and the advance.
 fn insert_of(wire: InsertRequest) -> (ChangesetMeta, Option<Advance>) {
     let parents = wire.parents.into_iter().map(id_of).collect();
@@ -620,8 +664,8 @@ fn own_end(mine: Member) -> Result<Published, RepoError> {
         Member::Queued(_) => Err(RepoError::Internal(
             "a queued publish ended without its commit".to_owned(),
         )),
-        Member::Inserted(_) => Err(RepoError::Internal(
-            "a publish's lead planned an insert".to_owned(),
+        Member::Inserted(_) | Member::Head(_) => Err(RepoError::Internal(
+            "a publish's lead planned no publish".to_owned(),
         )),
     }
 }
@@ -654,6 +698,22 @@ fn own_landed(led: Led, target: &str) -> Result<(Published, Option<u64>), RepoEr
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// What `answer`, a leader's answer to a read of a target's head, says the target names.
+pub(crate) fn answered_head(answer: &Answer) -> Result<ChangesetId, RepoError> {
+    match (decode(&answer.body, "answer")?, &answer.outcome) {
+        (Reply::Ok(head), Outcome::NoFrame) => Ok(id_of(head)),
+        (Reply::Err(refusal), Outcome::NoFrame) => Err(refusal.error()),
+        _ => Err(mismatched("a head read")),
+    }
+}
+
+/// The request body of a read of ref `target`'s head: its version, then the name.
+pub(crate) fn encode_head(target: &str) -> Result<Vec<u8>, RepoError> {
+    encode(&Request::Head(HeadRequest {
+        target: target.to_owned(),
+    }))
 }
 
 /// `g`'s request body: its version, then its fields but the changesets'.

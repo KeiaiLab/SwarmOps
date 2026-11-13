@@ -663,6 +663,29 @@ fn a_members_post_commit_warning_names_its_crc() {
     assert_eq!(op, OpId::new(frame.seq, frame.crc));
 }
 
+/// A replayed land found by its walk settles under the store's lock as a turn at the write
+/// queue: what a dead waiter left in `meta/queue/` is removed then, not at the next write.
+#[test]
+fn a_replayed_land_removes_dead_queue_files() {
+    let (_dir, root, repo) = new_store();
+    let (_, heads) = changes(&repo, 1);
+    let landed = repo.land(keyed(heads[0], "key-0")).unwrap().landed;
+
+    // 1. A dead waiter's request: a file in the queue's grammar whose flock no one holds.
+    let queue = layout_of(&root).queue_dir();
+    fs::create_dir_all(queue.as_std_path()).unwrap();
+    fs::write(queue.join("0000000000000001-1-00000000.req"), b"dead").unwrap();
+
+    // 2. The land again: a replay, the queue left empty.
+    let again = repo.land(keyed(heads[0], "key-0")).unwrap();
+    assert_eq!((again.status, again.landed), (LandStatus::Replayed, landed));
+    assert_eq!(
+        queue_files(&root),
+        Vec::<String>::new(),
+        "the queue is empty"
+    );
+}
+
 /// A member that lands with changes records its commit `C` and its land `L` in its frame of the
 /// batch, read by the leader by their ids: `C` is in the store and `L` squashes it.
 #[test]

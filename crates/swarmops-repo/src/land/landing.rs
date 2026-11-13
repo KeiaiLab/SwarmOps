@@ -13,14 +13,15 @@ use swarmops_core::{
 };
 use swarmops_merge::diff3;
 use swarmops_merge::tree_merge::FileConflict;
-use swarmops_store::{ObjectStore, Recovered};
+use swarmops_store::{ObjectStore, Recovered, Serve, Turn};
 
 use crate::commit::{CommitRequest, Draft, WrittenChangeset};
 use crate::error::RepoError;
 use crate::merge::MergeOutcome;
 use crate::read::{RepoRead, StoredChangeset};
-use crate::repo::{self, Repo};
+use crate::repo::Repo;
 
+use super::batch;
 use super::key::{KeyFound, Ours, TargetWalk};
 use super::resolve::Resolving;
 use super::{Publication, Published, Relocate, Resolutions};
@@ -502,13 +503,18 @@ impl<O: ObjectStore> Repo<O> {
     }
 
     /// What ref `target` names under the store's lock, after the write's tail check, which makes
-    /// the frames a snapshot showed durable, or takes back those a failed sync left: a write
-    /// transaction taken for that alone, and dropped without a frame. [`RepoError::NotFound`] if
-    /// the ref does not exist.
+    /// the frames a snapshot showed durable, or takes back those a failed sync left: a turn at
+    /// the store's write queue taken for that alone, which records nothing of its own
+    /// ([`super::batch`]). Leading, it serves the requests waiting there and removes what dead
+    /// writers left in `meta/queue/`; waiting, it is answered the head its leader read.
+    /// [`RepoError::NotFound`] if the ref does not exist.
     fn target_under_lock(&self, target: &str) -> Result<ChangesetId, RepoError> {
-        let write = self.meta.write()?;
-        let named = write.get_ref(target).map_err(repo::ref_error)?;
-        named.ok_or_else(|| RepoError::NotFound(target.to_owned()))
+        let body = batch::encode_head(target)?;
+        match self.meta.take_turn(&body, Serve::Queue)? {
+            Turn::Answered(answer) => batch::answered_head(&answer),
+            Turn::Lead(lead) => self.lead_head(lead, target),
+            _ => Err(RepoError::unknown_variant("Turn")),
+        }
     }
 }
 
