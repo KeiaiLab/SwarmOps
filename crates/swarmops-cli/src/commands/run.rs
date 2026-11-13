@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, Read as _, Write as _};
+use std::io::{self, Read as _, Seek as _, Write as _};
 use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -1523,13 +1523,14 @@ fn read_request(source: &str, limit: u64, flag: &str, what: &str) -> Result<Vec<
 }
 
 /// The content of `blob put -`: stdin read to its end, whatever it is (a pipe, a file, a socket,
-/// which no path opens), as inline text when it is UTF-8 and in base64 otherwise. It is read no
+/// which no path opens), as inline text when it is UTF-8 and in base64 otherwise. A regular
+/// file's length from where stdin stands is checked before a byte is read; any stdin is read no
 /// further than one byte past what a put may hold, so that a stdin past it is refused
 /// (`E_TOO_LARGE`, scope `put`) without being kept whole; one that cannot be read is
 /// `E_INVALID_ARG`, with `-` as the `file` in `details`.
 fn stdin_content() -> Result<ContentInput, OpError> {
     let limit = MAX_CONTENT_BYTES;
-    let read = read_text(io::stdin().lock(), None, limit).map_err(|e| {
+    let read = read_text(io::stdin().lock(), stdin_len(), limit).map_err(|e| {
         OpError::new(
             ErrorCode::InvalidArg,
             format!("cannot read the content from stdin: {e}"),
@@ -1554,6 +1555,21 @@ fn stdin_content() -> Result<ContentInput, OpError> {
         Ok(text) => ContentInput::Inline(text),
         Err(e) => ContentInput::Base64(STANDARD.encode(e.into_bytes())),
     })
+}
+
+/// What is left of stdin when it is a regular file: its length past the offset it stands at
+/// (`blob put - < file`, or after a reader before this process took some). `None` for anything
+/// else, or one that cannot be stat'ed, which the read then bounds.
+fn stdin_len() -> Option<u64> {
+    let file = fs::File::from(io::stdin().as_fd().try_clone_to_owned().ok()?);
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+
+    // The offset is the file description's, shared with the descriptor stdin reads.
+    let at = (&file).stream_position().ok()?;
+    Some(meta.len().saturating_sub(at))
 }
 
 /// How a request's errors call file `source`: quoted, or `stdin` for `-`.

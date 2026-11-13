@@ -4151,6 +4151,81 @@ fn blob_put_reads_a_socket_stdin() {
     );
 }
 
+/// `blob put -` with a regular file as its stdin takes the file's length before it reads: a
+/// sparse file of 1 GiB, twice what a put holds, is refused with its own size, where a read
+/// would stop one byte past the limit and say that; one under the limit is stored from where
+/// stdin stands.
+#[test]
+fn blob_put_stats_a_regular_file_stdin() {
+    use std::io::{Seek as _, SeekFrom};
+    use std::process::Stdio;
+
+    /// A sparse stdin twice what a put holds (512 MiB).
+    const SPARSE: u64 = 1 << 30;
+
+    let s = Session::new();
+    let store = s.store();
+    let init = Session::run_raw(&[], &["init", &store], None);
+    assert_eq!(init.exit, 0, "{}", init.stderr);
+    let put = |stdin: fs::File| {
+        let output = support::swarmops(&["--repo", &store, "--as", AGENT, "blob", "put", "-"], &[])
+            .stdin(Stdio::from(stdin))
+            .output()
+            .unwrap();
+        let printed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        (output.status.code(), printed)
+    };
+
+    // 1. Past the limit: refused by the file's length.
+    let big = std::path::Path::new(&s.tmp()).join("sparse");
+    fs::File::create(&big).unwrap().set_len(SPARSE).unwrap();
+    let (exit, refused) = put(fs::File::open(&big).unwrap());
+    assert_eq!(exit, Some(1), "{refused}");
+    assert_eq!(refused["error"]["code"], "E_TOO_LARGE", "{refused}");
+    assert_eq!(refused["error"]["details"]["size"], SPARSE, "{refused}");
+    assert_eq!(refused["error"]["details"]["scope"], "put", "{refused}");
+
+    // 2. Under it: what follows stdin's offset is the content.
+    let small = std::path::Path::new(&s.tmp()).join("small");
+    fs::write(&small, b"skipped|kept\n").unwrap();
+    let mut file = fs::File::open(&small).unwrap();
+    file.seek(SeekFrom::Start(8)).unwrap();
+    let (exit, stored) = put(file);
+    assert_eq!(exit, Some(0), "{stored}");
+    let id = hash_object(ObjectKind::Blob, b"kept\n").to_hex();
+    assert_eq!(stored["result"]["blob"], id, "{stored}");
+}
+
+/// `ws create NAME` with no `--path`, run in a working directory whose path is not UTF-8, is
+/// refused (`E_INVALID_ARG`) naming the workspace as a name, not as a relative path.
+#[test]
+fn ws_create_in_a_non_utf8_directory_names_the_name() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let s = Session::new();
+    let store = s.store();
+    let init = Session::run_raw(&[], &["init", &store], None);
+    assert_eq!(init.exit, 0, "{}", init.stderr);
+    let here = std::path::Path::new(&s.tmp()).join(std::ffi::OsStr::from_bytes(b"not-\xff"));
+    fs::create_dir(&here).unwrap();
+
+    let output = support::swarmops(
+        &["--repo", &store, "--as", AGENT, "ws", "create", "w1"],
+        &[],
+    )
+    .current_dir(&here)
+    .output()
+    .unwrap();
+    let printed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(2), "{printed}");
+    let error = &printed["error"];
+    assert_eq!(error["code"], "E_INVALID_ARG", "{printed}");
+    assert_eq!(error["details"]["name"], "w1", "{printed}");
+    let message = error["message"].as_str().expect("a message");
+    assert!(message.contains("working directory"), "{message}");
+    assert!(!message.contains("\"w1\" is relative"), "{message}");
+}
+
 // ---------------------------------------------------------------------------------------------
 
 /// `blob put` stores a file's bytes, or stdin's, as a blob before a commit names it, and says

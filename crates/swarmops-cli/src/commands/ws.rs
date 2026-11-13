@@ -320,7 +320,7 @@ pub(crate) fn create_bootstrapped(
     // 0. No `path`: NAME in the working directory, as `so ws create` has it; the workspace
     //    crate reads no working directory.
     if req.path.is_none() {
-        req.path = Some(absolute(&req.name)?.into_string());
+        req.path = Some(default_path(&req.name)?.into_string());
     }
 
     // 1. `from` is checked before anything is made, so that a bad one leaves nothing.
@@ -363,17 +363,14 @@ fn create(
         op,
         Ok(here_lookup()),
         || {
-            // The directory defaults to NAME in the working directory; a relative one is
-            // relative to it too.
+            // A relative directory is relative to the working directory; none is NAME there
+            // (`create_bootstrapped`).
             context::mutator(ctx.global.agent.as_deref(), ctx.env)?;
-            let dir = match path {
-                Some(path) => absolute(&path)?,
-                None => absolute(&name)?,
-            };
+            let dir = path.map(|path| absolute(&path)).transpose()?;
             let from = from.map(|from| absolute(&from)).transpose()?;
             let how = context::bootstrap(ctx.env)?;
             let mut req = WsCreateReq::new(name);
-            req.path = Some(dir.into_string());
+            req.path = dir.map(Utf8PathBuf::into_string);
             req.base = base.into();
             req.prefixes = prefixes;
             req.all = all;
@@ -479,6 +476,25 @@ fn absolute(path: &str) -> Result<Utf8PathBuf, OpError> {
         ));
     };
     workspace::host_path(here.join(path).as_std_path())
+}
+
+/// The directory of workspace `name` that names none: `name` in the working directory. A
+/// working directory that is not UTF-8 is `E_INVALID_ARG` naming the workspace, not a path.
+fn default_path(name: &str) -> Result<Utf8PathBuf, OpError> {
+    let Some(here) = context::here() else {
+        return Err(OpError::new(
+            ErrorCode::InvalidArg,
+            format!(
+                "workspace {name:?} names no path, and the working directory it would go in is \
+                 not UTF-8: give it a path"
+            ),
+        )
+        .with_details(serde_json::Map::from_iter([(
+            "name".to_owned(),
+            name.into(),
+        )])));
+    };
+    workspace::host_path(here.join(name).as_std_path())
 }
 
 /// `--status-after`, as the request has it.
