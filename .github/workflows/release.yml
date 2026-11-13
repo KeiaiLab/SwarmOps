@@ -46,9 +46,10 @@ on:
 
 permissions: {}
 
-# A release runs to its end: another run for the same tag (a re-run) waits for it.
+# A release runs to its end: another run for the same tag (a re-run) waits for it. The event is
+# in the group, so a rehearsal started on a tag's ref never takes a pending release's place.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 defaults:

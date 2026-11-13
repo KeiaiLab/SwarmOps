@@ -95,7 +95,10 @@ the macOS build waits, and nothing is published without it.
 the workspace version of the branch's commit, and publishes nothing: `publish` runs for a pushed
 `v*` tag only, and the tag's checks and `just check` (which CI runs on every push) are skipped. The
 run's artifacts hold its archives and packages for 14 days. The macOS build is part of a rehearsal,
-so one shows whether the Mac's runner is there before a tag is pushed.
+so one shows whether the Mac's runner is there before a tag is pushed. A rehearsal never shares a
+concurrency group with a pushed tag's run, so one started on a tag's ref cannot replace a
+pending release. `just check` fails while a job with a write permission runs for anything but a
+pushed tag.
 
 Like CI, the workflow pins every action by commit, starts from `permissions: {}`, keeps no
 credentials in its checkouts, and CI's zizmor job audits it. The container images it builds and

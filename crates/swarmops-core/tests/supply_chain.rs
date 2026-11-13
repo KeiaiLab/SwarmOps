@@ -12,7 +12,8 @@
 //! runs `scripts/check-stamped.py`, the one step that builds with `SWARMOPS_BUILD_COMMIT` set.
 //! The container images are read the same way: every image the automation runs is pinned by
 //! digest, each has one digest, the one `packaging/entrance/Dockerfile` names (the file Dependabot
-//! moves), and the workflows install one rustup-init release.
+//! moves), and the workflows install one rustup-init release. And `release.yml` gives a write
+//! permission to no job that runs for anything but a pushed tag.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -833,4 +834,108 @@ fn the_workflows_install_one_rustup_init() {
 
     let other = "      RUSTUP_RELEASE: 1.0.0\n      RUSTUP_SHA256: 00\n";
     assert_ne!(rustup_pins(other), source);
+}
+
+/// The one condition under which a job of release.yml may hold a write permission: the run is a
+/// tag's push.
+const TAG_PUSH_ONLY: &str = "    if: github.event_name == 'push' && github.ref_type == 'tag'";
+
+/// What lets a run of `workflow` that is no tag's push write or displace a release, one line
+/// each; empty when nothing does. Every job with a `: write` permission carries
+/// `TAG_PUSH_ONLY`, the workflow starts from no permission, a push starts it for tags alone, and
+/// its concurrency group names the event, so that a run started by hand on a tag's ref shares no
+/// group with that tag's release.
+fn release_problems(workflow: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+
+    // 1. The jobs that write.
+    let mut writers = 0;
+    for (id, lines) in jobs(workflow) {
+        let writes = shell_lines(&lines)
+            .iter()
+            .any(|line| line.split('#').next().unwrap_or_default().trim_end().ends_with(": write"));
+        if !writes {
+            continue;
+        }
+        writers += 1;
+        if !lines.lines().any(|line| line == TAG_PUSH_ONLY) {
+            problems.push(format!("job `{id}` writes without `{}`", TAG_PUSH_ONLY.trim()));
+        }
+    }
+    if writers == 0 {
+        problems.push("no job holds a write permission: is the scan reading it?".to_string());
+    }
+
+    // 2. What the jobs do not set.
+    if !workflow.lines().any(|line| line == "permissions: {}") {
+        problems.push("the workflow does not start from `permissions: {}`".to_string());
+    }
+    let on: Vec<&str> = (workflow.lines())
+        .skip_while(|line| *line != "on:")
+        .skip(1)
+        .take_while(|line| line.is_empty() || line.starts_with(' '))
+        .collect();
+    if !on.contains(&"    tags: [\"v*\"]") || on.iter().any(|line| line.contains("branches")) {
+        problems.push("a push starts the workflow for more than `v*` tags".to_string());
+    }
+
+    // 3. The group.
+    let group = (workflow.lines())
+        .skip_while(|line| *line != "concurrency:")
+        .find_map(|line| line.strip_prefix("  group: "));
+    match group {
+        Some(group) if group.contains("github.event_name") && group.contains("github.ref") => {}
+        _ => problems.push("the concurrency group does not name the event and the ref".to_string()),
+    }
+    problems
+}
+
+/// release.yml publishes for a pushed tag only, and a run started by hand cannot replace a
+/// pending release run.
+#[test]
+fn only_a_pushed_tag_publishes() {
+    let problems = release_problems(&read(".github/workflows/release.yml"));
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// The check finds a publishing job without its condition or with a weaker one, a write
+/// permission granted to every job, a branch that starts the workflow, and a group by ref alone.
+#[test]
+fn the_release_check_finds_each_gap() {
+    let workflow = [
+        "on:",
+        "  push:",
+        "    tags: [\"v*\"]",
+        "  workflow_dispatch:",
+        "",
+        "permissions: {}",
+        "",
+        "concurrency:",
+        "  group: release-${{ github.event_name }}-${{ github.ref }}",
+        "",
+        "jobs:",
+        "  build:",
+        "    permissions:",
+        "      contents: read",
+        "  publish:",
+        "    if: github.event_name == 'push' && github.ref_type == 'tag'",
+        "    permissions:",
+        "      contents: write # why",
+        "",
+    ]
+    .join("\n");
+    assert_eq!(release_problems(&workflow), Vec::<String>::new());
+
+    let condition = TAG_PUSH_ONLY.trim_start();
+    let gaps = [
+        workflow.replace(&format!("    {condition}\n"), ""),
+        workflow.replace(condition, "if: github.event_name == 'push'"),
+        workflow.replace("permissions: {}", "permissions:\n  contents: write"),
+        workflow.replace("    tags: [\"v*\"]", "    tags: [\"v*\"]\n    branches: [stable]"),
+        workflow.replace("${{ github.event_name }}-", ""),
+        workflow.replace("contents: write # why", "contents: read"),
+    ];
+    for gap in &gaps {
+        assert_eq!(release_problems(gap).len(), 1, "{gap}");
+    }
 }
