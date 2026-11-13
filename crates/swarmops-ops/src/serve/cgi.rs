@@ -188,6 +188,12 @@ fn parse_path(path_info: &str) -> Result<CgiRequest, OpError> {
     })
 }
 
+/// [`parse_path`] for the fuzz targets: the store's name and its smart request, or the refusal.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_parse_path(path_info: &str) -> Result<(String, &'static str), OpError> {
+    parse_path(path_info).map(|request| (request.store, request.rest))
+}
+
 /// `E_NOT_A_REPO` `not_smart_http`: a path that is none of git's smart HTTP requests.
 fn not_smart_http() -> OpError {
     refused(

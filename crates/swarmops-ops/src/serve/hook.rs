@@ -458,6 +458,12 @@ fn read_updates(input: &mut impl BufRead) -> Result<Vec<Command>, OpError> {
     Ok(commands)
 }
 
+/// [`read_updates`] for the fuzz targets: the commands of `pre-receive`'s `input`.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_read_updates(input: &mut impl BufRead) -> Result<Vec<Command>, OpError> {
+    read_updates(input)
+}
+
 /// Each of `commands`, pushed by `who` to the store at `store`, judged with `objects`
 /// ([`judge`]), beside the context its writes need: every one refused when there are too many,
 /// or when the store cannot be opened.
@@ -617,7 +623,7 @@ mod tests {
     use swarmops_api::{ErrorCode, OpError};
     use swarmops_git::serve::proc_receive::Report;
 
-    use super::{ng, redact, refusal_code};
+    use super::{ng, read_updates, redact, refusal_code};
     use crate::serve::guard::Redactor;
     use crate::serve::refused;
 
@@ -655,5 +661,27 @@ mod tests {
             )
         );
         assert_eq!(refusal_code(&report), Some(ErrorCode::InvalidArg));
+    }
+
+    /// pre-receive's lines, `<old> <new> <ref>`, git's zero id as none; any other line is
+    /// `not_from_git`, and so is the fuzz wrapper's answer.
+    #[test]
+    fn read_updates_reads_lines_and_refuses_others() {
+        // 1. A deletion and a creation, the ref keeping its spaces.
+        let (zero, one) = ("0".repeat(40), "1".repeat(40));
+        let input = format!("{one} {zero} refs/heads/a\n{zero} {one} refs/heads/b c\n");
+        let commands = read_updates(&mut input.as_bytes()).unwrap();
+        let names: Vec<_> = commands.iter().map(|c| c.refname.as_str()).collect();
+        assert_eq!(names, ["refs/heads/a", "refs/heads/b c"]);
+        assert!(commands[0].old.is_some() && commands[0].new.is_none());
+        assert!(commands[1].old.is_none() && commands[1].new.is_some());
+
+        // 2. A line short of a field, or with no id, refused.
+        for line in [format!("{one} {one}\n"), format!("x {one} refs/heads/a\n")] {
+            let error = read_updates(&mut line.as_bytes()).unwrap_err();
+            assert_eq!(error.details["reason"], "not_from_git", "{line:?}");
+            #[cfg(feature = "fuzzing")]
+            assert_eq!(super::fuzz_read_updates(&mut line.as_bytes()), Err(error));
+        }
     }
 }

@@ -22,6 +22,9 @@ test-hooks = [
     "swarmops-store/test-hooks",
     "swarmops-testkit/test-hooks",
 ]
+# The serve parsers' public wrappers the fuzz targets call (`serve::cgi::fuzz_parse_path`,
+# `serve::hook::fuzz_read_updates`); the parsers stay private. Off unless asked for.
+fuzzing = []
 
 [dependencies]
 swarmops-api = { path = "../swarmops-api", version = "0.11.0" }
