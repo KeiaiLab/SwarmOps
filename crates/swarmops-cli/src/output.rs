@@ -17,7 +17,8 @@
 //! parenthesis when the publish moved it onto a newer head) or `replayed <id>`, then its warnings
 //! as `warnings[i]` lines; a revert prints its land's line after `reverted <n> changeset(s): `.
 //! An `E_CONFLICT` prints one `conflict: <kind> <path>` line for each
-//! conflicting file in place of its details, the report.
+//! conflicting file in place of its details, the report, then `truncated: true` when the report
+//! left files out.
 //!
 //! `ws status`, `log`, `diff`, `ws diff`, `ws commit` and `clone` print their result in git's
 //! shape instead ([`gitshape`]), as long as it holds every field the shape reads.
@@ -155,6 +156,11 @@ fn human<T: Serialize>(envelope: &Envelope<T>) -> String {
                 for file in files {
                     line(&mut out, "conflict", &file);
                 }
+
+                // The files past the report's budget print no line; say that some were cut.
+                if cut(&error.details) {
+                    line(&mut out, "truncated", "true");
+                }
             }
             None => {
                 for (key, value) in &error.details {
@@ -232,6 +238,15 @@ fn conflicts(code: &str, details: &Map<String, Value>) -> Option<Vec<String>> {
             Some(format!("{} {}", field("kind")?, field("path")?))
         })
         .collect()
+}
+
+/// Whether the conflict report in `details` left files out at its budget.
+fn cut(details: &Map<String, Value>) -> bool {
+    let truncated = details
+        .get("report")
+        .and_then(|report| report.get("truncated"))
+        .and_then(Value::as_bool);
+    truncated == Some(true)
 }
 
 /// The sentence the text rendering prints before the lines of `op`'s `result`, for the operations
@@ -655,6 +670,25 @@ mod tests {
                     .to_owned(),
                 exit: 3,
             }
+        );
+    }
+
+    /// A conflict report cut at its budget says so after the files it lists: the files left out
+    /// print no line of their own.
+    #[test]
+    fn human_text_of_a_truncated_conflict() {
+        let report = json!({"base": "b0", "ours": "c1", "theirs": "h0",
+                            "files": [{"path": "a.rs", "kind": "content"}],
+                            "kinds": ["content"], "truncated": true});
+        let mut details = Map::new();
+        details.insert("report".to_owned(), report);
+        let error = OpError::new(ErrorCode::Conflict, "400 path(s) conflict").with_details(details);
+        let failed: Envelope<()> = Envelope::err("land", error, meta());
+        assert_eq!(
+            render(&failed, Format::Human).stdout,
+            "error: E_CONFLICT: 400 path(s) conflict\n\
+             conflict: content a.rs\n\
+             truncated: true\n"
         );
     }
 }
