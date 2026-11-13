@@ -234,7 +234,8 @@ pub struct MergeConflicts {
     /// every one, its hunks as a merge holds them ([`crate::merge`]: the first ones as diff3 made
     /// them, and each file's past those as one that spans them).
     pub conflicts: Vec<FileConflict>,
-    /// The paths both sides changed whose contents merged cleanly, sorted.
+    /// The paths both sides changed whose contents merged cleanly into content neither had,
+    /// sorted.
     pub auto_merged: Vec<RepoPath>,
     /// For each conflicting path, the newest changeset on the target's first-parent chain since
     /// the base whose delta touches it (the path, a path below it, or one above it), and that
