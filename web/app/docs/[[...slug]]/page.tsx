@@ -37,7 +37,8 @@ const TOC_MIN_DEPTH = 2;
 const SECTION_DEPTH = 2;
 const TOC_MIN_SECTIONS = 3;
 
-// The twin's media type, for the page's `<link rel="alternate">`.
+// The twin's media type, for the page's `<link rel="alternate">`: a site path, which React puts
+// in the head; metadata `alternates.types` would make it absolute on swarmops.cc.
 const MARKDOWN_TYPE = 'text/markdown';
 
 interface Props {
@@ -98,6 +99,7 @@ export default async function Page({ params }: Props) {
       breadcrumb={{ includeRoot: true, includePage: true }}
       footer={{ enabled: true }}
     >
+      <link rel="alternate" type={MARKDOWN_TYPE} href={twinUrl(page.url)} />
       <KindBadge kind={pageKindOf(file)} />
       <DocsBody>
         {kind ? (
@@ -132,7 +134,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   return {
     title: page.data.title,
     description: page.data.description,
-    alternates: { canonical: page.url, types: { [MARKDOWN_TYPE]: twinUrl(page.url) } },
+    alternates: { canonical: page.url },
     other: { 'swarmops:release': LATEST_RELEASE.version },
   };
 }
