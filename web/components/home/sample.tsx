@@ -1,5 +1,7 @@
-// README.md, "Many agents commit into one store at once", with its real output: the command in a
-// select figure, the output below it, folded after its first 8 lines.
+// Eight agents commit into one store at once: the transcript of docs/guides/parallel-agents.md,
+// "SwarmOps: eight agents commit and land at once", recorded from a run. The command in a select
+// figure, the output below it, folded after its first 8 lines; check-site's home-samples rule
+// holds each output line to that transcript.
 import { Fragment, type ReactNode } from 'react';
 import { SelectFigure } from '@/components/markdown-page';
 import { C, H2, LINK, PARA, Section } from './parts';
@@ -20,14 +22,14 @@ function T({ k, children }: { k: Token; children: ReactNode }) {
 }
 
 const LANDED = [
-  'landed 42df54c0… on main (onto 1a2861f1…, attempt 4)',
-  'landed 8dff860c… on main (onto c1a3b584…, attempt 1)',
-  'landed fb162384… on main (onto 80d99e24…, attempt 4)',
-  'landed 0d8001c4… on main (onto 42df54c0…, attempt 5)',
-  'landed c1a3b584… on main (onto 4a7bc757…, attempt 1)',
-  'landed e0f1f8a6… on main (onto 0d8001c4…, attempt 5)',
-  'landed 80d99e24… on main (onto 8dff860c…, attempt 3)',
-  'landed 1a2861f1… on main (onto fb162384…, attempt 4)',
+  'landed b661f17c… on main (onto 3d63f551…, attempt 1, relocated)',
+  'landed 662c74ed… on main (onto b661f17c…, attempt 1, relocated)',
+  'landed e616ec6c… on main (onto dc448545…, attempt 1)',
+  'landed 3d63f551… on main (onto 55eeb7ed…, attempt 1, relocated)',
+  'landed 67506989… on main (onto e616ec6c…, attempt 1, relocated)',
+  'landed 55eeb7ed… on main (onto 2db19b84…, attempt 1, relocated)',
+  'landed 7a254784… on main (onto 662c74ed…, attempt 1, relocated)',
+  'landed 2db19b84… on main (onto 67506989…, attempt 1, relocated)',
 ];
 
 const ENTRIES = Array.from({ length: 8 }, (_, i) => `entries[${i}].name: ${i + 1}.txt`);
@@ -88,6 +90,9 @@ export function Sample() {
             {'\n'}  so <T k="flag">--as</T> <T k="var">$me</T> <T k="flag">--human</T> land <T k="str">&quot;$cs&quot;</T>
             {'\n'}
             {'}'}
+            {'\n'}printf <T k="str">{`'[{"path": "README.md", "op": "put", "content": {"inline": "# acme\\\\n"}}]'`}</T> &gt; first.json
+            {'\n'}so <T k="flag">--as</T> agent/worker-0 <T k="flag">--human</T> commit <T k="flag">-m</T>{' '}
+            <T k="str">&quot;first&quot;</T> <T k="flag">--changes</T> first.json <T k="flag">--advance</T> main &gt;/dev/null
             {'\n'}for i in 1 2 3 4 5 6 7 8; do work <T k="var">$i</T> &gt; land-<T k="var">$i</T>.txt &amp; done; wait
             {'\n'}cat land-*.txt
             {'\n'}so <T k="flag">--human</T> ls main:notes | grep name
@@ -109,8 +114,8 @@ export function Sample() {
 
       {/* 2. What the output says. */}
       <p className={PARA + ' mt-6'}>
-        All eight landed. <C>attempt</C> counts the tries: a land whose <C>main</C> moved under it merged again and
-        retried.{' '}
+        All eight landed, on the first attempt. <C>relocated</C>: <C>main</C> moved under the land, which put the
+        change on the new head itself.{' '}
         <a className={LINK} href="/docs/guides/parallel-agents">
           Parallel agents
         </a>{' '}

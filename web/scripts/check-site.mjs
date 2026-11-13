@@ -40,6 +40,8 @@
 //   lookup             /api/lookup holds every command, tool and E_* code, each resolves [S24, D32]
 //   addresses          every line of addresses.txt is a page or a redirect source [D18]
 //   readme-home-drift  README's install line, version and status word equal Home's [S48]
+//   home-samples       each line of Home's output samples is a line a guide recorded from a run,
+//                      ids and meta aside
 //   home-transfer      Home's gzip transfer reported; above 300 kB fails [S38]
 //
 // A rule in ENFORCED fails the run; any other rule's findings print as PENDING, for a fix
@@ -315,6 +317,9 @@ const REDUCED_MOTION = /prefers-reduced-motion:\s*reduce\)\s*\{\s*\*[^}]*transit
 const SOURCE_DIRS = ['web/app', 'web/components']; // S32, S33, S34
 const SOURCE_EXT = /\.(tsx?|css|mdx?)$/;
 const AGENTS_TWIN = '/docs/agents.md'; // D47
+const GUIDES = 'docs/guides'; // home-samples: the transcripts recorded from runs
+const SAMPLE_ID = /\b[0-9a-f]{12,}\b|\b[0-9a-f]{4,}…/g; // a full id, or one cut with `…`
+const SAMPLE_META = /,"meta":\{.*$/; // an envelope's meta, to the end of the line
 const LOOKUP = 'api/lookup'; // S24, D32
 const ADDRESSES = 'web/addresses.txt'; // D18
 const NOT_PAGES = ['404.html', '_not-found.html'];
@@ -1298,6 +1303,64 @@ function addresses(site) {
     .map((l) => `${ADDRESSES}:${l.line}: ${l.address} is no page and no redirect source`);
 }
 
+/** An output line with its ids and its envelope's meta folded: `landed <id> on main ...`. */
+function sampleShape(line) {
+  return line
+    .trim()
+    .replace(SAMPLE_META, ',"meta":{…}}')
+    .replace(SAMPLE_ID, '<id>');
+}
+
+/** The shapes of every line in a fenced block of the guides. */
+function guideShapes(site) {
+  const dir = path.join(site.repo, GUIDES);
+  const shapes = new Set();
+  if (!existsSync(dir)) {
+    return shapes;
+  }
+  for (const file of walk(dir).filter((f) => f.endsWith('.md'))) {
+    let fenced = false;
+    for (const line of readFileSync(path.join(dir, file), 'utf8').split('\n')) {
+      if (/^\s*(```|~~~)/.test(line)) {
+        fenced = !fenced;
+        continue;
+      }
+      if (fenced) {
+        shapes.add(sampleShape(line));
+      }
+    }
+  }
+  return shapes;
+}
+
+// Home's output samples come from runs: each line, ids and meta folded, is a line of a guide's
+// transcript, so a guide recorded again from a newer build shows where Home has drifted.
+function homeSamples(site) {
+  const found = [];
+  if (homeOf(site, found) === null) {
+    return found;
+  }
+
+  // 1. The lines of each samp in main, as a browser renders them (React's `<!-- -->` dropped).
+  const raw = outText(site, HOME).replace(/<!--[\s\S]*?-->/g, '');
+  const lines = elementsOf(mainOf(raw).inner, 'samp')
+    .flatMap((samp) => decode(samp.inner.replace(/<[^>]+>/g, '')).split('\n'))
+    .filter((line) => line.trim() !== '');
+  if (lines.length === 0) {
+    return [`${HOME}:1: no output sample (samp) in main`];
+  }
+
+  // 2. Each one in a guide's transcript.
+  const recorded = guideShapes(site);
+  if (recorded.size === 0) {
+    return [`${GUIDES}:0: no fenced block`];
+  }
+  for (const line of lines.filter((l) => !recorded.has(sampleShape(l)))) {
+    found.push(`${HOME}:1: output "${line.trim().slice(0, 80)}" is in no transcript of ${GUIDES}`);
+  }
+  return found;
+}
+
 // S48: README's install line, version and status word equal Home's.
 function readmeHomeDrift(site) {
   const found = [];
@@ -1390,6 +1453,7 @@ const RULES = [
   ['lookup', lookup],
   ['addresses', addresses],
   ['readme-home-drift', readmeHomeDrift],
+  ['home-samples', homeSamples],
   ['home-transfer', homeTransfer],
 ];
 
@@ -1400,6 +1464,7 @@ const ENFORCED = new Set([
   'next-version',
   'tool-comparison',
   'comparative-link',
+  'home-samples',
   'header-links',
   'lookup',
   'literal-size',
@@ -1501,7 +1566,7 @@ function fixture() {
     `<div><code>${INSTALL_LINE}</code><button type="button" data-copy="${INSTALL_LINE}" aria-label="Copy the install line">Copy</button><span aria-live="polite"></span></div>`,
     '<a data-primary="" href="/docs/guides/quick-start">Quick start</a>',
     `<section id="first-run"><h2>First commands</h2><pre><code>${FX_MCP}</code></pre></section>`,
-    '<section id="sample"><h2>Sample</h2><pre>swarmops init</pre></section>',
+    '<section id="sample"><h2>Sample</h2><pre>swarmops init</pre><pre class="code-out-text"><samp>landed 1a2b<wbr/>3c4d… on main (onto 5e6f7a8b…, attempt 1)\n<!-- -->entries[0].name: 1.txt\n{&quot;ok&quot;:true,&quot;op&quot;:&quot;repo_init&quot;,&quot;result&quot;:{&quot;refs&quot;:0},&quot;meta&quot;:{…}}</samp></pre></section>',
     `<section id="features"><h2>Features</h2>${fxFeature('commit-and-land')}${fxFeature('parallel-agents')}</section>`,
     '<section id="evidence"><h2>Evidence</h2><p>1 met.</p></section>',
     '<section id="start"><h2>Start</h2><p>Begin here. <a data-primary="" href="/docs/guides/quick-start">Quick start</a></p></section>',
@@ -1541,6 +1606,13 @@ function fixture() {
   files.set('web/app/global.css', ':root {\n  --radius: 0.5rem;\n}\na {\n  transition: color 120ms;\n}\n');
   files.set(ADDRESSES, '/\n/product/vs-git\n/docs\n/docs/agents\n/guides/old\n');
   files.set('docs/develop/mcp.md', `# MCP\n\n\`\`\`sh\n${FX_MCP}\n\`\`\`\n`);
+  files.set(`${GUIDES}/quick-start.md`, [
+    '# Quick start\n\n```text',
+    'landed 0123456789abcdef0123456789abcdef on main (onto 89abcdef…, attempt 1)',
+    'entries[0].name: 1.txt',
+    '{"ok":true,"op":"repo_init","result":{"refs":0},"meta":{"elapsed_ms":3}}',
+    '```\n',
+  ].join('\n'));
   files.set('README.md', `# SwarmOps\n\nPre-release, v${FX_RELEASE}.\n\n\`\`\`sh\n${INSTALL_LINE}\n\`\`\`\n`);
   files.set('CHANGELOG.md', `# Changelog\n\n## [Unreleased]\n\n## [${FX_RELEASE}] - 2026-11-09\n`);
   return files;
@@ -1591,6 +1663,7 @@ const MUTATIONS = {
   'lookup': (f) => edit(f, `web/out/${LOOKUP}`, ',{"name":"E_BUSY","url":"/docs/reference/errors#e_busy"}', ''),
   'addresses': (f) => edit(f, ADDRESSES, '/guides/old\n', '/guides/old\n/gone\n'),
   'readme-home-drift': (f) => edit(f, 'README.md', `v${FX_RELEASE}`, 'v0.10.0'),
+  'home-samples': (f) => edit(f, OUT_HOME, 'attempt 1)', 'attempt 2)'),
   'home-transfer': (f) => {
     edit(f, OUT_HOME, '</body>', '<script src="/_next/static/chunks/big.js"></script></body>');
     f.set('web/out/_next/static/chunks/big.js', randomBytes(HOME_TRANSFER_KB * 1024 * 2).toString('base64'));

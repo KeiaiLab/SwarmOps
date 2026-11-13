@@ -1,5 +1,6 @@
 // The first commands after the install, with what the 0.13.0 build printed in an empty
 // temporary directory, then the MCP registration command of docs/develop/mcp.md, byte for byte.
+// check-site's home-samples rule holds each output line to a guide's transcript (quick-start.md).
 import { SelectFigure } from '@/components/markdown-page';
 import { C, H2, LINK, PARA, Section } from './parts';
 import { OutputText } from './sample';
