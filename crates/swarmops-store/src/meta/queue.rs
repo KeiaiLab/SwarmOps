@@ -1053,8 +1053,9 @@ impl MetaStore {
         // 3. The janitor, then the requests: none if a manifest is left (step 8, D10).
         janitor(self, &seams);
         let mut lead = Lead::new(self, write, own, body, Serve::Queue, seams);
+        let wanted = lead.lead_wait();
         if manifests(&*lead.seams.ops, dir).is_empty() {
-            lead.wait_hook();
+            lead.wait_hook(wanted);
             lead.gather();
         }
         lead.started = lead.seams.now();
@@ -1238,9 +1239,10 @@ impl<'a> Lead<'a> {
             .or_else(lead_wait_from_env)
     }
 
-    /// The test hook: waits up to 10 s for as many other pending requests as it asks for.
-    fn wait_hook(&self) {
-        let Some(wanted) = self.lead_wait() else {
+    /// The test hook: waits up to 10 s for the `wanted` other pending requests it asks for
+    /// ([`Lead::lead_wait`], which every queue lead reads, so that a malformed value fails each).
+    fn wait_hook(&self, wanted: Option<usize>) {
+        let Some(wanted) = wanted else {
             return;
         };
         let dir = self.store.layout.queue_dir();
@@ -3568,6 +3570,33 @@ mod tests {
                 "{stderr}"
             );
             assert_eq!(landed(&open(&root), 1), 0, "nothing committed");
+        }
+
+        /// The hook is read on every queue lead, whatever the lead then does: one that finds a
+        /// manifest left, and so waits for no request and is asked to plan none, panics on a
+        /// malformed value too. A proof that a build ignores the value thus holds for any lead.
+        #[test]
+        fn a_malformed_lead_wait_panics_beside_a_manifest() {
+            if let Some(root) = child_root() {
+                let (_claimed, _alive) = seed(&root, Kind::Com, Ask::Frame(3), true);
+                let leader = RequestId::new();
+                fs::write(Kind::Batch.path(&queue(&root), &leader), b"no manifest").unwrap();
+                let store = open(&root);
+                drop(store.take_turn(&Ask::Frame(1).body(), Serve::Queue));
+                return;
+            }
+            let (_dir, root) = new_store();
+            let ran = child(
+                "a_malformed_lead_wait_panics_beside_a_manifest",
+                &[(ROOT_ENV, root.as_str()), (LEAD_WAIT_ENV, "not-a-number")],
+            );
+            let stderr = String::from_utf8_lossy(&ran.stderr);
+            assert!(!ran.status.success(), "it panicked: {stderr}");
+            assert!(
+                stderr.contains("SWARMOPS_TEST_LEAD_WAIT=\"not-a-number\""),
+                "{stderr}"
+            );
+            assert_eq!(files(&root, Kind::Batch).len(), 1, "the manifest was left");
         }
 
         /// What the sweep seeds: two waiters, one with a frame, one frameless.
