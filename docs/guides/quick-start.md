@@ -46,7 +46,7 @@ so init "$SWARMOPS_REPO" --name acme
 ```
 
 ```text
-{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"3ca95e25fe9bbe471edc25c8c77d2073","name":"acme","store_version":2,"changesets":0,"refs":0},"meta":{"repo":"/home/me/.local/state/swarmops/repos/acme","elapsed_ms":34,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"e7a95700611f259a3f1a5ced7c0b4681","name":"acme","store_version":3,"changesets":0,"refs":0},"meta":{"repo":"/home/me/.local/state/swarmops/repos/acme","elapsed_ms":234,"resolved":{},"auth":"trust"}}
 ```
 
 `init` makes the directory if it is missing. A store has no default location: every command finds
@@ -77,7 +77,7 @@ so commit -m "first" --changes changes.json --advance main  # creates main at th
 ```
 
 ```text
-{"ok":true,"op":"commit","api":1,"result":{"changeset":"ecca9a10…","root":"b8a4f79e…","files_changed":2,"blobs_written":2,"advanced":{"name":"main","new":"ecca9a10…","already_applied":false},"replayed":false},"meta":{"repo":"/home/me/.local/state/swarmops/repos/acme","elapsed_ms":21,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"commit","api":1,"result":{"changeset":"fd984601…","root":"b8a4f79e…","files_changed":2,"blobs_written":2,"advanced":{"name":"main","new":"fd984601…","already_applied":false},"replayed":false},"meta":{"repo":"/home/me/.local/state/swarmops/repos/acme","elapsed_ms":88,"resolved":{},"auth":"trust"}}
 ```
 
 The first change puts `src/lib.rs` from inline text; the second puts `run.sh` from the client file,
@@ -115,7 +115,7 @@ entries[1].name: src
 entries[1].kind: dir
 entries[1].id: b3df0b759177d000a36c5c20217f3e62a8f9c9dbe9a2d119aa3558912838c011
 truncated: false
-ecca9a100bf3 first
+fd9846012bf9 first
 ```
 
 `so show main` prints the whole changeset: parents, author, message, changes and git-style
@@ -131,7 +131,7 @@ so cat main:src/lib.rs
 ```
 
 ```text
-{"ok":true,"op":"read_file","api":1,"result":{"blob":"f5f5220aa3d385d93f53321ce67338241ed06963653b5b823667cb2a45121a9d","size":14,"kind":"file","encoding":"utf8","content":"pub fn f() {}\n","truncated":false},"meta":{"repo":"/home/me/.local/state/swarmops/repos/acme","elapsed_ms":1,"resolved":{"main":"ecca9a10…"},"auth":"trust"}}
+{"ok":true,"op":"read_file","api":1,"result":{"blob":"f5f5220aa3d385d93f53321ce67338241ed06963653b5b823667cb2a45121a9d","size":14,"kind":"file","encoding":"utf8","content":"pub fn f() {}\n","truncated":false},"meta":{"repo":"/home/me/.local/state/swarmops/repos/acme","elapsed_ms":3,"resolved":{"main":"fd984601…"},"auth":"trust"}}
 ```
 
 `op` names the operation (`cat` is `read_file`), and `meta.resolved` what each revision named. A
@@ -172,9 +172,9 @@ so --human ls main
 ```
 
 ```text
-landed 11eb953b… on main (onto ecca9a10…, attempt 1)
-landed 4c54d337… on main (onto 11eb953b…, attempt 1)
-replayed 4c54d337…
+landed eae2e373… on main (onto fd984601…, attempt 1)
+landed 35ac4330… on main (onto eae2e373…, attempt 1)
+replayed 35ac4330…
 entries[0].name: README.md
 entries[0].kind: file
 entries[0].size: 7
@@ -206,9 +206,9 @@ so --human --as agent/worker-3 land "$C3" --key "$(uuidgen)"; echo "exit $?"
 ```
 
 ```text
-error: E_CONFLICT: 1 path(s) of the change conflict with the target's head 4c54d337…: nothing was recorded
+error: E_CONFLICT: 1 path(s) of the change conflict with the target's head 35ac4330…: nothing was recorded
 conflict: content src/lib.rs
-hint: swarmops cat 4c54d337…:src/lib.rs, then swarmops land 4b4e8668… --resolve <file> (resolutions over MCP) with each path's resolution and against = 4c54d337…
+hint: swarmops cat 35ac4330…:src/lib.rs, then swarmops land 27bc2469… --resolve <file> (resolutions over MCP) with each path's resolution and against = 35ac4330…
 exit 3
 ```
 
@@ -227,7 +227,7 @@ so --human cat main:src/lib.rs
 ```
 
 ```text
-landed aa1b0e84… on main (onto 4c54d337…, attempt 1)
+landed 20ef9b76… on main (onto 35ac4330…, attempt 1)
 blob: a922acde6e5a003e306c91b7984b6c9ed5c4dad587912f36f3d6873f5dac17a4
 size: 24
 kind: file
@@ -248,31 +248,31 @@ ref an operation moved back to what it named before, all of them or none, by com
 
 ```sh
 so --human op log -n 1
-so --human op undo 6:8e2a4f10; echo "exit $?"
+so --human op undo 6:acd37d5d; echo "exit $?"
 ```
 
 ```text
 ops[0].op: 6
-ops[0].id: 6:8e2a4f10
+ops[0].id: 6:acd37d5d
 ops[0].kind: land
-ops[0].changesets[0].id: aa1b0e84…
+ops[0].changesets[0].id: 20ef9b76…
 ops[0].changesets[0].agent: agent/worker-3
-ops[0].changesets[0].created_at: 1792626497000
+ops[0].changesets[0].created_at: 1794552231000
 ops[0].changesets[0].title: f returns 2
-ops[0].changesets[0].land_key: 4ccbb36c-71e9-44a0-a6c4-8fd4453d48bc
+ops[0].changesets[0].land_key: cb3d5a54-9968-43fe-93ba-cd11866f04ed
 ops[0].changesets_total: 1
 ops[0].ref_moves[0].name: main
-ops[0].ref_moves[0].old: 4c54d337…
-ops[0].ref_moves[0].new: aa1b0e84…
+ops[0].ref_moves[0].old: 35ac4330…
+ops[0].ref_moves[0].new: 20ef9b76…
 ops[0].ref_moves[0].actor: agent/worker-3
-ops[0].ref_moves[0].at: 1792626497
+ops[0].ref_moves[0].at: 1794552231
 truncated: true
-error: E_REF_PROTECTED: main moves only forward: aa1b0e84… is not a first-parent ancestor of 4c54d337… (the undo of operation 6:8e2a4f10), so nothing was written
-details.changeset: aa1b0e84…
-details.id: 6:8e2a4f10
+error: E_REF_PROTECTED: main moves only forward: 20ef9b76… is not a first-parent ancestor of 35ac4330… (the undo of operation 6:acd37d5d), so nothing was written
+details.changeset: 20ef9b76…
+details.id: 6:acd37d5d
 details.name: main
 details.op: 6
-details.target: 4c54d337…
+details.target: 35ac4330…
 hint: main moves only forward: land a change that takes it back
 exit 1
 ```
@@ -293,6 +293,8 @@ objects_checked: 23
 changesets_checked: 7
 problems: []
 findings: []
+truncated: false
+found: 0
 ```
 
 `verify --deep` re-hashes every object and checks the derived values against the objects. An empty
@@ -319,7 +321,7 @@ findings: []
 
 ## Sources
 
-The commands and their output come from a run of SwarmOps 0.1.0, the version check from 0.11.0.
+The commands and their output come from a run of SwarmOps 0.11.0.
 The command descriptions come from the [CLI reference](../reference/cli.md), the envelope from
 [CLI scripting](../develop/cli-scripting.md#the-envelope), and the conflict resolution from
 [Operating SwarmOps, Agents commit and land](../operations.md#2-agents-commit-and-land).
