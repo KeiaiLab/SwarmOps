@@ -29,12 +29,12 @@ program, no external database, no daemon.
 M0 (bootstrap), M1 (the single-agent core), M1.5 (hardening and opening), M1.6 (the
 code-review follow-ups), M2 (diff, history and the derived-data engine), M3 (git import), M4
 (merge and landing, and the operation log with undo), M8 (git export), M13 (git remotes) and M5
-(workspaces) are done, but for work of M1.6, M2, M3, M4 and M8 that waits until after the pilot. Since M1,
-SwarmOps is usable by one agent: its store takes commits from many processes at once, safely.
-Since M4, `land` merges an agent's change three-way onto a ref and publishes it, not yet measured
-under a swarm's load. Since M13, a store clones, fetches, pushes and syncs a git remote such as
-GitHub itself. Since M5, an agent builds and tests its change in a workspace on disk and lands
-the tree it tested. Review (M7) comes later, in the order of umbrella §13.
+(workspaces) are done, but for work of M1.6, M2, M3, M4 and M8 that waits until after the pilot.
+Since M1, SwarmOps is usable by one agent: its store takes commits from many processes at once,
+safely. Since M4, `land` merges an agent's change three-way onto a ref and publishes it, not yet
+measured under a swarm's load. Since M13, a store clones, fetches, pushes and syncs a git remote
+such as GitHub itself. Since M5, an agent builds and tests its change in a workspace on disk and
+lands the tree it tested. Review (M7) comes later, in the order of umbrella §13.
 [known-limitations.md](known-limitations.md) lists what M1, M1.5, M1.6, M2, M3, M4, M8, M13 and M5
 leave open.
 
@@ -70,7 +70,8 @@ swarmops-testkit core, store, repo   (repo behind its default feature `repo`; a 
 ```
 
 `fuzz/` is a cargo workspace of its own, with eight cargo-fuzz targets over the codec, object
-files, the journal of each `FORMAT` and FORMAT 2's ref files. The specs plan one more crate, `swarmops-sim` (the simulation harness, M9).
+files, the journal of each `FORMAT` and FORMAT 2's ref files. The specs plan one more crate,
+`swarmops-sim` (the simulation harness, M9).
 
 Two rules shape the layers (umbrella §1, [CONTRIBUTING.md](../CONTRIBUTING.md#the-rules)):
 
@@ -180,30 +181,29 @@ Objects are compressed one at a time with zstd at level 3, with zstd's content c
 they hold at least 128 bytes and compression makes them smaller; otherwise they are stored raw.
 Ids always hash the raw content.
 
-The index and the ref files are projections of the journal. A journal frame is
-`u32le len | u32le crc32(payload) | payload`, and its payload holds fixed-width little-endian
-records: a changeset entering the index, a ref move, a compaction marker. The frame layout and
-the record layouts are the disk contract of `FORMAT 1`: not part of the hash contract, but
-changed only with a new `FORMAT` (storage §3). `FORMAT 2` (M6) keeps the records and changes the
-frame header to `u32le len | u32le crc32(payload) | u64le seq | u32le prev_crc | u32le
-crc32(header)`, gives each `journal.off` entry the frame's payload CRC and a checksum of its own,
-and names each ref file `hex(blake3("swarmops:refname:v1\0" ++ name)[0..16])`, which holds the
-name; that recipe names files, and is no part of the hash contract. `FORMAT 3` (M20, the FORMAT 3
-design) keeps FORMAT 2's frames, offsets and ref files byte for byte, ends every frame with a
-`Nonce` record of a random 64-bit value, so that two operations of the same bytes get distinct
-ids, and adds facts: records in one envelope (kind, type, subject, other, time, actor, body) that
-reviews, annotations, checks, queue entries, withdrawals, lineage, provenance and annotated tags
-use, each kind behind a feature named in `meta/features`; a binary refuses a store that lists a
-feature it lacks (`E_STORE_TOO_NEW`). Its sorted views are runs under a manifest, built after the
-lock is released (below), so no write rewrites them under the lock. Derived values (M2) are no projection of the
+The index and the ref files are projections of the journal. A journal frame is `u32le len | u32le
+crc32(payload) | payload`, and its payload holds fixed-width little-endian records: a changeset
+entering the index, a ref move, a compaction marker. The frame layout and the record layouts are the
+disk contract of `FORMAT 1`: not part of the hash contract, but changed only with a new `FORMAT`
+(storage §3). `FORMAT 2` (M6) keeps the records and changes the frame header to `u32le len | u32le
+crc32(payload) | u64le seq | u32le prev_crc | u32le crc32(header)`, gives each `journal.off` entry
+the frame's payload CRC and a checksum of its own, and names each ref file
+`hex(blake3("swarmops:refname:v1\0" ++ name)[0..16])`, which holds the name; that recipe names
+files, and is no part of the hash contract. `FORMAT 3` (M20, the FORMAT 3 design) keeps FORMAT 2's
+frames, offsets and ref files byte for byte, ends every frame with a `Nonce` record of a random
+64-bit value, so that two operations of the same bytes get distinct ids, and adds facts: records in
+one envelope (kind, type, subject, other, time, actor, body) that reviews, annotations, checks,
+queue entries, withdrawals, lineage, provenance and annotated tags use, each kind behind a feature
+named in `meta/features`; a binary refuses a store that lists a feature it lacks
+(`E_STORE_TOO_NEW`). Its sorted views are runs under a manifest, built after the lock is released
+(below), so no write rewrites them under the lock. Derived values (M2) are no projection of the
 journal but a cache beside it, with a header of their own (below). The external id index (M3,
 storage §7) says which changeset an id of another system names, a git commit's oid say: an immutable
 file per id, written as an object is and only once the frame that records its changeset is durable.
 It is a cache outside the journal, not a projection of it, so it leaves `FORMAT 1` as it is. The
-milestones that use facts (M7's reviews among them) each turn on their feature in a FORMAT 3
-store. The workspace registry (M5), `workspaces/<name>.json`,
-sits beside `meta/`: only the client-side workspace operations read and write it, no store
-operation does.
+milestones that use facts (M7's reviews among them) each turn on their feature in a FORMAT 3 store.
+The workspace registry (M5), `workspaces/<name>.json`, sits beside `meta/`: only the client-side
+workspace operations read and write it, no store operation does.
 
 How the files depend on one another:
 
@@ -482,26 +482,25 @@ and passed over; `op log` reads the operation as a `land`.
 
 ## Reading
 
-Readers take no lock (storage §3, "읽기"), `op log` aside (below). `MetaStore::read()` takes a snapshot: it reads
-`journal.ckpt`, opens the index (counting only the records that all its index files hold whole,
-and, past the checkpoint and the sorted views, only those that the frames past the checkpoint
-vouch for, field by field, as storage §3, "색인의 보증", says: a record that a power loss zero-filled
-is not counted, the snapshot reads its changeset from the frame, and the next write replays it;
-with no journal to read, or a damaged one, it counts those records by the files' lengths instead,
-an index whose `par.col` entries there break their layout does not open, and `verify` reports the
-journal's damage),
-reads every frame past the checkpoint (whole frames not yet listed in `journal.off` included; it
-stops at a torn tail), reads every ref file, then reads the frames again, and if they are not the
-frames it read (new ones, or a frame a failed sync or rewrite cut back and the next writer
-replaced at its seq), reads the refs and frames again. It then lays the frames past the
-checkpoint over the index and the refs in memory. Writers replace a ref file only after its
-frame is whole, so the refs it reads never run ahead of the frames it read. It makes at most 32
-such rounds of reading the refs and the frames (`MetaStore::SNAPSHOT_ROUNDS`): when the frames
-changed in every round, commits kept landing as it read, and it gives up with the retryable
-`E_BUSY` rather than wait for them to stop. A `journal.off` that holds fewer entries when the
-frames are read than when it was measured is no damage: a writer cut an entry that was never
-genuine (one whose own sync failed, or zeroed ones a crash left at its end), and every reader of
-the journal (the snapshot's rounds, paging, `reflog`, `verify`) measures it again and reads on.
+Readers take no lock (storage §3, "읽기"), `op log` aside (below). `MetaStore::read()` takes a
+snapshot: it reads `journal.ckpt`, opens the index (counting only the records that all its index
+files hold whole, and, past the checkpoint and the sorted views, only those that the frames past the
+checkpoint vouch for, field by field, as storage §3, "색인의 보증", says: a record that a power loss
+zero-filled is not counted, the snapshot reads its changeset from the frame, and the next write
+replays it; with no journal to read, or a damaged one, it counts those records by the files' lengths
+instead, an index whose `par.col` entries there break their layout does not open, and `verify`
+reports the journal's damage), reads every frame past the checkpoint (whole frames not yet listed in
+`journal.off` included; it stops at a torn tail), reads every ref file, then reads the frames again,
+and if they are not the frames it read (new ones, or a frame a failed sync or rewrite cut back and
+the next writer replaced at its seq), reads the refs and frames again. It then lays the frames past
+the checkpoint over the index and the refs in memory. Writers replace a ref file only after its
+frame is whole, so the refs it reads never run ahead of the frames it read. It makes at most 32 such
+rounds of reading the refs and the frames (`MetaStore::SNAPSHOT_ROUNDS`): when the frames changed in
+every round, commits kept landing as it read, and it gives up with the retryable `E_BUSY` rather
+than wait for them to stop. A `journal.off` that holds fewer entries when the frames are read than
+when it was measured is no damage: a writer cut an entry that was never genuine (one whose own sync
+failed, or zeroed ones a crash left at its end), and every reader of the journal (the snapshot's
+rounds, paging, `reflog`, `verify`) measures it again and reads on.
 
 `op log` is the one local reader that takes the lock: it reads the committed snapshot
 (`MetaStore::read_committed`, as the git export below does), so that a frame a failed sync or a
@@ -653,18 +652,18 @@ store and its remotes, and move packs with the user's own git:
 **The transport.** `GitCli` runs `git` (2.39 or later: `SWARMOPS_GIT`, else `PATH`) as a child
 process, without a shell, with its arguments after `--end-of-options` and its configuration in
 the environment (`GIT_CONFIG_COUNT`: `core.fsync=all`, an empty hooks directory, protocol version
-2, git's fsck of every received object), never in its arguments. The child's environment loses the variables that point git at another
-repository, git's tracing and the locale, and gains `GIT_DIR` (the mirror), `LC_ALL=C`,
-`GIT_TERMINAL_PROMPT=0` and `GIT_ALLOW_PROTOCOL` (the remote URL's scheme alone); credential
-helpers, `SSH_AUTH_SOCK`, `GIT_SSH_COMMAND` and proxy variables pass through. A remote's
-`token_env` reaches git as an HTTP header scoped to the remote's URL, and is redacted, with its
-base64 form, from whatever git prints before it enters an error. A failure is classified by one
+2, git's fsck of every received object), never in its arguments. The child's environment loses the
+variables that point git at another repository, git's tracing and the locale, and gains `GIT_DIR`
+(the mirror), `LC_ALL=C`, `GIT_TERMINAL_PROMPT=0` and `GIT_ALLOW_PROTOCOL` (the remote URL's scheme
+alone); credential helpers, `SSH_AUTH_SOCK`, `GIT_SSH_COMMAND` and proxy variables pass through. A
+remote's `token_env` reaches git as an HTTP header scoped to the remote's URL, and is redacted, with
+its base64 form, from whatever git prints before it enters an error. A failure is classified by one
 table, from git's exit status, push's porcelain and git's messages under `LC_ALL=C`, into
 `E_REMOTE_UNREACHABLE` (retryable), `E_REMOTE_REJECTED` and `E_REMOTE_DIVERGED`; a failure the table
 does not know is `E_REMOTE_REJECTED` with the reason `unclassified`, never retried; an object git's
 fsck refuses, a pack whose checksum does not match, or one a fetched ref reaches and the mirror
-lacks, is `bad_objects`. SwarmOps has no network crate and writes no pack: gix stays on the
-disk side.
+lacks, is `bad_objects`. SwarmOps has no network crate and writes no pack: gix stays on the disk
+side.
 
 **The mirror.** `git/mirror.git` is a cache that SwarmOps alone writes: fetched packs land in it,
 the import reads it (`GixSource`), and a push's export is written into it (`GixSink`). A remote's
@@ -672,9 +671,9 @@ state is the mirror's `refs/remotes/<remote>/<branch>`, so the remotes need no n
 no new `FORMAT`. One ref is more than a cache: `refs/published/<remote>/<branch>`, the remote
 commit `main` was last matched to, which a sync and a push of `main` move and a fetch never does,
 is the floor below which a sync refuses a remote's head (M16); lost with the mirror, it lowers
-the floor to the sync's base. A mirror that is missing, has a marker this build does not know, or that gix
-cannot open is moved aside as `git/mirror.git.broken-<unix ms>` and made again; one held by a dead
-process's git lock files has those removed once they are older than ten minutes. `git/lock`
+the floor to the sync's base. A mirror that is missing, has a marker this build does not know, or
+that gix cannot open is moved aside as `git/mirror.git.broken-<unix ms>` and made again; one held by
+a dead process's git lock files has those removed once they are older than ten minutes. `git/lock`
 serializes the commands that write the mirror; a held lock is `E_BUSY` at once. `meta/lock`, the
 store's writer lock, is never held across the network.
 
@@ -758,9 +757,9 @@ lock (I4). The tests that hold the code to them:
   ref), each ending with `verify --deep`.
 
 The crash sweeps model a process crash, which leaves the kernel's page cache intact, and the
-power-loss images a model of the disk rather than a real device ([known-limitations.md](known-limitations.md)).
-Since M6 a literal `SIGKILL` kills `commit --advance` at random points on a real disk, and every
-sweep runs once per `FORMAT`.
+power-loss images a model of the disk rather than a real device
+([known-limitations.md](known-limitations.md)). Since M6 a literal `SIGKILL` kills
+`commit --advance` at random points on a real disk, and every sweep runs once per `FORMAT`.
 
 ## Concurrency
 
@@ -843,9 +842,9 @@ not know, so versions can differ (operations §0). `StoreOps` has thirty-one ope
 `commit`, `land`, `rebase`, `resolve_rev`, `blob_put`, `blob_has`, `blob_get`, `read_file`,
 `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `ref_list`, `ref_set`,
 `ref_delete`, `op_log`, `undo`, `verify`, `derive`, `gc`, `repair`, `upgrade`, `ref_log`,
-`revert`, `land_check`, `land_group`, `ref_txn` and `merge_base`; `init`, `whoami` and `schema` live in the CLI. `op_log` shows the journal as the store's
-operations, a frame each (storage §3), and `undo` moves an operation's refs back by
-compare-and-swap, `main` only forward.
+`revert`, `land_check`, `land_group`, `ref_txn` and `merge_base`; `init`, `whoami` and `schema` live
+in the CLI. `op_log` shows the journal as the store's operations, a frame each (storage §3), and
+`undo` moves an operation's refs back by compare-and-swap, `main` only forward.
 
 Every run of `swarmops` prints exactly one envelope on stdout (only `--help` and `--version` print
 plain text, `mcp`, below, speaks MCP there instead, `serve` git's protocol, and `derive --follow`
@@ -890,12 +889,13 @@ pages at the full ids the first page resolved.
 
 `swarmops mcp` (M1.5) serves the same operations to agents over the Model Context Protocol, on
 stdio: one tool per `StoreOps` operation but `derive`, which only fills ahead of time a cache
-that each read fills itself, so it changes no result an agent reads, and from M13 the five git remote operations that take a remote by its name
-(`remote_list`, `fetch`, `push`, `sync`, `sync_status`; `clone` and `remote add|remove` stay in
-the CLI); a tool's input schema is the request type's JSON Schema, kept a plain object (a
-rule across fields that the type's schema states with a top-level `oneOf` goes into the description
-and the server's own check) and with the `expected_old` of `ref_set` and `ref_delete` narrowed to a
-full changeset id, and its result is the envelope the CLI prints.
+that each read fills itself, so it changes no result an agent reads, and from M13 the five git
+remote operations that take a remote by its name (`remote_list`, `fetch`, `push`, `sync`,
+`sync_status`; `clone` and `remote add|remove` stay in the CLI); a tool's input schema is the
+request type's JSON Schema, kept a plain object (a rule across fields that the type's schema states
+with a top-level `oneOf` goes into the description and the server's own check) and with the
+`expected_old` of `ref_set` and `ref_delete` narrowed to a full changeset id, and its result is the
+envelope the CLI prints.
 
 ## Where to read more
 
