@@ -1347,12 +1347,13 @@ const PHASE_LOG_ENV: &str = "SWARMOPS_TEST_PHASE_LOG";
 
 /// Every phase the phase log names, in the M18 design §2.2's order.
 #[cfg(feature = "test-hooks")]
-const PHASES: [&str; 10] = [
+const PHASES: [&str; 11] = [
     "sync.fetch",
     "sync.plan",
     "sync.recognise",
     "sync.relocate",
     "sync.move",
+    "sync.publish",
     "push.export",
     "push.git",
     "export.derive",

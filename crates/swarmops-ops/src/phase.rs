@@ -11,6 +11,7 @@
 //! | `sync.recognise` | the changes the remote holds | changes it holds |
 //! | `sync.relocate` | the rest landed onto the remote's head | changes landed |
 //! | `sync.move` | `main`'s compare-and-swap | moves |
+//! | `sync.publish` | the published changes' export oids, their derive included | changes published |
 //! | `push.export` | the seen commit known, the export into the staging branch | commits written |
 //! | `push.git` | git's children: the ancestry check, the push, the housekeeping | pushes |
 //! | `export.derive` | the export oid derive, its memos' time included | changesets, trees and blobs derived |
@@ -18,7 +19,9 @@
 //! | `import.convert` | the import's frames | commits converted |
 //!
 //! The last three are the git crate's, added up over the operation (the fetch's import, the
-//! sync's published changes and the push's export each derive export oids) and written once.
+//! sync's published changes and the push's export each derive export oids) and written once;
+//! their time is also in the phase that called them. A sync that ends before its published
+//! changes (up to date, a fast-forward with nothing unpublished) writes no `sync.publish` line.
 
 #[cfg(feature = "test-hooks")]
 use std::io::Write as _;
@@ -42,6 +45,8 @@ pub(crate) enum Phase {
     SyncRelocate,
     /// `main` moved.
     SyncMove,
+    /// The published changes' export oids.
+    SyncPublish,
     /// The push's export.
     PushExport,
     /// The push's git children.
@@ -58,6 +63,7 @@ impl Phase {
             Phase::SyncRecognise => "sync.recognise",
             Phase::SyncRelocate => "sync.relocate",
             Phase::SyncMove => "sync.move",
+            Phase::SyncPublish => "sync.publish",
             Phase::PushExport => "push.export",
             Phase::PushGit => "push.git",
         }

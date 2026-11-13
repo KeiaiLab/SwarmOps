@@ -442,7 +442,9 @@ impl Syncing<'_, '_> {
         }
 
         // 5. Everything held already, or no push asked for: done without git.
+        let span = Span::start(Phase::SyncPublish);
         let published = self.published(&landed.published)?;
+        span.end(published.len());
         if landed.head == theirs || self.mode == SyncMode::Local {
             let kind = if landed.head == theirs {
                 SyncStatusKind::FastForwarded
