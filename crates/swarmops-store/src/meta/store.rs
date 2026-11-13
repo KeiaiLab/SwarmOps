@@ -64,7 +64,7 @@ use super::facts::Side;
 use super::features;
 use super::frame::{self, Fact, FactKind, Frame, MAX_RECORDS, MAX_RECORDS_V3, Record};
 use super::index::{ChangesetMeta, Index};
-use super::journal::{Journal, LogCut, PastFrames, TailRepair};
+use super::journal::{self, Journal, LogCut, PastFrames, Pending, TailRepair};
 use super::lock::MetaLock;
 use super::parents::MAX_PARENTS;
 use super::refs::{self, RefFile, RefState};
@@ -1438,7 +1438,7 @@ impl MetaWrite<'_> {
                     nonce: closed.nonce,
                 });
             }
-            offset += closed.len;
+            offset += bytes::to_u64(closed.bytes.len());
             start = closed.end;
         }
         Ok(frames)
@@ -1573,12 +1573,17 @@ impl MetaWrite<'_> {
         // 1. The frames: the closed ones, then the open one if it holds any record.
         let mut start = 0;
         let mut slices = Vec::with_capacity(self.closed.len() + 1);
-        for closed in &self.closed {
-            slices.push((&self.records[start..closed.end], closed.nonce));
+        for closed in &mut self.closed {
+            // Encoded when it closed: appended as those bytes, never encoded again.
+            slices.push(Pending {
+                records: &self.records[start..closed.end],
+                nonce: closed.nonce,
+                encoded: Some(std::mem::take(&mut closed.bytes)),
+            });
             start = closed.end;
         }
         if start < self.records.len() {
-            slices.push((&self.records[start..], self.nonce));
+            slices.push(Pending::new(&self.records[start..], self.nonce));
         }
         if slices.is_empty() {
             let info = CommitInfo {
@@ -1596,7 +1601,7 @@ impl MetaWrite<'_> {
         }
 
         // 2. The commit point of every frame.
-        let frames = store.journal.append_frames_in(&slices)?;
+        let frames = store.journal.append_frames_in(slices)?;
         self.uncheckpointed += bytes::to_u64(frames.len());
         let mut infos: Vec<CommitInfo> = frames.iter().map(commit_info).collect();
 
@@ -1714,8 +1719,9 @@ impl MetaWrite<'_> {
     }
 
     /// Closes the open frame, if it holds any record: encodes it, with its nonce in FORMAT 3, so
-    /// that its payload CRC and length are final ([`MetaWrite::frames_from`]); then the next
-    /// frame opens with a nonce of its own (the M20 plan's A2).
+    /// that its payload CRC and length are final ([`MetaWrite::frames_from`]), and keeps the
+    /// bytes for the commit to append; then the next frame opens with a nonce of its own (the
+    /// M20 plan's A2).
     fn close_frame(&mut self) -> Result<(), StoreError> {
         let start = self.open_start();
         if start == self.records.len() {
@@ -1723,13 +1729,13 @@ impl MetaWrite<'_> {
         }
         let format = self.store.layout.format();
         let records = &self.records[start..];
-        let bytes = frame::encode_frame_with_nonce(format, records, self.nonce, 0, 0)?;
+        let bytes = journal::encode_unplaced(format, records, self.nonce)?;
         let next = self.store.draw_nonce()?;
         self.closed.push(Closed {
             end: self.records.len(),
-            len: bytes::to_u64(bytes.len()),
             crc: frame::payload_crc(&bytes),
             nonce: self.nonce,
+            bytes,
         });
         self.nonce = next;
         Ok(())
@@ -1806,8 +1812,9 @@ struct Closed {
     /// Where its records end in the transaction's records: they start where the frame before
     /// it ends.
     end: usize,
-    /// Its length in `journal.log`.
-    len: u64,
+    /// Its bytes as `journal.log` takes them, at no place yet: the commit appends these, so
+    /// that the frame is encoded once. Taken by the commit, which ends the transaction.
+    bytes: Vec<u8>,
     /// Its payload CRC.
     crc: u32,
     /// The nonce it ends in (FORMAT 3; `None` in the others).
@@ -1948,6 +1955,60 @@ mod tests {
     use super::*;
     use crate::fs_ops::{FailAt, FailAtFs, FailMode, FsMethod, InjectedError};
     use crate::meta::MAX_LOOKUP_HITS;
+    use crate::meta::journal::frame_encodes;
+
+    /// A frame is encoded once, when it closes or, the open one, when it is appended: the append
+    /// writes a closed frame's bytes, with its place, and encodes none of them again. In every
+    /// format, three frames of a transaction, two of them closed, are three encodings, and the
+    /// journal lists the three as they were queued.
+    #[test]
+    fn a_closed_frame_is_encoded_once() {
+        let id = |n: u8| ChangesetId::new(ObjectId::new([n; 32]));
+        for format in [StoreFormat::V1, StoreFormat::V2, StoreFormat::V3] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8Path::from_path(dir.path()).unwrap();
+            let store =
+                MetaStore::create_in(Layout::with_format(root, format), Arc::new(RealFs)).unwrap();
+            let mut write = store.write().unwrap();
+            let before = frame_encodes::made();
+
+            // 1. Two frames closed, the third left open.
+            for n in 1..=3 {
+                let meta = ChangesetMeta::new(id(n), 0, 0, [n; 32], Vec::new());
+                write.insert_changesets_batch(vec![meta]).unwrap();
+                if n < 3 {
+                    write.begin_frame().unwrap();
+                }
+            }
+            assert_eq!(
+                frame_encodes::made() - before,
+                2,
+                "{format:?}: at the close"
+            );
+
+            // 2. The commit encodes the open one only.
+            let infos = write.commit_frames().unwrap();
+            assert_eq!(infos.len(), 3, "{format:?}");
+            assert_eq!(frame_encodes::made() - before, 3, "{format:?}: once each");
+
+            // 3. What the journal lists is what was queued, at its place.
+            let listed = store.journal.frames_from(infos[0].frame_seq, 3).unwrap();
+            let ids: Vec<Vec<ChangesetId>> = (listed.iter())
+                .map(|frame| {
+                    (frame.records.iter())
+                        .filter_map(|record| match record {
+                            Record::Changeset { id, .. } => Some(*id),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .collect();
+            assert_eq!(ids, [[id(1)], [id(2)], [id(3)]], "{format:?}");
+            let crcs: Vec<Option<u32>> = listed.iter().map(|frame| Some(frame.crc)).collect();
+            let committed: Vec<Option<u32>> = infos.iter().map(|info| info.frame_crc).collect();
+            assert_eq!(crcs, committed, "{format:?}");
+        }
+    }
 
     /// An open that finds `meta/` without its journal, as a create over a `meta/` that someone
     /// emptied does, and a create that finds `meta/` there, are refused by the name of the

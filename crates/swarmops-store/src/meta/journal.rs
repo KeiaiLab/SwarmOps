@@ -342,6 +342,64 @@ pub(crate) struct PastFrames {
     pub(crate) frames: Vec<Frame>,
 }
 
+/// A frame [`Journal::append_frames_in`] appends: its records, the nonce it ends in, and its
+/// bytes if its writer encoded it already.
+pub(crate) struct Pending<'a> {
+    /// Its records.
+    pub(crate) records: &'a [Record],
+    /// The nonce it ends in (FORMAT 3; `None` in the others).
+    pub(crate) nonce: Option<u64>,
+    /// [`encode_unplaced`] of `records` and `nonce`, if it was made: appended as it is, once
+    /// its place is written.
+    pub(crate) encoded: Option<Vec<u8>>,
+}
+
+impl<'a> Pending<'a> {
+    /// A frame of `records` ending in `nonce`, not encoded yet.
+    pub(crate) fn new(records: &'a [Record], nonce: Option<u64>) -> Pending<'a> {
+        Pending {
+            records,
+            nonce,
+            encoded: None,
+        }
+    }
+}
+
+/// The bytes of a frame of `format` holding `records` and ending in `nonce`, at no place yet:
+/// [`Journal::append_frames_in`] writes its place (FORMAT 2 and 3), which no payload byte holds.
+/// Errors as [`frame::encode_frame_with_nonce`].
+pub(crate) fn encode_unplaced(
+    format: StoreFormat,
+    records: &[Record],
+    nonce: Option<u64>,
+) -> Result<Vec<u8>, StoreError> {
+    #[cfg(test)]
+    frame_encodes::count();
+
+    frame::encode_frame_with_nonce(format, records, nonce, 0, 0)
+}
+
+/// How many frames this thread encoded for an append ([`encode_unplaced`]): for a test that pins
+/// that a frame is encoded once.
+#[cfg(test)]
+pub(crate) mod frame_encodes {
+    use std::cell::Cell;
+
+    thread_local! {
+        static MADE: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Counts one.
+    pub(crate) fn count() {
+        MADE.with(|made| made.set(made.get() + 1));
+    }
+
+    /// The count so far.
+    pub(crate) fn made() -> u64 {
+        MADE.with(Cell::get)
+    }
+}
+
 impl Journal {
     /// Creates `meta/` and the journal files of `layout` where they are missing, makes their
     /// directory entries durable, and opens the journal. Existing files are kept as they are.
@@ -461,34 +519,39 @@ impl Journal {
                 _ => Ok(None),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let frames: Vec<(&[Record], Option<u64>)> = frames.iter().copied().zip(nonces).collect();
-        self.append_frames_in(&frames)
+        let frames = (frames.iter())
+            .zip(nonces)
+            .map(|(&records, nonce)| Pending::new(records, nonce))
+            .collect();
+        self.append_frames_in(frames)
     }
 
     /// [`Journal::append_frames`] of `frames`, each of its records and the nonce it ends in
     /// (FORMAT 3's, `None` in FORMAT 1 and 2): a write transaction drew each frame's when the
     /// frame opened, and fixed its payload CRC with it (the M20 plan's A2). A FORMAT 3 frame
     /// without a nonce, or another's with one, is [`StoreError::BadCall`]; one past 65,534
-    /// records, whose nonce takes the 65,535th place, [`StoreError::Limit`].
+    /// records, whose nonce takes the 65,535th place, [`StoreError::Limit`]. A frame its writer
+    /// encoded already ([`Pending::encoded`]) is appended as those bytes, encoded no second time.
     ///
     /// The feature of every fact kind among the records is durable in `meta/features` before
     /// the frames are appended ([`features::enable`], W10): a list that cannot be replaced is
     /// [`StoreError::NotCommitted`], nothing appended.
     pub(crate) fn append_frames_in(
         &self,
-        frames: &[(&[Record], Option<u64>)],
+        mut frames: Vec<Pending<'_>>,
     ) -> Result<Vec<Frame>, StoreError> {
         if frames.is_empty() {
             return Err(StoreError::BadCall(
                 "a batch holds at least one frame".to_owned(),
             ));
         }
-        let mut encoded = (frames.iter())
-            .map(|&(records, nonce)| {
-                frame::encode_frame_with_nonce(self.format, records, nonce, 0, 0)
+        let mut encoded = (frames.iter_mut())
+            .map(|pending| match pending.encoded.take() {
+                Some(bytes) => Ok(bytes),
+                None => encode_unplaced(self.format, pending.records, pending.nonce),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.enable_kinds(frames)?;
+        self.enable_kinds(&frames)?;
         let mut tail = self.tail();
         if !self.still_ends_at(&tail)? {
             tail.checked = false;
@@ -540,12 +603,12 @@ impl Journal {
         };
         let frames = (first_seq..)
             .zip(frames.iter().zip(offsets.iter().zip(crcs)))
-            .map(|(seq, (&(records, nonce), (&offset, crc)))| Frame {
+            .map(|(seq, (pending, (&offset, crc)))| Frame {
                 seq,
                 offset,
-                records: records.to_vec(),
+                records: pending.records.to_vec(),
                 crc,
-                nonce,
+                nonce: pending.nonce,
             })
             .collect();
         Ok(frames)
@@ -554,9 +617,9 @@ impl Journal {
     /// Makes the features of the fact kinds `frames` hold durable in the store's list, before
     /// they are appended (W10); FORMAT 1 and 2 frames hold no fact. A failed write of the list is
     /// [`StoreError::NotCommitted`]: the frames were never appended.
-    fn enable_kinds(&self, frames: &[(&[Record], Option<u64>)]) -> Result<(), StoreError> {
+    fn enable_kinds(&self, frames: &[Pending<'_>]) -> Result<(), StoreError> {
         let mut kinds: Vec<FactKind> = Vec::new();
-        for record in frames.iter().flat_map(|(records, _)| records.iter()) {
+        for record in frames.iter().flat_map(|pending| pending.records.iter()) {
             if let Record::Fact(fact) = record
                 && !kinds.contains(&fact.kind())
             {
