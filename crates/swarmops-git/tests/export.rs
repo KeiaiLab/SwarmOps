@@ -23,8 +23,9 @@ use swarmops_core::{
 };
 use swarmops_git::{
     BranchUpdate, DivergedReason, ExportError, ExportOid, ExportReport, ExportRequest, GitOid,
-    GitSink, GitSource, GixSink, GixSource, ImportReport, ImportRequest, LossyClass, RawCommit,
-    RawKind, RawTree, TRAILERS, commit_bytes, export, git_hash, import, register,
+    GitSink, GitSource, GixSink, GixSource, ImportReport, ImportRequest, LossyClass, ObjectFormat,
+    RawCommit, RawKind, RawTree, SinkError, Stored, TRAILERS, commit_bytes, export, git_hash,
+    import, register,
 };
 use swarmops_repo::{
     Advance, CasResult, Change, LocalRepo, RawChangeset, RepoError, RevertRequest, StoreError,
@@ -857,6 +858,98 @@ fn power_loss_images_of_an_export_never_name_a_lost_object() {
             let end = sink.image(calls, keep);
             assert_eq!(end.branches.get("main"), Some(&report.head_oid));
         }
+    }
+}
+
+/// A [`MemSink`] that keeps each tag `<name>` as the branch `tags/<name>`, so that its log and
+/// its power-loss images, which know branches alone, cover a tag export.
+#[derive(Default)]
+struct TagsAsBranches(MemSink);
+
+/// The branch [`TagsAsBranches`] keeps the tag `name` as.
+fn tag_branch(name: &str) -> String {
+    format!("tags/{name}")
+}
+
+impl GitSink for TagsAsBranches {
+    fn object_format(&self) -> ObjectFormat {
+        self.0.object_format()
+    }
+
+    fn stored(&self, oid: GitOid) -> Result<Stored, SinkError> {
+        self.0.stored(oid)
+    }
+
+    fn read(&self, oid: GitOid) -> Result<(RawKind, Vec<u8>), SinkError> {
+        self.0.read(oid)
+    }
+
+    fn write_object(&mut self, kind: RawKind, bytes: &[u8]) -> Result<GitOid, SinkError> {
+        self.0.write_object(kind, bytes)
+    }
+
+    fn sync(&mut self, oids: &[GitOid]) -> Result<(), SinkError> {
+        self.0.sync(oids)
+    }
+
+    fn branch(&self, name: &str) -> Result<Option<GitOid>, SinkError> {
+        self.0.branch(name)
+    }
+
+    fn checked_out(&self) -> Result<Option<String>, SinkError> {
+        self.0.checked_out()
+    }
+
+    fn cas_branch(
+        &mut self,
+        name: &str,
+        expected: Option<GitOid>,
+        new: GitOid,
+    ) -> Result<BranchUpdate, SinkError> {
+        self.0.cas_branch(name, expected, new)
+    }
+
+    fn tag(&self, name: &str) -> Result<Option<GitOid>, SinkError> {
+        self.0.branch(&tag_branch(name))
+    }
+
+    fn cas_tag(
+        &mut self,
+        name: &str,
+        expected: Option<GitOid>,
+        new: GitOid,
+    ) -> Result<BranchUpdate, SinkError> {
+        self.0.cas_branch(&tag_branch(name), expected, new)
+    }
+}
+
+/// A tag export keeps the branch's order (every object synced before the tag moves): what a
+/// power loss after any of its calls could leave never has the tag name an object it lost,
+/// keeping none, all, and seeded draws of the objects not synced yet.
+#[test]
+fn power_loss_images_of_a_tag_export_never_name_a_lost_object() {
+    // 1. A tag on the third of three native changesets, exported into an empty sink.
+    let store = store();
+    let natives = three_natives(&store.repo);
+    create_ref(&store.repo, "tags/v1", natives[2]);
+    let mut sink = TagsAsBranches::default();
+    let report = exported(&store.repo, &mut sink, &ExportRequest::tag("tags/v1", "v1"));
+    assert!(report.branch_moved, "the tag was made");
+
+    // 2. Every image after every call: the tag reaches only what was kept.
+    let (calls, tag) = (sink.0.log().len(), tag_branch("v1"));
+    let keeps = [Keep::None, Keep::All]
+        .into_iter()
+        .chain((2..=9).map(Keep::Seeded));
+    for keep in keeps {
+        for after in 0..=calls {
+            let image = sink.0.image(after, keep);
+            if let Err(why) = reaches_only_kept(&image, &tag) {
+                panic!("after {after} of {calls} calls, keeping {keep:?}: {why}");
+            }
+        }
+        let end = sink.0.image(calls, keep);
+        assert_eq!(end.branches.get(&tag), Some(&report.head_oid));
     }
 }
 
@@ -2547,8 +2640,14 @@ mod by_step {
         (steps, wall, report.commits_written)
     }
 
+    /// The steps of a new branch's export that do work: each reads, writes or syncs something,
+    /// so a clock that laps it counts some of its time.
+    const WORKING: [&str; 6] = ["check", "derive", "commits", "write", "sync", "move"];
+
     /// The nine steps' times of one small export (200 commits) add up to its wall time, within
-    /// 5 %: the clock leaves out nothing but the report's assembly.
+    /// 5 %: the clock leaves out nothing but the report's assembly. And each step that does work
+    /// has a time of its own: a lap dropped would add its step's time to the next, and leave the
+    /// sum as it is.
     #[test]
     fn step_times_add_up() {
         let store = store();
@@ -2560,6 +2659,12 @@ mod by_step {
             sum >= wall.saturating_sub(wall / 20),
             "the steps {sum:?} against the wall {wall:?}: {steps:?}"
         );
+
+        // Each working step's own time.
+        for name in WORKING {
+            let at = STEPS.iter().position(|step| *step == name).unwrap();
+            assert!(steps[at] > Duration::ZERO, "{name}: {steps:?}");
+        }
     }
 
     /// A cold export of 12,000 imported commits into an empty bare repository, by step: once
@@ -2567,7 +2672,7 @@ mod by_step {
     /// own on the host's filesystem, fsync'd as by default. It prints an `export-steps: ` line a
     /// step and one for the whole, and asserts only that every commit was written.
     #[test]
-    #[ignore = "slow, ~430 s (429.2 s at load 100 to 147, idle not measured): two imports and two exports of 12,000 commits"]
+    #[ignore = "slow, ~430 s loaded (429.2 s at load 100 to 147; no idle run yet, owed to a quiet host): two imports and two exports of 12,000 commits"]
     fn export_of_12000_by_step() {
         let key = MemoKey::from_bytes([7; 32]);
         for (case, key) in [("no-key", None), ("memo-key", Some(&key))] {
