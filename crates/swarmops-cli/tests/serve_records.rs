@@ -325,6 +325,7 @@ fn findings<'a>(line: &str, needles: &[&'a str]) -> Vec<&'a str> {
 
 /// A client reading at about 1 MiB/s: the cached clone's connection is spent sending.
 #[test]
+#[ignore = "slow, ~15 s: a 6 MiB clone read at about 1 MiB/s, its share of the time asserted"]
 fn a_slow_reader_shows_send_time() {
     // 1. The pack made and cached by a first clone, read at full speed.
     let site = Site::big();
