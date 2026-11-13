@@ -7,6 +7,7 @@ every entrance (M28 criterion 2).
 
     python3 -I scripts/server-acceptance.py fetch [--cache D]          # with the network, once
     python3 -I scripts/server-acceptance.py run [--bin-dir D] [--cache D] [--method M]...
+                                                [--image-archive A]
     python3 -I scripts/server-acceptance.py selftest                   # offline, no docker
 
 `fetch` downloads, into the cache, what an offline install needs beside the release's own
@@ -38,9 +39,16 @@ scripts/packages.py, and for each method:
 
 The acceptance level's own cases live in packaging/server/accept/, which the package installs;
 this script installs and runs them and holds none of their names. Methods: `deb` (Debian 12,
-apt-get), `rpm` (AlmaLinux 9, dnf) and `image` (the container image, which waits on the image
-slice). Last, the self-check `network_on_fails_the_run` plants a container on a network with a
-route out and needs the offline check to find it. Needs docker. Exit 1 on any failure.
+apt-get), `rpm` (AlmaLinux 9, dnf) and `image` (the container image). The image is A, or
+scripts/server-image.py builds it from this build's .deb as release.yml does (its fetch stage
+downloads Debian's packages: the one step of `run` with the network). It is loaded from that
+local archive and started as its contract says (read-only root, settings volume, `so-kit run
+all` on ports 2222 and 8443); the stand-ins beside it are Debian 12. For the image, removing
+the server is removing its container: a new container on the same volumes serves the stores;
+the upgrade case is the deb method's, whose packages the image holds. Last, the self-check
+`network_on_fails_the_run` plants a container on a network with a route out and needs the
+offline check to find it. Needs docker (with BuildKit and the containerd image store for the
+image). Exit 1 on any failure.
 """
 
 import argparse
@@ -76,7 +84,8 @@ SERVING = "so"
 LOGIN = "accept"
 STORE = "accept"
 IDENTITY = f"person/{LOGIN}"
-SECRETS = "/etc/swarmops-server/secrets"
+ETC = "/etc/swarmops-server"
+SECRETS = f"{ETC}/secrets"
 ACCEPT_SECRETS = f"{SECRETS}/accept"
 BACKUP_SECRETS = f"{SECRETS}/backup"
 HOME = "/var/lib/swarmops-server"
@@ -115,6 +124,20 @@ def load(name: str, path: Path):
 
 
 PACKAGES = load("packages", SCRIPTS / "packages.py")
+IMAGE_TOOL = load("server_image", SCRIPTS / "server-image.py")
+
+
+def kit_setting(key: str) -> str:
+    """The value kit.conf, as the package installs it, gives `key`."""
+    for line in (KIT / "kit.conf").read_text().splitlines():
+        if line.startswith(f"{key}="):
+            return line.split("=", 1)[1]
+    raise Failure(f"kit.conf has no {key}")
+
+
+def served_url(ssh_port: int) -> str:
+    """The acceptance repository's ssh URL on the installation."""
+    return f"ssh://{SERVING}@{HOST}:{ssh_port}/{STORE}.git"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -398,6 +421,25 @@ class Run:
     tag: str
     network: str = ""
     volume: str = ""
+    # The image method: the loaded image, its settings volume and the ssh port it serves on.
+    image: str = ""
+    etc_volume: str = ""
+    ssh_port: int = 22
+    authorized_keys: str = f"{HOME}/.ssh/authorized_keys"
+
+    def settings(self, box: Box, script: str, user: str = "root", stdin: str = "") -> str:
+        """`script` on the installation's settings, as `user`; its stdout. The image mounts
+        them read-only, so there it runs as root in a throwaway container of the image, and
+        what it made under the secrets goes to the serving account."""
+        if not self.etc_volume:
+            done = box.run(["sh", "-c", script], user, stdin=stdin)
+        else:
+            script = f"set -e\n{script}\nchown -R {SERVING}:{SERVING} {SECRETS}\n"
+            done = docker("run", "--rm", "--interactive", "--network", "none", "--user", "0:0",
+                          "--entrypoint", "sh", "--volume", f"{self.etc_volume}:{ETC}",
+                          self.image, "-c", script, stdin=stdin)
+        check(done.code == 0, f"settings: exit {done.code}: {done.err[-3000:]}")
+        return done.out
 
     def mounts(self) -> list[str]:
         """The packages under test, the dependencies and the previous release, read-only."""
@@ -510,7 +552,7 @@ def so_through_git_server(run: Run, box: Box) -> None:
     server = git_server(run, box)
     try:
         work = f"{HOME}/two"
-        ours = f"ssh://{SERVING}@{HOST}/{STORE}.git"
+        ours = served_url(run.ssh_port)
         theirs = f"ssh://git@{GIT_HOST}/home/git/gh.git"
 
         # 1. The store: a clone of the installation, the git server a second remote.
@@ -575,14 +617,14 @@ def bucket(run: Run, box: Box) -> tuple[Box, str]:
         time.sleep(WAIT_STEP_S)
 
 
-def backup_settings(endpoint: str, side: str, module) -> str:
+def backup_settings(endpoint: str, side: str, module, secrets_file: str) -> str:
     """so-backup's settings for the serving side or the rehearsal side."""
     lines = [f"backup_endpoint={endpoint}", f"backup_region={module.REGION}",
              f"backup_bucket={module.BUCKET}",
              f"backup_credential={BACKUP_SECRETS}/{side}.credential",
              f"backup_recovery_recipient={BACKUP_SECRETS}/recovery.pem",
              f"backup_rehearsal_recipient={BACKUP_SECRETS}/rehearsal.pem",
-             f"backup_secrets={HOME}/.ssh/authorized_keys", f"backup_alert={HOME}/alert"]
+             f"backup_secrets={secrets_file}", f"backup_alert={HOME}/alert"]
     if side == "rehearsal":
         lines.append(f"backup_rehearsal_key={BACKUP_SECRETS}/rehearsal.key")
     return "\n".join(lines) + "\n"
@@ -601,22 +643,23 @@ def backup_wipe_restore(run: Run, box: Box) -> None:
     stand_in, endpoint = bucket(run, box)
     try:
         # 1. Keys, credentials and both sides' settings, as the serving account.
-        box.sh(f"set -eu\ninstall -d -o {SERVING} -g {SERVING} -m 0700 {BACKUP_SECRETS}\n"
-               f"printf '#!/bin/sh\\nprintf \"%s %s\\\\n\" \"$1\" \"$2\" >>{HOME}/alerts\\n'"
+        run.settings(box, f"install -d -o {SERVING} -g {SERVING} -m 0700 {BACKUP_SECRETS}")
+        box.sh(f"set -eu\nprintf '#!/bin/sh\\nprintf \"%s %s\\\\n\" \"$1\" \"$2\" >>{HOME}/alerts\\n'"
                f" >{HOME}/alert\nchmod 0755 {HOME}/alert\n")
         for name in ("recovery", "rehearsal"):
-            box.sh("openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes"
-                   f" -subj /CN={name} -days 30 -keyout {BACKUP_SECRETS}/{name}.key"
-                   f" -out {BACKUP_SECRETS}/{name}.pem 2>/dev/null", user=SERVING)
+            run.settings(box, "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256"
+                         f" -nodes -subj /CN={name} -days 30 -keyout {BACKUP_SECRETS}/{name}.key"
+                         f" -out {BACKUP_SECRETS}/{name}.pem 2>/dev/null", SERVING)
         for side, (key_id, secret) in module.CREDENTIALS.items():
-            write(box, f"{BACKUP_SECRETS}/{side}.conf", backup_settings(endpoint, side, module))
-            write(box, f"{BACKUP_SECRETS}/{side}.credential",
-                  f"access_key_id={key_id}\nsecret_access_key={secret}\n")
+            conf = backup_settings(endpoint, side, module, run.authorized_keys)
+            run.settings(box, f"cat >{BACKUP_SECRETS}/{side}.conf", SERVING, conf)
+            run.settings(box, f"cat >{BACKUP_SECRETS}/{side}.credential", SERVING,
+                         f"access_key_id={key_id}\nsecret_access_key={secret}\n")
 
         # 2. Backup; the stores wiped; the drill restores onto an empty directory; moved back.
         before = stores_refs(box)
         check(bool(before), "no store to back up")
-        url = f"ssh://{SERVING}@{HOST}/{STORE}.git"
+        url = served_url(run.ssh_port)
         served = ls_main(box, f"{HOME}/restored", url)
         box.sh(f"SO_BACKUP_CONF={BACKUP_SECRETS}/serving.conf so-backup backup", user=SERVING)
         box.sh(f"find {STORES} -mindepth 1 -delete", user=SERVING)
@@ -688,6 +731,32 @@ def upgrade_from_previous(run: Run) -> None:
 # The run
 
 
+def run_case(name: str, label: str, body: Callable[[], None], failed: list[str]) -> bool:
+    """One case of method `name`, its line printed; a failure added to `failed`."""
+    started = time.monotonic()
+    try:
+        body()
+    except (Failure, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError) as error:
+        print(f"FAILED  {name}: {label}: {error}", flush=True)
+        failed.append(f"{name}: {label}")
+        return False
+    print(f"ok      {name}: {label} ({time.monotonic() - started:.1f} s)", flush=True)
+    return True
+
+
+def accept_level(box: Box, name: str, started: float, failed: list[str]) -> None:
+    """`so-kit run accept full` as the serving account, then the time from the install's start."""
+    accepted = box.run(["so-kit", "run", "accept", "full"], user=SERVING)
+    print(accepted.out + accepted.err, end="", flush=True)
+    if accepted.code != 0:
+        failed.append(f"{name}: so-kit run accept full")
+    took = time.monotonic() - started
+    print(f"        {name}: the install's start to the acceptance level's end: {took:.0f} s")
+    run_case(name, "first_push_in_five_minutes",
+             lambda: check(took <= FIRST_PUSH_LIMIT_S, f"{took:.0f} s after the install began"),
+             failed)
+
+
 def method_run(run: Run, failed: list[str]) -> None:
     """One install method: the installation, the acceptance level, the cases beyond it."""
     name = run.method.name
@@ -698,15 +767,7 @@ def method_run(run: Run, failed: list[str]) -> None:
     box = None
 
     def case(label: str, body: Callable[[], None]) -> bool:
-        started = time.monotonic()
-        try:
-            body()
-        except (Failure, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError) as error:
-            print(f"FAILED  {name}: {label}: {error}", flush=True)
-            failed.append(f"{name}: {label}")
-            return False
-        print(f"ok      {name}: {label} ({time.monotonic() - started:.1f} s)", flush=True)
-        return True
+        return run_case(name, label, body, failed)
 
     try:
         # 1. The installation, offline, then the guide and the acceptance level.
@@ -722,14 +783,7 @@ def method_run(run: Run, failed: list[str]) -> None:
 
         if not case("offline_install", offline):
             return
-        accepted = box.run(["so-kit", "run", "accept", "full"], user=SERVING)
-        print(accepted.out + accepted.err, end="", flush=True)
-        if accepted.code != 0:
-            failed.append(f"{name}: so-kit run accept full")
-        took = time.monotonic() - started
-        print(f"        {name}: the install's start to the acceptance level's end: {took:.0f} s")
-        case("first_push_in_five_minutes",
-             lambda: check(took <= FIRST_PUSH_LIMIT_S, f"{took:.0f} s after the install began"))
+        accept_level(box, name, started, failed)
 
         # 2. The cases beyond it.
         case("so_through_a_stock_git_server", lambda: so_through_git_server(run, box))
@@ -741,6 +795,145 @@ def method_run(run: Run, failed: list[str]) -> None:
             box.stop()
         docker("volume", "rm", "--force", run.volume)
         docker("network", "rm", run.network)
+
+
+# The image's settings volume, made as root in a throwaway container of the image: kit.conf
+# naming the contract's paths and the acceptance store, the host key, the acceptance identity's
+# key and key line, the certificate for the installation's name, the web login, accept.conf
+# (stdin). WEB_WORD stands for the run's web password.
+IMAGE_SETTINGS = f"""cd {ETC}
+mkdir -p host-keys access tls {ACCEPT_SECRETS}
+printf '%s\\n' root={STORES} host_keys={ETC}/host-keys web_root={IMAGE_TOOL.WEB_ROOT} \\
+    authorized_keys={ETC}/access/authorized_keys 'store={STORE} {IDENTITY}' >kit.conf
+ssh-keygen -q -t ed25519 -N '' -C '' -f host-keys/ssh_host_ed25519_key
+ssh-keygen -q -t ed25519 -N '' -C accept -f {ACCEPT_SECRETS}/id
+SO_KIT_CONF={ETC}/kit.conf so-kit key-line {IDENTITY} {ACCEPT_SECRETS}/id.pub \\
+    >access/authorized_keys
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \\
+    -subj /CN={HOST} -addext subjectAltName=DNS:{HOST} \\
+    -keyout tls/privkey.pem -out tls/fullchain.pem 2>/dev/null
+cp tls/fullchain.pem {ACCEPT_SECRETS}/ca.pem
+printf %s WEB_WORD >{ACCEPT_SECRETS}/password
+printf '%s:%s\\n' {LOGIN} "$(openssl passwd -apr1 WEB_WORD)" >web.htpasswd
+cat >accept.conf
+chown -R {SERVING}:{SERVING} host-keys tls web.htpasswd
+chmod 0400 host-keys/ssh_host_ed25519_key tls/privkey.pem
+chmod 0600 {ACCEPT_SECRETS}/id
+"""
+# The acceptance repository `so-kit run setup` made grants reading and landing; the acceptance
+# level pushes to main too.
+GRANT = f"""version = 1
+
+[[grant]]
+who = ["{IDENTITY}"]
+read = true
+push = ["main"]
+land = ["main"]
+"""
+
+
+def image_accept_conf() -> str:
+    """accept.conf for the image: the ports of kit.conf's container roles, and the scratch in
+    the account's home, as the contract's /tmp is a tmpfs docker mounts noexec."""
+    ssh, https = kit_setting("ssh_port"), kit_setting("https_port")
+    return (ACCEPT_CONF.replace("accept_ssh_port=22\n", f"accept_ssh_port={ssh}\n")
+            .replace("accept_https_port=443\n", f"accept_https_port={https}\n")
+            .replace("accept_work=/tmp\n", f"accept_work={HOME}\n"))
+
+
+def image_host(run: Run, home: str) -> Box:
+    """A container of the image serving `so-kit run all` as its contract runs it, ready."""
+    owner = f"uid={IMAGE_TOOL.SERVING_ID},gid={IMAGE_TOOL.SERVING_ID}"
+    options = ["--network", run.network, "--network-alias", HOST, "--hostname", HOST,
+               "--read-only",
+               "--tmpfs", f"{IMAGE_TOOL.RUN_DIR}:{owner},mode=0700",
+               "--tmpfs", f"{IMAGE_TOOL.WEB_ROOT}:{owner},mode=0755",
+               "--tmpfs", "/tmp:mode=1777",
+               "--volume", f"{run.volume}:{STORES}", "--volume", f"{home}:{HOME}",
+               "--volume", f"{run.etc_volume}:{ETC}:ro"]
+    box = Box.start(run.image, f"{run.tag}-host-{secrets.token_hex(2)}", options, ["run", "all"])
+
+    # Ready when every serving role answers, as the chart's probe asks.
+    deadline = time.monotonic() + READY_WAIT_S
+    while box.run(["so-kit", "ready", "all"], user=SERVING).code != 0:
+        if time.monotonic() > deadline:
+            logs = docker("logs", box.name)
+            box.stop()
+            raise Failure(f"the image did not get ready: {logs.out}{logs.err}")
+        time.sleep(WAIT_STEP_S)
+    return box
+
+
+def replace_keeps_stores(run: Run, box: Box, home: str) -> Box:
+    """The image's container removed; a new one on the same volumes serves the stores."""
+    box.stop()
+    again = image_host(run, home)
+    again.sh(f"swarmops --repo {STORES}/{STORE} verify --deep", user=SERVING)
+    served = ls_main(again, f"{HOME}/replaced", served_url(run.ssh_port))
+    check(len(served) == 40, f"the new container serves {served!r}")
+    return again
+
+
+def image_run(run: Run, archive: Path, failed: list[str]) -> None:
+    """The image method: the archive loaded, its settings, `run all`, the acceptance level and
+    the cases beyond it, the stand-ins Debian 12 on the same internal network."""
+    name = IMAGE_METHOD
+    run.network = f"{run.tag}-net"
+    run.volume = f"{run.tag}-stores"
+    run.etc_volume = f"{run.tag}-etc"
+    run.ssh_port = int(kit_setting("ssh_port"))
+    run.authorized_keys = f"{ETC}/access/authorized_keys"
+    home = f"{run.tag}-home"
+    must("network", "create", "--internal", run.network)
+    for volume in (run.volume, run.etc_volume, home):
+        must("volume", "create", volume)
+    hosts: list[Box] = []
+
+    def case(label: str, body: Callable[[], None]) -> bool:
+        return run_case(name, label, body, failed)
+
+    try:
+        # 1. The image from the local archive, its settings, the container serving, offline.
+        started = time.monotonic()
+        password = secrets.token_hex(16)
+
+        def offline() -> None:
+            run.image = IMAGE_TOOL.load(archive)
+            run.settings(Box(""), IMAGE_SETTINGS.replace("WEB_WORD", password),
+                         stdin=image_accept_conf())
+            hosts.append(image_host(run, home))
+            problems = offline_problems(hosts[-1].name)
+            check(not problems, "; ".join(problems))
+            write(hosts[-1], f"{STORES}/{STORE}/access.toml", GRANT)
+
+        if not case("offline_install", offline):
+            return
+        accept_level(hosts[-1], name, started, failed)
+
+        # 2. The cases beyond it; the upgrade is the deb method's, whose packages these are.
+        case("so_through_a_stock_git_server", lambda: so_through_git_server(run, hosts[-1]))
+        case("backup_wipe_restore", lambda: backup_wipe_restore(run, hosts[-1]))
+        case("remove_keeps_the_stores",
+             lambda: hosts.append(replace_keeps_stores(run, hosts[-1], home)))
+    finally:
+        for box in hosts:
+            box.stop()
+        for volume in (run.volume, run.etc_volume, home):
+            docker("volume", "rm", "--force", volume)
+        docker("network", "rm", run.network)
+
+
+def image_archive(built: list[Path], version: str, scratch: Path) -> Path | None:
+    """This build's image, made by server-image.py from its .deb for this host; None when the
+    build fails, its reason printed."""
+    out = scratch / "image.tar"
+    try:
+        digest = IMAGE_TOOL.build_archive(built[0].parent, version, [IMAGE_TOOL.HOST_ARCH], out)
+    except (IMAGE_TOOL.Failure, subprocess.TimeoutExpired) as error:
+        print(f"FAILED  {IMAGE_METHOD}: build: {error}", flush=True)
+        return None
+    print(f"        {IMAGE_METHOD}: built {digest}", flush=True)
+    return out
 
 
 def network_on_fails_the_run(image: str) -> list[str]:
@@ -773,7 +966,7 @@ def fetch(cache: Path) -> int:
     return 0
 
 
-def run_methods(bin_dir: Path, cache: Path, methods: list[str]) -> int:
+def run_methods(bin_dir: Path, cache: Path, methods: list[str], archive: Path | None) -> int:
     """Every method named, then the self-check."""
     missing = [n for n in PACKAGES.BINARIES if not (bin_dir / n).is_file()]
     if missing:
@@ -784,12 +977,14 @@ def run_methods(bin_dir: Path, cache: Path, methods: list[str]) -> int:
     with tempfile.TemporaryDirectory(prefix="server-acceptance-") as scratch:
         built = pack(bin_dir.resolve(), tested_version(previous), Path(scratch))
         for name in methods:
-            if name == IMAGE_METHOD:
-                print("FAILED  image: the container image is not in this tree yet (the image"
-                      " slice, packaging/container/)")
-                failed.append(IMAGE_METHOD)
-                continue
             tag = f"so-accept-{secrets.token_hex(4)}"
+            if name == IMAGE_METHOD:
+                image = archive or image_archive(built, tested_version(previous), Path(scratch))
+                if image is None:
+                    failed.append(f"{IMAGE_METHOD}: build")
+                    continue
+                image_run(Run(DEB, cache.resolve(), built, previous, tag), image, failed)
+                continue
             method_run(Run(METHODS[name], cache.resolve(), built, previous, tag), failed)
 
     problems = network_on_fails_the_run(DEB.image)
@@ -864,10 +1059,23 @@ def accept_refuses_bad_settings() -> None:
     check(done.returncode == 2 and "no acceptance level deep" in done.stderr, f"deep: {done}")
 
 
+def image_run_reaches_the_kit_ports() -> None:
+    """The image run's acceptance settings and URLs name the ports kit.conf's container roles
+    listen on, not a package host's, and a scratch that is no noexec tmpfs."""
+    ports = {key: kit_setting(key) for key in ("ssh_port", "https_port")}
+    check(ports["ssh_port"] != "22", f"kit.conf's ssh_port: {ports}")
+    lines = image_accept_conf().splitlines()
+    check(f"accept_ssh_port={ports['ssh_port']}" in lines, f"ssh port: {lines}")
+    check(f"accept_https_port={ports['https_port']}" in lines, f"https port: {lines}")
+    check(f"accept_work={HOME}" in lines, f"the scratch is not on the home volume: {lines}")
+    check(f":{ports['ssh_port']}/" in served_url(int(ports["ssh_port"])), "the served URL")
+
+
 SELFTESTS: dict[str, Callable[[], None]] = {
     "accept_cases_are_one_implementation": accept_cases_are_one_implementation,
     "accept_is_installed_where_so_kit_runs_it": accept_is_installed_where_so_kit_runs_it,
     "accept_refuses_bad_settings": accept_refuses_bad_settings,
+    "image_run_reaches_the_kit_ports": image_run_reaches_the_kit_ports,
 }
 
 
@@ -894,13 +1102,15 @@ def main() -> int:
     running.add_argument("--bin-dir", type=Path, default=default_bin_dir())
     running.add_argument("--cache", type=Path, default=default_cache())
     running.add_argument("--method", action="append", choices=[*METHODS, IMAGE_METHOD])
+    running.add_argument("--image-archive", type=Path, help="the image's OCI archive")
     commands.add_parser("selftest", help="the offline checks of this script and accept/")
     args = parser.parse_args()
     try:
         if args.command == "fetch":
             return fetch(args.cache)
         if args.command == "run":
-            return run_methods(args.bin_dir, args.cache, args.method or [*METHODS, IMAGE_METHOD])
+            methods = args.method or [*METHODS, IMAGE_METHOD]
+            return run_methods(args.bin_dir, args.cache, methods, args.image_archive)
         return selftest()
     except (Failure, PACKAGES.Failure, OSError, subprocess.TimeoutExpired) as error:
         print(f"server-acceptance: {error}", file=sys.stderr)

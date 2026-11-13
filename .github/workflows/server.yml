@@ -59,9 +59,11 @@ jobs:
         run: python3 -I scripts/server-entrance.py run --bin-dir "${CARGO_TARGET_DIR:-target}/debug"
 
   # The installation acceptance (slice C-5, M28 criterion 2): this build's packages installed on
-  # an empty Debian 12 and an empty AlmaLinux 9 on an internal network, through the guide's setup,
-  # the package's acceptance level and the cases beyond it. Only `fetch` reaches the network,
-  # and only for what its cache, under the runner's CARGO_TARGET_DIR, lacks.
+  # an empty Debian 12 and an empty AlmaLinux 9, and the image built from them, on an internal
+  # network, through the guide's setup or the image's contract, the package's acceptance level
+  # and the cases beyond it. Only `fetch` and the image build's fetch stage reach the network,
+  # and `fetch` only for what its cache, under the runner's CARGO_TARGET_DIR, lacks. The image
+  # build needs the runner's docker with BuildKit and the containerd image store, as release.yml's.
   acceptance:
     name: installation acceptance
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
@@ -82,5 +84,5 @@ jobs:
         run: python3 -I scripts/server-acceptance.py selftest
       - name: Fetch the dependency packages and the previous release, unless cached
         run: python3 -I scripts/server-acceptance.py fetch
-      - name: Install and accept on Debian 12 and AlmaLinux 9, offline
-        run: python3 -I scripts/server-acceptance.py run --method deb --method rpm --bin-dir "${CARGO_TARGET_DIR:-target}/debug"
+      - name: Install and accept on Debian 12, AlmaLinux 9 and the image, offline
+        run: python3 -I scripts/server-acceptance.py run --method deb --method rpm --method image --bin-dir "${CARGO_TARGET_DIR:-target}/debug"
