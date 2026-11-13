@@ -201,6 +201,34 @@ fn expect_err<T: Debug>(result: Result<T, OpError>, code: ErrorCode) -> OpError 
     }
 }
 
+/// The most pages a paging test asks for, far past what any of them needs (the longest, text
+/// paged four bytes at a time, takes 300).
+const PAGE_CAP: usize = 1_000;
+
+/// The numbers of the pages a paging loop asks for, from 0: at most `cap` of them. Asked for one
+/// more, it panics, so that a cursor that never ends fails its test instead of hanging it.
+fn page_numbers(cap: usize) -> impl Iterator<Item = usize> {
+    (0..=cap).inspect(move |page| assert!(*page < cap, "page {page}: the cursor never ends"))
+}
+
+/// A paging loop that never reaches its last page is stopped at its cap.
+#[test]
+#[should_panic(expected = "page 3: the cursor never ends")]
+fn a_cursor_that_never_ends_fails_its_test() {
+    let (_dir, _root, ops) = new_store();
+    let c = commit(&ops, None, vec![text("a", "a"), text("b", "b")]);
+
+    // A page of one entry, asked for again from the start each time: it is never the last.
+    for _ in page_numbers(3) {
+        let mut req = ls(&c, None);
+        req.limit = 1;
+        let page = ops.read_tree(req).unwrap();
+        if !page.truncated {
+            break;
+        }
+    }
+}
+
 /// Two changeset records whose ids share the 12-digit prefix `abababababab`, inserted into
 /// the store's metadata directly (they have no objects): their ids, as the API writes them.
 fn insert_prefix_twins(root: &Utf8Path) -> [String; 2] {
@@ -3391,7 +3419,7 @@ fn listings_page_with_cursors() {
     // ls, two entries a page; each cursor is the page's last name.
     let mut pages = Vec::new();
     let mut cursor = None;
-    loop {
+    for _ in page_numbers(PAGE_CAP) {
         let mut read_tree_req = ls(&head, None);
         read_tree_req.limit = 2;
         read_tree_req.cursor = cursor.clone();
@@ -3416,7 +3444,7 @@ fn listings_page_with_cursors() {
     // log, two changesets a page, newest first; each cursor is the page's last id.
     let mut seen = Vec::new();
     let mut cursor = None;
-    loop {
+    for _ in page_numbers(PAGE_CAP) {
         let mut req = log_req(Some(&head));
         req.limit = 2;
         req.cursor = cursor.clone();
@@ -4338,7 +4366,7 @@ mod spans {
         let c = commit(&ops, None, vec![text("big.txt", &file)]);
         let mut pages = Vec::new();
         let mut offset = 0;
-        loop {
+        for _ in page_numbers(PAGE_CAP) {
             let page = ops.read_file(at(&c, "big.txt", offset, 16 << 10)).unwrap();
             assert_eq!(
                 (page.encoding, page.size, page.offset, page.lines),
@@ -4374,7 +4402,7 @@ mod spans {
         for max_bytes in [4, 5, 6, 7, 64, 333] {
             let mut pages = Vec::new();
             let mut offset = 0;
-            loop {
+            for _ in page_numbers(PAGE_CAP) {
                 let page = ops
                     .read_file(at(&c, "chars.txt", offset, max_bytes))
                     .unwrap();
@@ -4714,7 +4742,7 @@ mod spans {
         for limit in [1, 2, 3] {
             let mut seen = Vec::new();
             let mut cursor: Option<String> = None;
-            loop {
+            for _ in page_numbers(PAGE_CAP) {
                 let got = page(3, limit, cursor.as_deref());
                 let names = paths(&got);
                 assert!(names.len() <= limit, "limit {limit}");
