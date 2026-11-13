@@ -64,14 +64,14 @@ pub use check::MetaCheck;
 pub use derived::{DerivedSlot, DerivedStore, ListedValue, StoredValue};
 pub use frame::{BadRecord, Frame, Record};
 pub use fsck::Rebuilt;
-pub use index::{ChangesetMeta, Index};
+pub use index::{ChangesetMeta, Index, LookupHits};
 pub use journal::{Journal, LogCut, TailRepair};
 pub use lock::MetaLock;
 pub use queue::{Answer, FrameUse, Lead, Outcome, Planned, Request, RequestId, Serve, Turn, Whose};
 pub use refs::{RefFile, RefKind, RefState};
 pub use sorted::SortedView;
 pub use store::{
-    CasResult, CommitInfo, InsertOutcome, JournalEntry, MetaRead, MetaStore, MetaWrite, Recovered,
-    RefMismatch, RefMoveEntry,
+    CasResult, CommitInfo, IdHits, InsertOutcome, JournalEntry, MetaRead, MetaStore, MetaWrite,
+    Recovered, RefMismatch, RefMoveEntry,
 };
 pub use upgrade::Upgraded;

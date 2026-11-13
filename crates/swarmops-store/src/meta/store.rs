@@ -823,9 +823,17 @@ impl MetaRead<'_> {
     }
 
     /// The changesets whose ids start with `hex`, 1 to 64 hex digits of either case
-    /// (anything else is [`StoreError::BadPrefix`]), in seq order.
+    /// (anything else is [`StoreError::BadPrefix`]), in seq order: at most 4,096 of those the
+    /// index holds, and [`MetaRead::resolve_prefix_hits`] says whether more matched.
     pub fn resolve_prefix(&self, hex: &str) -> Result<Vec<ChangesetId>, StoreError> {
-        let mut ids = self.ids_at(self.index.find_prefix(hex)?)?;
+        self.resolve_prefix_hits(hex).map(|hits| hits.ids)
+    }
+
+    /// [`MetaRead::resolve_prefix`], saying whether the index cut its answer at 4,096 changesets
+    /// ([`LookupHits::truncated`](super::index::LookupHits::truncated)).
+    pub fn resolve_prefix_hits(&self, hex: &str) -> Result<IdHits, StoreError> {
+        let hits = self.index.find_prefix_hits(hex)?;
+        let mut ids = self.ids_at(hits.recs)?;
         let prefix = hex.to_ascii_lowercase();
         ids.extend(
             self.overlay
@@ -834,13 +842,24 @@ impl MetaRead<'_> {
                 .filter(|meta| meta.id.0.to_hex().starts_with(&prefix))
                 .map(|meta| meta.id),
         );
-        Ok(ids)
+        Ok(IdHits {
+            ids,
+            truncated: hits.truncated,
+        })
     }
 
     /// The changesets whose delta hash is `dh` (the same change on different bases), in seq
-    /// order.
+    /// order: at most 4,096 of those the index holds, and [`MetaRead::by_delta_hash_hits`] says
+    /// whether more matched.
     pub fn by_delta_hash(&self, dh: &[u8; 32]) -> Result<Vec<ChangesetId>, StoreError> {
-        let mut ids = self.ids_at(self.index.find_delta_hash(dh)?)?;
+        self.by_delta_hash_hits(dh).map(|hits| hits.ids)
+    }
+
+    /// [`MetaRead::by_delta_hash`], saying whether the index cut its answer at 4,096 changesets
+    /// ([`LookupHits::truncated`](super::index::LookupHits::truncated)).
+    pub fn by_delta_hash_hits(&self, dh: &[u8; 32]) -> Result<IdHits, StoreError> {
+        let hits = self.index.find_delta_hash_hits(dh)?;
+        let mut ids = self.ids_at(hits.recs)?;
         ids.extend(
             self.overlay
                 .extras()
@@ -848,7 +867,10 @@ impl MetaRead<'_> {
                 .filter(|meta| meta.delta_hash == *dh)
                 .map(|meta| meta.id),
         );
-        Ok(ids)
+        Ok(IdHits {
+            ids,
+            truncated: hits.truncated,
+        })
     }
 
     /// Ref `name`; `None` if it does not exist. [`StoreError::RefName`] for a name no format
@@ -1883,6 +1905,18 @@ fn entries(frame: &Frame) -> impl Iterator<Item = JournalEntry> + '_ {
     })
 }
 
+/// What a snapshot's lookup by id prefix or by delta hash found
+/// ([`MetaRead::resolve_prefix_hits`], [`MetaRead::by_delta_hash_hits`]): the changesets, and
+/// whether more match than it lists.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IdHits {
+    /// The changesets found, in seq order.
+    pub ids: Vec<ChangesetId>,
+    /// Whether the index cut its answer at 4,096 changesets: more match than `ids` lists.
+    pub truncated: bool,
+}
+
 /// Now, in Unix seconds (negative before 1970).
 fn unix_now() -> i64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
@@ -1900,8 +1934,50 @@ fn to_usize(n: u64) -> usize {
 mod tests {
     use std::fs;
 
+    use swarmops_core::ObjectId;
+
     use super::*;
     use crate::fs_ops::{FailAt, FailAtFs, FailMode, FsMethod, InjectedError};
+    use crate::meta::MAX_LOOKUP_HITS;
+
+    /// A snapshot's lookups by id prefix and by delta hash say when the index cut its answer:
+    /// of 4,097 changesets that share a delta hash and an id prefix, each lookup gives the first
+    /// 4,096 in seq order and says more matched; a lookup that matches one says none did. The
+    /// plain lookups give the same changesets without the flag.
+    #[test]
+    fn a_cut_lookup_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        let store = MetaStore::create(root).unwrap();
+        let id = |n: usize| {
+            let mut bytes = [0xab; 32];
+            bytes[1..3].copy_from_slice(&u16::try_from(n).unwrap().to_be_bytes());
+            ChangesetId::new(ObjectId::new(bytes))
+        };
+        let shared = [7; 32];
+        let metas: Vec<ChangesetMeta> = (0..=MAX_LOOKUP_HITS)
+            .map(|n| ChangesetMeta::new(id(n), 0, 0, shared, Vec::new()))
+            .collect();
+        let mut write = store.write().unwrap();
+        write.insert_changesets_batch(metas).unwrap();
+        write.commit().unwrap();
+        store.flush().unwrap();
+
+        let read = store.read().unwrap();
+        let first: Vec<ChangesetId> = (0..MAX_LOOKUP_HITS).map(id).collect();
+        let by_dh = read.by_delta_hash_hits(&shared).unwrap();
+        assert_eq!((by_dh.ids.len(), by_dh.truncated), (MAX_LOOKUP_HITS, true));
+        assert_eq!(by_dh.ids, first);
+        let by_prefix = read.resolve_prefix_hits("AB").unwrap();
+        assert_eq!(by_prefix, by_dh);
+        assert_eq!(read.by_delta_hash(&shared).unwrap(), first);
+        assert_eq!(read.resolve_prefix("ab").unwrap(), first);
+
+        let one = read.resolve_prefix_hits("ab0001").unwrap();
+        assert_eq!((one.ids, one.truncated), (vec![id(1)], false));
+        let none = read.by_delta_hash_hits(&[8; 32]).unwrap();
+        assert_eq!((none.ids, none.truncated), (Vec::new(), false));
+    }
 
     /// A create removes what a crashed create left in `meta.tmp/` through the seam, its first
     /// call there: a failure injected into call 1 is that removal's (`remove_dir_all meta.tmp`),
