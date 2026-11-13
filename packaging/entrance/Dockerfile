@@ -7,8 +7,23 @@
 #                      └── https://so-host ──▶ nginx ── fcgiwrap (as so) ──▶ serve --cgi
 #                                                         stores under /srv/so, owner `so`
 #
-# The base is ubuntu:24.04 by digest, the one scheduled.yml's git matrix pins; Ubuntu 24.04's
-# git is 2.43.0, which the version pin below holds and the run checks.
+# This file is also the one place that names the digest of every container image the automation
+# runs: Dependabot's docker entry reads its FROM lines and moves them, and `just check` fails
+# while a workflow or a script names another digest. The four stages below build nothing and
+# are in no image; scripts/packages.py reads the first three by stage name, release.yml names the
+# fourth's image:
+#
+#   install-deb, install-rpm   where `smoke` installs the .deb and the .rpm
+#   package-build              where the release makes the packages (its Python and liblzma)
+#   qemu-binfmt                registers QEMU for the server image's aarch64 half
+FROM debian:12@sha256:d74df7598108a173a621eda4d58a2adbf850b2d9a9d81bc2cca1a6c21174a880 AS install-deb
+FROM almalinux:9@sha256:245f8aab832fe800aa42bdab5fad75ebbd8e0b4c9f24820a83c638b177857ae2 AS install-rpm
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS package-build
+FROM tonistiigi/binfmt:qemu-v9.2.2@sha256:1b804311fe87047a4c96d38b4b3ef6f62fca8cd125265917a9e3dc3c996c39e6 AS qemu-binfmt
+
+# The base is ubuntu:24.04 by digest, the one build.yml's release build and scheduled.yml's git
+# matrix run in: when Dependabot moves it here, move it there in the same pull request. Ubuntu
+# 24.04's git is 2.43.0, which the version pin below holds and the run checks.
 FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
 
 ARG DEBIAN_FRONTEND=noninteractive

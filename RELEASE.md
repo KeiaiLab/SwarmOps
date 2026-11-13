@@ -99,8 +99,11 @@ so one shows whether the Mac's runner is there before a tag is pushed.
 
 Like CI, the workflow pins every action by commit, starts from `permissions: {}`, keeps no
 credentials in its checkouts, and CI's zizmor job audits it. The container images it builds and
-installs in are pinned by digest, the build image in the workflow and the install images in
-`scripts/packages.py`; Dependabot moves none of them. No job restores a cache: what a
+installs in are pinned by digest, each digest named once in `packaging/entrance/Dockerfile`,
+whose `FROM` lines Dependabot moves; `just check` fails while a workflow or a script names
+another digest, so the build image's digest in `build.yml` and `scheduled.yml` is moved in the
+same pull request. The rustup-init release the build installs is moved by hand, in both files
+at once (`just check` fails otherwise). No job restores a cache: what a
 release ships is built from the tagged commit and `Cargo.lock` alone. Its `just check` job
 installs the same tool versions as `ci.yml`'s: move them together.
 

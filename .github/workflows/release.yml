@@ -27,8 +27,10 @@
 # release.yml calls) run inside an ubuntu:24.04 container pinned by digest, the image whose glibc
 # README's install section is measured against; they install the cross compiler, QEMU and the pinned
 # toolchain there and build into the container's own filesystem, which goes with the container. The
-# packages jobs run on the runner, which starts their install containers. The digests and the
-# rustup-init release are moved by hand: Dependabot does not read them.
+# packages jobs run on the runner, which starts their install containers. Every image digest has
+# one source, packaging/entrance/Dockerfile, which Dependabot moves; `just check` fails while a
+# workflow names another. The rustup-init release is build.yml's, moved by hand with
+# scheduled.yml's.
 #
 # The macOS build alone runs elsewhere: on the maintainers' own Mac, through a self-hosted runner
 # labelled `macos-local`, natively and in no container, with that Mac's Xcode command line tools
@@ -475,7 +477,7 @@ jobs:
 
   # One target's .deb and .rpm, made by scripts/packages.py from that target's archive alone (its
   # binaries and files, byte for byte, dated at the tagged commit), then each installed with dpkg
-  # or rpm in a container pinned by digest (the digests are in the script): Debian 12, and
+  # or rpm in a container pinned by digest (packaging/entrance/Dockerfile's): Debian 12, and
   # AlmaLinux 9, whose glibc 2.34 is README's floor. Both binaries must print the version, the
   # packages verify (rpm's seeing a tampered binary) and remove cleanly. The aarch64 packages are
   # installed for aarch64 (Debian's multiarch, an AlmaLinux root of that architecture, whose glibc
@@ -544,8 +546,8 @@ jobs:
     timeout-minutes: 60
     env:
       VERSION: ${{ needs.version.outputs.version }}
-      # tonistiigi/binfmt qemu-v9.2.2, by digest: moved by hand, as the other images are.
-      BINFMT_IMAGE: tonistiigi/binfmt@sha256:1b804311fe87047a4c96d38b4b3ef6f62fca8cd125265917a9e3dc3c996c39e6
+      # By digest, the one packaging/entrance/Dockerfile names (its `qemu-binfmt` stage).
+      BINFMT_IMAGE: tonistiigi/binfmt:qemu-v9.2.2@sha256:1b804311fe87047a4c96d38b4b3ef6f62fca8cd125265917a9e3dc3c996c39e6
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

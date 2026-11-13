@@ -32,8 +32,9 @@ the run before anything is written.
     swarmops-X-<target>/swarmops         control.tar.xz,            header, xz cpio payload
     swarmops-X-<target>/LICENSE ...      data.tar.xz
 
-`smoke` installs the packages of one target in containers pinned by digest: the .deb with dpkg
-in Debian 12, the .rpm with rpm in AlmaLinux 9 (glibc 2.34, the oldest the binaries run on). It
+`smoke` installs the packages of one target in containers pinned by digest (the digests are
+packaging/entrance/Dockerfile's, which Dependabot moves): the .deb with dpkg in Debian 12, the
+.rpm with rpm in AlmaLinux 9 (glibc 2.34, the oldest the binaries run on). It
 checks what dpkg and rpm record, that `so --version` and `swarmops --version` print the version,
 that the packages verify, that `rpm --verify` sees a byte appended to an installed binary, and
 that removing them removes their files. A target this host does not run is installed for its own
@@ -112,11 +113,20 @@ ARCHIVE = re.compile(r"swarmops-(?P<version>.+)-(?P<target>[a-z0-9_]+-unknown-li
 
 XZ_PRESET = 6
 
-# The containers `smoke` installs in, by digest: moved by hand, as release.yml's build image is.
-DEBIAN_IMAGE = "debian:12@sha256:d74df7598108a173a621eda4d58a2adbf850b2d9a9d81bc2cca1a6c21174a880"
-ALMALINUX_IMAGE = (
-    "almalinux:9@sha256:245f8aab832fe800aa42bdab5fad75ebbd8e0b4c9f24820a83c638b177857ae2"
-)
+# The containers, by digest. packaging/entrance/Dockerfile names them, one `FROM <image> AS
+# <stage>` line each, so that Dependabot moves the digests: this script holds none.
+IMAGES = ROOT / "packaging" / "entrance" / "Dockerfile"
+IMAGE_LINE = re.compile(r"FROM (?P<image>\S+@sha256:[0-9a-f]{64}) AS (?P<stage>\S+)")
+
+
+class Stage(enum.Enum):
+    """A stage of `IMAGES` that names an image this script runs."""
+
+    DEBIAN = "install-deb"  # where `smoke` installs the .deb
+    ALMALINUX = "install-rpm"  # where `smoke` installs the .rpm
+    BUILD = "package-build"  # where the release makes the packages
+
+
 ALMALINUX_RELEASE = "9"
 # How long one command in a container may take: an emulated target's downloads are the slowest.
 COMMAND_TIMEOUT = 900
@@ -1052,6 +1062,16 @@ def build(archive: Path, out: Path, kit: Path) -> None:
         print(f"{name}: {len(data)} bytes, {what}")
 
 
+def image(stage: Stage) -> str:
+    """The image `IMAGES` names for `stage`, which must be pinned by digest."""
+    lines = (IMAGE_LINE.fullmatch(line.strip()) for line in IMAGES.read_text().splitlines())
+    found = [line["image"] for line in lines if line and line["stage"] == stage.value]
+    if len(found) != 1:
+        where = IMAGES.relative_to(ROOT)
+        raise Failure(f"{where} has not one 'FROM <image>@sha256:<digest> AS {stage.value}' line")
+    return found[0]
+
+
 # `smoke`: each package installed with its own tool, in a container pinned by digest.
 
 
@@ -1136,7 +1156,7 @@ def smoke_deb(deb: Path, version: str, target: Target, emulator: Path) -> None:
     """Installs the .deb in Debian with dpkg; for an emulated target, copies out its emulator."""
     emulated = target.rpm != platform.machine()
     network = Network.BRIDGE if emulated else Network.NONE
-    with Container(DEBIAN_IMAGE, deb.parent, network) as box:
+    with Container(image(Stage.DEBIAN), deb.parent, network) as box:
         run_with: list[str] = []
 
         # 1. An emulated target: its C library and libgcc (multiarch), and the emulator.
@@ -1171,7 +1191,7 @@ def smoke_rpm(rpm: Path, version: str, target: Target, emulator: Path) -> None:
     is emulated, with the emulator `smoke_deb` left."""
     emulated = target.rpm != platform.machine()
     network = Network.BRIDGE if emulated else Network.NONE
-    with Container(ALMALINUX_IMAGE, rpm.parent, network) as box:
+    with Container(image(Stage.ALMALINUX), rpm.parent, network) as box:
         package = f"/packages/{rpm.name}"
         root, run_with, foreign = "", [], []
 
@@ -1272,7 +1292,7 @@ def expect_server_removed(box: Container, state: KitState) -> None:
 def smoke_server_deb(client: Path, server: Path, version: str, target: Target,
                      state: KitState) -> None:
     """Installs the server .deb beside the client's with apt-get, which fetches its dependencies."""
-    with Container(DEBIAN_IMAGE, server.parent, Network.BRIDGE) as box:
+    with Container(image(Stage.DEBIAN), server.parent, Network.BRIDGE) as box:
         box.run("apt-get", "update", "--quiet")
         box.run("apt-get", "install", "--yes", "--quiet", "--no-install-recommends",
                 f"/packages/{client.name}", f"/packages/{server.name}")
@@ -1298,7 +1318,7 @@ def smoke_server_deb(client: Path, server: Path, version: str, target: Target,
 def smoke_server_rpm(client: Path, server: Path, version: str, target: Target,
                      state: KitState) -> None:
     """Installs the server .rpm beside the client's with dnf, which fetches its dependencies."""
-    with Container(ALMALINUX_IMAGE, server.parent, Network.BRIDGE) as box:
+    with Container(image(Stage.ALMALINUX), server.parent, Network.BRIDGE) as box:
         checked = box.run("rpm", "--checksig", "--verbose", f"/packages/{server.name}")
         if "Payload SHA256 digest: OK" not in checked:
             raise Failure(f"rpm --checksig does not find {server.name}'s payload digest OK")
