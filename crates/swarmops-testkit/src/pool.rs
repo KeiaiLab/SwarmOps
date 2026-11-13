@@ -5,7 +5,7 @@
 //! - [`Arrival`]: a pool's arrival, spread over each interval as [`landing::slot`] spreads an
 //!   open loop, or all at each mark (a herd).
 //! - [`InFlight`]: lands in flight, counted as they enter and leave, and the peak.
-//! - [`Wave`] and [`waves`]: a herd's lands cut by the mark they began after, each wave's drain.
+//! - [`Wave`] and [`waves`]: a herd's lands cut by the mark they were due at, each wave's drain.
 //! - [`Tally`] and [`tally`]: the identities whose every scheduled land is recorded and landed.
 //! - [`children_of`] and [`mem_available_mib`]: a process's live children and the host's
 //!   available memory, read off `/proc`.
@@ -154,13 +154,13 @@ impl Drop for Entered<'_> {
     }
 }
 
-/// The lands that began after one mark of a herd and before the next.
+/// The lands of a herd due at one mark.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Wave {
     /// The mark's number: the wave began at `n·interval`.
     pub n: u64,
-    /// Lands that began in it.
+    /// Lands due at its mark.
     pub lands: usize,
     /// Of them, those that landed.
     pub landed: usize,
@@ -168,16 +168,27 @@ pub struct Wave {
     pub drain_us: u64,
 }
 
-/// Every lander's records cut into waves of `interval`, in mark order; a mark no land began
-/// after has no wave. A record's wave is `at_us / interval`; its end is `at_us + latency_us`.
+/// Every lander's records cut into waves of `interval`, in mark order; a mark no land was due
+/// at has no wave. A lander's record `n` is its land due at mark `n`, whenever it began: a land
+/// late behind its lander's previous one stays in its mark's wave. Its end is
+/// `at_us + latency_us`. Panics on a record that began before its mark.
 pub fn waves(records: &[Vec<LandRecord>], interval: Duration) -> Vec<Wave> {
     let interval_us = u64::try_from(interval.as_micros()).expect("an interval fits in u64 µs");
     assert!(interval_us > 0, "a herd's waves need an interval");
 
-    // 1. Each record joins the wave of the last mark at or before its start.
+    // 1. Each record joins the wave of the mark it was due at, never one it began before.
     let mut by_mark: BTreeMap<u64, Wave> = BTreeMap::new();
-    for record in records.iter().flatten() {
-        let n = record.at_us / interval_us;
+    let due = records
+        .iter()
+        .enumerate()
+        .flat_map(|(who, lands)| lands.iter().enumerate().map(move |(n, r)| (who, n, r)));
+    for (who, n, record) in due {
+        let n = u64::try_from(n).expect("a land number fits in u64");
+        assert!(
+            record.at_us >= n * interval_us,
+            "lander {who}'s land {n} began at {} µs, before its mark",
+            record.at_us
+        );
         let wave = by_mark.entry(n).or_insert(Wave {
             n,
             lands: 0,
@@ -374,22 +385,22 @@ mod tests {
 
     #[test]
     fn waves_cut_by_the_mark_and_time_the_last() {
-        // Two landers, a mark every 2 s: three lands after the first mark, one unlanded; two
-        // after the third; none after the second.
+        // Three landers, a mark every 2 s: three lands due at the first mark, one unlanded; two
+        // at the second, lander 1 having made one land only.
         let records = vec![
             vec![
                 record(10_000, 50_000, true),
-                record(4_100_000, 30_000, true),
+                record(2_100_000, 30_000, true),
             ],
+            vec![record(0, 120_000, true)],
             vec![
-                record(0, 120_000, true),
                 record(1_999_999, 5_000, false),
-                record(4_000_000, 200_000, true),
+                record(2_000_000, 200_000, true),
             ],
         ];
 
-        // The last end sets the drain: 1,999,999 + 5,000 after mark 0; 4,000,000 + 200,000
-        // less 4 s after mark 2.
+        // The last end sets the drain: 1,999,999 + 5,000 after mark 0; 2,000,000 + 200,000
+        // less 2 s after mark 1.
         let expected = vec![
             Wave {
                 n: 0,
@@ -398,13 +409,47 @@ mod tests {
                 drain_us: 2_004_999,
             },
             Wave {
-                n: 2,
+                n: 1,
                 lands: 2,
                 landed: 2,
                 drain_us: 200_000,
             },
         ];
         assert_eq!(waves(&records, TWO_S), expected);
+    }
+
+    #[test]
+    fn a_late_land_stays_in_its_marks_wave() {
+        // One lander whose land 0 took 4.5 s: land 1, due at 2 s, began at 4.5 s, past mark 2.
+        let records = vec![vec![
+            record(0, 4_500_000, true),
+            record(4_500_000, 100_000, true),
+        ]];
+
+        // Land 1 is mark 1's, drained 2.6 s after it; no wave of mark 2.
+        let expected = vec![
+            Wave {
+                n: 0,
+                lands: 1,
+                landed: 1,
+                drain_us: 4_500_000,
+            },
+            Wave {
+                n: 1,
+                lands: 1,
+                landed: 1,
+                drain_us: 2_600_000,
+            },
+        ];
+        assert_eq!(waves(&records, TWO_S), expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "before its mark")]
+    fn a_land_before_its_mark_is_refused() {
+        // Land 1 is due at 2 s but began at 1 s: the pacing broke.
+        let records = vec![vec![record(0, 10, true), record(1_000_000, 10, true)]];
+        waves(&records, TWO_S);
     }
 
     #[test]

@@ -366,7 +366,7 @@ fn assert_every_change_on_main(store: &Store) {
 /// With [`LANDERS_VAR`] at 1,000 and [`INTERVAL_VAR`] at 60,000 the two are the large-pool
 /// goals' pool that lands once a minute, spread and at the mark. Any other name fails the run;
 /// a closed loop has no arrival. A herd's pace reads `open interval_ms=<n> arrival=herd
-/// duration_s=<n>`, and its lands are also cut by the mark they began after ([`waves`]), the
+/// duration_s=<n>`, and its lands are also cut by the mark they were due at ([`waves`]), the
 /// drain being the time from the mark to the end of the wave's last land:
 ///
 /// ```text
@@ -636,7 +636,7 @@ mod perf {
         inflight: InFlight,
         /// Its agents' account: each one's scheduled lands against its records.
         tally: Tally,
-        /// Its lands by the mark they began after; empty unless a herd landed.
+        /// Its lands by the mark they were due at; empty unless a herd landed.
         waves: Vec<Wave>,
         /// The test's child processes after the race ([`children_left`]).
         children: Option<Vec<u32>>,
@@ -1112,8 +1112,8 @@ mod perf {
         )
     }
 
-    /// Prints a herd's waves in lane `name` ([`waves`]: `records` cut by the mark each began
-    /// after), a line each and their count with the longest drain, and returns them; none, and
+    /// Prints a herd's waves in lane `name` ([`waves`]: `records` cut by the mark each was
+    /// due at), a line each and their count with the longest drain, and returns them; none, and
     /// no line, unless `shape` is an open loop of a herd.
     fn print_waves(name: &str, shape: &Shape, records: &[Vec<LandRecord>]) -> Vec<Wave> {
         if shape.interval.is_zero() || shape.arrival != Arrival::Herd {
