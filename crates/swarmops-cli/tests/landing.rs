@@ -520,7 +520,13 @@ mod perf {
         /// The lanes [`LANES_VAR`] names, in [`Lane::ALL`]'s order; all of them if it is unset.
         /// A name that is no lane's fails the run.
         fn chosen() -> Vec<Lane> {
-            let Ok(list) = std::env::var(LANES_VAR) else {
+            Lane::named(std::env::var(LANES_VAR).ok().as_deref())
+        }
+
+        /// The lanes `list` names, comma-separated, in [`Lane::ALL`]'s order whatever the
+        /// list's; all of them for no list. A name that is no lane's fails the run.
+        fn named(list: Option<&str>) -> Vec<Lane> {
+            let Some(list) = list else {
                 return Lane::ALL.to_vec();
             };
             let named: Vec<Lane> = (list.split(','))
@@ -979,6 +985,27 @@ mod perf {
             lock,
             inflight: flight,
         }
+    }
+
+    /// The lanes a list names run in the case's order, each once, whatever the list's order and
+    /// spacing; no list runs all four.
+    #[test]
+    fn the_lanes_named_run_in_the_cases_order() {
+        assert_eq!(Lane::named(None), Lane::ALL);
+        assert_eq!(
+            Lane::named(Some("beside, landers,beside")),
+            [Lane::Landers, Lane::Beside]
+        );
+        for lane in Lane::ALL {
+            assert_eq!(Lane::named(Some(lane.name())), [lane]);
+        }
+    }
+
+    /// A name that is no lane's fails the run instead of running fewer lanes than asked.
+    #[test]
+    #[should_panic(expected = "no lane \"lander\"")]
+    fn a_name_that_is_no_lane_fails_the_run() {
+        let _ = Lane::named(Some("movers,lander"));
     }
 
     /// An open loop on the `landers` lane alone, small enough for the regular suite: four agents,
@@ -1645,6 +1672,31 @@ mod perf {
             assert!(
                 line.starts_with("holds=1 answers=0 b_p50=1 b_p99=1 hold_p50_ms=2.0 "),
                 "{line}"
+            );
+        }
+
+        /// A claim is an answer of the hold of the leader its manifest names, not of whoever
+        /// holds the lock in that sample: pid 40 already holds it when pid 30's batch shows a
+        /// claimed request, so 30's hold reads `b` = 2. A manifest whose leader was never seen
+        /// with the lock (pid 99) gives its claim to the holder, 40.
+        #[test]
+        fn a_claim_goes_to_the_manifests_leader() {
+            let mut sampled = Sampled::new();
+            let go = Instant::now();
+            step(&mut sampled, go, 0, Some(30), &["1-30-a.batch"]);
+            let late = ["1-30-a.batch", "1-31-a.com"];
+            step(&mut sampled, go, 2, Some(40), &late);
+            let unseen = ["2-99-a.batch", "2-41-a.com"];
+            step(&mut sampled, go, 5, Some(40), &unseen);
+            step(&mut sampled, go, 6, None, &[]);
+
+            let holds: Vec<(u64, u64)> = (sampled.holds.iter())
+                .map(|(_, hold)| (hold.us, hold.members()))
+                .collect();
+            assert_eq!(holds, [(2_000, 2), (4_000, 2)]);
+            assert_eq!(
+                (sampled.tracks[&30].answers, sampled.tracks[&40].answers),
+                (1, 1)
             );
         }
     }
