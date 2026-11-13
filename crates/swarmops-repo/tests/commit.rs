@@ -747,6 +747,8 @@ fn commit_is_idempotent_for_identical_request() {
 /// transaction, so in one journal frame, recorded together or not at all, and only as a one-step
 /// fast-forward from the first parent.
 mod advance {
+    use std::cmp;
+
     use swarmops_repo::{Advance, Advanced};
     use swarmops_store::{JournalEntry, RefState};
     use swarmops_testkit::fs::RecordingFs;
@@ -977,25 +979,50 @@ mod advance {
         assert_eq!(journal_frames(&root), frames);
     }
 
+    /// A root changeset, beside every other, whose id is above `than` (`Greater`) or below it:
+    /// the first of the roots tried, each of another file content.
+    fn root_ordered(repo: &LocalRepo, order: cmp::Ordering, than: ChangesetId) -> ChangesetId {
+        (0_u32..64)
+            .map(|n| commit(repo, &[], vec![put("side", n.to_string().as_bytes())]).id)
+            .find(|side| side.cmp(&than) == order)
+            .expect("one of 64 ids on that side")
+    }
+
     /// The move expects the changeset's first parent, whatever its other parents are (the
     /// expectation M4's `land` reuses): with main at the first of two parents the move applies;
-    /// with main at the second, it is `RefMoved` and records nothing.
+    /// with main at the second, it is `RefMoved` and records nothing. Each way round with the
+    /// first parent's id below the second's and above it, so that the first is neither the
+    /// largest nor the smallest of the ids by chance.
     #[test]
     fn an_advancing_commit_with_two_parents_expects_the_first() {
         let (_dir, root, repo, c0) = with_main();
-        let side = commit(&repo, &[], vec![put("s", b"s")]).id;
+        let mut head = c0;
+        let orders = [cmp::Ordering::Less, cmp::Ordering::Greater];
+        for (round, first_is) in orders.into_iter().enumerate() {
+            // 1. A second parent on the other side of main's head.
+            let side = root_ordered(&repo, first_is.reverse(), head);
+            assert_eq!(head.cmp(&side), first_is, "round {round}");
+            let file = format!("f{round}");
 
-        let out = repo
-            .commit(advancing(&[c0, side], vec![put("b", b"b")], "main"))
-            .unwrap();
-        assert_eq!(out.advanced, Some(moved("main", Some(c0), false)));
-        let main = repo.get_ref("main").unwrap().map(|state| state.target);
-        assert_eq!(main, Some(out.id));
+            // 2. Main at the second parent: refused, nothing recorded.
+            let frames = journal_frames(&root);
+            let second = repo.commit(advancing(&[side, head], vec![put(&file, b"b")], "main"));
+            assert_moved(second, "main", Some(head));
+            assert_eq!(
+                journal_frames(&root),
+                frames,
+                "round {round}: nothing recorded"
+            );
 
-        let frames = journal_frames(&root);
-        let second = repo.commit(advancing(&[side, out.id], vec![put("c", b"c")], "main"));
-        assert_moved(second, "main", Some(out.id));
-        assert_eq!(journal_frames(&root), frames, "nothing recorded");
+            // 3. Main at the first parent: the move applies.
+            let out = repo
+                .commit(advancing(&[head, side], vec![put(&file, b"b")], "main"))
+                .unwrap();
+            assert_eq!(out.advanced, Some(moved("main", Some(head), false)));
+            let main = repo.get_ref("main").unwrap().map(|state| state.target);
+            assert_eq!(main, Some(out.id), "round {round}");
+            head = out.id;
+        }
     }
 
     /// The warning of an advancing commit whose step after its commit point fails says what is
@@ -1056,7 +1083,9 @@ mod advance {
 
     /// The crash sweep's own check ([`both_or_neither`]): a store holding the changeset without
     /// main's move to it, as a crash between the two frames of a commit then a `cas_ref` leaves
-    /// one, is refused; with main moved to it too, it holds both.
+    /// one, is refused; with main moved to it too, it holds both. A store that holds both and
+    /// does not verify clean is refused as well, damage that only a deep verify finds included
+    /// (a blob's payload, which a shallow one never reads).
     #[test]
     fn the_crash_sweep_s_check_refuses_a_changeset_without_its_move() {
         let (_dir, root, repo, base) = with_main();
@@ -1070,6 +1099,16 @@ mod advance {
         );
         repo.cas_ref("main", Some(base), Some(want), ACTOR).unwrap();
         assert_eq!(both_or_neither(&root, base, want), Ok(true));
+
+        // The last payload byte of the blob the commit put, flipped.
+        let file = layout_of(root.clone()).object_path(blob(b"b").0);
+        let mut bytes = fs::read(&file).unwrap();
+        *bytes.last_mut().unwrap() ^= 0x01;
+        fs::write(&file, &bytes).unwrap();
+        let shallow = repo.verify(Depth::Shallow).unwrap().problems;
+        assert_eq!(shallow, [], "damage a shallow verify finds pins no depth");
+        let refused = both_or_neither(&root, base, want).unwrap_err();
+        assert!(refused.contains("verify found"), "{refused}");
     }
 
     /// The commit the crash sweep's child makes: [`crash_request`]'s files, on main's head `base`,
