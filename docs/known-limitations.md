@@ -601,6 +601,27 @@ left).
   git runs with that bound, so a fetch's pack-objects hook does too; over ssh a fetch's hook runs
   without it, with rayon's default of a thread per core. *Unscheduled. Found: the M17 closure
   review (issue #29).*
+- **A land push run again walks the lands made since.** A push to `refs/land/<target>` names the
+  landed commit by walking the target's first parents down to the landed changeset, in the store
+  and in `serve.git` alike: no step for a land just made, and for the same push run again (a
+  replay) as many commits as landed on the target since, each read from `serve.git`. No index
+  shortens the walk. *Unscheduled. Found: the M14 v0.7 reviews (issue #22).*
+- **A pushed tag's move costs an import before it is refused.** Tags do not move
+  (`E_TAG_IMMUTABLE`), and a push that moves one is refused by the store's rule on the move as it
+  would be made, after the push's tip was imported: nothing moves, and the imported objects stay
+  in the store with no ref naming them (`gc` collects no object). *Documented. Found: the M14 v0.7
+  reviews (issue #22).*
+- **Identical clones send a cached pack one at a time.** A fetch that waited while another made
+  the pack its request asks for then sends the kept pack while it holds that pack's lock, so the
+  identical fetches that came while it was made are sent one after another; one that waits past
+  10 s (the writer lock's wait) makes its own pack and keeps none. Fetches that come once the
+  pack is kept send it without the lock. *Unscheduled: letting go of the lock once a sound pack
+  is found would send them together. Found: the M17 review (issue #27).*
+- **The pack cache's key sees beneath a git wrapper only through `PATH`.** A cached pack's key
+  names the git binary `SWARMOPS_GIT` names (its path, length, modification time, device and
+  inode) and, when that is a script, the git that `PATH` finds. A wrapper that runs a git `PATH`
+  does not find keeps its keys when that git is upgraded; each kept pack is still checked against
+  its digest before it is sent. *Unscheduled. Found: the M17 closure review (issue #29).*
 - **A request takes the memory its type holds.** The MCP server reads of a message line, at
   most 64 MiB, only the members it serves, and a tool's arguments only as their request type,
   so what else a line holds costs it nothing beyond the line's bytes (operations spec §0). A
