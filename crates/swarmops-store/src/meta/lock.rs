@@ -301,6 +301,9 @@ fn spawn_helper(file: File) -> io::Result<Receiver<io::Result<MetaLock>>> {
     thread::Builder::new()
         .name("meta-lock-wait".to_owned())
         .spawn(move || {
+            #[cfg(test)]
+            let _counted = tests::Helper::of(&file);
+
             // Not given yet: an abandoned guard is no caller's hold.
             let locked = lock_blocking(&file).map(|()| MetaLock { file, given: None });
             if let Err(SendError(abandoned)) = handoff.send(locked) {
@@ -360,14 +363,46 @@ fn lock_blocking(file: &File) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs::{self, File, OpenOptions};
     use std::io;
-    use std::os::unix::fs::{OpenOptionsExt, symlink};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, symlink};
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::mpsc;
+    use std::sync::{Mutex, PoisonError, mpsc};
     use std::thread;
     use std::time::Duration;
+
+    use crate::layout::Layout;
+
+    /// A lock file, as the kernel tells files apart: its device and inode.
+    type LockFile = (u64, u64);
+
+    /// The helper threads running now, counted by the lock file each waits for: a test counts
+    /// those of its own store, whatever the tests beside it in this process spawn.
+    static HELPERS: Mutex<BTreeMap<LockFile, usize>> = Mutex::new(BTreeMap::new());
+
+    /// One running helper thread, counted from when it starts until it ends.
+    pub(super) struct Helper(LockFile);
+
+    impl Helper {
+        /// Counts the helper that waits for the lock on `file`.
+        pub(super) fn of(file: &File) -> Helper {
+            let key = (file.metadata()).map_or((0, 0), |meta| (meta.dev(), meta.ino()));
+            let mut helpers = HELPERS.lock().unwrap_or_else(PoisonError::into_inner);
+            *helpers.entry(key).or_default() += 1;
+            Helper(key)
+        }
+    }
+
+    impl Drop for Helper {
+        fn drop(&mut self) {
+            let mut helpers = HELPERS.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(count) = helpers.get_mut(&self.0) {
+                *count -= 1;
+            }
+        }
+    }
 
     /// What [`super::open_unfollowed`] returned for `path` within 5 s, run on a thread of its
     /// own so that an open that blocks fails the test instead of hanging it: `None` if it
@@ -427,35 +462,50 @@ mod tests {
     }
 
     /// A store root with `meta/`, as [`super::MetaLock::start`] needs it.
-    fn meta_root() -> (tempfile::TempDir, crate::layout::Layout) {
+    fn meta_root() -> (tempfile::TempDir, Layout) {
         let dir = tempfile::tempdir().unwrap();
         let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        let layout = crate::layout::Layout::new(root);
+        let layout = Layout::new(root);
         fs::create_dir(layout.meta_dir()).unwrap();
         (dir, layout)
     }
 
-    /// How many helper threads (`meta-lock-wait`) this process runs.
-    fn helpers() -> usize {
-        fs::read_dir("/proc/self/task")
-            .unwrap()
-            .filter(|task| {
-                let comm = task.as_ref().unwrap().path().join("comm");
-                fs::read_to_string(comm).is_ok_and(|name| name.trim() == "meta-lock-wait")
-            })
-            .count()
+    /// How many helper threads (`meta-lock-wait`) wait for `layout`'s lock file, which exists.
+    fn helpers(layout: &Layout) -> usize {
+        let meta = fs::metadata(layout.meta_lock()).unwrap();
+        let helpers = HELPERS.lock().unwrap_or_else(PoisonError::into_inner);
+        helpers.get(&(meta.dev(), meta.ino())).copied().unwrap_or(0)
     }
 
-    /// Waits up to 5 s for `helpers() == n`.
-    fn helpers_become(n: usize) -> bool {
+    /// Waits up to 5 s for `helpers(layout) == n`.
+    fn helpers_become(layout: &Layout, n: usize) -> bool {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
-            if helpers() == n {
+            if helpers(layout) == n {
                 return true;
             }
             thread::sleep(Duration::from_millis(1));
         }
         false
+    }
+
+    /// The helpers are counted by lock file: one that waits for another store's lock, as a test
+    /// running beside this one in the process spawns, is not among this store's.
+    #[test]
+    fn helpers_are_counted_per_lock_file() {
+        let (_dir, layout) = meta_root();
+        let (_other_dir, other) = meta_root();
+        let _held = super::MetaLock::acquire(&layout, Duration::ZERO).unwrap();
+        let other_held = super::MetaLock::acquire(&other, Duration::ZERO).unwrap();
+        let super::Started::Waiting(wait) = super::MetaLock::start(&other).unwrap() else {
+            panic!("the lock is held: start must wait");
+        };
+        assert!(wait.wait(Duration::from_millis(5)).is_none(), "still held");
+        assert!(helpers_become(&other, 1), "the other store's helper waits");
+        assert_eq!(helpers(&layout), 0, "it is not this store's");
+        drop(wait);
+        drop(other_held);
+        assert!(helpers_become(&other, 0), "the abandoned helper ended");
     }
 
     /// A wait started while the lock is held gets it once the holder lets go, within its limit;
@@ -492,10 +542,10 @@ mod tests {
             panic!("the lock is held: start must wait");
         };
         assert!(wait.wait(Duration::from_millis(5)).is_none(), "still held");
-        assert!(helpers_become(1), "one helper waits");
+        assert!(helpers_become(&layout, 1), "one helper waits");
         drop(wait);
         drop(held);
-        assert!(helpers_become(0), "the abandoned helper ended");
+        assert!(helpers_become(&layout, 0), "the abandoned helper ended");
         super::MetaLock::acquire(&layout, Duration::from_secs(5)).unwrap();
     }
 
@@ -514,7 +564,7 @@ mod tests {
             Err(crate::StoreError::Busy)
         ));
         thread::sleep(Duration::from_millis(20));
-        assert_eq!(helpers(), 0, "no helper was spawned");
+        assert_eq!(helpers(&layout), 0, "no helper was spawned");
     }
 
     /// [`super::open_flock_file`] with [`super::Create::Never`] fails on a missing file and makes

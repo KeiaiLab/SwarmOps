@@ -167,7 +167,7 @@ fn unstated_in_format3(design: &str) -> Vec<Rule> {
 /// invariants R1 to R4 are: each counted where it stands as a word of its own (not in `R10`).
 fn old_ids_outside_the_reviews(spec: &str) -> Vec<String> {
     let words = |text: &str, id: &str| {
-        let alone = |c: Option<char>| !c.is_some_and(char::is_alphanumeric);
+        let alone = |c: Option<char>| !c.is_some_and(|c| c.is_ascii_alphanumeric());
         (text.match_indices(id))
             .filter(|&(at, _)| {
                 alone(text[..at].chars().next_back()) && alone(text[at + id.len()..].chars().next())
