@@ -198,7 +198,7 @@ fn freshness_with(
         .map(|(name, ref_state)| (name, ref_state.target))
         .collect();
     let mut ignored = Refreshed::default();
-    let wanted = served(heads.keys().cloned(), &mut ignored);
+    let wanted = served(heads.keys().cloned(), &Scope::All, &mut ignored);
     let store: BTreeMap<&str, ChangesetId> = (wanted.iter())
         .map(|(full, (name, _))| (full.as_str(), heads[name]))
         .collect();
@@ -470,7 +470,7 @@ fn export_from(
     // 2. The store's refs, in that snapshot, mapped to the git refs they are served as.
     let listed = read.list_refs().map_err(error::op)?;
     let names = listed.into_iter().map(|(name, _)| name);
-    let wanted = served(names.filter(|name| in_scope(scope, name)), refreshed);
+    let wanted = served(names, scope, refreshed);
     let mut updates = StateUpdates::new();
 
     // 3. Each git ref in scope no store ref is served as: deleted, before an export needs its
@@ -523,11 +523,14 @@ fn export_from(
     Ok(())
 }
 
-/// The served store refs among `names`, by the git ref each is served as. A remote-tracking ref
-/// is passed over; a name git takes no ref for, or one under a served branch's name, is left out
-/// with a warning in `refreshed`.
+/// The served store refs `scope` names among `names`, every ref the store holds, by the git ref
+/// each is served as. A remote-tracking ref is passed over; a name git takes no ref for, or one
+/// under a served branch's name, is left out, with a warning in `refreshed` when `scope` names
+/// it. A name is under a served one whether or not `scope` names that one: the store's refs
+/// decide, as in a full refresh.
 fn served(
     names: impl Iterator<Item = String>,
+    scope: &Scope,
     refreshed: &mut Refreshed,
 ) -> BTreeMap<String, ServedRef> {
     let mut mapped = BTreeMap::new();
@@ -542,9 +545,10 @@ fn served(
             Some(full) => {
                 mapped.insert(full, (name, kind));
             }
-            None => refreshed
+            None if in_scope(scope, &name) => refreshed
                 .warnings
                 .push(format!("not_served: {name}: git takes no ref of that name")),
+            None => {}
         }
     }
 
@@ -553,15 +557,20 @@ fn served(
     let mut kept: BTreeMap<String, ServedRef> = BTreeMap::new();
     for (full, served) in mapped {
         let under = ancestors(&full).find(|dir| kept.contains_key(*dir));
-        if let Some(dir) = under {
+        let Some(dir) = under else {
+            kept.insert(full, served);
+            continue;
+        };
+        if in_scope(scope, &served.0) {
             refreshed.warnings.push(format!(
                 "not_served: {}: {dir} is served, and git holds no ref under a ref's name",
                 served.0
             ));
-            continue;
         }
-        kept.insert(full, served);
     }
+
+    // The scope's refs among them.
+    kept.retain(|_, (name, _)| in_scope(scope, name));
     kept
 }
 
@@ -1072,6 +1081,38 @@ mod tests {
         assert_eq!(done.moved, 1, "{done:?}");
         let names: Vec<String> = site.served().into_keys().collect();
         assert_eq!(names, ["refs/heads/release/1"]);
+    }
+
+    /// `Scope::Refs` naming a ref under a served branch's name (`feature/x/y` beside
+    /// `feature/x`) leaves it out with the full refresh's warning: no error, and nothing moves.
+    #[test]
+    fn a_scoped_ref_under_a_served_name_is_left_out() {
+        let site = Site::new();
+        refresh(&site.ops, &site.repo, &Scope::All).expect("refresh");
+        let head = site.ops.repo.get_ref("main").expect("read").expect("main");
+        site.create("feature/x/y", &head.target.to_string());
+        let served = site.served();
+
+        let scope = Scope::Refs(vec!["feature/x/y".to_owned()]);
+        let done = refresh(&site.ops, &site.repo, &scope).expect("a warning, not an error");
+        let warning = "not_served: feature/x/y: refs/heads/feature/x is served, and git holds no \
+                       ref under a ref's name";
+        assert_eq!(done.warnings, [warning]);
+        assert_eq!((done.moved, done.removed), (0, 0), "{done:?}");
+        assert_eq!(site.served(), served);
+    }
+
+    /// A scoped refresh warns of the refs it names alone: a name git takes no ref for, outside
+    /// its scope, is the full refresh's to report.
+    #[test]
+    fn a_scoped_refresh_warns_of_its_refs_alone() {
+        let site = Site::new();
+        let head = site.ops.repo.get_ref("main").expect("read").expect("main");
+        site.create("feature/x/y", &head.target.to_string());
+
+        let scope = Scope::Refs(vec!["release/1".to_owned()]);
+        let done = refresh(&site.ops, &site.repo, &scope).expect("refresh");
+        assert_eq!(done.warnings, [] as [&str; 0]);
     }
 
     /// A refresh reads the committed snapshot: while a writer holds the store's lock with a
