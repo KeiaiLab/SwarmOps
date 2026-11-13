@@ -3256,6 +3256,44 @@ mod import_memos {
         assert_eq!(wrong, [], "every memo checks");
     }
 
+    /// An import onto an imported head takes the head's root, its trees and its blobs as
+    /// converted (step 4's seed), and renders a tree it makes over them: a new root that holds
+    /// the old root, a kept tree and a kept blob gets its memo, which only the seeded oids of all
+    /// three give.
+    #[test]
+    fn a_tree_over_seeded_objects_gets_its_memo() {
+        let (_dir, _root, repo, _reads) = counted_store();
+        let mut source = MemSource::default();
+        let key = key();
+
+        // 1. The base: `keep.txt` and `sub/`, imported under the key.
+        let keep = source.blob(b"kept\n");
+        let inner = source.blob(b"inner\n");
+        let sub = source.tree(&[("100644", b"s.txt", inner)]);
+        let base_tree = source.tree(&[("100644", b"keep.txt", keep), ("40000", b"sub", sub)]);
+        let base = source.commit(base_tree, &[], "Base\n");
+        import(&repo, &source, &keyed(base, &key)).expect("import the base");
+
+        // 2. A commit on it whose new root holds the old root, `sub/`, `keep.txt` and a new blob.
+        let new = source.blob(b"new\n");
+        let top_tree = source.tree(&[
+            ("100644", b"keep.txt", keep),
+            ("100644", b"new.txt", new),
+            ("40000", b"old", base_tree),
+            ("40000", b"sub", sub),
+        ]);
+        let top = source.commit(top_tree, &[base], "Top\n");
+        let report = import(&repo, &source, &keyed(top, &key)).expect("import the top");
+        assert_eq!((report.imported, report.skipped), (1, 1), "{report:?}");
+
+        // 3. The new root's memo, and every memo the store's own.
+        let root = repo.changeset(report.head).unwrap().unwrap().changeset.root;
+        let memo = mac_memo(&repo, MAC_MEMOS[1], root.0, &key);
+        assert!(memo.is_some(), "the new root's memo");
+        let wrong = verify_export_oids_with(&repo, Some(&key)).expect("verify");
+        assert_eq!(wrong, [], "every memo checks");
+    }
+
     /// The changeset of each commit `main` reaches, by its `git.oid`.
     fn changesets_by_commit(repo: &LocalRepo) -> HashMap<GitOid, ChangesetId> {
         let mut by_commit = HashMap::new();
