@@ -1850,12 +1850,24 @@ fn commit_and_advance_main(server: &mut Server, c1: &str) -> String {
 /// read from a working directory the agent cannot see: here the crate's, where `src/lib.rs`
 /// exists) and a path that is this process's own stdin or stdout (the protocol's pipes, which
 /// a read would block on) are refused before anything is resolved or opened, with the change
-/// and the file named; the server serves on, and the store is untouched.
+/// and the file named; the server serves on, and the store is untouched. The store's main names
+/// a commit, which a commit with no parent reads once it opens the store: a refusal made after
+/// that would show it resolved.
 #[test]
 fn a_client_file_must_be_absolute_and_not_the_servers_stdio() {
     let store = Store::init();
     let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
     server.initialize();
+    let first = json!({"message": "first", "changes": [{"path": "README.md", "op": "put",
+                                                       "content": {"inline": "# acme\n"}}]});
+    let first = server.ok("commit", first)["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": first, "create": true}),
+    );
     for (file, why) in [
         ("src/lib.rs", "relative path"),
         ("/dev/stdin", "stdin or stdout"),
@@ -1882,7 +1894,7 @@ fn a_client_file_must_be_absolute_and_not_the_servers_stdio() {
         assert_eq!(refused["meta"]["resolved"], json!({}), "{refused}");
         assert_eq!(server.result("ping", json!({})), json!({}));
         let info = server.ok("repo_info", json!({}));
-        assert_eq!(info["result"]["changesets"], 0, "{file}: {info}");
+        assert_eq!(info["result"]["changesets"], 1, "{file}: {info}");
     }
     server.finish_clean();
     store.assert_clean("after the refused commits");
