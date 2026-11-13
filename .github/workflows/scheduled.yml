@@ -482,16 +482,16 @@ jobs:
 
   # The measurement cases that `just check-ci-slow` leaves out (`just check-ci-perf`):
   # `remote_perf`'s five, `serve_perf`'s six and `intake_perf`'s one, on 12,000 or 13,000 commits,
-  # and the checked land on 12,000 changesets. They need a longer kill than the ci-slow profile's 20 minutes: in
-  # the slow suite four ran into it and the other five took 65-76 % of it, and three take over 20
-  # minutes even optimized. Optimized and one at a time, as `just perf` runs them, they took
-  # 7,541 s in all, the longest 1,650 s (justfile, `check-ci-perf`). They fail on what they ran,
-  # never on its time. Last and alone, after the bench gate, and under the heavy lock as it is:
-  # the bench gate runs where it did, and neither waits for the lock the other holds.
-  # `!cancelled()` runs it after a failed bench gate too. The wait for a lock that a measurement
-  # outside CI holds is bounded as the bench gate's is, apart from the run, and fails the job when
-  # it runs out. The `ci-perf` profile kills a hung case after 55 minutes and names it in the
-  # JUnit report, which is uploaded.
+  # and the checked land on 12,000 changesets. They need a longer kill than the ci-slow profile's 20
+  # minutes: in the slow suite four ran into it and the other five took 65-76 % of it, and three
+  # take over 20 minutes even optimized. Optimized and one at a time, as `just perf` runs them, they
+  # took 7,541 s in all, the longest 1,650 s (justfile, `check-ci-perf`). They fail on what they
+  # ran, never on its time. Last and alone, after the bench gate, and under the heavy lock as it is:
+  # the bench gate runs where it did, and neither waits for the lock the other holds. `!cancelled()`
+  # runs it after a failed bench gate too. The wait for a lock that a measurement outside CI holds
+  # is bounded as the bench gate's is, apart from the run, and fails the job when it runs out. The
+  # `ci-perf` profile kills a hung case after 55 minutes and names it in the JUnit report, which is
+  # uploaded.
   perf-cases:
     name: measurement cases
     needs: bench-gate
@@ -500,16 +500,16 @@ jobs:
     permissions:
       contents: read
     # The lock wait's 60 minutes, plus twice the cases' 7,541 s (251 minutes) and 5 for the
-    # optimized build (62 s cold on this host at load 650), rounded up to 5 minutes, 320 (60 + 251
-    # + 5 = 316). That sum is the nine cases before M17; M17-1 added four, M17-4a one
+    # optimized build (62 s cold on this host at load 650), rounded up to 5 minutes, 320 (60 + 251 +
+    # 5 = 316). That sum is the nine cases before M17; M17-1 added four, M17-4a one
     # (`first_clone_after_import`), and M17-8b `serve_load`'s two and G4's landing lanes
     # (`landing::perf::landing_under_load`, moved here from the weekly slow suite), whose times
     # `just perf` has not measured yet, so the value waits for that run: it is then recomputed by
-    # this rule from the new sum, never set by a guess. M18-1 added `remote_perf::first_sync_phases`,
-    # measured at 1,497 s (docs/perf.md, "M18 first sync profile"): 60 + twice 9,038 s (301
-    # minutes) + 5 = 366, rounded up to 370. M18-3 added `sync_load::sync_keeps_pace_with_landing`,
-    # measured at 655 s (docs/perf.md, "M18 continuous-sync lane"): 60 + twice 9,693 s (323.1
-    # minutes) + 5 = 388.1, rounded up to 390.
+    # this rule from the new sum, never set by a guess. M18-1 added
+    # `remote_perf::first_sync_phases`, measured at 1,497 s (docs/perf.md, "M18 first sync
+    # profile"): 60 + twice 9,038 s (301 minutes) + 5 = 366, rounded up to 370. M18-3 added
+    # `sync_load::sync_keeps_pace_with_landing`, measured at 655 s (docs/perf.md, "M18
+    # continuous-sync lane"): 60 + twice 9,693 s (323.1 minutes) + 5 = 388.1, rounded up to 390.
     # M19-8 added four (`ws_processes::perf`'s sparse workspace, 500,000-file status, 50 creates at
     # once and update across 1,000 lands), whose loaded sizing runs (docs/perf.md, "M19-8") are not
     # `just perf` times; the same run sums them.
