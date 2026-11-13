@@ -468,4 +468,12 @@ impl<F: FsOps> FsOps for FsyncModelFs<F> {
             Ok(())
         }
     }
+
+    fn crash_point(&self) {
+        self.inner.crash_point();
+    }
+
+    fn lead_wait(&self) -> Option<usize> {
+        self.inner.lead_wait()
+    }
 }

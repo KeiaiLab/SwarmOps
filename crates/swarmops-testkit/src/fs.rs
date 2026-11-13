@@ -199,6 +199,14 @@ impl<W: Watch, F: FsOps> FsOps for Watched<W, F> {
             self.1.rename_durable(from, to)
         })
     }
+
+    fn crash_point(&self) {
+        self.1.crash_point();
+    }
+
+    fn lead_wait(&self) -> Option<usize> {
+        self.1.lead_wait()
+    }
 }
 
 /// A hook for a [`RecordingFs`]: the call it waits for as the recorder names it, whether it
@@ -718,6 +726,14 @@ impl<F: FsOps> FsOps for HoldThenFail<F> {
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
         self.fs.rename_durable(from, to)
     }
+
+    fn crash_point(&self) {
+        self.fs.crash_point();
+    }
+
+    fn lead_wait(&self) -> Option<usize> {
+        self.fs.lead_wait()
+    }
 }
 
 /// Copies directory `from` to `to`, files and subdirectories, without syncing anything.
@@ -985,10 +1001,103 @@ mod tests {
         assert!(staging.join("meta/journal.log").exists(), "nothing went");
     }
 
+    /// The wrappers forward `crash_point` and `lead_wait` to the filesystem they wrap, as the
+    /// seam asks of every wrapper: a crash test's counter inside one counts the crash point,
+    /// and a lead's wait set on the innermost filesystem is what the wrapper answers.
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn the_wrappers_forward_crash_points_and_lead_waits() {
+        use swarmops_store::CrashAtFs;
+
+        use crate::faults::FsyncModelFs;
+        use crate::power::ImageRecordingFs;
+
+        // 1. A crash point reaches the counter inside each wrapper.
+        let counter = || Arc::new(CrashAtFs::new(RealFs::new(), 0));
+        let inner = counter();
+        Watched(Methods::default(), Arc::clone(&inner)).crash_point();
+        assert_eq!(inner.calls(), 1, "Watched");
+        let inner = counter();
+        HoldThenFail::new("no-such-file", Arc::clone(&inner))
+            .0
+            .crash_point();
+        assert_eq!(inner.calls(), 1, "HoldThenFail");
+        let inner = counter();
+        FsyncModelFs::over(Arc::clone(&inner)).crash_point();
+        assert_eq!(inner.calls(), 1, "FsyncModelFs");
+
+        // 2. A lead's wait is the innermost filesystem's.
+        let waiting = || {
+            let recorder = ImageRecordingFs::new();
+            recorder.set_lead_wait(3);
+            recorder
+        };
+        let watched = Watched(Methods::default(), waiting());
+        assert_eq!(watched.lead_wait(), Some(3), "Watched");
+        let (held, _test) = HoldThenFail::new("no-such-file", waiting());
+        assert_eq!(held.lead_wait(), Some(3), "HoldThenFail");
+        assert_eq!(
+            FsyncModelFs::over(waiting()).lead_wait(),
+            Some(3),
+            "FsyncModelFs"
+        );
+        assert_eq!(Watched(Methods::default(), NoSyncFs).lead_wait(), None);
+    }
+
+    /// `HoldThenFail` gives what `RealFs` gives for every method where a path is missing (in a
+    /// directory that exists, or in one that does not) and where a link's or a rename's target
+    /// lies in a missing directory: only the first `append_durable` of its one file differs. That
+    /// call appends its bytes, is held, and fails with `EIO`, the bytes left in the file; the
+    /// next one of the file goes to the filesystem as it is. Where `RealFs` cannot append (a
+    /// missing directory), the held call fails as `RealFs` does.
+    #[test]
+    fn hold_then_fail_fails_where_real_fs_fails() {
+        // 1. Every method on another path: as `RealFs`.
+        let cases = [
+            ("missing", "to"),
+            ("no-dir/missing", "to"),
+            ("file", "no-dir/to"),
+        ];
+        for method in FsMethod::ALL {
+            for (path, to) in cases {
+                let real = tempfile::tempdir().unwrap();
+                fs::write(real.path().join("file"), b"a file").unwrap();
+                let (path_in, to_in) = (real.path().join(path), real.path().join(to));
+                let expected = call(&RealFs::new(), method, &path_in, &to_in);
+
+                let dir = tempfile::tempdir().unwrap();
+                fs::write(dir.path().join("file"), b"a file").unwrap();
+                let (double, _test) = HoldThenFail::new(dir.path().join("held"), RealFs::new());
+                let (path_in, to_in) = (dir.path().join(path), dir.path().join(to));
+                let got = call(&double, method, &path_in, &to_in);
+                assert_eq!(got, expected, "{method} {path} {to}");
+            }
+        }
+
+        // 2. Its file's first `append_durable`: written, held, then `EIO`; the next as it is.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        let (double, test) = HoldThenFail::new(&log, RealFs::new());
+        test.release();
+        let failed = double.append_durable(&log, b"ab").unwrap_err();
+        assert_eq!(failed.raw_os_error(), Some(EIO), "{failed}");
+        assert_eq!(fs::read(&log).unwrap(), b"ab", "its bytes are in the file");
+        assert_eq!(double.append_durable(&log, b"cd").unwrap(), 2);
+        assert_eq!(fs::read(&log).unwrap(), b"abcd");
+
+        // 3. Where the append itself fails, the call fails as `RealFs`'s does.
+        let nowhere = dir.path().join("no-dir/log");
+        let (double, _test) = HoldThenFail::new(&nowhere, RealFs::new());
+        let expected = RealFs::new().append_durable(&nowhere, b"ab").unwrap_err();
+        let failed = double.append_durable(&nowhere, b"ab").unwrap_err();
+        assert_eq!(failed.kind(), expected.kind(), "{failed}");
+        assert_eq!(failed.kind(), io::ErrorKind::NotFound, "{failed}");
+    }
+
     /// The double opens the directory that `RealFs` syncs after a replace or a rename into it,
     /// so that a directory the process may write but not read fails there as on the real
-    /// filesystem, the work done (`PermissionDenied`; a process that reads every directory, as
-    /// root does, gets `Ok` from both).
+    /// filesystem, the work done (`PermissionDenied`). A process that reads every directory, as
+    /// root does, would get `Ok` from both and pin nothing: the test fails there, saying so.
     #[test]
     fn no_sync_fs_opens_the_directory_real_fs_syncs() {
         use std::fs::Permissions;
@@ -1001,6 +1110,11 @@ mod tests {
                 fs::create_dir(&shut).unwrap();
                 fs::write(&file, b"a file").unwrap();
                 fs::set_permissions(&shut, Permissions::from_mode(0o300)).unwrap();
+                assert!(
+                    File::open(&shut).is_err(),
+                    "this process reads a directory it has no read permission on (root?): the \
+                     test would pin nothing"
+                );
                 let path = if method == FsMethod::AtomicReplace {
                     shut.join("file")
                 } else {
