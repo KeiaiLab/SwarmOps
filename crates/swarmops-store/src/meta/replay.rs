@@ -62,7 +62,9 @@ pub(crate) fn replay(
     let mut from = 0;
     for frame in frames {
         let to = from + changeset_count(frame);
-        if to > held {
+        // A frame without changesets appends nothing: an empty batch would still cost the
+        // index's tail check, five `fstat`s.
+        if to > held && to > from {
             let metas: Vec<ChangesetMeta> = changesets[from.max(held)..to]
                 .iter()
                 .map(|record| record.meta(0))
@@ -278,6 +280,7 @@ mod tests {
     use camino::Utf8Path;
     use swarmops_core::ObjectId;
 
+    use super::super::index::tail_checks;
     use super::*;
 
     /// A store of `format` in a temp dir, with an index: what replay needs.
@@ -302,6 +305,36 @@ mod tests {
             ts: 0,
         };
         (Frame::new(0, 40, vec![record]), target)
+    }
+
+    /// A frame recording the root changeset whose id is all `n`.
+    fn recording(n: u8) -> Frame {
+        let record = Record::Changeset {
+            id: ChangesetId::new(ObjectId::new([n; 32])),
+            generation: 1,
+            delta_hash: [n; 32],
+            parents: Vec::new(),
+        };
+        Frame::new(0, 40, vec![record])
+    }
+
+    /// Replay appends to the index once a frame that holds changesets it lacks: the frames
+    /// without changesets that follow one, ref moves here, make no append, and so none of the
+    /// index's tail checks (five `fstat`s each).
+    #[test]
+    fn replay_appends_nothing_for_a_frame_without_changesets() {
+        let (_dir, layout, fs, mut index) = store(StoreFormat::V2);
+        let frames = [recording(1), moving("main").0, moving("feature/x").0];
+
+        let before = tail_checks::made();
+        let replayed = replay(&mut index, &layout, &fs, &frames).unwrap();
+        assert_eq!((replayed.records, replayed.refs), (1, 2));
+        assert_eq!(index.len(), 1);
+        assert_eq!(
+            tail_checks::made() - before,
+            1,
+            "one append: the frame that holds a changeset"
+        );
     }
 
     /// A `RefMove` naming a free-form branch applies on a FORMAT 2 store, for a writer and for

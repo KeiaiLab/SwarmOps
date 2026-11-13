@@ -133,6 +133,27 @@ impl LookupHits {
     }
 }
 
+/// How many tail checks (`Index::ends_where_counted`, five `fstat`s each) the index handles of
+/// this thread made: for a test that pins what a path costs.
+#[cfg(test)]
+pub(crate) mod tail_checks {
+    use std::cell::Cell;
+
+    thread_local! {
+        static MADE: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Counts one.
+    pub(crate) fn count() {
+        MADE.with(|made| made.set(made.get() + 1));
+    }
+
+    /// The count so far.
+    pub(crate) fn made() -> u64 {
+        MADE.with(Cell::get)
+    }
+}
+
 /// What [`Index::repair_tail_with`] repaired.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct IndexRepair {
@@ -1503,8 +1524,11 @@ impl Index {
         }
     }
 
-    /// Whether the files end exactly where this handle's records do.
+    /// Whether the files end exactly where this handle's records do: five `fstat`s.
     fn ends_where_counted(&self) -> Result<bool, IoFailure> {
+        #[cfg(test)]
+        tail_checks::count();
+
         Ok(self.parents.holds(self.parents_len)?
             && self.pars.holds(self.len)?
             && self.gens.holds(self.len)?
