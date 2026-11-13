@@ -15,8 +15,8 @@
 //!   pre-receive:  all accepted ─▶ exit 0 · any refused ─▶ a line per command, exit 1: git
 //!                 drops the quarantine, every ref "pre-receive hook declined"
 //!   proc-receive: refs/land/<target> ─▶ land::apply · any other ─▶ push::apply
-//! 5 proc-receive: one report each (ok | ng <CODE>: <message>), host paths masked; a refusal's
-//!   code added to the connection's split
+//! 5 proc-receive: one report each (ok | ng <CODE>: <message> [<reason>]), host paths masked; a
+//!   refusal's code added to the connection's split
 //! ```
 //!
 //! receive-pack runs the hooks in the bare `serve.git` and hands them a relative `GIT_DIR`
@@ -67,6 +67,9 @@ const PRE_RECEIVE_REFUSED: i32 = 1;
 
 /// The line `pre-receive` gives a command it accepted, in a push it refuses.
 const REFUSED_WITH_PUSH: &str = "accepted alone; refused with the push";
+
+/// The key of an error's details that names why, as one token (`annotated_tag`).
+const DETAILS_REASON: &str = "reason";
 
 /// The refusals whose reason begins with no `<CODE>`, for the client's sake, by the reason's
 /// head (before its first `:`), and the code each stands for in the connection's record.
@@ -177,9 +180,9 @@ impl<'a> HookCtx<'a> {
 }
 
 /// Runs `pre-receive` for `who`, the caller its parent resolved, on this process's stdin: exit 0
-/// when every command is accepted; else a line on stderr per command (`<ref> <CODE>: <message>`,
-/// git's side band, which the client prints after `remote:`) and exit 1, so that git drops the
-/// push's quarantine and no object of it enters `serve.git`.
+/// when every command is accepted; else a line on stderr per command (`<ref> <CODE>: <message>
+/// [<reason>]`, git's side band, which the client prints after `remote:`) and exit 1, so that git
+/// drops the push's quarantine and no object of it enters `serve.git`.
 pub fn pre_receive(invocation: &ServeInvocation, who: &Identity) -> Result<Served, OpError> {
     // 1. Run by git, inside a push serve started: the start of the push's check.
     let start_us = records::now_us();
@@ -574,10 +577,20 @@ fn open(
     Ok((ops, access, repo))
 }
 
-/// The report that refuses `refname` with `e`: `ng <refname> <CODE>: <message>`, on one line.
+/// The report that refuses `refname` with `e`: `ng <refname> <CODE>: <message>`, on one line,
+/// ending in ` [<reason>]` when `e` has a `details.reason`, the token its envelope would give.
 pub(crate) fn ng(refname: &str, e: &OpError) -> Report {
-    let reason = format!("{}: {}", e.code, e.message).replace(['\n', '\r'], " ");
-    Report::ng(refname, reason)
+    let mut reason = format!("{}: {}", e.code, e.message);
+
+    // The token last, so that the line still begins `<CODE>: <message>`.
+    if let Some(token) = e
+        .details
+        .get(DETAILS_REASON)
+        .and_then(|token| token.as_str())
+    {
+        reason = format!("{reason} [{token}]");
+    }
+    Report::ng(refname, reason.replace(['\n', '\r'], " "))
 }
 
 /// `report`, its texts masked by `redactor`.
@@ -604,8 +617,9 @@ mod tests {
     use swarmops_api::{ErrorCode, OpError};
     use swarmops_git::serve::proc_receive::Report;
 
-    use super::{ng, redact};
+    use super::{ng, redact, refusal_code};
     use crate::serve::guard::Redactor;
+    use crate::serve::refused;
 
     /// A refusal is one `ng` line, `<CODE>: <message>`, whatever newlines its message holds,
     /// and the store's path is masked in it.
@@ -620,5 +634,26 @@ mod tests {
             report,
             Report::ng("refs/heads/x", "E_IO: <path>/git: broken second line")
         );
+    }
+
+    /// A refusal that has a `details.reason` ends in it, in brackets, after the message: the
+    /// client reads `annotated_tag` as the token the envelope would give it, and the line
+    /// still begins with its code.
+    #[test]
+    fn ng_ends_in_the_reason() {
+        let e = refused(
+            ErrorCode::InvalidArg,
+            "annotated_tag",
+            "refs/tags/v1 is an annotated tag",
+        );
+        let report = ng("refs/tags/v1", &e);
+        assert_eq!(
+            report,
+            Report::ng(
+                "refs/tags/v1",
+                "E_INVALID_ARG: refs/tags/v1 is an annotated tag [annotated_tag]"
+            )
+        );
+        assert_eq!(refusal_code(&report), Some(ErrorCode::InvalidArg));
     }
 }
