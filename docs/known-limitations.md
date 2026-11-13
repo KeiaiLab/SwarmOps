@@ -1172,6 +1172,13 @@ These do not change what SwarmOps does, only how well the tests can see it.
   `journal.off` a writer cut is tested only at the journal's level. *Target: M9 (the metadata
   read paths through `FsOps`, umbrella spec §14; the M6 design, decision D4). Found: M1.5 Task 3 review (M3); M1.5 final
   review (D5).*
+- **No test runs a streamed read out of memory.** `stream_failure` turns a zstd stream's
+  `OutOfMemory` into a failed read of the object's file, not damage, and its unit test pins that
+  mapping. No test drives `read_chunks` (`visit_payload`) into it: no hook injects an allocation
+  failure, and a custom allocator needs `unsafe`. Its piece buffer is fixed, so only zstd's own
+  allocations (the decoder's context and window) can fail there, and the zstd crate reports those
+  as `ErrorKind::Other`: the read comes back as `E_STORE_CORRUPT`, not as a failed read.
+  *Unscheduled. Found: issue #4 item 14.*
 - **Golden envelopes cover 56 of the 56 error codes.** `error_codes_reach_the_cli` pins the envelope
   of 43, the nine workspace codes (M5), `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` (M15),
   `E_FORMAT_REQUIRED` (M6), `E_AUTH` and `E_POLICY_DENIED` (M14) and `E_REF_NOT_FOUND` (`ref log`
