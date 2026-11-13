@@ -1516,7 +1516,10 @@ pub(crate) fn dirty(mut paths: Vec<String>) -> OpError {
 /// not open, or `path` (the M16 design §1).
 pub(crate) fn host_failed(path: &str, e: &io::Error) -> OpError {
     // 1. A directory or file replaced during the write: the agent's change, in the way. An
-    //    update's intent stays, so every command refuses until it is moved aside.
+    //    update's intent stays, so every command that opens the workspace refuses until it is
+    //    moved aside, `ws status` and `ws discard` among them: kept so on purpose (the known
+    //    limitation "A write refused at a swapped link blocks the workspace"), since a command
+    //    that ran past the intent would read files of two changesets.
     if let Some(swapped) = hostfs::swapped_path(e) {
         let hint = format!(
             "move {swapped} aside: it changed while a write went through it; then run the \
@@ -1525,10 +1528,31 @@ pub(crate) fn host_failed(path: &str, e: &io::Error) -> OpError {
         return dirty(vec![swapped.to_owned()]).with_hint(hint);
     }
 
-    // 2. Else the directory that would not open, or the path itself.
-    let path = hostfs::unopened_dir(e).unwrap_or(path);
-    OpError::new(ErrorCode::Io, format!("{path}: {e}"))
+    // 2. Else the directory that would not open, which its error names already, or the path
+    //    itself.
+    let (path, message) = match hostfs::unopened_dir(e) {
+        Some(dir) => (dir, e.to_string()),
+        None => (path, format!("{path}: {e}")),
+    };
+    OpError::new(ErrorCode::Io, message)
         .with_details(Map::from_iter([("path".to_owned(), Value::from(path))]))
+}
+
+/// The path that names the workspace's own directory in an error.
+const ROOT_SHOWN: &str = ".";
+
+/// The error of a host call that removes the workspace's own directory from its parent and
+/// failed with `e`: as [`host_failed`] of `path`, but a swap is `E_WS_DIRTY` naming the
+/// workspace's directory itself. The call names that directory by its name in the parent,
+/// which in an error would read as a path below the workspace.
+pub(crate) fn root_failed(path: &str, e: &io::Error) -> OpError {
+    if hostfs::swapped_path(e).is_none() {
+        return host_failed(path, e);
+    }
+    dirty(vec![ROOT_SHOWN.to_owned()]).with_hint(
+        "move the workspace's directory aside: it changed while it was removed; then run the \
+         command again",
+    )
 }
 
 /// `n` as a u64.
@@ -1564,6 +1588,7 @@ mod tests {
         assert_eq!(failed.code, ErrorCode::Io.as_str());
         assert_eq!(path_of(&failed), Some("a/b"));
         assert!(failed.message.starts_with("a/b: "), "{}", failed.message);
+        assert_eq!(failed.message.matches("a/b").count(), 1, "named once");
 
         // 3. A removal of the missing `a/c`, every directory opened: the path itself.
         let e = RealHost.remove_file(root, "a/c").unwrap_err();

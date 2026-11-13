@@ -192,7 +192,12 @@ fn remove_all(host: &dyn HostFs, root: &Utf8Path, rel: &str) -> Result<(), OpErr
 fn remove_root(host: &dyn HostFs, dir: &Utf8Path) -> Result<(), OpError> {
     let (parent, name) =
         hostfs::split_root(dir).map_err(|e| materialize::host_failed(dir.as_str(), &e))?;
-    remove_dir(host, parent, name)
+    match host.remove_dir_if_empty(parent, name) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(written_to(dir)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(materialize::root_failed(dir.as_str(), &e)),
+    }
 }
 
 /// `rel` below `root`, the root itself for [`ROOT`].
@@ -210,13 +215,18 @@ fn remove_dir(host: &dyn HostFs, root: &Utf8Path, rel: &str) -> Result<(), OpErr
     let path = full(root, rel);
     match host.remove_dir_if_empty(root, rel) {
         Ok(true) => Ok(()),
-        Ok(false) => Err(OpError::new(
-            ErrorCode::Io,
-            format!("{path} was written to while it was deleted"),
-        )),
+        Ok(false) => Err(written_to(&path)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(materialize::host_failed(path.as_str(), &e)),
     }
+}
+
+/// `E_IO` for the directory at `path`, emptied before, that holds something again.
+fn written_to(path: &Utf8Path) -> OpError {
+    OpError::new(
+        ErrorCode::Io,
+        format!("{path} was written to while it was deleted"),
+    )
 }
 
 /// `E_WS_DIRTY` for workspace `name`, whose `head` holds commits past its `base` that were not
@@ -239,4 +249,29 @@ fn unlanded(name: &str, head: &str, base: &str) -> OpError {
 /// `name` in `.swarmws/`, as errors name it.
 fn shown(name: &str) -> String {
     format!("{SWARMWS_DIR}/{name}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file put where the workspace's directory was, once the delete emptied it, is named as
+    /// the workspace's own directory, never by its name in the parent, which would read as a
+    /// path below it.
+    #[test]
+    #[cfg(unix)]
+    fn a_swapped_directory_is_named_as_the_root() {
+        use crate::hostfs::RealHost;
+
+        // 1. A file where the workspace's directory was.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Utf8Path::from_path(tmp.path()).unwrap().join("w");
+        std::fs::write(&dir, "in the way").unwrap();
+
+        // 2. Its removal: refused, naming the root.
+        let refused = remove_root(&RealHost, &dir).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::WsDirty.as_str());
+        assert_eq!(refused.details["paths"], serde_json::json!(["."]));
+        assert!(dir.is_file(), "the file is left as it was");
+    }
 }

@@ -228,9 +228,7 @@ fn undo(
             .map_err(|e| materialize::host_failed(SWARMWS_DIR, &e))?;
     }
     if made_dir {
-        let (parent, name) =
-            hostfs::split_root(dir).map_err(|e| materialize::host_failed(".", &e))?;
-        (host.remove_dir_if_empty(parent, name)).map_err(|e| materialize::host_failed(".", &e))?;
+        remove_made(host, dir)?;
     }
 
     // 2. The entry, if this create made it.
@@ -240,10 +238,42 @@ fn undo(
     Ok(())
 }
 
+/// Removes the directory `dir` a create made, if empty, from its parent.
+fn remove_made(host: &dyn HostFs, dir: &Utf8Path) -> Result<(), OpError> {
+    let (parent, name) = hostfs::split_root(dir).map_err(|e| materialize::host_failed(".", &e))?;
+    (host.remove_dir_if_empty(parent, name))
+        .map(drop)
+        .map_err(|e| materialize::root_failed(".", &e))
+}
+
 /// The time now, in Unix milliseconds.
 fn now_ms() -> u64 {
     let since = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file put where the directory a create made was is named as the workspace's own
+    /// directory, never by its name in the parent, which would read as a path below it.
+    #[test]
+    #[cfg(unix)]
+    fn a_swapped_directory_is_named_as_the_root() {
+        use crate::hostfs::RealHost;
+
+        // 1. A file where the workspace's directory was.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Utf8Path::from_path(tmp.path()).unwrap().join("w");
+        std::fs::write(&dir, "in the way").unwrap();
+
+        // 2. Its removal: refused, naming the root.
+        let refused = remove_made(&RealHost, &dir).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::WsDirty.as_str());
+        assert_eq!(refused.details["paths"], serde_json::json!(["."]));
+        assert!(dir.is_file(), "the file is left as it was");
+    }
 }
