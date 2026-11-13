@@ -406,6 +406,7 @@ impl MetaStore {
         let fs = StoreFs::new(fs, &dir);
         let meta = layout.meta_dir();
         if std::fs::exists(&meta).map_err(|e| fs.locate(FileOp::Stat, &meta, e))? {
+            let meta = in_store(&fs, &meta);
             return Err(StoreError::Format(format!("{meta} exists already")));
         }
         let staging = dir.join(STAGING);
@@ -456,6 +457,7 @@ impl MetaStore {
     fn open_on(layout: Layout, fs: StoreFs) -> Result<MetaStore, StoreError> {
         let log = layout.journal_log();
         if !std::fs::exists(&log).map_err(|e| fs.locate(FileOp::Stat, &log, e))? {
+            let log = in_store(&fs, &log);
             return Err(StoreError::Format(format!(
                 "{log} is missing: no metadata store here"
             )));
@@ -1905,6 +1907,13 @@ fn entries(frame: &Frame) -> impl Iterator<Item = JournalEntry> + '_ {
     })
 }
 
+/// `path`, a file or a directory of the store `fs` is rooted at, as an error's text names it:
+/// relative to the root, never by the host's path.
+fn in_store(fs: &StoreFs, path: &Utf8Path) -> String {
+    crate::fs_ops::store_relative(fs.root(), path.as_std_path())
+        .map_or_else(|| "a file of the store".to_owned(), String::from)
+}
+
 /// What a snapshot's lookup by id prefix or by delta hash found
 /// ([`MetaRead::resolve_prefix_hits`], [`MetaRead::by_delta_hash_hits`]): the changesets, and
 /// whether more match than it lists.
@@ -1939,6 +1948,28 @@ mod tests {
     use super::*;
     use crate::fs_ops::{FailAt, FailAtFs, FailMode, FsMethod, InjectedError};
     use crate::meta::MAX_LOOKUP_HITS;
+
+    /// An open that finds `meta/` without its journal, as a create over a `meta/` that someone
+    /// emptied does, and a create that finds `meta/` there, are refused by the name of the
+    /// file in the store: neither text holds the host's path to it.
+    #[test]
+    fn a_refused_open_or_create_names_no_host_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        fs::create_dir(root.join("meta")).unwrap();
+
+        let Err(StoreError::Format(missing)) = MetaStore::open(root) else {
+            panic!("meta/ holds no journal");
+        };
+        assert_eq!(
+            missing,
+            "meta/journal.log is missing: no metadata store here"
+        );
+        let Err(StoreError::Format(exists)) = MetaStore::create(root) else {
+            panic!("meta/ is there");
+        };
+        assert_eq!(exists, "meta exists already");
+    }
 
     /// A snapshot's lookups by id prefix and by delta hash say when the index cut its answer:
     /// of 4,097 changesets that share a delta hash and an id prefix, each lookup gives the first
