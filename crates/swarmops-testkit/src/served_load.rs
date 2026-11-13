@@ -17,6 +17,8 @@
 //! - [`GitClient`]: one client in a clone of its own, through a [`Server`]; [`GitClient::run`]
 //!   is its open loop.
 //! - [`first_attempt`]: the share of commands that succeeded at their first attempt (G21).
+//! - [`outcome_counts`]: the attempts counted record by record, each record held to the shape a
+//!   command's reruns give it: the count a run's summary is checked against.
 //!
 //! The records are [`LandRecord`]s, so that [`Stats`](crate::landing::Stats) and its windows
 //! count them as they count lands: `id` is the commit a push acknowledged (`ok` for a fetch),
@@ -126,6 +128,74 @@ pub fn first_attempt(records: &[Vec<LandRecord>]) -> f64 {
         .filter(|record| record.outcomes.first() == Some(&Outcome::Success))
         .count();
     count(first) / count(all.len())
+}
+
+/// What a run's commands came to, counted record by record ([`outcome_counts`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// The commands: one per record.
+    pub commands: u64,
+    /// The commands that succeeded.
+    pub succeeded: u64,
+    /// The attempts that ended retryable.
+    pub retryable: u64,
+    /// The attempts that ended in another failure.
+    pub other: u64,
+}
+
+/// `records`' commands and attempts ([`Counts`]), each record held to the shape its command's
+/// reruns give it; the error names the first record that has another, by client and command.
+///
+/// ```text
+/// [Success]                       id set     one command, succeeded
+/// [Retryable, Retryable, Success] id set     the same, two attempts retryable
+/// [Retryable × (LAND_RERUNS + 1)] no id      given up: one command, none succeeded
+/// [Other]                         no id      one other failure
+/// ```
+///
+/// - at least one attempt, at most [`LAND_RERUNS`] reruns after the first;
+/// - only a retryable attempt is followed by another;
+/// - the record names what it succeeded with (`id`) exactly when its last attempt succeeded.
+pub fn outcome_counts(records: &[Vec<LandRecord>]) -> Result<Counts, String> {
+    let most = usize::try_from(LAND_RERUNS).map_or(usize::MAX, |reruns| reruns.saturating_add(1));
+    let mut counts = Counts::default();
+    for (client, commands) in records.iter().enumerate() {
+        for (n, record) in commands.iter().enumerate() {
+            let broken = |rule: &str| {
+                let outcomes = &record.outcomes;
+                format!("{rule}: client {client}'s command {n} has {outcomes:?}")
+            };
+
+            // 1. The attempts' shape.
+            let Some((last, earlier)) = record.outcomes.split_last() else {
+                return Err(broken("no attempt"));
+            };
+            if record.outcomes.len() > most {
+                return Err(broken("too many attempts"));
+            }
+            let reran = |outcome: &Outcome| matches!(outcome, Outcome::Retryable { .. });
+            if !earlier.iter().all(reran) {
+                return Err(broken("an attempt after the command's end"));
+            }
+            let succeeded = *last == Outcome::Success;
+            if succeeded != record.id.is_some() {
+                let id = &record.id;
+                return Err(broken(&format!("its id {id:?} against its last attempt")));
+            }
+
+            // 2. Its counts.
+            counts.commands += 1;
+            counts.succeeded += u64::from(succeeded);
+            let retryable = record
+                .outcomes
+                .iter()
+                .filter(|outcome| reran(outcome))
+                .count();
+            counts.retryable += u64::try_from(retryable).unwrap_or(u64::MAX);
+            counts.other += u64::from(*last == Outcome::Other);
+        }
+    }
+    Ok(counts)
 }
 
 /// A count as a float, exact far past any count of commands here.
@@ -307,8 +377,8 @@ mod tests {
     use std::os::unix::process::ExitStatusExt as _;
     use std::process::{ExitStatus, Output};
 
-    use super::outcome_of;
-    use crate::landing::Outcome;
+    use super::{Counts, first_attempt, outcome_counts, outcome_of};
+    use crate::landing::{LAND_RERUNS, LandRecord, Outcome};
 
     /// A git run that exited with `code` and wrote `stderr`.
     fn ran(code: i32, stderr: &str) -> Output {
@@ -316,6 +386,108 @@ mod tests {
             status: ExitStatus::from_raw(code << 8),
             stdout: Vec::new(),
             stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    /// A retryable refusal.
+    fn refused() -> Outcome {
+        Outcome::Retryable {
+            code: "E_BUSY".to_owned(),
+            hint: Some("connect again".to_owned()),
+        }
+    }
+
+    /// A command's record: `outcomes` in order, its `id` set when the last one succeeded.
+    fn command(outcomes: &[Outcome]) -> LandRecord {
+        let succeeded = outcomes.last() == Some(&Outcome::Success);
+        LandRecord {
+            id: succeeded.then(|| "ok".to_owned()),
+            outcomes: outcomes.to_vec(),
+            ..LandRecord::default()
+        }
+    }
+
+    /// Two clients' commands: two that succeeded at once, one after a refusal, one that ended
+    /// in another failure after one, one given up after every rerun.
+    fn two_clients() -> Vec<Vec<LandRecord>> {
+        let given_up: Vec<Outcome> = (0..=LAND_RERUNS).map(|_| refused()).collect();
+        vec![
+            vec![
+                command(&[Outcome::Success]),
+                command(&[refused(), Outcome::Success]),
+                command(&given_up),
+            ],
+            vec![
+                command(&[Outcome::Success]),
+                command(&[refused(), Outcome::Other]),
+            ],
+        ]
+    }
+
+    /// G21's share counts a command once, by its first attempt alone, over every client: two of
+    /// five here, though three succeeded in the end; no command at all reads 1.
+    #[test]
+    fn the_first_attempt_share_counts_first_attempts_only() {
+        let share = first_attempt(&two_clients());
+        assert!((share - 0.4).abs() < 1e-12, "{share}");
+
+        let none = first_attempt(&[Vec::new(), Vec::new()]);
+        assert!((none - 1.0).abs() < 1e-12, "{none}");
+        let refused_first = first_attempt(&[vec![command(&[refused(), Outcome::Success])]]);
+        assert!(refused_first.abs() < 1e-12, "{refused_first}");
+    }
+
+    /// The counts are the commands' own: five commands, three succeeded, eleven attempts
+    /// retryable (1 + 9 + 1), one other failure.
+    #[test]
+    fn outcomes_are_counted_record_by_record() {
+        let counts = outcome_counts(&two_clients()).expect("well-formed records");
+        let reruns = u64::from(LAND_RERUNS);
+        assert_eq!(
+            counts,
+            Counts {
+                commands: 5,
+                succeeded: 3,
+                retryable: reruns + 3,
+                other: 1,
+            }
+        );
+        assert_eq!(outcome_counts(&[]), Ok(Counts::default()));
+    }
+
+    /// A record that no command's reruns give is refused by its rule, naming the client and the
+    /// command: no attempt, one rerun too many, an attempt after a success or another failure,
+    /// an id without a last success, a last success without an id.
+    #[test]
+    fn a_record_no_command_gives_is_refused() {
+        let too_many: Vec<Outcome> = (0..LAND_RERUNS + 2).map(|_| refused()).collect();
+        let named = LandRecord {
+            id: Some("ok".to_owned()),
+            ..command(&[refused()])
+        };
+        let unnamed = LandRecord {
+            id: None,
+            ..command(&[Outcome::Success])
+        };
+        let cases = [
+            (command(&[]), "no attempt: "),
+            (command(&too_many), "too many attempts: "),
+            (
+                command(&[Outcome::Success, Outcome::Success]),
+                "an attempt after the command's end: ",
+            ),
+            (
+                command(&[Outcome::Other, Outcome::Success]),
+                "an attempt after the command's end: ",
+            ),
+            (named, "its id Some(\"ok\") against its last attempt: "),
+            (unnamed, "its id None against its last attempt: "),
+        ];
+        for (record, rule) in cases {
+            let records = vec![vec![command(&[Outcome::Success])], vec![record]];
+            let refusal = outcome_counts(&records).expect_err(rule);
+            assert!(refusal.starts_with(rule), "{refusal}");
+            assert!(refusal.contains("client 1's command 0 has ["), "{refusal}");
         }
     }
 
