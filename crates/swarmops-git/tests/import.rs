@@ -1855,39 +1855,37 @@ fn two_imports_racing_end_at_the_same_head() {
     assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
-/// What the import does not read is refused: a SHA-256 repository and a shallow clone when the
-/// source opens, a partial clone's missing blob and a damaged object when the conversion reads
-/// them, before the frame that would hold their commit. Here that frame is the first, so nothing
-/// is written: the store stays as `init` left it.
+/// What the import does not read is refused: a SHA-256 repository, a shallow clone and a partial
+/// clone when the source opens, a damaged object when the conversion reads it, before the frame
+/// that would hold its commit. Here that frame is the first, so nothing is written: the store
+/// stays as `init` left it.
 #[test]
 fn the_unsupported_fixtures_are_refused_before_writing() {
     for (name, unsupported) in [
         ("sha256", Unsupported::ObjectFormat("sha256".to_owned())),
         ("shallow", Unsupported::Shallow),
+        (
+            "partial_clone",
+            Unsupported::PartialClone("origin".to_owned()),
+        ),
     ] {
         let fixture = git::fixture(name);
         let repo = fixture.repo.as_deref().expect("a repository");
         let refused = GixSource::open(repo).map(|_| ()).unwrap_err();
         assert_eq!(refused, SourceError::Unsupported(unsupported), "{name}");
     }
-    for name in ["partial_clone", "corrupt_object"] {
-        let fixture = git::fixture(name);
-        let (_dir, root, repo) = new_repo();
-        let before = files(&root);
-        let error = import(&repo, &open(&fixture), &request("HEAD")).unwrap_err();
-        let unread = match name {
-            "partial_clone" => matches!(
-                error,
-                ImportError::Convert(ConvertError::Source(SourceError::Missing { .. }))
-            ),
-            _ => matches!(
-                error,
-                ImportError::Convert(ConvertError::Source(SourceError::Corrupt { .. }))
-            ),
-        };
-        assert!(unread, "{name}: {error:?}");
-        assert_eq!(files(&root), before, "{name}: the store as init left it");
-    }
+    let fixture = git::fixture("corrupt_object");
+    let (_dir, root, repo) = new_repo();
+    let before = files(&root);
+    let error = import(&repo, &open(&fixture), &request("HEAD")).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ImportError::Convert(ConvertError::Source(SourceError::Corrupt { .. }))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(files(&root), before, "the store as init left it");
 }
 
 /// A source of another object format than SHA-1 is refused before it is read, whatever its

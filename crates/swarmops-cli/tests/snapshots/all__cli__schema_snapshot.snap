@@ -3212,12 +3212,12 @@ expression: s.redact(&all)
         },
         {
           "const": "E_GIT_UNSUPPORTED",
-          "description": "`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow\nclone, a FIFO, a socket or a device where it reads a file of the git directory, a file it\nreads whole there that is longer than 16 MiB, a commit of more than 255 distinct parents\n(a parent listed twice counts once), or an\nentry whose mode is no kind of entry; `details.reason` says which (`object_format`,\n`ref_storage`, `shallow`, `special_file`, `file_too_long`, `parents`, `mode`),\n`details.file` names the file of `special_file` and `file_too_long` by its path in the git\ndirectory (`details.size` and `details.max` give the long one's length and the limit), and\n`details.commit` names the commit of `parents` and `mode`.",
+          "description": "`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow\nclone, a partial clone, an extension it does not know, a FIFO, a socket or a device where\nit reads a file of the git directory, a file it reads whole there that is longer than\n16 MiB, a commit of more than 255 distinct parents (a parent listed twice counts once), or\nan entry whose mode is no kind of entry; `details.reason` says which (`object_format`,\n`ref_storage`, `shallow`, `partial_clone`, `extension`, `special_file`, `file_too_long`,\n`parents`, `mode`), `details.remote` names the promisor remote of `partial_clone` and\n`details.extension` the extension, `details.file` names the file of `special_file` and\n`file_too_long` by its path in the git directory (`details.size` and `details.max` give the\nlong one's length and the limit), and `details.commit` names the commit of `parents` and\n`mode`.",
           "type": "string"
         },
         {
           "const": "E_GIT_READ",
-          "description": "`git import` could not read the source: an object is missing (as in a partial clone),\ndoes not hash to its id or does not parse, or the filesystem refused a read\n(`details.reason`; `details.object` names the object when there is one).",
+          "description": "`git import` could not read the source: an object is missing, does not hash to its id or\ndoes not parse, or the filesystem refused a read\n(`details.reason`; `details.object` names the object when there is one).",
           "type": "string"
         },
         {
@@ -11088,12 +11088,12 @@ expression: s.redact(&all)
             },
             {
               "const": "E_GIT_UNSUPPORTED",
-              "description": "`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow\nclone, a FIFO, a socket or a device where it reads a file of the git directory, a file it\nreads whole there that is longer than 16 MiB, a commit of more than 255 distinct parents\n(a parent listed twice counts once), or an\nentry whose mode is no kind of entry; `details.reason` says which (`object_format`,\n`ref_storage`, `shallow`, `special_file`, `file_too_long`, `parents`, `mode`),\n`details.file` names the file of `special_file` and `file_too_long` by its path in the git\ndirectory (`details.size` and `details.max` give the long one's length and the limit), and\n`details.commit` names the commit of `parents` and `mode`.",
+              "description": "`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow\nclone, a partial clone, an extension it does not know, a FIFO, a socket or a device where\nit reads a file of the git directory, a file it reads whole there that is longer than\n16 MiB, a commit of more than 255 distinct parents (a parent listed twice counts once), or\nan entry whose mode is no kind of entry; `details.reason` says which (`object_format`,\n`ref_storage`, `shallow`, `partial_clone`, `extension`, `special_file`, `file_too_long`,\n`parents`, `mode`), `details.remote` names the promisor remote of `partial_clone` and\n`details.extension` the extension, `details.file` names the file of `special_file` and\n`file_too_long` by its path in the git directory (`details.size` and `details.max` give the\nlong one's length and the limit), and `details.commit` names the commit of `parents` and\n`mode`.",
               "type": "string"
             },
             {
               "const": "E_GIT_READ",
-              "description": "`git import` could not read the source: an object is missing (as in a partial clone),\ndoes not hash to its id or does not parse, or the filesystem refused a read\n(`details.reason`; `details.object` names the object when there is one).",
+              "description": "`git import` could not read the source: an object is missing, does not hash to its id or\ndoes not parse, or the filesystem refused a read\n(`details.reason`; `details.object` names the object when there is one).",
               "type": "string"
             },
             {

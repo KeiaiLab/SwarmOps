@@ -2293,10 +2293,15 @@ fn git_error_cases(
             import(&[&gitlinks, "--into", "release/gitlinks"]),
         ),
         ("E_GIT_UNSUPPORTED", import(&[&repo("shallow")])),
-        // A partial clone lacks every blob.
+        // A partial clone is refused as it opens.
+        (
+            "E_GIT_UNSUPPORTED",
+            import(&[&repo("partial_clone"), "--into", "release/partial"]),
+        ),
+        // Its second commit's blob is damaged.
         (
             "E_GIT_READ",
-            import(&[&repo("partial_clone"), "--into", "release/partial"]),
+            import(&[&repo("corrupt_object"), "--into", "release/corrupt"]),
         ),
     ]
 }
@@ -2332,8 +2337,18 @@ fn git_export_error_cases(
 
 /// The git fixtures that the failing `git import`s and `git export`s of
 /// [`error_codes_reach_the_cli`] read, each named after itself in `s`'s transcript.
-fn git_fixtures(s: &mut Session) -> [(&'static str, swarmops_testkit::git::GitFixture); 4] {
-    ["refs", "gitlinks", "shallow", "partial_clone"].map(|name| {
+fn git_fixtures(s: &mut Session) -> [(&'static str, swarmops_testkit::git::GitFixture); 5] {
+    // corrupt_object's damaged blob, named so that the ids after it keep their numbers.
+    let damaged = swarmops_git::git_hash(swarmops_git::RawKind::Blob, b"damaged\n");
+    s.name(&damaged.to_string(), "damaged");
+    [
+        "refs",
+        "gitlinks",
+        "shallow",
+        "partial_clone",
+        "corrupt_object",
+    ]
+    .map(|name| {
         let fixture = swarmops_testkit::git::fixture(name);
         s.name(fixture.dir.to_str().expect("UTF-8 temp paths"), name);
         (name, fixture)

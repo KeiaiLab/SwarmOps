@@ -44,10 +44,10 @@ fn gix_source_reads_every_fixture_object_by_its_oid() {
             continue;
         };
         // What the source refuses when it opens it (`gix_source_refuses_what_it_does_not_read`,
-        // `a_reftable_repository_is_unsupported`): another object format, a shallow clone, and
-        // refs git keeps in a reftable (its `reftable/` directory), which only a git of 2.45 or
-        // newer makes.
-        if manifest.object_format != "sha1" || manifest.shallow || repo.join("reftable").is_dir() {
+        // `a_reftable_repository_is_unsupported`): another object format, a shallow or a partial
+        // clone, and refs git keeps in a reftable (its `reftable/` directory), which only a git
+        // of 2.45 or newer makes.
+        if !readable(&name, manifest, repo) {
             continue;
         }
         let source = GixSource::open(repo).unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -201,7 +201,12 @@ fn a_loose_object_written_by_the_test_kit_reads_back() {
 #[test]
 fn gix_source_refuses_what_it_does_not_read() {
     // (the repository's `config`, what opening it gives)
-    let configs: [(&str, Result<(), SourceError>); 4] = [
+    let partial = || {
+        Err(SourceError::Unsupported(Unsupported::PartialClone(
+            "origin".to_owned(),
+        )))
+    };
+    let configs: [(&str, Result<(), SourceError>); 6] = [
         (
             "[core]\n\trepositoryformatversion = 1\n\tbare = true\n\
              [extensions]\n\tobjectFormat = sha256\n",
@@ -216,17 +221,33 @@ fn gix_source_refuses_what_it_does_not_read() {
                 "reftable".to_owned(),
             ))),
         ),
-        // The files of `refs/` and `packed-refs` are what gix reads; naming them changes nothing.
+        // The files of `refs/` and `packed-refs` are what gix reads; naming them changes nothing,
+        // nor do the extensions that change no read, nor a remote that is no promisor.
         (
             "[core]\n\trepositoryformatversion = 1\n\tbare = true\n\
-             [extensions]\n\trefStorage = files\n\tobjectFormat = sha1\n",
+             [extensions]\n\trefStorage = files\n\tobjectFormat = sha1\n\
+             \tworktreeConfig = true\n\tpreciousObjects = true\n\tnoop = true\n\
+             [remote \"origin\"]\n\tpromisor = false\n",
             Ok(()),
         ),
-        // A partial clone's repository opens; its missing objects are `Missing` when read.
+        // A partial clone, by its extension or by its promisor remote, as git writes it.
         (
             "[core]\n\trepositoryformatversion = 1\n\tbare = true\n\
              [extensions]\n\tpartialclone = origin\n",
-            Ok(()),
+            partial(),
+        ),
+        (
+            "[core]\n\trepositoryformatversion = 1\n\tbare = true\n\
+             [remote \"origin\"]\n\tpromisor = true\n\tpartialclonefilter = blob:none\n",
+            partial(),
+        ),
+        // An extension git knows of no reader for, as git itself refuses one.
+        (
+            "[core]\n\trepositoryformatversion = 1\n\tbare = true\n\
+             [extensions]\n\tfrobnicate = true\n",
+            Err(SourceError::Unsupported(Unsupported::Extension(
+                "frobnicate".to_owned(),
+            ))),
         ),
     ];
     for (config, expected) in configs {
@@ -238,6 +259,19 @@ fn gix_source_refuses_what_it_does_not_read() {
             "{config}"
         );
     }
+
+    // A promisor remote in `config.worktree`, which gix reads past the open (with
+    // `extensions.worktreeConfig`) and the check before it does not: refused after the open.
+    let fixture = git::fixture("linear");
+    fs::write(
+        repo(&fixture).join("config"),
+        "[core]\n\trepositoryformatversion = 1\n\tbare = true\n\
+         [extensions]\n\tworktreeConfig = true\n",
+    )
+    .unwrap();
+    let worktree = "[remote \"origin\"]\n\tpromisor = true\n";
+    fs::write(repo(&fixture).join("config.worktree"), worktree).unwrap();
+    assert_eq!(GixSource::open(repo(&fixture)).map(|_| ()), partial());
 
     // A shallow clone: a `shallow` file naming the commits whose parents it lacks.
     let fixture = git::fixture("linear");
@@ -327,10 +361,14 @@ fn an_object_the_repository_lacks_is_missing() {
 fn the_real_unsupported_fixtures_are_refused() {
     use swarmops_git::RawTree;
 
-    // Refused as they open: a SHA-256 repository, and a shallow clone git made.
+    // Refused as they open: a SHA-256 repository, and a shallow and a partial clone git made.
     for (name, refused) in [
         ("sha256", Unsupported::ObjectFormat("sha256".to_owned())),
         ("shallow", Unsupported::Shallow),
+        (
+            "partial_clone",
+            Unsupported::PartialClone("origin".to_owned()),
+        ),
     ] {
         let fixture = git::fixture(name);
         assert_eq!(
@@ -340,25 +378,12 @@ fn the_real_unsupported_fixtures_are_refused() {
         );
     }
 
-    // A partial clone opens, and lacks every blob its trees name.
+    // `git cat-file`'s source refuses the partial clone as gix's does.
     let partial = git::fixture("partial_clone");
-    let (source, held) = (open(&partial), manifest(&partial));
-    let mut lacked = std::collections::BTreeSet::new();
-    for bytes in held.trees.values() {
-        for entry in RawTree::parse(bytes).unwrap().entries {
-            if entry.mode == b"100644" {
-                assert!(!held.blobs.contains_key(&entry.oid.to_string()));
-                let missing = SourceError::Missing { oid: entry.oid };
-                assert_eq!(source.read(entry.oid), Err(missing.clone()));
-                assert_eq!(source.header(entry.oid), Err(missing));
-                lacked.insert(entry.oid);
-            }
-        }
-    }
+    let refused = Unsupported::PartialClone("origin".to_owned());
     assert_eq!(
-        lacked.len(),
-        3,
-        "the blobs of dir/1.txt, dir/2.txt and dir/3.txt"
+        CatFileSource::open(repo(&partial)).map(|_| ()),
+        Err(SourceError::Unsupported(refused))
     );
 
     // A loose blob whose file holds another blob is damaged, once read.
@@ -375,23 +400,29 @@ fn the_real_unsupported_fixtures_are_refused() {
     );
 }
 
-/// The fixtures both sources read: SHA-1, not shallow, refs kept as files.
-fn readable(manifest: &Manifest, repo: &Path) -> bool {
-    manifest.object_format == "sha1" && !manifest.shallow && !repo.join("reftable").is_dir()
+/// The fixtures both sources read: SHA-1, not shallow, no partial clone, refs kept as files.
+fn readable(name: &str, manifest: &Manifest, repo: &Path) -> bool {
+    manifest.object_format == "sha1"
+        && !manifest.shallow
+        && name != PARTIAL_CLONE
+        && !repo.join("reftable").is_dir()
 }
+
+/// The fixture of a partial clone, which gix refuses as it opens.
+const PARTIAL_CLONE: &str = "partial_clone";
 
 /// Every object of every fixture both sources read reads the same through `git cat-file` as
 /// through gix: its header and its bytes, or the same refusal (`corrupt_object`'s); `HEAD`
-/// resolves alike; an absent id is missing from both, and no blob a partial clone lacks is read.
+/// resolves alike; an absent id is missing from both.
 #[test]
 fn cat_file_source_reads_what_gix_reads() {
-    let (mut read, mut lacked) = (0, 0);
+    let mut read = 0;
     for name in git::names() {
         let fixture = git::fixture(&name);
         let (Some(repo), Some(manifest)) = (&fixture.repo, &fixture.manifest) else {
             continue;
         };
-        if !readable(manifest, repo) {
+        if !readable(&name, manifest, repo) {
             continue;
         }
         let gix = GixSource::open(repo).unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -415,28 +446,7 @@ fn cat_file_source_reads_what_gix_reads() {
         let missing = SourceError::Missing { oid: absent };
         assert_eq!(cat.header(absent), Err(missing.clone()), "{name}");
         assert_eq!(cat.read(absent), Err(missing), "{name}");
-
-        // 3. The blobs a partial clone lacks: never read, never fetched (missing with git 2.45
-        //    or newer; an older git ends on the first, the promisor remote out of reach).
-        for bytes in manifest.trees.values() {
-            let entries = swarmops_git::RawTree::parse(bytes).unwrap().entries;
-            for entry in entries.iter().filter(|entry| entry.mode == b"100644") {
-                if manifest.blobs.contains_key(&entry.oid.to_string()) {
-                    continue;
-                }
-                let got = cat.header(entry.oid);
-                let refused = matches!(
-                    got,
-                    Err(SourceError::Missing { .. }
-                        | SourceError::Corrupt { .. }
-                        | SourceError::Io { .. })
-                );
-                assert!(refused, "{name}: {}: {got:?}", entry.oid);
-                lacked += 1;
-            }
-        }
     }
-    assert!(lacked > 0, "no partial clone's blob was looked for");
     assert!(read > 0, "no fixture object was read");
 }
 

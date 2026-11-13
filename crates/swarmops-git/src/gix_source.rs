@@ -20,8 +20,9 @@ use crate::{GitOid, GitSource, ObjectFormat, RawKind, RawTag, SourceError, Unsup
 /// no global or system configuration, no `GIT_*` variable. It refuses, before any read, a
 /// repository whose objects are named by another hash than SHA-1 (`extensions.objectFormat`),
 /// one whose refs are kept otherwise than as files (`extensions.refStorage`: gix-ref 0.69 reads no
-/// reftable, and would see no refs), a shallow clone, one where a file gix reads in the git
-/// directory is a FIFO, a socket or a device ([`Unsupported::SpecialFile`]), and one where a file
+/// reftable, and would see no refs), a shallow clone, a partial clone
+/// ([`Unsupported::PartialClone`]), one that needs an extension it does not know
+/// ([`Unsupported::Extension`]), one where a file gix reads in the git directory is a FIFO, a socket or a device ([`Unsupported::SpecialFile`]), and one where a file
 /// gix reads whole there, a ref among them, is longer than 16 MiB
 /// ([`Unsupported::FileTooLong`]). Replacement objects never apply, and gix's revision syntax is
 /// not built in (its `revision` feature is off). Every object [`read`] returns is checked against
@@ -188,8 +189,8 @@ impl GitSource for GixSource {
 /// system configuration and no `GIT_*` variable, and replacement objects never applied. It
 /// refuses, before any read, a repository where a file gix reads in the git directory is a FIFO,
 /// a socket or a device, or one it reads whole longer than 16 MiB ([`GitDir`]), one whose objects
-/// are named by another hash than SHA-1, one whose refs are kept otherwise than as files, and a
-/// shallow clone. [`GixSource::open`] and [`GixSink::open`](crate::GixSink::open) both open
+/// are named by another hash than SHA-1, one whose refs are kept otherwise than as files, a
+/// partial clone, one that needs an extension it does not know, and a shallow clone. [`GixSource::open`] and [`GixSink::open`](crate::GixSink::open) both open
 /// through it, so that the export writes only repositories the import reads.
 pub(crate) fn open_repository(path: &Path) -> Result<gix::Repository, SourceError> {
     if let Some(git_dir) = GitDir::find(path)? {
@@ -209,6 +210,7 @@ pub(crate) fn open_repository(path: &Path) -> Result<gix::Repository, SourceErro
     // other way round, `false` loading `refs/replace/`): the object handle is told to ignore them;
     // `read`'s hash check would see one regardless.
     repo.objects.ignore_replacements = true;
+    // gix's configuration holds `config.worktree` too, which the check above does not read.
     refuse_extensions(repo.config_snapshot().plumbing())?;
     if repo.is_shallow().map_err(|error| io(&error))? {
         return Err(SourceError::Unsupported(Unsupported::Shallow));
@@ -557,8 +559,23 @@ fn is_pseudo_ref(name: &OsStr) -> bool {
     })
 }
 
-/// Refuses a configuration whose objects are named by another hash than SHA-1, or whose refs are
-/// kept otherwise than as files (`extensions.refStorage = files` is the default, written out).
+/// The extensions, lowercase as git compares them, that change nothing the source reads, or that
+/// [`refuse_extensions`] reads by value (`objectFormat`, `refStorage`): git's known ones but
+/// `partialClone`.
+const READ_EXTENSIONS: [&str; 8] = [
+    "noop",
+    "noop-v1",
+    "preciousobjects",
+    "worktreeconfig",
+    "objectformat",
+    "refstorage",
+    "compatobjectformat",
+    "relativeworktrees",
+];
+
+/// Refuses a configuration whose objects are named by another hash than SHA-1, whose refs are
+/// kept otherwise than as files (`extensions.refStorage = files` is the default, written out),
+/// of a partial clone, or that needs an extension past [`READ_EXTENSIONS`].
 fn refuse_extensions(config: &gix::config::File) -> Result<(), SourceError> {
     if let Some(format) = config.string("extensions.objectFormat")
         && !format.eq_ignore_ascii_case(b"sha1")
@@ -572,7 +589,34 @@ fn refuse_extensions(config: &gix::config::File) -> Result<(), SourceError> {
         let storage = storage.to_string();
         return Err(SourceError::Unsupported(Unsupported::RefStorage(storage)));
     }
+    if let Some(remote) = promisor(config) {
+        return Err(SourceError::Unsupported(Unsupported::PartialClone(remote)));
+    }
+
+    // Every other extension: git refuses one it does not know, and the source one it does not read.
+    let sections = config.sections_by_name("extensions").into_iter().flatten();
+    for name in sections.flat_map(|section| section.value_names().collect::<Vec<_>>()) {
+        if !READ_EXTENSIONS.contains(&name.to_ascii_lowercase().as_str()) {
+            return Err(SourceError::Unsupported(Unsupported::Extension(name)));
+        }
+    }
     Ok(())
+}
+
+/// The promisor remote of a partial clone, as git's `promisor-remote.c` reads it:
+/// `extensions.partialClone`, or else the first remote whose `promisor` is true (or does not
+/// read as a boolean, which git refuses).
+fn promisor(config: &gix::config::File) -> Option<String> {
+    if let Some(remote) = config.string("extensions.partialClone") {
+        return Some(remote.to_string());
+    }
+    let mut names = (config.sections_by_name("remote")?)
+        .filter_map(|section| section.header().subsection_name());
+    let remote = names.find(|&name| {
+        let promisor = config.boolean_by("remote", Some(name), "promisor");
+        !matches!(promisor, Ok(None | Some(false)))
+    })?;
+    Some(remote.to_string())
 }
 
 fn not_found(name: &str) -> SourceError {

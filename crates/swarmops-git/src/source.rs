@@ -151,6 +151,14 @@ pub enum Unsupported {
     /// It is a shallow clone: some of its commits lack their parents.
     #[error("it is a shallow clone, whose oldest commits lack their parents")]
     Shallow,
+    /// It is a partial clone, which lacks objects its promisor remote, named here, holds
+    /// (`extensions.partialClone`, or `remote.<name>.promisor`, as git reads them).
+    #[error("it is a partial clone, which lacks objects its promisor remote {0} holds")]
+    PartialClone(String),
+    /// It needs an extension the source does not know (`extensions.<name>`), named as written:
+    /// git refuses a repository of an extension it does not know, too.
+    #[error("it needs extensions.{0}, which it does not know")]
+    Extension(String),
     /// A file it reads in its git directory, named by its path there (`config`,
     /// `refs/heads/main`, `objects/info/alternates`, …; an alternate object directory elsewhere
     /// by its own path), is a FIFO, a socket or a device, or a symlink to one: opening a FIFO

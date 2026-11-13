@@ -829,8 +829,9 @@ fn source_error(e: SourceError, message: String, git_path: &str, git_ref: &str) 
 
 /// `E_GIT_UNSUPPORTED`: the repository at `git_path` is one the git side does not read or write
 /// as it is, `why` (a SHA-256 repository, reftable refs, a shallow clone, which a hint deepens, a
-/// FIFO, a socket or a device where it reads a file of the git directory, or a file it reads whole
-/// there that is too long, each of which it names).
+/// partial clone or an extension it does not know, each named, a FIFO, a socket or a device where
+/// it reads a file of the git directory, or a file it reads whole there that is too long, each of
+/// which it names).
 fn unsupported(why: Unsupported, message: String, git_path: &str) -> OpError {
     let found = match why {
         Unsupported::ObjectFormat(format) => details([
@@ -841,6 +842,13 @@ fn unsupported(why: Unsupported, message: String, git_path: &str) -> OpError {
             ("reason", "ref_storage".into()),
             ("ref_storage", storage.into()),
         ]),
+        Unsupported::PartialClone(remote) => details([
+            ("reason", "partial_clone".into()),
+            ("remote", remote.into()),
+        ]),
+        Unsupported::Extension(name) => {
+            details([("reason", "extension".into()), ("extension", name.into())])
+        }
         Unsupported::SpecialFile(file) => {
             details([("reason", "special_file".into()), ("file", file.into())])
         }
@@ -2515,6 +2523,12 @@ mod tests {
         let error = git_maps(shallow, ErrorCode::GitUnsupported, &want);
         let deepen = "git -C /nonexistent/swarmops-test/repo.git fetch --unshallow";
         assert_eq!(error.hint.as_deref(), Some(deepen));
+        let partial = unsupported(Unsupported::PartialClone("origin".into()));
+        let want = json!({"reason": "partial_clone", "remote": "origin"});
+        git_maps(partial, ErrorCode::GitUnsupported, &want);
+        let unknown = unsupported(Unsupported::Extension("frobnicate".into()));
+        let want = json!({"reason": "extension", "extension": "frobnicate"});
+        git_maps(unknown, ErrorCode::GitUnsupported, &want);
         let special = unsupported(Unsupported::SpecialFile("refs/heads/main".into()));
         let want = json!({"reason": "special_file", "file": "refs/heads/main"});
         let error = git_maps(special, ErrorCode::GitUnsupported, &want);

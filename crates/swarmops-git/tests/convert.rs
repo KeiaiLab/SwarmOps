@@ -715,17 +715,16 @@ fn a_corrupt_source_object_is_a_source_error_not_a_lossy_class() {
             "{got:?}"
         );
     }
-    // A partial clone lacks its blobs: what it lacks is the source's `Missing`.
-    let (results, _) = convert_fixture("partial_clone", LossySet::all());
-    for (id, result) in results {
-        assert!(
-            matches!(
-                result,
-                Err(ConvertError::Source(SourceError::Missing { .. }))
-            ),
-            "{id}: {result:?}"
-        );
-    }
+    // A blob the source lacks is the source's `Missing`.
+    let mut source = MemSource::default();
+    let lacked = git_hash(RawKind::Blob, b"lacked\n");
+    let root = source.tree(&[("100644", b"lacked.txt", lacked)]);
+    let commit = source.commit(root, &[], "a blob the source lacks\n");
+    let got = Converter::new(&source, LossySet::all()).commit(commit, &mut Vec::new());
+    assert!(
+        matches!(got, Err(ConvertError::Source(SourceError::Missing { oid })) if oid == lacked),
+        "{got:?}"
+    );
 }
 
 #[test]

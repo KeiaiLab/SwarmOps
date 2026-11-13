@@ -193,17 +193,19 @@ error_codes! {
     /// commit, and the target ref does not move.
     GitImportLossy => "E_GIT_IMPORT_LOSSY", EXIT_ERROR, false;
     /// `git import` does not read the source: a SHA-256 repository, reftable refs, a shallow
-    /// clone, a FIFO, a socket or a device where it reads a file of the git directory, a file it
-    /// reads whole there that is longer than 16 MiB, a commit of more than 255 distinct parents
-    /// (a parent listed twice counts once), or an
-    /// entry whose mode is no kind of entry; `details.reason` says which (`object_format`,
-    /// `ref_storage`, `shallow`, `special_file`, `file_too_long`, `parents`, `mode`),
-    /// `details.file` names the file of `special_file` and `file_too_long` by its path in the git
-    /// directory (`details.size` and `details.max` give the long one's length and the limit), and
-    /// `details.commit` names the commit of `parents` and `mode`.
+    /// clone, a partial clone, an extension it does not know, a FIFO, a socket or a device where
+    /// it reads a file of the git directory, a file it reads whole there that is longer than
+    /// 16 MiB, a commit of more than 255 distinct parents (a parent listed twice counts once), or
+    /// an entry whose mode is no kind of entry; `details.reason` says which (`object_format`,
+    /// `ref_storage`, `shallow`, `partial_clone`, `extension`, `special_file`, `file_too_long`,
+    /// `parents`, `mode`), `details.remote` names the promisor remote of `partial_clone` and
+    /// `details.extension` the extension, `details.file` names the file of `special_file` and
+    /// `file_too_long` by its path in the git directory (`details.size` and `details.max` give the
+    /// long one's length and the limit), and `details.commit` names the commit of `parents` and
+    /// `mode`.
     GitUnsupported => "E_GIT_UNSUPPORTED", EXIT_ERROR, false;
-    /// `git import` could not read the source: an object is missing (as in a partial clone),
-    /// does not hash to its id or does not parse, or the filesystem refused a read
+    /// `git import` could not read the source: an object is missing, does not hash to its id or
+    /// does not parse, or the filesystem refused a read
     /// (`details.reason`; `details.object` names the object when there is one).
     GitRead => "E_GIT_READ", EXIT_ERROR, false;
     // `git export` (M8): the history it writes and the repository it writes it into.

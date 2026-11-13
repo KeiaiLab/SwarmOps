@@ -839,15 +839,41 @@ expression: s.transcript()
       "op": "git_import",
       "api": 1,
       "error": {
-        "code": "E_GIT_READ",
-        "message": "the repository lacks object [id7]",
+        "code": "E_GIT_UNSUPPORTED",
+        "message": "the repository is not read as it is: it is a partial clone, which lacks objects its promisor remote origin holds",
         "retryable": false,
         "exit": 1,
         "details": {
-          "object": "[id7]",
-          "reason": "missing"
+          "reason": "partial_clone",
+          "remote": "origin"
         },
-        "hint": "git -C [partial_clone]/repo.git fsck; in a partial clone, which fsck passes, git -C [partial_clone]/repo.git fetch --refetch --no-filter <remote> gets the objects left out"
+        "hint": null
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 git import [corrupt_object]/repo.git --into release/corrupt",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "git_import",
+      "api": 1,
+      "error": {
+        "code": "E_GIT_READ",
+        "message": "object [damaged] is damaged: its bytes, a blob, hash to [id7]",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "object": "[damaged]",
+          "reason": "corrupt"
+        },
+        "hint": "git -C [corrupt_object]/repo.git fsck"
       },
       "meta": {
         "repo": "[tmp]/store",
