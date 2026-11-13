@@ -835,14 +835,15 @@ mod tests {
         RefSetReq, StoreOps as _, UndoReq,
     };
     use swarmops_git::serve::repo::ServeRepo;
-    use swarmops_git::{ExportRequest, GitOid, GixSink, export};
+    use swarmops_git::{BranchUpdate, ExportRequest, GitOid, GixSink, export};
     use swarmops_repo::{LocalRepo, RepoError, StoreError};
     use swarmops_store::{Layout, RealFs, StoreFormat};
     use swarmops_testkit::fs::HoldThenFail;
     use tempfile::TempDir;
 
     use super::{
-        Freshness, Refreshed, Scope, export_from, freshness, freshness_with, refresh, refresh_with,
+        Covered, Freshness, Refreshed, Scope, StateUpdates, export_from, freshness, freshness_with,
+        moved, refresh, refresh_with, write_state_covered, written,
     };
     use crate::LocalOps;
 
@@ -1113,6 +1114,43 @@ mod tests {
         let scope = Scope::Refs(vec!["release/1".to_owned()]);
         let done = refresh(&site.ops, &site.repo, &scope).expect("refresh");
         assert_eq!(done.warnings, [] as [&str; 0]);
+    }
+
+    /// An export that writes `git/serve.state` alone, `serve.git`'s refs as they were, is a
+    /// move: the state half of what `moved` compares.
+    #[test]
+    fn a_state_written_alone_is_a_move() {
+        let site = Site::new();
+        refresh(&site.ops, &site.repo, &Scope::All).expect("refresh");
+        let before = written(&site.repo);
+        assert!(!moved(&site.repo, &before), "nothing wrote");
+
+        let lock = site.repo.lock(Duration::ZERO).expect("serve.lock");
+        let covered = Covered::Set(covered_of(&site.state()) + 1);
+        write_state_covered(&site.repo, &lock, &StateUpdates::new(), covered).expect("the state");
+        drop(lock);
+        assert_eq!(written(&site.repo).1, before.1, "the refs as they were");
+        assert!(moved(&site.repo, &before));
+    }
+
+    /// An export that moves a ref of `serve.git` and writes no state is a move: the refs half of
+    /// what `moved` compares.
+    #[test]
+    fn a_ref_moved_alone_is_a_move() {
+        let site = Site::new();
+        refresh(&site.ops, &site.repo, &Scope::All).expect("refresh");
+        let before = written(&site.repo);
+        let served = site.served();
+        let (release, main) = (served["refs/heads/release/1"], served["refs/heads/main"]);
+
+        let lock = site.repo.lock(Duration::ZERO).expect("serve.lock");
+        let update = site
+            .repo
+            .set_ref(&lock, "refs/heads/release/1", Some(release), Some(main));
+        assert!(matches!(update, Ok(BranchUpdate::Applied)), "{update:?}");
+        drop(lock);
+        assert_eq!(written(&site.repo).0, before.0, "the state as it was");
+        assert!(moved(&site.repo, &before));
     }
 
     /// A refresh reads the committed snapshot: while a writer holds the store's lock with a
