@@ -237,7 +237,7 @@ The fields of the result:
 | `relocated` | The target moved after the land read it, and the publish put the change on the new head itself, without another attempt. |
 | `files_changed` | How many paths the landed changeset changes. |
 | `squashed_from` | The changesets the land squashed, oldest first. |
-| `auto_merged` | The paths both sides changed that merged cleanly; left out when there are none. |
+| `auto_merged` | The paths both sides changed whose contents merged cleanly into a content neither side had; left out when there are none. |
 
 A land run again without a key finds the change on the target already:
 
@@ -883,8 +883,8 @@ How to read it:
 - **`theirs_changeset`** and **`theirs_agent`** name the newest changeset on the target that
   changed the file, and who wrote it: what to read, and whom to ask. **`theirs_changesets`**
   lists every one since the base, newest first, up to 16.
-- **`auto_merged`** lists the paths both sides changed that merged cleanly; it is left out when
-  there are none.
+- **`auto_merged`** lists the paths both sides changed whose contents merged cleanly into a
+  content neither side had; it is left out when there are none.
 - **`truncated`** is true when hunk texts were left out to stay within `--max-conflict-bytes`
   (32768 by default), on the report and on each hunk that lost them; the first such hunk keeps
   the whole lines that fit (`text_head`). Line numbers and blob ids are always there; read the
@@ -898,7 +898,7 @@ How to read it:
 | `modify_delete` | Your change changed the file; the target deleted it. |
 | `add_add` | Both sides added the file, with contents that do not merge. |
 | `mode` | Both sides changed the file's kind (file, executable or symlink), differently. |
-| `type_change` | One side has a file where the other has a directory. |
+| `type_change` | One side has a file where the other has a directory, or your change deleted a file where the target made a directory. |
 
 Read the other side's lines at `theirs`:
 
