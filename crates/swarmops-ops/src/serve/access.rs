@@ -2,10 +2,13 @@
 //! connection and before each land attempt (the M15 design §6), and the caller named by
 //! [`resolve_identity`], the one resolver of `serve`'s identity.
 
+use std::io::{ErrorKind, Read};
+
+use camino::Utf8Path;
 use serde::Deserialize;
 use swarmops_api::{ErrorCode, Identity, OpError};
 use swarmops_repo::RepoError;
-use swarmops_store::{IoFailure, StoreError};
+use swarmops_store::{FileOp, FsMethod, IoFailure, StoreError, StoreFs};
 use toml::Spanned;
 
 use super::{IdentitySource, refused};
@@ -169,11 +172,11 @@ struct GrantFile {
 }
 
 impl Access {
-    /// The grants of the store `ops` serves, read now through the store's filesystem seam.
-    /// No file is `E_AUTH` `no_access_file`; a file this build does not read is
+    /// The grants of the store `ops` serves, read now: measured through the store's filesystem
+    /// seam, its bytes read on a handle of its own, at most one past the limit. No file is `E_AUTH` `no_access_file`; a file this build does not read is
     /// `E_POLICY_DENIED` `access_file_invalid`, with its line and no path.
     pub fn load(ops: &LocalOps) -> Result<Access, OpError> {
-        // 1. The bytes, bounded before they are read; no file grants nothing.
+        // 1. The bytes, bounded before and while they are read; no file grants nothing.
         let fs = ops.repo.store_fs();
         let path = fs.root().join(ACCESS_TOML);
         if !fs.exists(&path).map_err(io)? {
@@ -183,13 +186,9 @@ impl Access {
         if len > MAX_ACCESS_BYTES {
             return Err(too_large(len));
         }
-        let Some(bytes) = fs.read(&path).map_err(io)? else {
+        let Some(bytes) = read_capped(&fs, &path)? else {
             return Err(no_access_file());
         };
-        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if len > MAX_ACCESS_BYTES {
-            return Err(too_large(len));
-        }
 
         // 2. Text, then the shape and the version.
         let text = String::from_utf8(bytes).map_err(|e| {
@@ -324,6 +323,45 @@ fn grant_of(text: &str, file: GrantFile) -> Result<Grant, OpError> {
     })
 }
 
+/// `access.toml`'s bytes at `path`, or `None` if it is gone. Read on a handle of its own, since
+/// the seam reads a file whole: a file that grew past [`MAX_ACCESS_BYTES`] after it was measured
+/// is refused once one byte past the limit is read, never held in full.
+fn read_capped(fs: &StoreFs, path: &Utf8Path) -> Result<Option<Vec<u8>>, OpError> {
+    let failed = |e: std::io::Error| io(fs.locate(FileOp::Fs(FsMethod::Read), path, e));
+
+    // 1. A regular file only, as the seam reads: opening a FIFO would block.
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(failed(e)),
+    };
+    if !meta.is_file() {
+        let what = format!("{ACCESS_TOML} is not a regular file");
+        return Err(failed(std::io::Error::new(ErrorKind::InvalidData, what)));
+    }
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(failed(e)),
+    };
+
+    // 2. At most one byte past the limit, which tells a file over it.
+    let bytes = take_capped(file, MAX_ACCESS_BYTES).map_err(failed)?;
+    let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if read > MAX_ACCESS_BYTES {
+        let now = std::fs::metadata(path).map_or(read, |meta| meta.len().max(read));
+        return Err(too_large(now));
+    }
+    Ok(Some(bytes))
+}
+
+/// What `from` gives, up to `cap + 1` bytes: one more than `cap` says there is more.
+fn take_capped(from: impl Read, cap: u64) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    from.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// The 1-based line of byte `at` in `bytes`.
 fn line_of(bytes: &[u8], at: usize) -> u64 {
     let before = bytes.get(..at).unwrap_or(bytes);
@@ -419,10 +457,13 @@ fn user_family(family: &str, remote_user: Option<&str>) -> Result<Identity, OpEr
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use camino::Utf8PathBuf;
     use swarmops_api::{ErrorCode, Identity, OpError};
+    use swarmops_testkit::fs::{Hook, RecordingFs, When};
 
-    use super::{Access, Action, MAX_ACCESS_BYTES, resolve_identity};
+    use super::{Access, Action, MAX_ACCESS_BYTES, resolve_identity, take_capped};
     use crate::LocalOps;
     use crate::serve::IdentitySource;
 
@@ -621,6 +662,44 @@ push = ["b"]
         assert_eq!(error.details["reason"], "access_file_invalid", "{error:?}");
         assert_eq!(error.details["limit"], MAX_ACCESS_BYTES, "{error:?}");
         assert_no_path(&error);
+    }
+
+    /// A file that grows past the limit after it is measured is refused, and never read whole:
+    /// no read of the store's filesystem returns it, so at most one byte past the limit is held.
+    #[test]
+    fn a_file_grown_after_its_measure_is_not_read_whole() {
+        // 1. A valid file that grows to four times the limit right after its length is taken.
+        let (_dir, root, _ops) = store();
+        let path = root.join("access.toml");
+        std::fs::write(&path, EXAMPLE).unwrap();
+        let grown = usize::try_from(4 * MAX_ACCESS_BYTES).unwrap();
+        let grow = move || {
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            file.write_all(&vec![b'#'; grown]).unwrap();
+        };
+        let hook: Hook = (
+            "file_len access.toml".to_owned(),
+            When::After,
+            Box::new(grow),
+        );
+        let (fs, calls) = RecordingFs::new();
+        let ops = LocalOps::open_on(&root, fs.with_hook(hook));
+        calls();
+
+        // 2. Refused as over the limit; the store's whole-file read never ran on it.
+        let error = Access::load(&ops).unwrap_err();
+        assert_eq!(error.details["reason"], "access_file_invalid", "{error:?}");
+        assert_eq!(error.details["limit"], MAX_ACCESS_BYTES, "{error:?}");
+        let calls = calls();
+        assert!(!calls.contains(&"read access.toml".to_owned()), "{calls:?}");
+    }
+
+    /// An endless source gives one byte past the cap, then is read no further.
+    #[test]
+    fn a_capped_read_stops_one_byte_past_the_cap() {
+        let bytes = take_capped(std::io::repeat(b'#'), MAX_ACCESS_BYTES).unwrap();
+        let read = u64::try_from(bytes.len()).unwrap();
+        assert_eq!(read, MAX_ACCESS_BYTES + 1, "one byte past the cap");
     }
 
     /// A caller no grant names is `E_AUTH`, whatever it asks.
