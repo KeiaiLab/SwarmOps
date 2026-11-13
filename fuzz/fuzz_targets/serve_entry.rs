@@ -5,7 +5,7 @@
 //! ```text
 //! even ─▶ parse_ssh(SSH_ORIGINAL_COMMAND)     odd ─▶ cgi::fuzz_parse_path(PATH_INFO)
 //! accepted: one remote segment, no `/`, not `.` or `..`, and the name read back the same
-//!           (ssh: git-upload-pack <name quoted as git quotes it>; CGI: /<name>.git/<request>)
+//!           (ssh: git-upload-pack </name.git quoted as git quotes it>; CGI: /<name>.git/<request>)
 //! refused:  E_INVALID_ARG or E_NOT_A_REPO, a known reason, a text no input could change
 //! ```
 #![no_main]
@@ -60,9 +60,11 @@ fn ssh(command: &str) {
         }
     };
 
-    // 2. A name, which git's quoting of it gives back.
+    // 2. A name, which the path git sends for ssh://<host>/<name>.git gives back: the bare
+    //    name would lose a `.git` it ends in.
     one_segment(&request.store);
-    let line = format!("git-upload-pack {}", sq_quote(&request.store));
+    let path = format!("/{}.git", request.store);
+    let line = format!("git-upload-pack {}", sq_quote(&path));
     let again = parse_ssh(&line).unwrap_or_else(|e| panic!("{line:?}: {e:?}"));
     assert_eq!(again.store, request.store, "{line:?}");
 }
