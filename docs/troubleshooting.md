@@ -429,9 +429,10 @@ Use the store (the hint describes it), or pick another directory.
 
 ### Permission refused
 
-The store creates its files readable and writable by their owner only (mode `0600`) and its
-directories with mode `0700`; a store made by 0.11 or earlier keeps the modes it was made with
-([known limitations](known-limitations.md#platforms)). A command that cannot read a file of the
+The store creates its own files readable and writable by their owner only (mode `0600`) and its
+own directories with mode `0700`; the `git/` tree, `health/`, `meta/queue/` and
+`meta/maint.lock` follow the umask, and a store made by 0.11 or earlier keeps the modes it was
+made with ([known limitations](known-limitations.md#platforms)). A command that cannot read a file of the
 store fails with `E_IO`, `details.fs_op` and `details.store_file` naming it. Here the checkpoint
 of a copy was made unreadable (`chmod 000 chk/meta/journal.ckpt`):
 

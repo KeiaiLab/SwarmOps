@@ -1111,12 +1111,15 @@ left).
 - **How a store path resolves.** A `..` after an existing file is taken lexically, and a
   dangling symlink is followed (both documented on the resolver). *Unscheduled. Found: M1
   Task 3.*
-- **Two of a store's paths follow the umask.** A store makes its files readable and writable by
-  their owner only (mode `0600`) and its directories with mode `0700`, whatever the umask; the
-  write queue's directory `meta/queue/` and the maintenance lease `meta/maint.lock` are still made
-  without a mode, so the umask decides theirs. A store made by 0.11 or earlier keeps the modes it
-  was made with: its directories, journal, index and `meta/lock` followed the umask then
-  (`chmod -R go-rwx <store>` narrows them). *Unscheduled. Found: the pilot pre-flight (issue #15);
+- **The umask still decides some of a store's modes.** A store makes its own files readable and
+  writable by their owner only (mode `0600`) and its own directories with mode `0700`, whatever
+  the umask. Made without a mode, so the umask decides theirs: the write queue's directory
+  `meta/queue/`, the maintenance lease `meta/maint.lock`, the `health/` directory and its
+  records, and the whole `git/` tree (`git/serve.git` with its config, objects, refs, info and
+  hooks, `git/serve-hooks`, `git/serve-cache`, `git/serve-split`, `git/serve.state`,
+  `git/SERVE` and `git/serve.lock`; `755` and `644` under a umask of `022`). A store made by 0.11
+  or earlier keeps the modes it was made with: its directories, journal, index and `meta/lock`
+  followed the umask then (`chmod -R go-rwx <store>` narrows them). *Unscheduled. Found: the pilot pre-flight (issue #15);
   left by its fix.*
 - **No default store location.** A store is found by `--repo`, `SWARMOPS_REPO`, or, since M5, the
   nearest `.swarmws/workspace.json` above the working directory; `init` needs its directory, and
