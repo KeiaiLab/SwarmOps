@@ -33,14 +33,21 @@
 //! Two reader processes run beside every loop ([`Readers`]): `ref list`, then `show` and `cat`
 //! of what each ref names. What a ref they read reaches is never missing (`E_REV_NOT_FOUND`,
 //! `E_PATH_NOT_FOUND`, `E_STORE_CORRUPT`); the documented `E_IO` after a cut is counted apart.
+//! `E_BUSY` is allowed too: a reader whose snapshot gave up on the writers landing beside it is
+//! told to retry and has read nothing, so it counts as neither a read nor a violation. A loop's
+//! readers must have read something all the same ([`assert_tally_clean`]).
+//!
+//! The oracles have checks of their own at the end of this file: each is given a store or a
+//! result that breaks its rule, and must fail.
 //!
 //! Each test owns its temp dir; the tests share nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
-use std::process::Output;
+use std::process::{ExitStatus, Output};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -219,11 +226,24 @@ impl Drop for Readers {
     }
 }
 
-/// Stops `readers` and asserts they met no violation; `what` names the loop.
+/// Asserts that `tally` holds no violation and at least one read; `what` names the loop.
+///
+/// `E_BUSY` and `E_IO` after a cut are allowed in any number: neither says anything of what the
+/// store holds. Readers that met nothing else checked nothing, so one read must have succeeded.
+#[track_caller]
+fn assert_tally_clean(tally: &Tally, what: &str) {
+    assert_eq!(tally.violations, 0, "{what}: {:#?}", tally.seen);
+    assert!(
+        tally.reads > 0,
+        "{what}: the readers read nothing: {tally:?}"
+    );
+}
+
+/// Stops `readers` and asserts what they counted ([`assert_tally_clean`]); `what` names the loop.
 fn assert_read_clean(readers: Readers, what: &str) {
     let tally = readers.stop();
     println!("{what}: readers {tally:?}");
-    assert_eq!(tally.violations, 0, "{what}: {:#?}", tally.seen);
+    assert_tally_clean(&tally, what);
 }
 
 /// How one killed run ended.
@@ -283,6 +303,69 @@ fn kill_after(store: &Store, n: usize, delay: Duration) -> Ended {
     Ended::Exited(id)
 }
 
+/// How many commits `main` gains between two looks of the commit test at most: the commit that
+/// ended the round before, and the killed run's.
+const NEW_PER_LOOK: usize = 2;
+
+/// `main`'s log as the commit test has read it so far. Each look reads on from the head of the
+/// look before, so a test of `n` kills reads `O(n)` entries, not the whole log after each kill.
+struct MainLog {
+    /// Every id read so far.
+    ids: BTreeSet<String>,
+    /// The newest of them: where the next look must arrive.
+    head: String,
+}
+
+impl MainLog {
+    /// The log of a `main` that holds `first` alone.
+    fn from(first: String) -> MainLog {
+        MainLog {
+            ids: BTreeSet::from([first.clone()]),
+            head: first,
+        }
+    }
+
+    /// Looks at `main`: its newest [`NEW_PER_LOOK`] + 1 entries, which must reach the head of
+    /// the look before, since a store never takes a commit back. What `main` gained, newest
+    /// first; `what` says when.
+    #[track_caller]
+    fn follow(&mut self, store: &Store, what: &str) -> Vec<String> {
+        // 1. The newest entries.
+        let limit = (NEW_PER_LOOK + 1).to_string();
+        let log = store.read(&["log", MAIN, "-n", &limit]).ok();
+        let entries = log["entries"].as_array().expect("log entries");
+        let newest: Vec<String> = (entries.iter())
+            .map(|entry| entry["id"].as_str().expect("an id").to_owned())
+            .collect();
+
+        // 2. They reach the last head; those above it are new, each seen for the first time.
+        let reached = newest.iter().position(|id| *id == self.head);
+        let Some(reached) = reached else {
+            panic!("{what}: main's log left {}: {newest:?}", self.head);
+        };
+        let gained = newest[..reached].to_vec();
+        for id in &gained {
+            assert!(self.ids.insert(id.clone()), "{what}: {id} in the log twice");
+        }
+        if let Some(head) = gained.first() {
+            self.head.clone_from(head);
+        }
+        gained
+    }
+}
+
+/// How many of `gained`, the commits `main` gained in a round, no envelope in `reported` named:
+/// the killed run's commit, made and never acknowledged. Every reported commit must be among
+/// those gained; `what` says when.
+#[track_caller]
+fn unacknowledged(gained: &[String], reported: &[String], what: &str) -> usize {
+    let lost: Vec<&String> = (reported.iter())
+        .filter(|id| !gained.contains(id))
+        .collect();
+    assert!(lost.is_empty(), "{what}: reported, not in log: {lost:?}");
+    gained.len() - reported.len()
+}
+
 /// The ids `log` lists from `main`, all of them.
 fn logged(store: &Store, at_least: usize) -> BTreeSet<String> {
     let limit = (at_least + 1).to_string();
@@ -308,18 +391,23 @@ fn commit(store: &Store, n: usize) -> (String, u64) {
 }
 
 /// `kills` SIGKILLs of `commit --advance` on a store of `format`, each followed by the checks.
+///
+/// The log is read on from the look before ([`MainLog`]), and whole once at the end. A killed
+/// run whose commit `main` holds though no envelope was read is counted and printed: committed,
+/// never acknowledged.
 fn kill_commits(format: StoreFormat, kills: usize) {
     let store = Store::init_as(format);
-    let mut read = BTreeSet::new();
     let mut rng = Rng::new(SEED ^ u64::from(format.version()));
 
     // 1. The window: one whole commit's wall time here, so most delays land inside a run. Each
     //    round's last commit times it again, so it follows the host's load as it rises or falls.
     let (first, mut window) = commit(&store, 0);
-    read.insert(first);
+    let mut log = MainLog::from(first);
+    let mut reported: Vec<String> = Vec::new();
     let readers = Readers::start(&store);
 
     let mut killed = 0;
+    let mut silent = 0;
     let mut runs = 0;
     while killed < kills {
         runs += 1;
@@ -335,26 +423,33 @@ fn kill_commits(format: StoreFormat, kills: usize) {
         match kill_after(&store, n - 1, delay) {
             Ended::Killed(id) => {
                 killed += 1;
-                read.extend(id);
+                reported.extend(id);
             }
-            Ended::Exited(id) => {
-                read.insert(id);
-            }
+            Ended::Exited(id) => reported.push(id),
         }
 
-        // 3. The store verifies clean and lists every commit an envelope reported.
+        // 3. The store verifies clean; what main gained since the last look holds every commit
+        //    an envelope reported since.
         store.assert_clean(&what);
-        let log = logged(&store, 2 * runs + 1);
-        let lost: Vec<&String> = read.difference(&log).collect();
-        assert!(lost.is_empty(), "{what}: reported, not in log: {lost:?}");
+        let gained = log.follow(&store, &what);
+        silent += unacknowledged(&gained, &reported, &what);
 
         // 4. The next commit succeeds; its wall time is the next window.
         let (id, took) = commit(&store, n);
-        read.insert(id);
+        reported = vec![id];
         window = took;
     }
 
-    println!("{format:?}: {killed} kills in {runs} runs, last window {window} us");
+    // 5. The last commit is on main too, and the whole log is what the looks read.
+    let gained = log.follow(&store, "the last look");
+    assert_eq!(gained, reported, "the last commit is main's head");
+    let whole = logged(&store, log.ids.len());
+    assert_eq!(whole, log.ids, "the whole log is what the looks read");
+
+    println!(
+        "{format:?}: {killed} kills in {runs} runs, {silent} committed unacknowledged, \
+         last window {window} us"
+    );
     assert_read_clean(readers, &format!("{format:?} commits"));
     store.assert_clean("after the last commit");
 }
@@ -460,6 +555,27 @@ fn key_of(store: &Store, id: &str) -> Option<String> {
     shown["land_key"].as_str().map(str::to_owned)
 }
 
+/// The ids of `main`'s log, newest first, which must be `want` of them: [`LOG_SURPLUS`] more are
+/// asked for, so a changeset too many fails the count as one too few does. `what` says when.
+#[track_caller]
+fn main_ids(store: &Store, want: usize, what: &str) -> Vec<String> {
+    let asked = (want + LOG_SURPLUS).to_string();
+    let log = store.read(&["log", MAIN, "-n", &asked]).ok();
+    let ids: Vec<String> = (log["entries"].as_array().expect("log entries").iter())
+        .map(|entry| entry["id"].as_str().expect("an id").to_owned())
+        .collect();
+    assert_eq!(ids.len(), want, "{what}: main's log: {ids:?}");
+    ids
+}
+
+/// Asserts that one changeset of `keys`, each changeset on `main` and its land key, carries
+/// `key`: a land that ran twice leaves two, a land that was lost none. `what` says when.
+#[track_caller]
+fn assert_one_per_key(keys: &BTreeMap<String, Option<String>>, key: &str, what: &str) {
+    let lands = keys.values().flatten().filter(|&k| k == key).count();
+    assert_eq!(lands, 1, "{what}: changesets with key {key}");
+}
+
 /// Lands the `n`-th change again under its key, as an agent retries a land that died: the
 /// changeset, which a land made now or a replay found.
 fn land_again(store: &Store, head: &str, n: usize) -> String {
@@ -530,27 +646,13 @@ fn kill_lands(format: StoreFormat, kills: usize) {
 
         // 3. The store verifies clean; main holds the base and one land per key so far.
         store.assert_clean(&what);
-        let log = store
-            .read(&["log", MAIN, "-n", &(n + 2 + LOG_SURPLUS).to_string()])
-            .ok();
-        let on_main: Vec<&str> = (log["entries"].as_array().expect("log entries").iter())
-            .map(|entry| entry["id"].as_str().expect("an id"))
-            .collect();
-        assert_eq!(on_main.len(), n + 2, "{what}: main's log: {on_main:?}");
-        assert!(
-            on_main.contains(&again.as_str()),
-            "{what}: {again} not on main"
-        );
+        let on_main = main_ids(&store, n + 2, &what);
+        assert!(on_main.contains(&again), "{what}: {again} not on main");
         for id in on_main {
-            keys.entry(id.to_owned())
-                .or_insert_with(|| key_of(&store, id));
+            let key = || key_of(&store, &id);
+            keys.entry(id.clone()).or_insert_with(key);
         }
-        let lands = keys
-            .values()
-            .flatten()
-            .filter(|&k| *k == land_key(n))
-            .count();
-        assert_eq!(lands, 1, "{what}: changesets with key {n}");
+        assert_one_per_key(&keys, &land_key(n), &what);
     }
 
     // 4. A key given for another change is refused, and writes nothing. The change starts at the
@@ -724,16 +826,8 @@ fn kill_groups(format: StoreFormat, kills: usize) {
         // 3. The store verifies clean; main holds the base and every group's whole chain.
         store.assert_clean(&what);
         let want = 1 + (n + 1) * GROUP_SIZE;
-        let log = store
-            .read(&["log", MAIN, "-n", &(want + LOG_SURPLUS).to_string()])
-            .ok();
-        let on_main = log["entries"].as_array().expect("log entries");
-        assert_eq!(on_main.len(), want, "{what}: main's log: {on_main:?}");
-        assert_eq!(
-            on_main[0]["id"],
-            again.as_str(),
-            "{what}: main is the group's head"
-        );
+        let on_main = main_ids(&store, want, &what);
+        assert_eq!(on_main[0], again, "{what}: main is the group's head");
     }
 
     println!("{format:?}: {killed} kills in {n} groups, window {window} us");
@@ -888,24 +982,13 @@ fn kill_reverts(format: StoreFormat, kills: usize) {
         //    round; the key is on one changeset; the change's file is gone.
         store.assert_clean(&what);
         let rounds = 2 * (n + 1);
-        let log = store
-            .read(&["log", MAIN, "-n", &(rounds + 1 + LOG_SURPLUS).to_string()])
-            .ok();
-        let on_main: Vec<&str> = (log["entries"].as_array().expect("log entries").iter())
-            .map(|entry| entry["id"].as_str().expect("an id"))
-            .collect();
-        assert_eq!(on_main.len(), rounds + 1, "{what}: main's log: {on_main:?}");
+        let on_main = main_ids(&store, rounds + 1, &what);
         assert_eq!(on_main[0], again, "{what}: {again} is not main's head");
         for id in on_main {
-            keys.entry(id.to_owned())
-                .or_insert_with(|| key_of(&store, id));
+            let key = || key_of(&store, &id);
+            keys.entry(id.clone()).or_insert_with(key);
         }
-        let reverts = keys
-            .values()
-            .flatten()
-            .filter(|&k| *k == revert_key(n))
-            .count();
-        assert_eq!(reverts, 1, "{what}: changesets with key {n}");
+        assert_one_per_key(&keys, &revert_key(n), &what);
         let file = format!("{MAIN}:revert-{n}.txt");
         store.read(&["cat", &file]).err("E_PATH_NOT_FOUND");
     }
@@ -1144,25 +1227,13 @@ impl Batches {
 
         // 2. Main holds the base and each key once; the store verifies clean.
         store.assert_clean(what);
-        let asked = (self.lands + 1 + LOG_SURPLUS).to_string();
-        let log = store.read(&["log", MAIN, "-n", &asked]).ok();
-        let on_main: Vec<&str> = (log["entries"].as_array().expect("log entries").iter())
-            .map(|entry| entry["id"].as_str().expect("an id"))
-            .collect();
-        assert_eq!(
-            on_main.len(),
-            self.lands + 1,
-            "{what}: main's log: {on_main:?}"
-        );
+        let on_main = main_ids(store, self.lands + 1, what);
         for id in on_main {
-            (self.keys)
-                .entry(id.to_owned())
-                .or_insert_with(|| key_of(store, id));
+            let key = || key_of(store, &id);
+            self.keys.entry(id.clone()).or_insert_with(key);
         }
         for n in first..self.lands {
-            let key = batch_key(n);
-            let count = self.keys.values().flatten().filter(|&k| *k == key).count();
-            assert_eq!(count, 1, "{what}: changesets with key {key}");
+            assert_one_per_key(&self.keys, &batch_key(n), what);
         }
 
         // 3. A replay takes no turn: the next write's janitor empties the queue.
@@ -1326,6 +1397,33 @@ fn release_move(target: &str) -> String {
     format!("{RELEASE:?}={target:?}")
 }
 
+/// Whether a killed move of `release/1` from `old` to `new` was made, `head` what the ref names
+/// after the kill: one of the two, and `new` if the run's envelope was read (`acked`). `what`
+/// says when.
+#[track_caller]
+fn move_made(head: &str, old: &str, new: &str, acked: Acked, what: &str) -> bool {
+    assert!(head == old || head == new, "{what}: release/1 at {head}");
+    assert!(
+        acked == Acked::No || head == new,
+        "{what}: an acknowledged move was not kept"
+    );
+    head == new
+}
+
+/// Whether a killed run's envelope was read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Acked {
+    Yes,
+    No,
+}
+
+impl Acked {
+    /// A run whose envelope was read (`read`) acknowledged what it did.
+    fn from_read(read: bool) -> Acked {
+        if read { Acked::Yes } else { Acked::No }
+    }
+}
+
 /// Where the ref test's kills stand.
 struct RefKills {
     /// Kills of `ref set` and of `op undo` so far.
@@ -1413,17 +1511,14 @@ fn kill_ref_moves(format: StoreFormat, kills: usize) {
         let acked = match kill_run(&set, delay) {
             Cut::Killed(result) => {
                 cuts.set += 1;
-                result.is_some()
+                Acked::from_read(result.is_some())
             }
             Cut::Exited => {
                 cuts.set_window -= cuts.set_window / WINDOW_SHRINK;
-                true
+                Acked::Yes
             }
         };
-        let head = release_head(&store);
-        assert!(head == a || head == b, "{what}: release/1 at {head}");
-        assert!(!acked || head == b, "{what}: an acknowledged move kept");
-        let made = head == b;
+        let made = move_made(&release_head(&store), &a, &b, acked, &what);
         cuts.set_made += usize::from(made);
         let mut seen = model.clone();
         seen.extend(made.then(|| release_move(&b)));
@@ -1443,17 +1538,14 @@ fn kill_ref_moves(format: StoreFormat, kills: usize) {
         let acked = match kill_run(&undo, delay) {
             Cut::Killed(result) => {
                 cuts.undo += 1;
-                result.is_some()
+                Acked::from_read(result.is_some())
             }
             Cut::Exited => {
                 cuts.undo_window -= cuts.undo_window / WINDOW_SHRINK;
-                true
+                Acked::Yes
             }
         };
-        let head = release_head(&store);
-        assert!(head == a || head == b, "{what}: release/1 at {head}");
-        assert!(!acked || head == a, "{what}: an acknowledged undo kept");
-        let undone = head == a;
+        let undone = move_made(&release_head(&store), &b, &a, acked, &what);
         cuts.undo_made += usize::from(undone);
         let mut seen = model.clone();
         seen.extend(undone.then(|| release_move(&a)));
@@ -1514,4 +1606,263 @@ fn readers_flag_a_missing_object() {
     // 3. The started readers make at least one pass each.
     let tally = Readers::start(&store).stop();
     assert!(tally.violations >= READERS, "{tally:?}");
+}
+
+/// Asserts that `check` fails, with a message that holds `needle`: an oracle given what breaks
+/// its rule.
+#[track_caller]
+fn fires(check: impl FnOnce(), needle: &str) {
+    let caught = panic::catch_unwind(AssertUnwindSafe(check));
+    let Err(panic) = caught else {
+        panic!("the oracle passed what breaks its rule ({needle})");
+    };
+    let message = (panic.downcast_ref::<String>().map(String::as_str))
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(message.contains(needle), "failed otherwise: {message}");
+}
+
+/// A made-up run of a read that ended with exit code `exit` and printed `stdout`.
+fn read_run(exit: i32, stdout: &str) -> Run {
+    Run {
+        args: vec!["a".to_owned(), "read".to_owned()],
+        status: ExitStatus::from_raw(exit << 8),
+        stdout: stdout.to_owned(),
+        stderr: String::new(),
+    }
+}
+
+/// The readers' count has a check of its own: `E_BUSY` and `E_IO` are counted apart and allowed,
+/// any other failure is a violation, and readers that read nothing fail the loop.
+#[test]
+fn a_tally_with_a_violation_or_no_read_fails() {
+    // 1. What each kind of run counts as.
+    let mut tally = Tally::default();
+    let read = tally.judge(&read_run(0, "{\"ok\":true,\"result\":{\"refs\":[]}}\n"));
+    assert!(read.is_some(), "a read");
+    let failed = |code: &str| {
+        read_run(
+            4,
+            &format!("{{\"ok\":false,\"error\":{{\"code\":{code:?}}}}}\n"),
+        )
+    };
+    assert!(tally.judge(&failed("E_BUSY")).is_none(), "busy is no read");
+    assert!(tally.judge(&failed("E_IO")).is_none(), "E_IO is no read");
+    let counted = (
+        tally.reads,
+        tally.busy,
+        tally.io_after_cut,
+        tally.violations,
+    );
+    assert_eq!(counted, (1, 1, 1, 0), "{tally:?}");
+    assert_tally_clean(&tally, "a read, a busy one, a cut one");
+
+    // 2. Readers that only met the allowed failures read nothing.
+    let mut unread = Tally::default();
+    unread.judge(&failed("E_BUSY"));
+    unread.judge(&failed("E_IO"));
+    fires(|| assert_tally_clean(&unread, "unread"), "read nothing");
+
+    // 3. Any other failure is a violation, a torn envelope included.
+    for run in [failed("E_REV_NOT_FOUND"), read_run(1, "{\"ok\":fal")] {
+        let mut violated = Tally::default();
+        violated.judge(&read_run(0, "{\"ok\":true,\"result\":{}}\n"));
+        violated.judge(&run);
+        assert_eq!(violated.violations, 1, "{violated:?}");
+        fires(|| assert_tally_clean(&violated, "violated"), "violated");
+    }
+}
+
+/// The commit test's oracle has a check of its own: a reported commit `main` does not hold, a
+/// commit in the log twice, and a `main` that left the head read before each fail it.
+#[test]
+fn the_commit_oracle_flags_a_lost_commit() {
+    let store = Store::init();
+    let (first, _) = commit(&store, 0);
+    let mut log = MainLog::from(first);
+
+    // 1. A look finds what main gained; a commit no envelope named is counted.
+    let (second, _) = commit(&store, 1);
+    let gained = log.follow(&store, "one commit");
+    assert_eq!(gained, [second]);
+    assert_eq!(unacknowledged(&gained, &gained, "reported"), 0);
+    assert_eq!(unacknowledged(&gained, &[], "killed unread"), 1);
+    assert_eq!(log.follow(&store, "nothing new"), Vec::<String>::new());
+
+    // 2. A commit reported and not on main: made off main, as one a broken replay dropped.
+    let off = store.commit(&agent(0), "off.txt", "off\n", None);
+    let gained = log.follow(&store, "off main");
+    fires(
+        || {
+            unacknowledged(&gained, std::slice::from_ref(&off), "lost");
+        },
+        "reported, not in log",
+    );
+
+    // 3. A main that no longer holds the head read before.
+    let mut left = MainLog::from(off);
+    fires(
+        || {
+            left.follow(&store, "left");
+        },
+        "main's log left",
+    );
+
+    // 4. A main that gained more than a round can make: the look does not reach its last head.
+    let made: Vec<String> = (2..=2 + NEW_PER_LOOK)
+        .map(|n| commit(&store, n).0)
+        .collect();
+    fires(
+        || {
+            log.follow(&store, "surplus");
+        },
+        "main's log left",
+    );
+
+    // 5. A log that shows again a commit a look before read.
+    let mut again = MainLog {
+        ids: BTreeSet::from([main_head(&store)]),
+        head: made[0].clone(),
+    };
+    fires(
+        || {
+            again.follow(&store, "twice");
+        },
+        "in the log twice",
+    );
+}
+
+/// The land tests' oracles have a check of their own: a changeset too many or too few on `main`,
+/// a key on two changesets and a key on none each fail them.
+#[test]
+fn the_land_oracle_flags_a_land_made_twice() {
+    let store = Store::init();
+    let base = store.commit(&agent(0), "base.txt", "base\n", None);
+    let create = ["ref", "set", MAIN, &base, "--create"];
+    store.run_as(&agent(0), &create, &[]).ok();
+
+    // 1. One keyed land: main holds the base and it, and its key once.
+    let first = land_again(&store, &change_off_main(&store, 0), 0);
+    let on_main = main_ids(&store, 2, "one land");
+    assert_eq!(on_main, [first.clone(), base.clone()]);
+    let mut keys: BTreeMap<String, Option<String>> = (on_main.iter())
+        .map(|id| (id.clone(), key_of(&store, id)))
+        .collect();
+    assert_one_per_key(&keys, &land_key(0), "one land");
+
+    // 2. A land the test did not count: one changeset too many, and the count one too few.
+    let second = land_again(&store, &change_off_main(&store, 1), 1);
+    fires(|| drop(main_ids(&store, 2, "surplus")), "main's log");
+    fires(|| drop(main_ids(&store, 4, "missing")), "main's log");
+
+    // 3. A key on two changesets, as a land made twice leaves; a key on none, as a lost one.
+    keys.insert(second, Some(land_key(0)));
+    fires(
+        || assert_one_per_key(&keys, &land_key(0), "twice"),
+        "changesets with key",
+    );
+    fires(
+        || assert_one_per_key(&keys, &land_key(1), "lost"),
+        "changesets with key",
+    );
+}
+
+/// The ref test's model has a check of its own: an operation the model does not hold, one the
+/// store does not hold, a move recorded as another (the newest, or one before it), a ref at
+/// neither target and an acknowledged move that was not kept each fail it.
+#[test]
+fn the_ref_oracle_flags_an_operation_recorded_twice() {
+    let store = Store::init();
+    let me = agent(0);
+    let a = store.commit(&me, "a.txt", "a\n", None);
+    let create = ["ref", "set", MAIN, &a, "--create"];
+    store.run_as(&me, &create, &[]).ok();
+    let b = store.commit(&me, "b.txt", "b\n", Some(&a));
+    let create = ["ref", "set", RELEASE, &a, "--create"];
+    store.run_as(&me, &create, &[]).ok();
+    let set = store.args(&me, &["ref", "set", RELEASE, &b, "--expect", &a]);
+
+    // 1. The model after a move and its undo is the op log's; a replay records nothing.
+    let (mut model, _) = first_round(&store, &set);
+    assert_ops(&store, &model, "the first round");
+    crate::support::run(&set, &[]).ok();
+    model.push(release_move(&b));
+    let again = crate::support::run(&set, &[]).ok();
+    assert_eq!(again["already_applied"], true, "{again}");
+    assert_ops(&store, &model, "a move and its replay");
+
+    // 2. The model holds an operation the store does not, then lacks one the store holds.
+    let mut longer = model.clone();
+    longer.push(release_move(&a));
+    fires(
+        || assert_ops(&store, &longer, "not recorded"),
+        "op log's tail",
+    );
+    let shorter = &model[..model.len() - 1];
+    fires(
+        || assert_ops(&store, shorter, "recorded twice"),
+        "op log's tail",
+    );
+
+    // 3. The newest move recorded as one to another target.
+    let mut other = shorter.to_vec();
+    other.push(release_move(&a));
+    fires(
+        || assert_ops(&store, &other, "another move"),
+        "op log's tail",
+    );
+
+    // 4. An older operation of the tail recorded as another, the newest as modelled.
+    let mut older = model.clone();
+    older[model.len() - 2] = release_move(&b);
+    fires(
+        || assert_ops(&store, &older, "an older move"),
+        "op log's tail",
+    );
+
+    // 5. What the ref names after a kill.
+    assert!(move_made(&b, &a, &b, Acked::Yes, "made"));
+    assert!(!move_made(&a, &a, &b, Acked::No, "not made"));
+    fires(
+        || {
+            move_made("neither", &a, &b, Acked::No, "torn");
+        },
+        "release/1 at",
+    );
+    fires(
+        || {
+            move_made(&a, &a, &b, Acked::Yes, "taken back");
+        },
+        "was not kept",
+    );
+}
+
+/// The batch test's reading of a lander's end has a check of its own: a lander killed that the
+/// test did not kill, and one that failed otherwise than `E_BUSY`, each fail it.
+#[test]
+fn a_lander_killed_unasked_or_failed_otherwise_fails() {
+    let ended = |status: i32, stdout: &str| Output {
+        status: ExitStatus::from_raw(status),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: Vec::new(),
+    };
+    let failed = |code: &str| {
+        let envelope = format!("{{\"ok\":false,\"error\":{{\"code\":{code:?}}}}}\n");
+        ended(4 << 8, &envelope)
+    };
+
+    // 1. The ends the test allows.
+    let killed = ended(SIGKILL, "");
+    assert!(matches!(landed_as(0, &killed, true), Landed::Killed(None)));
+    let busy = failed("E_BUSY");
+    assert!(matches!(landed_as(0, &busy, false), Landed::Busy));
+    let landed = ended(0, "{\"ok\":true,\"result\":{\"landed\":\"x\"}}\n");
+    assert!(matches!(landed_as(0, &landed, false), Landed::Exited(id) if id == "x"));
+
+    // 2. A lander no test killed; a failure that is not `E_BUSY`; a success without an envelope.
+    fires(|| drop(landed_as(1, &killed, false)), "lander 1 killed");
+    let corrupt = failed("E_STORE_CORRUPT");
+    fires(|| drop(landed_as(2, &corrupt, false)), "lander 2");
+    let silent = ended(0, "");
+    fires(|| drop(landed_as(3, &silent, false)), "no envelope");
 }
