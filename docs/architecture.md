@@ -140,7 +140,7 @@ A store is one directory (storage §2, §3):
 
 ```text
 <store>/
-  FORMAT                     "swarmops-store 2\n" (or 1), written last by init: a store without it was never finished
+  FORMAT                     "swarmops-store 3\n" (or 2, 1), written last by init: a store without it was never finished
   REPO                       the repository's id and name
   objects/tmp/               where new object files are staged
   objects/<2 hex>/<62 hex>   one file per object: a header ("SOB1", kind, encoding, length), then the payload
@@ -155,6 +155,11 @@ A store is one directory (storage §2, §3):
   meta/refs/main             one file per ref ("<64 hex>\n<version>\n"); also meta/refs/release/<name>
   meta/journal2.{log,off,ckpt}  FORMAT 2's journal, offsets and checkpoint, in place of journal.* (M6)
   meta/refs2/<32 hex>        FORMAT 2's ref files, in place of meta/refs/ (M6): named by the name's hash, holding it
+  meta/journal3.ckpt         FORMAT 3's checkpoint (M20), in place of journal2.ckpt; FORMAT 3 keeps journal2.{log,off} and refs2/
+  meta/sorted3/              FORMAT 3's sorted views (M20), in place of meta/sorted/: immutable runs and the MANIFEST that lists them
+  meta/views.lock            FORMAT 3's lease of the work on the runs and the manifest (M20)
+  meta/features              FORMAT 3's list of the features a store has on (M20); absent when none is
+  meta/idx/facts.col         FORMAT 3's index column of facts (M20): one row per fact, its place in the journal and its kind
   meta/derived/<name>/...    derived values, one file each: a cache beside the journal, never synced (M2)
   meta/derived/tmp/          where new derived values are staged
   meta/external_ids/         the external id index (M3): <system>/<2 hex>/<rest of the hex>, one 44-byte file per id
@@ -183,12 +188,20 @@ changed only with a new `FORMAT` (storage §3). `FORMAT 2` (M6) keeps the record
 frame header to `u32le len | u32le crc32(payload) | u64le seq | u32le prev_crc | u32le
 crc32(header)`, gives each `journal.off` entry the frame's payload CRC and a checksum of its own,
 and names each ref file `hex(blake3("swarmops:refname:v1\0" ++ name)[0..16])`, which holds the
-name; that recipe names files, and is no part of the hash contract. Derived values (M2) are no projection of the
+name; that recipe names files, and is no part of the hash contract. `FORMAT 3` (M20, the FORMAT 3
+design) keeps FORMAT 2's frames, offsets and ref files byte for byte, ends every frame with a
+`Nonce` record of a random 64-bit value, so that two operations of the same bytes get distinct
+ids, and adds facts: records in one envelope (kind, type, subject, other, time, actor, body) that
+reviews, annotations, checks, queue entries, withdrawals, lineage, provenance and annotated tags
+use, each kind behind a feature named in `meta/features`; a binary refuses a store that lists a
+feature it lacks (`E_STORE_TOO_NEW`). Its sorted views are runs under a manifest, built after the
+lock is released (below), so no write rewrites them under the lock. Derived values (M2) are no projection of the
 journal but a cache beside it, with a header of their own (below). The external id index (M3,
 storage §7) says which changeset an id of another system names, a git commit's oid say: an immutable
 file per id, written as an object is and only once the frame that records its changeset is durable.
-It is a cache outside the journal, not a projection of it, so it leaves `FORMAT 1` as it is. Later
-milestones add reviews (M7) to `meta/`. The workspace registry (M5), `workspaces/<name>.json`,
+It is a cache outside the journal, not a projection of it, so it leaves `FORMAT 1` as it is. The
+milestones that use facts (M7's reviews among them) each turn on their feature in a FORMAT 3
+store. The workspace registry (M5), `workspaces/<name>.json`,
 sits beside `meta/`: only the client-side workspace operations read and write it, no store
 operation does.
 
@@ -308,9 +321,13 @@ one chain.
    ref the frame moves is replaced (temp file, fsync, rename, directory fsync). A batch
    materializes once: each ref its frames move is replaced once, with the last target.
 6. Housekeeping, still under the lock: every 32 frames past the checkpoint (and on an explicit
-   flush), the five index files are synced and `journal.ckpt` moves to the end of the journal.
-   When more than 1,024 index records sit past the sorted views, a compaction merges them into
-   the views after the sync, before the checkpoint moves.
+   flush), the index files (five; FORMAT 3's six, with `facts.col`) are synced and
+   `journal.ckpt` moves to the end of the journal. On FORMAT 1 and 2, when more than 1,024
+   index records sit past the sorted views, a compaction merges them into the views after the
+   sync, before the checkpoint moves. FORMAT 3 does no view work under the lock: after the reply
+   is out, the CLI, the MCP server and `serve` build the next run under `meta/views.lock`
+   (`views::step`), a commit whose unbuilt tail passes 8,192 records builds one after it releases
+   the lock, and `gc` builds what is left.
 
 The same steps, with what a failure on each side of the commit point leaves:
 
@@ -459,7 +476,7 @@ and passed over; `op log` reads the operation as a `land`.
 ## Reading
 
 Readers take no lock (storage §3, "읽기"), `op log` aside (below). `MetaStore::read()` takes a snapshot: it reads
-`journal.ckpt`, opens the index (counting only the records that all five index files hold whole,
+`journal.ckpt`, opens the index (counting only the records that all its index files hold whole,
 and, past the checkpoint and the sorted views, only those that the frames past the checkpoint
 vouch for, field by field, as storage §3, "색인의 보증", says: a record that a power loss zero-filled
 is not counted, the snapshot reads its changeset from the frame, and the next write replays it;

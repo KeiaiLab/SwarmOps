@@ -93,8 +93,8 @@ No compatibility is promised for:
   with what to do about it.
 - A store format change may need a store to be created again. (It happened once during M1:
   once `init` began to create every index file, stores created before that were refused.) The
-  changelog says when. `FORMAT 1` moves to `FORMAT 2` in place, with `swarmops upgrade` (M6),
-  which no older release can read afterwards.
+  changelog says when. `FORMAT 1` moves to `FORMAT 2` (M6) and either to `FORMAT 3` (M20) in
+  place, with `swarmops upgrade`, which no older release can read afterwards.
 - From 1.0 on, the intent is that a release opens every store an earlier 1.x release wrote, or
   migrates it, and that a test proves it before each release.
 
@@ -106,9 +106,11 @@ No compatibility is promised for:
   than misread it, because there is no rule for skipping unknown records. `FORMAT 2` (M6) added a
   checksum to each `journal.off` entry, a frame header that carries the frame's sequence number
   and the previous frame's CRC, and ref files named by the hash of the ref's name, under new
-  file names, with the record layouts unchanged. The first new journal record kind (annotations,
-  M7) makes the next one, `swarmops-store 3`; whichever version first changes the layout takes
-  the next number.
+  file names, with the record layouts unchanged. `FORMAT 3` (M20) keeps FORMAT 2's frames,
+  offsets and ref files, adds a nonce record to every frame and the fact records, and moves the
+  sorted views to runs under a manifest; within it, new record kinds come behind named features,
+  which a binary that lacks one refuses (`E_STORE_TOO_NEW`) rather than misread. Whichever
+  version next changes a layout takes the next number.
 - **A new external id entry layout** gets the next `SXID` version, beside version 1: entries
   already written keep their bytes. A binary reads only the versions it knows and reports an
   entry of any other as damaged (`E_STORE_CORRUPT`), so an older binary fails on such an entry

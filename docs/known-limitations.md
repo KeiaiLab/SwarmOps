@@ -1,6 +1,6 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M19, and the milestone
+What SwarmOps does not do yet, or does less well than it should, as of M20, and the milestone
 meant to change it. The items come from the M1 and M1.5 reviews and the 2026-10-16 code review:
 the carry-overs their tasks handed to later milestones, the deferred minors that are still open,
 and the rulings of M1's final review, which left 14 questions to the maintainer (the table at the
@@ -75,13 +75,16 @@ left).
   failed; the warning names its id) and then lost this way gives its number to the next write.
   An operation's id carries its frame's CRC-32 beside the number, so an `op undo` of the lost
   operation's id is `E_OP_NOT_FOUND` (`reason: checksum`) and never acts on the other operation,
-  unless the two frames' CRC-32s are equal: one chance in 2^32 for each number taken back (the
-  M15 design §2). `repair` reports the lost frame. The tail check runs in a committed read too
+  unless the two frames' CRC-32s are equal. On FORMAT 1 and 2 a frame of the same bytes (the same
+  move of the same ref) has the same CRC-32, so its id is the lost one's; a FORMAT 3 frame carries
+  a random nonce, so there only frames that differ remain, at one chance in 2^32 for each number
+  taken back (the M15 design §2; the FORMAT 3 design §2.7). `repair` reports the lost frame. The tail check runs in a committed read too
   (M8's git export, M11's `serve`), so a double fault there aborts a reader process as it does a
   writer.
   *Documented (the M6 design, section 12; the v0.6.0
   design, D7). Found: M1.5 Task 2; narrowed by M6; the operation number from the M4
-  consolidated review (issue #11), closed by operation ids in M15 but for the CRC-32 collision.*
+  consolidated review (issue #11), closed by operation ids in M15 but for the CRC-32 collision;
+  narrowed by FORMAT 3's frame nonce (M20).*
 - **A failed directory fsync in the object store is retried, not taken back.**
   `FsObjectStore::flush` keeps a fan-out directory whose fsync failed and fsyncs it again on a
   later flush; the commit whose flush failed fails. The retry is for an fsync that never ran (the
@@ -160,7 +163,7 @@ left).
   or lists anything, the first writer after a crash checks every entry of a FORMAT 1 store's
   `journal.off`. On a long journal that walk could approach `lock_timeout` for the writers queued
   behind it. A FORMAT 2 entry carries its own checksum, so recovery checks only the entries from
-  the checkpoint on; `swarmops upgrade` moves a store to FORMAT 2. *Documented (M6). Found: M1
+  the checkpoint on; `swarmops upgrade` moves a store through FORMAT 2 to FORMAT 3. *Documented (M6). Found: M1
   fuzzing review; final review, question 5.*
 - **`repair` and `upgrade` hold the lock for the whole journal.** Rebuilding the index and
   upgrading a store read every frame under `meta/lock`, so a writer that waits for them past the
@@ -217,8 +220,8 @@ left).
   every directory it enters, however few of their entries it lists. Bounded reads come later.
   (Sizes and depths came in M2, and the default page was measured again for them: 250 entries.)
   A tree object is decoded whole within the 512 MiB object bound. *Unscheduled (a streaming tree
-  decode is a codec path of its own, the M6 design, section 5). Found: M1 Task 5; final review,
-  question 9.*
+  decode is a codec path of its own, the M6 design, section 5; FORMAT 3 does not split wide trees,
+  the FORMAT 3 design §5). Found: M1 Task 5; final review, question 9.*
 - **A page cursor does not pin the revisions it pages.** The `cursor` of `diff` and `read_tree`,
   and `read_file`'s `next_offset`, say where the next page starts, not which revisions it pages:
   an agent that pages through a diff, a directory or a file at `main` while another agent lands
@@ -383,10 +386,24 @@ left).
 - **`verify --deep` skips object files that are symlinks**, because the object listing ignores
   them; SwarmOps never writes one. *Unscheduled. Found: M1 final review.*
 - **An upgraded store fails older handles as damaged.** After `swarmops upgrade`, an older
-  release, and a handle this release opened as FORMAT 1 before the upgrade, fail their next read
-  or write with `E_STORE_CORRUPT` and a hint to verify: the FORMAT 1 checkpoint is poisoned so
-  that no older writer appends to the old journal. Opening the store again with this release
-  reads FORMAT 2. *Documented (the M6 design, section 3). Found: the M6 plan, risk R-3.*
+  release, and a handle this release opened as FORMAT 1 or 2 before the upgrade, fail their next
+  read or write with `E_STORE_CORRUPT` and a hint to verify: the old format's checkpoint is
+  poisoned so that no older writer appends to the old journal. Opening the store again with this
+  release reads FORMAT 3; a release older than M20 opening it anew refuses it as no store
+  (`E_NOT_A_REPO`). *Documented (the M6 design, section 3; the FORMAT 3 design §3, §4). Found: the
+  M6 plan, risk R-3.*
+- **FORMAT 3 has one way back, and it loses facts.** `upgrade` to FORMAT 3 cannot be undone, and
+  no older release opens the store after it: the way back is a git export imported by the older
+  binary into a new store. Once a release turns on a FORMAT 3 feature in a store (reviews,
+  annotations, checks, queue entries, withdrawals, lineage, provenance), that way back drops the
+  facts the feature recorded, since git has no place for them. *Documented (the FORMAT 3 design,
+  amendment G7). Found: the FORMAT 3 design.*
+- **A withdrawal's reason cannot be erased.** A FORMAT 3 withdrawal fact keeps its reason (up to
+  1,024 bytes) in the journal itself, which nothing rewrites, so an erase removes the withdrawn
+  content but never the reason written for it. Every other free text of a fact (a review's title
+  and intent, an annotation's value, provenance's document) is a blob that a withdrawal can
+  remove. No release writes withdrawals yet. *Documented (the FORMAT 3 design, amendment G3;
+  withdrawal is M23's). Found: the FORMAT 3 design.*
 
 ## Hostile input
 
@@ -605,8 +622,8 @@ left).
   export. It lands no change on them, and passes over a partial clone, whose objects are not all
   on the host. *Target: M8's round trip of them with lands (its plan's Task 11), in the pilot.
   Found: M1, final review, question 14; narrowed by the host-repository tests (v0.5.0).*
-- **An import's step can hold the writer lock past 100 ms at 1,000,000 records.** Each frame of
-  an import is sized so that its commit holds the lock about 100 ms (the M17 design §3.1), but a
+- **An import's step can hold the writer lock past 100 ms at 1,000,000 records, on FORMAT 1 and
+  2.** Each frame of an import is sized so that its commit holds the lock about 100 ms (the M17 design §3.1), but a
   frame whose commit finds the index's tail past 1,024 records, or a metadata flush before the
   target's move that does, also rewrites the sorted views under the lock ("Compaction rewrites both sorted views under the
   writer lock" below): at 1,000,000 records that rewrite alone takes 173 ms, so a commit or a land
@@ -615,8 +632,12 @@ left).
   0.207 s), against G18's 100 ms; that figure holds the committers' queue behind each other and
   their own syncs, which the case does not separate from the import's holds (the import of 1,000
   commits alone held the lock 0.067 s at most;
-  [perf.md](perf.md#m17-baselines--2026-11-07)). *Target: compaction out of the write (M20).
-  Found: the M17 design §3.1.*
+  [perf.md](perf.md#m17-baselines--2026-11-07)). FORMAT 3 builds its sorted views after the lock
+  is released, so its import steps hold no view work; G18 at 1,000,000 records on FORMAT 3 is not
+  measured yet: `just perf`'s case for it has run only on a 20,000-changeset trial under load
+  ([perf.md](perf.md#m20--format-3-at-1000000-records--2026-11-12-not-measured)). *Target:
+  `upgrade` to FORMAT 3 (M20), and that case's run in a quiet window. Found: the M17 design §3.1;
+  narrowed by M20.*
 - **An import's last step is bounded in transactions, not in flushes.** The step that moves the
   target takes as many write transactions after 12,000 commits as after 1 (the M17 closure
   design §3.1), but only no more flushes: its first transaction, the metadata flush, flushes
@@ -1065,8 +1086,8 @@ left).
   `~/.local/state/swarmops/repos/<name>/` is only the convention the README follows.
   *Unscheduled. Found: M1 Task 5; umbrella spec §4; M1.5 final review.*
 - **No migration between pre-release formats.** A store made before a format change may be
-  refused afterwards and need creating again; it happened once during M1. A FORMAT 1 store moves
-  to FORMAT 2 with `swarmops upgrade` (M6). *Documented (the versioning policy, before 1.0).*
+  refused afterwards and need creating again; it happened once during M1. A FORMAT 1 or 2 store
+  moves to FORMAT 3 with `swarmops upgrade` (M6, M20). *Documented (the versioning policy, before 1.0).*
 - **The release binaries print an `ld.so` line on glibc 2.34 to 2.38.** On glibc 2.34 to 2.38 hosts
   (Ubuntu 22.04, Debian 12, RHEL 9) every start of the release `swarmops` and `so` binaries prints
   one `ld.so` line on stderr, `weak version 'GLIBC_2.39' not found (required by …)`; exit codes,
@@ -1091,19 +1112,23 @@ left).
   walks frames past the snapshot only to drop them. *Target: M2's measured decision on them (its
   plan's Task 3), deferred until after the pilot. Found: M1 Tasks 2c and 3; deferred again by
   Task 8.*
-- **Compaction rewrites both sorted views under the writer lock.** When the index's unsorted
-  tail passes 1,024 records, the writer that holds the lock merges it into the sorted views and
+- **Compaction rewrites both sorted views under the writer lock, on FORMAT 1 and 2.** When the
+  index's unsorted tail passes 1,024 records, the writer that holds the lock merges it into the sorted views and
   writes them anew before it lets go, so the writers queued behind it wait for a rewrite that
   grows with the store; one that waits past the 10 s `lock_timeout` fails with the retryable
   `E_BUSY`, and nothing is lost. The rewrite takes 50 ms at 100,000 records and 173 ms at
   1,000,000 (p50; 179 ms at most, [perf.md](perf.md#v060--2026-10-28)). It also holds the unsorted
   tail in memory: the tail's ids read in one piece and its (id, record) pairs sorted, 72 bytes a
   record, for a tail of a little past 1,024 records, or more after one transaction that adds
-  many (an import's frame). *Target: the sorted views as
-  immutable runs under a manifest, in a `FORMAT 3`, so that the lock holds only the manifest's
-  swap (the M6 design, decision D2), or M3's merge outside the lock (its plan's Task 15) if the bench shows a
-  stall of 100 ms or more at 100,000 records first. Found: M1.6 Task 7 (the compaction design);
-  the 2026-10-20 plan triage; the tail in memory, the M6 resolve round (issue #20).*
+  many (an import's frame). FORMAT 3 keeps the sorted views as immutable runs under a manifest
+  and builds them after the lock is released: by the command that wrote, once its reply is out,
+  by a commit whose unbuilt tail passes 8,192 records, and by `gc`. A reader there scans the
+  unbuilt tail, at most about 9,216 records and a frame while the builds succeed. The lock hold
+  of a FORMAT 3 commit at 1,000,000 records is not measured yet
+  ([perf.md](perf.md#m20--format-3-at-1000000-records--2026-11-12-not-measured)). *Target:
+  `upgrade` to FORMAT 3 (the FORMAT 3 design §2.5), and the measurement in a quiet window. Found:
+  M1.6 Task 7 (the compaction design); the 2026-10-20 plan triage; the tail in memory, the M6
+  resolve round (issue #20); narrowed by M20.*
 - **A blob is stored whole.** Each version of a file is one object (zstd-compressed past a
   small size), with no chunks or deltas, so a small edit to a large file stores it again.
   *Unscheduled (content-defined chunking). Found: the 2026-10-27 completeness report.*
