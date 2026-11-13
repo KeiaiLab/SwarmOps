@@ -955,6 +955,15 @@ fn undo_of_an_op_past_the_journal_is_not_found() {
         other => panic!("op {op}: expected OpNotFound, got {other:?}"),
     };
     assert_eq!(not_found(0), None, "an empty journal");
+    let nothing_yet = repo.undo(OpId::new(0, 0), UNDOER).unwrap_err();
+    assert_eq!(
+        nothing_yet.to_string(),
+        format!(
+            "there is no operation {}: its number is past the last operation (the last is \
+             none: the store has no operation yet)",
+            OpId::new(0, 0)
+        )
+    );
     chain(&repo);
     assert_eq!(not_found(3), Some(2));
     assert_eq!(not_found(u64::MAX), Some(2));
@@ -1286,6 +1295,43 @@ fn undo_reports_what_its_write_repaired() {
         }
         other => panic!("expected HistoryProtected, got {other:?}"),
     }
+}
+
+/// An undo that finds every ref back already writes nothing and still reports what its write's
+/// recovery repaired first: the repair is made, and stays, whatever the undo then does.
+#[test]
+fn a_replayed_undo_reports_what_its_write_repaired() {
+    let mut listed_and_replayed = Recovered::default();
+    listed_and_replayed.frames_listed = 1;
+    listed_and_replayed.refs_replayed = 1;
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
+    let [c1, c2, _] = chain(&repo);
+    cas(&repo, "release/r", None, Some(c1)); // op 3
+    cas(&repo, "release/r", Some(c1), Some(c2)); // op 4
+    let op4 = id_of(&repo, 4);
+    assert_eq!(undo(&repo, 4).frame_seq, Some(5), "release/r back at c1");
+
+    // A write of another ref, committed and not listed: the next write's recovery lists it.
+    let unlisted = listing_fails(&root)
+        .cas_ref("release/q", None, Some(c1), ACTOR)
+        .unwrap(); // op 6
+    assert_eq!(unlisted.warnings.len(), 1);
+
+    let again = repo.undo(op4, UNDOER).unwrap();
+    assert!(again.already_applied, "{again:?}");
+    assert_eq!((again.frame_seq, again.moves.len()), (None, 0));
+    assert_eq!(again.recovered, listed_and_replayed);
+    let (last, _) = repo.op_log(None, 1).unwrap();
+    assert_eq!(
+        seqs(&last),
+        [6],
+        "nothing written: the unlisted move is the last operation"
+    );
+
+    // The repair was made once: a third undo finds nothing left to repair.
+    let third = repo.undo(op4, UNDOER).unwrap();
+    assert!(third.already_applied);
+    assert_eq!(third.recovered, Recovered::default());
 }
 
 /// The operation the crash sweep's child undoes: the template's frame that moved [`TWO_REFS`]
