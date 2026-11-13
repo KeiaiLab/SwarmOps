@@ -44,7 +44,8 @@ left).
   the library the binary calls, not the binary; the readers run on the writer's host, so they read
   frames the page cache holds before their fdatasync, which only a power loss can take back; no
   image covers a check result or an approval (neither exists yet); and the recorded run is
-  short (its journal ends at 2,460 B on FORMAT 1 and 2,732 B on FORMAT 2, 17 frames), so a cut
+  short (its journal ends at 2,460 B on FORMAT 1, 2,732 B on FORMAT 2 and 2,885 B on FORMAT 3,
+  17 frames, lengths the default sweep asserts), so a cut
   at 4 KiB is in the model but never differs from dropping there; only the slow variant's bulk frame (1,025 changeset records, about 76 KB) reaches
   past a 4 KiB boundary. *Unscheduled. Found: M1 Task 6; final review, question 11; narrowed by M1.5
   Task 3, M1.6 Task 4, M6 Task K1, M16 Task S2 and M18 (revert, group land).*
@@ -429,10 +430,11 @@ left).
   output, beside the decoder's window, which the frame's header sets up to zstd's default limit of
   128 MiB: about 192 MiB at worst. SwarmOps never writes such a file; a crafted store can hold one.
   A derived value's file (`meta/derived/`) over 4 KiB is a zstd frame too, decoded whole before its
-  trailer is checked, within the same bound: a header that records a value longer than 512 MiB fails
-  the file's checks before anything is decoded or allocated for it, and the file reads as missing.
-  Since M2, streamed reads bound `cat` below 512 MiB (`read_chunks`); every other read of the
-  payload decodes it whole. *Unscheduled; M2 streamed `cat`, and M3 Task 4 set the bound. Found: M1
+  trailer, which covers the decoded value, is checked, within the same bound: a header that records
+  a value longer than 512 MiB fails the file's checks before anything is decoded or allocated for
+  it, and the file reads as missing. Since M2, streamed reads bound `cat` below 512 MiB
+  (`read_chunks`); every other read of the payload, and every read of a derived value, decodes it
+  whole. *Unscheduled; M2 streamed `cat`, and M3 Task 4 set the bound. Found: M1
   Task 1; the 2026-10-16 code review; for derived values, the 2026-10-20 security review.*
 - **Crafted FORMAT 1 `journal.off` entries can mis-number a read.** In a FORMAT 1 store, entries
   crafted to agree with each other (one pointing into a payload whose bytes read as a frame header
@@ -456,17 +458,18 @@ left).
   loops. A record's generation below the checkpoint or under the sorted views is read as it is,
   but the walks that order or bound by one check it against the generations of the parents its object names (1 + the largest, 1 for a root), or fail with
   `E_STORE_CORRUPT`: each changeset a merge base's walk steps from, each touch `log --path`
-  orders, and where a no of `is_ancestor` stopped; and a revision's `~N` takes no `None` from a
-  generation, reaching a root or a skip list's checked end instead. Each check covers one link:
-  a generation that agrees with its parents' crafted ones passes, as does a no of
-  `is_ancestor` from the two generations alone, no step taken, and a keyed land's walk of its
-  target, which stops at a generation. Such a `meta/idx/gen.col` can still have a land take an
-  older common ancestor than the newest for its merge base, or `log --path` list its changesets
-  out of order; a record's delta hash is taken as it is. Every changeset such a walk reaches is on
-  the objects' first-parent chain, and `verify` reports the damage, which `swarmops repair`
-  rebuilds from the journal. Checking a generation fully on every read takes the journal, or
-  every generation down to a root. *Documented (M6); narrowed to one link by issue #16 item 5's fix.
-  Found: 2026-10-20, when the read path came to check the index.*
+  orders, where a no of `is_ancestor` stopped, and where a keyed land's walk of its target
+  stops; and a revision's `~N` takes no `None` from a generation, reaching a root or a skip
+  list's checked end instead. Each check covers one link: a generation that agrees with its
+  parents' crafted ones passes, as does a no of `is_ancestor` from the two generations alone, no
+  step taken. Such a `meta/idx/gen.col` can still have a land take an older common ancestor than
+  the newest for its merge base, or `log --path` list its changesets out of order; a record's
+  delta hash is taken as it is. Every changeset such a walk reaches is on the objects'
+  first-parent chain, and `verify` reports the damage, which `swarmops repair` rebuilds from the
+  journal. Checking a generation fully on every read takes the journal, or every generation down
+  to a root. *Documented (M6); narrowed to one link by issue #16 item 5's fix, and for a keyed
+  land's walk by issue #23 item 17's. Found: 2026-10-20, when the read path came to check the
+  index.*
 - **A text file past the line diff's bound is not diffed or merged by lines.** The histogram diff's
   time can grow with the square of a file's lines, so `diff` and a land's merge run it only on sides
   of at most 49,152 lines and 8 MiB (`MAX_DIFF_LINES`, `MAX_DIFF_BYTES`): past that,
@@ -486,7 +489,7 @@ left).
   texts aside, fit in 24 KiB: the first always, its hunks that do not fit as one entry without texts
   that spans them, and a later one whole or not at all. The files it leaves out are counted only in
   the error's message, not in a field of the report, which says `truncated`, and `land --human`
-  prints a `conflict:` line for the listed files alone. The report's `auto_merged` and `stale` lists
+  prints a `conflict:` line for each listed file, then `truncated: true`. The report's `auto_merged` and `stale` lists
   have no bound but the paths of the change, and the three-way merge still makes every hunk of a
   file, within the line diff's bound, before the merge keeps 128 of them. Past `max_conflict_bytes`
   a hunk keeps no text but the first such hunk's whole lines that fit (`text_head`), each such hunk
@@ -552,18 +555,18 @@ left).
   (error contract); narrowed by M14.*
 - **git's own lines on a push's side band are not masked.** `serve` masks what it and its hook
   write, and git's stderr; receive-pack's side band travels on git's stdout, which `serve` passes
-  on as it is. One such line names a host path: when the hook's program is gone (the serving
-  binary replaced or removed), `sh` names the hook file `<store>/git/serve-hooks/pre-receive`,
-  and the client prints it as a `remote:` line. *Unscheduled. Found: M14 Task S3.*
+  on as it is. The one such line known to name a host path, `sh`'s error when a hook's program is
+  gone (the serving binary replaced or removed), no longer reaches a client: each hook looks for
+  its program first and, missing, refuses the push or the fetch with a line `serve` wrote, over
+  ssh and HTTP alike. A program removed between that look and the hook's start still gets `sh`'s
+  line, which names the hook file under the store and the program. *Unscheduled; narrowed by issue #35's fix.
+  Found: M14 Task S3.*
 - **A land through `refs/land/<target>` does not move the client's tracking branch.** The landed
   commit is a squash the server made, so the client holds none of its objects, and git would
   refuse to move `origin/<target>` onto it (`update_ref failed … nonexistent object`, git 2.43.0).
   The hook names the landed commit on a `remote:` line (`landed onto main as <40 hex>: git fetch
   brings it in`), and the next `git fetch` or `git pull` moves `origin/<target>`. *Documented (the
   M14 design §7). Found: M14 Task L1.*
-- **A refused ref's `ng` line carries the code and the message, not `details.reason`.** A client
-  reads `reserved`, `not_served` and `annotated_tag` as words of the message ("reserves", "is not
-  served", "annotated tag"). *Unscheduled. Found: M14 Task S4.*
 - **A land attempt checks access before it starts, not under the lock.** A push to
   `refs/land/<target>` reads `access.toml` again before each attempt and stops with the
   connection's refusal when the `land` grant is gone, writing nothing (the M15 design §6). A
@@ -586,11 +589,13 @@ left).
   store prepared without a seed, or never prepared, still pays it at its first connection.
   *Unscheduled; narrowed by the M17 design §4.3 (G20's first clone after import, prepared, within
   2× git's). Found: M14 Task Q1.*
-- **A revert, a group land and a ref transaction leave `serve.git` to the next connection.** After
-  `land`, `commit --advance`, `ref set`, `ref delete`, `op undo`, `sync`, `fetch`, `git import` and
-  `ws land`, a store with an access file starts a detached preparation that makes `serve.git`
-  current; `revert`, `land-group` and `ref txn` (M18) start none, so the next connection exports
-  what they moved before it advertises. *Unscheduled. Found: the M18 slices' reviews.*
+- **A group land and a ref transaction leave `serve.git` to the next connection.** After `land`,
+  `commit --advance`, `ref set`, `ref delete`, `op undo`, `revert`, `sync`, `fetch`, `git import`
+  and `ws land`, a store with an access file starts a detached preparation that makes `serve.git`
+  current; the operation's process only tries `git/serve.lock` once, without waiting, and neither
+  opens nor repairs `serve.git`. `land-group` and `ref txn` (M18) start none, so the next
+  connection exports what they moved before it advertises. *Unscheduled; narrowed by issue #30
+  item 19's fix (`revert`). Found: the M18 slices' reviews.*
 - **The hooks' thread bound differs by transport.** A push's hooks compress the store's objects
   on at most 4 threads (`RAYON_NUM_THREADS`), over ssh and HTTP alike. Over HTTP every request's
   git runs with that bound, so a fetch's pack-objects hook does too; over ssh a fetch's hook runs
@@ -714,7 +719,9 @@ left).
   (`special_file`). No such file that git writes comes near the bound, but a `FETCH_HEAD` left by
   a fetch of some hundreds of thousands of refs, or a `SQUASH_MSG` of a squash of very many
   commits, can pass it: remove that file, which git keeps only for its next command, and run the
-  import or export again. *Documented (storage spec §7). Found: 2026-10-20.*
+  import or export again. A ref file within the bound that gix cannot decode fails `E_GIT_READ`,
+  whose reason is cut at 1 KiB, so the message never quotes the file whole. *Documented (storage
+  spec §7). Found: 2026-10-20; the reason's cut, issue #16 item 11.*
 - **A served push's hook peaks above one batch.** Since M17 the import stores a commit's trees
   and blobs every 64 MiB (`ImportRequest::object_batch_bytes`) inside one commit too, so it holds
   one batch and the file it converts (the M17 design §3.2). The `pre-receive` hook that imports a
@@ -1020,8 +1027,10 @@ left).
   Windows is not built yet. *Target: M12. Found: the 2026-11-01 completeness report (F7).*
 - **The check log is written by full path.** `ws land --check` writes its log to
   `.swarmws/checks/<attempt>.log` by full path, as the other `.swarmws` records are written: a
-  `.swarmws` swapped for a link is written through. The tree's files are not. *Unscheduled (the
-  M16 design §1). Found: M16 Task S1.*
+  `.swarmws` swapped for a link is written through. The tree's files are not, nor the volume probe
+  of `ws create`, whose writes start at the workspace's root and refuse such a `.swarmws`
+  (`E_WS_DIRTY`). *Unscheduled (the M16 design §1). Found: M16 Task S1; the probe, the M16 review
+  (issue #26).*
 - **A hold record records; it guards nothing.** Since M21 each workspace mutation that succeeds
   writes `workspaces/hold/<name>.json` beside the registry: the identity that made it, when, and
   the commits not landed yet. It is not synced, and a failed write is a warning: after a power cut
@@ -1212,16 +1221,7 @@ These do not change what SwarmOps does, only how well the tests can see it.
   two fifty-racer siblings run again a command that meets `E_BUSY` (`retry_busy`): the `ref set`
   race its setup commits, and the `commit --advance` race its racers' publishes, since one that
   met `E_BUSY` recorded nothing. *Unscheduled. Found: M1.5 Task 3.*
-- **A create's removal of a crashed create's staging is outside the fault doubles.** A create
-  removes what a crashed create left in `meta.tmp/`, and a repository create removes an older
-  `meta.tmp/` before it sets a crashed create of another format aside there, with `std::fs`:
-  `FsOps` removes no directories. So the crash and I/O-error sweeps inject no fault there, and the
-  power-loss images do not model it. A failed removal fails the create before it changes `meta/`
-  (pinned with a directory the process may not change); a crash during it leaves part of
-  `meta.tmp/`, which the next create removes. *Unscheduled: an `FsOps::remove_dir_all` is a new
-  seam method that every double must forward. Found: M6 Task A4 review.*
-- **Some tests run on one format.** The operations' mapping of malformed revisions, pinned to
-  FORMAT 1, has no FORMAT 2 or FORMAT 3 twin yet. Verify's damaged ref, lock and checkpoint cases
+- **Some tests run on one format.** Verify's damaged ref, lock and checkpoint cases
   run on FORMAT 1 and 2. Every sweep that runs per format (the crash, I/O-error, power-loss and
   SIGKILL sweeps of the store, of the git import and export and of the CLI) runs on all three. The CLI's damaged sorted-view
   cases and the repository's verify cases that compact the index run on FORMAT 2 alone: FORMAT
