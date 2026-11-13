@@ -203,7 +203,7 @@ impl Mirror {
     /// empty one is made, then the marker written.
     pub fn ensure(&self, _lock: &MirrorLock) -> Result<Rebuilt, MirrorError> {
         let git = self.git();
-        let marked = read_marker(git)?;
+        let marked = holds_marker(&git.join(MARKER_FILE), MARKER)?;
         let there = exists(&self.git_dir)?;
 
         // 1. Kept: marked, there, and gix opens it.
@@ -433,17 +433,7 @@ impl Mirror {
     /// Renames `mirror.git` aside as `mirror.git.broken-<unix ms>`, a name not yet taken.
     fn set_aside(&self) -> Result<Rebuilt, MirrorError> {
         let git = self.git();
-        let since = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        let mut ms = since.as_millis();
-
-        // The first free name from now on.
-        let mut name = format!("{BROKEN}{ms}");
-        while exists(&git.join(&name))? {
-            ms += 1;
-            name = format!("{BROKEN}{ms}");
-        }
+        let name = aside_name(git, BROKEN)?;
         fs::rename(&self.git_dir, git.join(&name))?;
         sync_dir(git)?;
         Ok(Rebuilt::SetAside { name })
@@ -495,8 +485,24 @@ fn moved(full: String, expected: Option<GitOid>, actual: Option<GitOid>) -> Mirr
     })
 }
 
+/// The first name `<prefix><unix ms>` not yet taken in `git`, from now on: what a broken
+/// repository is set aside as.
+pub(crate) fn aside_name(git: &Path, prefix: &str) -> io::Result<String> {
+    let since = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO);
+    let mut ms = since.as_millis();
+
+    let mut name = format!("{prefix}{ms}");
+    while exists(&git.join(&name))? {
+        ms += 1;
+        name = format!("{prefix}{ms}");
+    }
+    Ok(name)
+}
+
 /// Whether `path` is there (a symlink is not followed).
-fn exists(path: &Path) -> io::Result<bool> {
+pub(crate) fn exists(path: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -505,7 +511,7 @@ fn exists(path: &Path) -> io::Result<bool> {
 }
 
 /// Makes the directory `path`; whether it made it.
-fn make_dir(path: &Path) -> io::Result<bool> {
+pub(crate) fn make_dir(path: &Path) -> io::Result<bool> {
     match fs::create_dir(path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(false),
@@ -513,10 +519,10 @@ fn make_dir(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Whether `git/MIRROR` holds this layout's marker; a missing one does not.
-fn read_marker(git: &Path) -> io::Result<bool> {
-    match fs::read(git.join(MARKER_FILE)) {
-        Ok(marker) => Ok(marker == MARKER),
+/// Whether the file `path` holds `marker`, a layout's; a missing one does not.
+pub(crate) fn holds_marker(path: &Path, marker: &[u8]) -> io::Result<bool> {
+    match fs::read(path) {
+        Ok(found) => Ok(found == marker),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
@@ -534,6 +540,6 @@ fn write_marker(git: &Path) -> io::Result<()> {
 }
 
 /// fsyncs the directory `path`.
-fn sync_dir(path: &Path) -> io::Result<()> {
+pub(crate) fn sync_dir(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }

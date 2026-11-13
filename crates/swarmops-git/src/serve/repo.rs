@@ -26,12 +26,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError, SendError};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::gix_sink::{self, GixSink};
-use crate::mirror::STALE_LOCK_AGE;
+use crate::mirror::{STALE_LOCK_AGE, aside_name, exists, holds_marker, make_dir, sync_dir};
 use crate::oid::GitOid;
 use crate::sink::{BranchUpdate, SinkError};
 
@@ -370,17 +370,7 @@ impl ServeRepo {
     /// deletes it.
     fn set_aside(&self) -> Result<(), ServeError> {
         let git = self.git().as_std_path();
-        let since = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        let mut ms = since.as_millis();
-
-        // The first free name from now on.
-        let mut name = format!("{BROKEN}{ms}");
-        while exists(&git.join(&name)).map_err(io_failed(&name))? {
-            ms += 1;
-            name = format!("{BROKEN}{ms}");
-        }
+        let name = aside_name(git, BROKEN).map_err(io_failed(SERVE_GIT))?;
         fs::rename(self.git_dir.as_std_path(), git.join(&name)).map_err(io_failed(SERVE_GIT))?;
         sync_dir(git).map_err(io_failed(""))
     }
@@ -409,31 +399,9 @@ fn open_lock(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-/// Whether `path` is there (a symlink is not followed).
-fn exists(path: &Path) -> io::Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-/// Makes the directory `path`; whether it made it.
-fn make_dir(path: &Path) -> io::Result<bool> {
-    match fs::create_dir(path) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
 /// Whether `git/SERVE` holds this layout's marker; a missing one does not.
 fn read_marker(git: &Path) -> io::Result<bool> {
-    match fs::read(git.join(MARKER_FILE)) {
-        Ok(marker) => Ok(marker == SERVE_MARKER),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
+    holds_marker(&git.join(MARKER_FILE), SERVE_MARKER)
 }
 
 /// Writes `HEAD` of the bare repository `git_dir` as [`HEAD`] says, whatever gix wrote.
@@ -454,9 +422,4 @@ fn write_atomic(dir: &Path, name: &str, bytes: &[u8], mode: Option<Permissions>)
     drop(file);
     fs::rename(&temp, dir.join(name))?;
     sync_dir(dir)
-}
-
-/// fsyncs the directory `path`.
-fn sync_dir(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
 }
