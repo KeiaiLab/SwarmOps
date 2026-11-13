@@ -31,7 +31,7 @@ use swarmops_repo::merge::tree_diff::{PathFilter, delta_of};
 use swarmops_repo::{Advance, Change, CommitRequest, Depth, LocalRepo, OpId, RepoError};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, HookedFs, ORDER_CHECK_ENV};
-use swarmops_store::{FsOps, Journal, MetaStore, RealFs, Recovered};
+use swarmops_store::{FsOps, Journal, MetaStore, RealFs, Recovered, StoreError};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::checked;
@@ -1258,6 +1258,46 @@ fn keyed_land_reads(other_ref: OtherRef) {
         (1..=6).contains(&read),
         "the land read {read} of the target's changesets"
     );
+}
+
+/// A keyed land's walk of its target stops at the first changeset at or below the base's
+/// generation. One whose generation a crafted `meta/idx/gen.col` lowers to the base's, above the
+/// key's land, would hide that land, and the change, reverted since, would land again: the walk
+/// checks the generation where it stops against its parents', so the land fails with
+/// `IndexCorrupt` and records nothing.
+#[test]
+fn a_crafted_generation_never_hides_a_keyed_land() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    let first = repo.land(keyed(head, "key-1")).unwrap().landed;
+    let above = advance(&repo, OTHER, &[first], vec![delete("b")]);
+    let record = repo.changeset(above).unwrap().expect("above").seq;
+    repo.flush_metadata().unwrap();
+    drop(repo);
+
+    // 1. `above`'s generation 3 to 1, `t0`'s: by it, the walk stops above the key's land.
+    let gen_col = layout_of(&root).meta_path("idx/gen.col");
+    let mut generations = std::fs::read(&gen_col).unwrap();
+    let at = 8 * usize::try_from(record).unwrap();
+    assert_eq!(
+        generations[at..at + 8],
+        3u64.to_le_bytes(),
+        "above's generation"
+    );
+    generations[at..at + 8].copy_from_slice(&1u64.to_le_bytes());
+    std::fs::write(&gen_col, generations).unwrap();
+
+    // 2. The same land again, from `t0`: refused, nothing recorded.
+    let repo = LocalRepo::open(&root).unwrap();
+    let frames = frame_count(&root);
+    let mut again = keyed(head, "key-1");
+    again.base = Some(t0);
+    match repo.land(again) {
+        Err(RepoError::Store(StoreError::IndexCorrupt { .. })) => {}
+        other => panic!("expected IndexCorrupt, got {other:?}"),
+    }
+    assert_eq!((frame_count(&root), main_head(&repo)), (frames, above));
 }
 
 /// A land onto a ref that does not exist, or onto a name that is no ref name, is refused, and

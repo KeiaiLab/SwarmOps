@@ -17,6 +17,12 @@
 //! form), the changeset of the target's chain where a land of the change could have landed at the
 //! earliest, since a land lands above its base. Generations fall strictly along first parents, so
 //! the walk reads at most one changeset per generation between the two.
+//!
+//! The generation the walk stops at is the index's word: it is checked against the generations
+//! of the parents the changeset's object names (1 + the largest, 1 for a root), or the walk fails
+//! with [`StoreError::IndexCorrupt`], so that a crafted `gen.col` cannot end it above a land of
+//! the key. Parents' generations are taken as they are: one check covers one link, as the read
+//! path's do.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
@@ -27,6 +33,7 @@ use swarmops_store::{ObjectStore, RefKind, StoreError, ref_kind};
 use super::landing::{More, Touches, stored};
 use super::{LAND_KEY, SQUASHED_FROM};
 use crate::error::RepoError;
+use crate::history::wrong_generation;
 use crate::read::{RepoRead, StoredChangeset};
 
 /// The metadata key of who made a change: what a conflict report names for each changeset that
@@ -35,8 +42,8 @@ const AGENT: &str = "agent";
 
 /// What a land's walk keeps of each changeset of the target's chain it read.
 struct Walked {
-    /// Its first parent; `None` for a root.
-    parent: Option<ChangesetId>,
+    /// Its parents, as its object names them; none for a root.
+    parents: Vec<ChangesetId>,
     /// Its generation.
     generation: u64,
     /// Its `agent` metadata, lossily UTF-8; empty when it names none.
@@ -63,7 +70,7 @@ impl Walked {
                 .map(|(_, value)| value.clone())
         };
         Walked {
-            parent: changeset.parents.first().copied(),
+            parents: changeset.parents.clone(),
             generation,
             agent: value(AGENT).map_or_else(String::new, |agent| {
                 String::from_utf8_lossy(&agent).into_owned()
@@ -74,6 +81,11 @@ impl Walked {
             land_key: value(LAND_KEY),
             squashed_from: value(SQUASHED_FROM),
         }
+    }
+
+    /// Its first parent; `None` for a root.
+    fn parent(&self) -> Option<ChangesetId> {
+        self.parents.first().copied()
     }
 
     /// The changesets its `squashed_from` lists, in its order: ids in hex, a space between each
@@ -93,6 +105,23 @@ impl Walked {
         (self.paths.iter())
             .any(|changed| changed == path || below(changed, path) || below(path, changed))
     }
+}
+
+/// Checks `walked`'s generation, where a walk stops by it, against the index records of the
+/// parents its object names: 1 + the largest of theirs, 1 for a root, or
+/// [`StoreError::IndexCorrupt`]. It reads no object.
+fn check_generation<O: ObjectStore>(
+    read: &RepoRead<'_, O>,
+    walked: &Walked,
+) -> Result<(), RepoError> {
+    let mut top = 0;
+    for &parent in &walked.parents {
+        top = top.max(read.walk_record(parent)?.generation);
+    }
+    if walked.generation != top.saturating_add(1) {
+        return Err(wrong_generation());
+    }
+    Ok(())
 }
 
 /// A changeset a keyed land's walk found carrying its key.
@@ -160,7 +189,7 @@ fn judge(
     load: &Load<'_>,
 ) -> Result<KeyFound, RepoError> {
     let squashed_from = walked.squashed();
-    let (Some(&last), Some(parent)) = (squashed_from.last(), walked.parent) else {
+    let (Some(&last), Some(parent)) = (squashed_from.last(), walked.parent()) else {
         return Ok(KeyFound::Reused(id));
     };
     if !squashed_ours(last, ours, load)? {
@@ -247,10 +276,15 @@ impl TargetWalk {
                 vacant.insert(walked);
             }
             let walked = &self.walked[&id];
-            if !visit(id, walked) || walked.generation <= self.floor {
+            if !visit(id, walked) {
                 return Ok(());
             }
-            at = walked.parent;
+
+            // The floor: its generation checked first, since it ends the walk.
+            if walked.generation <= self.floor {
+                return check_generation(read, walked);
+            }
+            at = walked.parent();
         }
         Ok(())
     }
