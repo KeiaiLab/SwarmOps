@@ -15,7 +15,8 @@
 # matrix and the fuzz smoke (load 319 on 32 cores) clone_cost_on_12000_commits, in the suite
 # then, ran into its 20-minute kill: 1,048 s within the suite the run before, 721 s by itself.
 # The other jobs wait for it, pass or fail.
-# The git matrix alone runs in a container on that host, so that it needs none of its packages.
+# The git matrix alone runs in a container on that host, so that it needs none of its packages;
+# it builds into a directory of the host's, one per git, mounted into the container.
 name: Scheduled
 
 on:
@@ -172,9 +173,15 @@ jobs:
   # Inside ubuntu:24.04 pinned by digest, as root, as release.yml's build jobs are: the job
   # installs the compiler, zlib's and curl's headers and the pinned toolchain itself, so it needs
   # nothing of the runner's host; the last step gives the runner's user back what it wrote into
-  # the mounted workspace and temporary directory. The toolchain, the build and git's install
-  # prefix stay in the container's own filesystem. The digest and the rustup-init release are
-  # moved by hand, with release.yml's.
+  # the mounted workspace, temporary directory and build directory. The toolchain and git's
+  # install prefix stay in the container's own filesystem. The build goes to a directory of the
+  # host's beside the runners' own (`volumes`), mounted at CARGO_TARGET_DIR and kept between
+  # runs, which docker makes when it is missing: without it every run compiled the test kit, the
+  # git crate and the CLI from nothing, three times, inside the job's timeout. One per git, so
+  # that the three jobs, which run at once, never wait for each other's build lock. The
+  # container's paths are the same on every runner, so whichever runner takes a job finds its
+  # dependencies built. The digest and the rustup-init release are moved by hand, with
+  # release.yml's.
   git-matrix:
     name: git matrix (${{ matrix.git }})
     needs: slow
@@ -182,6 +189,8 @@ jobs:
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     container:
       image: ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+      volumes:
+        - /data/swarmops/ci-target/git-matrix-${{ matrix.git }}:/opt/target
     permissions:
       contents: read
     timeout-minutes: 45
@@ -297,11 +306,11 @@ jobs:
           SWARMOPS_GIT="$GIT_PREFIX/bin/git" \
             cargo nextest run --locked --all-features -p swarmops-testkit -p swarmops-git \
             -p swarmops-cli -E 'test(/^(transport|mirror|sync|limits|remote|remote_[a-z_]+|serve|serve_[a-z_]+)::/)'
-      - name: Give the runner's user back the workspace
+      - name: Give the runner's user back the workspace and the build directory
         if: ${{ always() }}
         run: |
           owner=$(stat -c %u:%g "$(dirname "$RUNNER_TEMP")")
-          chown -R "$owner" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          chown -R "$owner" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$CARGO_TARGET_DIR"
 
   # This host's repositories, which tests read only with SWARMOPS_HOST_REPOS=1: bare mirrors in
   # /data/swarmops/host-repos, refreshed by scripts/host-repos.py from the list file there (one
