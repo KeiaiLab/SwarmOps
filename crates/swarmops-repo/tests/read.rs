@@ -868,9 +868,12 @@ fn a_format_file_one_byte_too_long_is_refused_by_its_length() {
     );
 }
 
-/// A `FORMAT` or `REPO` that is not a regular file (a directory here, of a few kilobytes on
-/// ext4) is refused as not a regular file by its read, which names it by its place in the store,
-/// and not by its length: a directory's size says nothing of a file that is too long.
+/// A `FORMAT` or `REPO` that is not a regular file (a directory here) is refused as not a regular
+/// file by its read, which names it by its place in the store, and not by its length: a
+/// directory's size says nothing of a file that is too long. The directory holds twenty empty
+/// files of long names, so that it is longer than either file may be where a directory's size
+/// grows with its entries too (20 bytes an entry on tmpfs; an empty one is 4,096 bytes on ext4
+/// already).
 #[test]
 fn a_format_or_repo_that_is_a_directory_is_not_a_regular_file() {
     use swarmops_store::{FileOp, FsMethod};
@@ -880,6 +883,13 @@ fn a_format_or_repo_that_is_a_directory_is_not_a_regular_file() {
         drop(repo);
         fs::remove_file(root.join(file)).unwrap();
         fs::create_dir(root.join(file)).unwrap();
+        for n in 0..20 {
+            let pad = format!("pad-{n:02}-{}", "x".repeat(33));
+            fs::write(root.join(file).join(pad), b"").unwrap();
+        }
+        let len = fs::metadata(root.join(file)).unwrap().len();
+        assert!(len > 288, "{file}: a directory of {len} bytes");
+
         match LocalRepo::open(&root) {
             Err(RepoError::Store(StoreError::Io(failure))) => {
                 assert_eq!(
@@ -1242,13 +1252,21 @@ fn create_and_open_name_a_failed_call_relative_to_the_store() {
 
 /// The filesystem calls of `LocalRepo::create`, in order, on a fresh store.
 fn create_calls() -> Vec<String> {
+    create_calls_over(|_| {})
+}
+
+/// The filesystem calls of a FORMAT 1 `LocalRepo::create`, in order, at a store path where
+/// `leave` first left what an earlier create that crashed did.
+fn create_calls_over(leave: impl FnOnce(&Utf8Path)) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+    leave(&root);
     // create canonicalizes the store path; record paths against the canonical root.
     let canonical_dir = dir.path().canonicalize().unwrap();
     let (fs, calls) = RecordingFs::new();
     let fs = fs.naming_paths_in(canonical_dir.join("store"));
     LocalRepo::create_with_fs_as(&root, "demo", StoreFormat::V1, Arc::new(fs)).unwrap();
+    assert!(!root.join("meta.tmp").exists(), "the staging removed");
     calls()
 }
 
@@ -1324,6 +1342,54 @@ fn create_makes_the_documented_fs_calls() {
             "write_durable_temp objects/tmp",
             "link_noclobber FORMAT",
             "fsync_dir .",
+        ]
+    );
+}
+
+/// A create removes the `meta.tmp/` an earlier create left through the filesystem seam, where
+/// the fault doubles and the crash sweeps reach it (a `remove` of the directory, as the doubles
+/// name `FsOps::remove_dir_all`): the staging of a create that crashed before its rename, and
+/// the `meta/` of another format's crashed create, which is set aside as `meta.tmp/` over an
+/// older staging first. A create without leftovers makes no such call.
+#[test]
+fn a_create_removes_leftover_staging_through_the_seam() {
+    let fresh = create_calls();
+    assert!(!fresh.contains(&"remove meta.tmp".to_owned()), "{fresh:?}");
+
+    // 1. Staging alone: removed where the metadata store's create starts, and nothing else
+    //    differs from a create without it.
+    let staged = create_calls_over(|root| {
+        fs::create_dir_all(root.join("meta.tmp/meta")).unwrap();
+        fs::write(root.join("meta.tmp/meta/left"), b"a crashed create's").unwrap();
+    });
+    let (start, _) = meta_create_span(&fresh);
+    let mut want = fresh;
+    want.insert(start, "remove meta.tmp".to_owned());
+    assert_eq!(staged, want);
+
+    // 2. Another format's meta/ beside an older staging: the staging removed, meta/ renamed
+    //    over its name, and that removed in turn, before the create stages its own.
+    let aside = create_calls_over(|root| {
+        drop(LocalRepo::create_as(root, "crashed", StoreFormat::V2).unwrap());
+        fs::remove_file(root.join("FORMAT")).unwrap();
+        fs::create_dir_all(root.join("meta.tmp/meta")).unwrap();
+        fs::write(root.join("meta.tmp/meta/left"), b"an older create's").unwrap();
+    });
+    let staged = aside
+        .iter()
+        .position(|call| call == "create_dir_all meta.tmp/meta")
+        .unwrap();
+    let of_staging: Vec<&str> = aside[..staged]
+        .iter()
+        .map(String::as_str)
+        .filter(|call| call.ends_with(" meta.tmp"))
+        .collect();
+    assert_eq!(
+        of_staging,
+        [
+            "remove meta.tmp",
+            "rename_durable meta.tmp",
+            "remove meta.tmp"
         ]
     );
 }
@@ -1702,6 +1768,107 @@ mod span {
             (4, b"two\nthree".to_vec(), Some((2, 3)))
         );
         assert_eq!(read("short.txt", 3, 2, u64::MAX), (13, Vec::new(), None));
+    }
+
+    /// A line that a piece's end cuts in two is one line: of 15-byte lines, which no 64 KiB
+    /// piece ends on, the lines after the first cut are still numbered by their newlines (line n
+    /// starts at (n - 1) * 15), raw and zstd. A reader that counted a line at each piece's end
+    /// would be one line ahead from byte 65,536 on.
+    #[test]
+    fn a_line_cut_by_a_piece_s_end_is_counted_once() {
+        let (_dir, _root, repo) = new_repo();
+        let text: Vec<u8> = (1..=70_000_u32)
+            .flat_map(|n| format!("line {n:09}\n").into_bytes())
+            .collect();
+        assert_eq!(text.len(), 70_000 * 15);
+        assert_ne!((1_usize << 16) % 15, 0, "a piece ends inside a line");
+        let cs = commit(&repo, &[], vec![put("text.txt", &text)]);
+        let snap = repo.snapshot().unwrap();
+        let lines = |first: u64, last: u64| {
+            let span = FileSpan::Lines { first, last };
+            let got = snap.read_file_span(cs, &path("text.txt"), span, u64::MAX);
+            let got = got.unwrap().expect("a file");
+            (got.start, got.bytes, got.lines)
+        };
+
+        // Line 4370 holds byte 65,536: lines 5000 and 5001 come after the first cut.
+        assert_eq!(
+            lines(5000, 5001),
+            (74_985, text[74_985..75_015].to_vec(), Some((5000, 5001)))
+        );
+        // The cut line itself, and the last line, after every cut.
+        assert_eq!(
+            lines(4370, 4370),
+            (65_535, text[65_535..65_550].to_vec(), Some((4370, 4370)))
+        );
+        assert_eq!(
+            lines(70_000, 70_001),
+            (
+                1_049_985,
+                text[1_049_985..].to_vec(),
+                Some((70_000, 70_000))
+            )
+        );
+    }
+
+    /// A tree made by hand whose file entry names an object of another kind (a tree here) holds
+    /// no blob there: the span read and the length are `MissingObject` for a blob of that id,
+    /// never the other object's payload or size.
+    #[test]
+    fn a_file_entry_naming_an_object_of_another_kind_is_a_missing_blob() {
+        use swarmops_core::{BlobId, Tree, TreeEntry};
+        use swarmops_repo::RawChangeset;
+        use swarmops_testkit::repo::signature;
+
+        // 1. A root tree whose file `odd` names the id of a tree the store holds.
+        let (_dir, _root, repo) = new_repo();
+        let inner = Tree::new(vec![TreeEntry::leaf("f", LeafKind::File, blob(b"f"))]).unwrap();
+        let not_a_blob = BlobId::new(inner.id().0);
+        let entries = vec![
+            TreeEntry::leaf("fine", LeafKind::File, blob(b"f")),
+            TreeEntry::leaf("odd", LeafKind::File, not_a_blob),
+        ];
+        let root = Tree::new(entries).unwrap();
+        repo.put_objects(vec![
+            (ObjectKind::Blob, b"f".to_vec()),
+            (ObjectKind::Tree, inner.encode()),
+            (ObjectKind::Tree, root.encode()),
+        ])
+        .unwrap();
+        let raw = RawChangeset::new(
+            Vec::new(),
+            root.id(),
+            signature(),
+            signature(),
+            b"a tree made by hand".to_vec(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let cs = repo.commit_raw(raw).unwrap().outcomes[0].id;
+        let snap = repo.snapshot().unwrap();
+        let missing_blob = |got: RepoError, what: &str| match got {
+            RepoError::MissingObject { id, kind } => {
+                assert_eq!((id, kind), (not_a_blob.0, ObjectKind::Blob), "{what}");
+            }
+            other => panic!("{what}: expected MissingObject, got {other:?}"),
+        };
+
+        // 2. Its span and its length are refused; the file beside it reads.
+        for span in [
+            FileSpan::Bytes { start: 0 },
+            FileSpan::Lines { first: 1, last: 1 },
+        ] {
+            let got = snap.read_file_span(cs, &path("odd"), span, 64);
+            missing_blob(got.unwrap_err(), "read_file_span");
+            let fine = snap.read_file_span(cs, &path("fine"), span, 64).unwrap();
+            assert_eq!(fine.expect("a file").bytes, b"f");
+        }
+        missing_blob(snap.blob_len(not_a_blob).unwrap_err(), "blob_len");
+        assert_eq!(snap.blob_len(blob(b"f")).unwrap(), 1);
+
+        // 3. A listing of the directory, which gives each leaf's size, is refused too.
+        let page = snap.list_tree_depth(cs, None, 1, None, 10);
+        missing_blob(page.unwrap_err(), "list_tree_depth");
     }
 
     /// A page of a depth listing reads the changeset, the trees on the way to the listed
