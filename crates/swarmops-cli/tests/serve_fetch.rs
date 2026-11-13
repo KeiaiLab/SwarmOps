@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use swarmops_store::MetaLock;
 use swarmops_testkit::git::fixture;
-use swarmops_testkit::remote::{GIT_ENV, GitServer};
-use swarmops_testkit::serve::ServeSite;
+use swarmops_testkit::remote::{GIT_ENV, GitServer, HttpAuth};
+use swarmops_testkit::serve::{HttpIdentity, ServeSite};
 use swarmops_testkit::store::layout_of;
 use tempfile::TempDir;
 
@@ -969,6 +969,42 @@ fn identical_clones_pack_once() {
             site.rev(clone, "origin/main"),
             site.served("refs/heads/main")
         );
+    }
+}
+
+/// Over smart HTTP too (`serve --cgi`, git's `http-backend`), two identical clones share one
+/// pack: the first writes the cache's one entry, the second is sent from it.
+#[test]
+fn identical_http_clones_pack_once() {
+    let site = Site::new().with_linear();
+    let http = site
+        .served
+        .http(HttpIdentity::Fixed(AGENT.to_owned()), HttpAuth::Anonymous);
+    let url = http.url(STORE);
+
+    // 1. One clone over HTTP, protocol v2; its directory.
+    let clone = |name: &str| {
+        let output = site
+            .served
+            .command()
+            .current_dir(site.work.path())
+            .args(["-c", Protocol::V2.setting(), "clone", "--quiet", &url, name])
+            .output()
+            .unwrap();
+        let stderr = text(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(!stderr.contains(&site.root()), "a host path: {stderr}");
+        site.dir(name)
+    };
+
+    // 2. The first packs; the second is sent from its entry.
+    let first = clone("first");
+    let entry = site.only_entry();
+    let second = clone("second");
+    assert_eq!(site.only_entry(), entry, "the second clone packed again");
+    for dir in [&first, &second] {
+        site.fsck(dir);
+        assert_eq!(site.rev(dir, "origin/main"), site.served("refs/heads/main"));
     }
 }
 
