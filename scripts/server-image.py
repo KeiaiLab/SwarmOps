@@ -5,6 +5,7 @@
 """Builds the server's container image from the release's packages, and tests the image.
 
     python3 -I scripts/server-image.py build <version> <packages dir> <out archive> [--arch A]...
+                                             [--fresh]
     python3 -I scripts/server-image.py test <version> <packages dir> [--archive A] [--only NAME]
 
 `build` makes one image index of `swarmops-server:<version>` for each architecture named (default
@@ -13,7 +14,8 @@ it as an OCI archive. The build context holds packaging/container/Dockerfile and
 `swarmops_<version>_<arch>.deb` and `swarmops-server_<version>_<arch>.deb` of the packages
 directory, nothing else; the Dockerfile copies no file in. Its dates are the packages' own, so
 the same packages give the same archive, byte for byte. The fetch stage downloads Debian's
-packages the two need: a cold build needs the network.
+packages the two need: a cold build needs the network. The install stage always runs again;
+`--fresh` runs the fetch stage again too, so no layer of an earlier build is reused.
 
 `test` checks an archive (default: one built for this host into a scratch directory) against
 the packages it came from, in containers without a network, the root filesystem read-only, the
@@ -40,6 +42,7 @@ Exit 1 on any failure. Needs docker with BuildKit and the containerd image store
 """
 
 import argparse
+import enum
 import hashlib
 import io
 import json
@@ -237,7 +240,16 @@ def context_dir(scratch: Path, packages: Path, version: str, arches: list[str]) 
     return context
 
 
-def build_archive(packages: Path, version: str, arches: list[str], out: Path) -> str:
+class Cache(enum.Enum):
+    """What a build may take from BuildKit's cache: the fetched Debian packages, or nothing."""
+
+    FETCHED = "fetched"
+    NONE = "none"
+
+
+def build_archive(
+    packages: Path, version: str, arches: list[str], out: Path, cache: Cache = Cache.FETCHED
+) -> str:
     """Builds the image index of `arches` into the OCI archive `out`; its digest."""
     for arch in arches:
         check(arch in ARCHES, f"no architecture {arch}; one of {', '.join(ARCHES)}")
@@ -252,7 +264,8 @@ def build_archive(packages: Path, version: str, arches: list[str], out: Path) ->
         context = context_dir(Path(scratch), packages, version, arches)
         argv = ["buildx", "build", "--builder", "default", "--progress", "plain"]
         argv += ["--platform", ",".join(f"linux/{arch}" for arch in arches)]
-        argv += ["--provenance=false", "--sbom=false", "--no-cache-filter", INSTALL_STAGE]
+        argv += ["--provenance=false", "--sbom=false"]
+        argv += ["--no-cache"] if cache == Cache.NONE else ["--no-cache-filter", INSTALL_STAGE]
         argv += ["--build-arg", f"SOURCE_DATE_EPOCH={epoch}"]
         argv += ["--output", f"type=oci,dest={out},name={IMAGE}:{version},rewrite-timestamp=true"]
         built = docker([*argv, str(context)], timeout=BUILD_WAIT_S)
@@ -693,6 +706,7 @@ def main() -> int:
     build.add_argument("packages", type=Path)
     build.add_argument("out", type=Path)
     build.add_argument("--arch", action="append", choices=sorted(ARCHES))
+    build.add_argument("--fresh", action="store_true", help="reuse no cached layer")
     tested = steps.add_parser("test", help="the cases, against an archive")
     tested.add_argument("version")
     tested.add_argument("packages", type=Path)
@@ -702,7 +716,9 @@ def main() -> int:
 
     try:
         if args.step == "build":
-            digest = build_archive(args.packages, args.version, args.arch or sorted(ARCHES), args.out)
+            arches = args.arch or sorted(ARCHES)
+            cache = Cache.NONE if args.fresh else Cache.FETCHED
+            digest = build_archive(args.packages, args.version, arches, args.out, cache)
             print(f"server-image: {args.out.name} {digest}")
             return 0
         return test(args.version, args.packages, args.archive, args.only)

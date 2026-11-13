@@ -1,8 +1,9 @@
 # The release (RELEASE.md): a pushed `v*` tag is checked against the workspace version, `stable`
 # and CHANGELOG.md; `just check` runs on the tagged commit; `swarmops` and `so` are built for two
 # Linux targets and smoke-run; each target's archive is made into a .deb and an .rpm, which are
-# installed in containers; and the tag's GitHub release is published with the archives, the
-# packages, `SHA256SUMS`, and the version's CHANGELOG.md section as its notes.
+# installed in containers; the server's container image is built from those packages and tested;
+# and the tag's GitHub release is published with the archives, the packages, the image's OCI
+# archive, `SHA256SUMS`, and the version's CHANGELOG.md section as its notes.
 #
 # A run started by hand (workflow_dispatch) on a branch rehearses the builds, the packages and
 # their installs for the workspace version, and publishes nothing: `publish` runs for a pushed tag
@@ -448,10 +449,66 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # The server's container image: one image index of x86_64 and aarch64, which
+  # scripts/server-image.py builds from both targets' `swarmops` and `swarmops-server` .deb alone
+  # (packaging/container/Dockerfile copies no file in) and writes as an OCI archive, a release
+  # asset. Every layer is built here (`--fresh`), Debian's packages fetched from its mirror. The
+  # aarch64 half runs its install under QEMU's user-mode emulator, which a pinned image registers
+  # with the host's binfmt_misc when the host lacks it. Then the image's cases run on the x86_64
+  # half in containers without a network, the last building the index again: both archives must
+  # be equal, byte for byte. On the runner, whose docker holds images in containerd's store.
+  image:
+    name: server image
+    needs: [version, packages]
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      # tonistiigi/binfmt qemu-v9.2.2, by digest: moved by hand, as the other images are.
+      BINFMT_IMAGE: tonistiigi/binfmt@sha256:1b804311fe87047a4c96d38b4b3ef6f62fca8cd125265917a9e3dc3c996c39e6
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: swarmops-${{ needs.version.outputs.version }}-*-packages
+          merge-multiple: true
+          path: packages
+      - name: Check the packages against the SHA-256 their jobs wrote
+        run: |
+          cd packages
+          sha256sum --check --strict -- *.sha256
+      - name: Register QEMU for the aarch64 half
+        run: |
+          if [ ! -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+            docker run --rm --privileged "$BINFMT_IMAGE" --install arm64
+          fi
+      - name: Build the image index
+        run: |
+          mkdir dist
+          python3 -I scripts/server-image.py build --fresh "$VERSION" packages \
+            "dist/swarmops-server-$VERSION-oci.tar"
+      - name: Test the image, and build it again
+        run: |
+          python3 -I scripts/server-image.py test "$VERSION" packages \
+            --archive "dist/swarmops-server-$VERSION-oci.tar"
+          cd dist
+          sha256sum -- *-oci.tar >"swarmops-server-$VERSION-oci.tar.sha256"
+          cat -- *.sha256
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: swarmops-${{ needs.version.outputs.version }}-server-image
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
   # For a pushed tag only: a rehearsal publishes nothing.
   publish:
     name: publish the release
-    needs: [version, check, build, packages]
+    needs: [version, check, build, packages, image]
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
@@ -462,7 +519,8 @@ jobs:
         with:
           name: release-notes
           path: notes
-      # The archives and the packages: `swarmops-<version>-<target>` and its `-packages`.
+      # The archives, the packages and the image: `swarmops-<version>-<target>`, its `-packages`,
+      # and `swarmops-<version>-server-image`.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: swarmops-*
@@ -486,4 +544,4 @@ jobs:
             flags+=(--prerelease)
           fi
           gh release create "v$VERSION" --verify-tag --title "SwarmOps $VERSION" \
-            --notes-file ../notes/notes.md "${flags[@]}" -- *.tar.gz *.deb *.rpm SHA256SUMS
+            --notes-file ../notes/notes.md "${flags[@]}" -- *.tar.gz *.deb *.rpm *-oci.tar SHA256SUMS
