@@ -23,8 +23,13 @@ crc32fast = "1.5.2"
 # The workspace's crates, at its version (RELEASE.md bumps it here too): cargo deny refuses a
 # dependency without a version requirement, a path one included.
 swarmops-core = { path = "../crates/swarmops-core", version = "0.11.0", features = ["arbitrary"] }
-# The native wire's link (`wire_chunk`), the one public way to its chunk reader.
-swarmops-ops = { path = "../crates/swarmops-ops", version = "0.11.0" }
+# The serve targets' refusals (`serve_entry`).
+swarmops-api = { path = "../crates/swarmops-api", version = "0.11.0" }
+# The proc-receive protocol and its pkt-lines (`serve_hook_input`).
+swarmops-git = { path = "../crates/swarmops-git", version = "0.11.0" }
+# The native wire's link (`wire_chunk`), the one public way to its chunk reader; `fuzzing`, the
+# serve parsers' wrappers (`serve_entry`, `serve_hook_input`).
+swarmops-ops = { path = "../crates/swarmops-ops", version = "0.11.0", features = ["fuzzing"] }
 swarmops-store = { path = "../crates/swarmops-store", version = "0.11.0" }
 # The filesystem doubles only (`NoSyncFs`): without its default features, which hold the CLI
 # and repository helpers, it adds no dependency the store does not have.
@@ -118,6 +123,20 @@ bench = false
 [[bin]]
 name = "wire_chunk"
 path = "fuzz_targets/wire_chunk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "serve_entry"
+path = "fuzz_targets/serve_entry.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "serve_hook_input"
+path = "fuzz_targets/serve_hook_input.rs"
 test = false
 doc = false
 bench = false
