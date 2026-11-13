@@ -657,10 +657,15 @@ mod tests {
         service_of, wants,
     };
 
+    /// What a stand-in answers `git version` with: a release the transport runs.
+    const STAND_IN_VERSION: &str = "git version 2.43.0";
+
     /// A stand-in for git at `dir/git`, a shell script of `body`; the [`GitCli`] that runs it.
+    /// It answers `git version` first, as every child is checked by it before it starts.
     fn stand_in(dir: &Path, body: &str) -> GitCli {
         let program = dir.join("git");
-        fs::write(&program, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let version = format!("[ \"$1\" = version ] && {{ echo '{STAND_IN_VERSION}'; exit 0; }}");
+        fs::write(&program, format!("#!/bin/sh\n{version}\n{body}\n")).unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
         let env = [(OsString::from(GIT_ENV), program.into_os_string())];
         GitCli::find_with_env(env).unwrap()
