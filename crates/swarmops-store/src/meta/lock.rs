@@ -4,8 +4,8 @@
 //!
 //! # The lock file
 //!
-//! `meta/lock` is a regular file, which [`MetaLock::acquire`] makes if it is missing and never
-//! writes. One that is anything else, as a crafted or restored store can hold, is refused before
+//! `meta/lock` is a regular file, which [`MetaLock::acquire`] makes if it is missing (mode 0600,
+//! whatever the umask) and never writes. One that is anything else, as a crafted or restored store can hold, is refused before
 //! it is opened, as every store file is: a FIFO, whose open for writing would wait for a reader
 //! (and every writer with it, before its timeout even starts), a symlink, whatever it points at
 //! (the open would follow it, and make the file it names, outside the store), a socket, a device
@@ -168,7 +168,11 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
 /// lock: `flock` waits unless `LOCK_NB` is given.
 fn open_unfollowed(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(false);
+    options
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(fs_ops::FILE_MODE);
     open_with(path, &options)
 }
 
@@ -346,7 +350,8 @@ pub(crate) fn open_flock_file(path: &Path, create: Create) -> io::Result<File> {
         .read(true)
         .write(true)
         .create(create == Create::IfMissing)
-        .truncate(false);
+        .truncate(false)
+        .mode(fs_ops::FILE_MODE);
     open_with(path, &options)
 }
 

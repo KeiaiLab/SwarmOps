@@ -36,9 +36,9 @@
 //! records each sync [`RealFs`] makes, and drops one when asked.
 
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -400,7 +400,7 @@ impl RealFs {
 
 impl FsOps for RealFs {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        fs::create_dir_all(p)
+        DirBuilder::new().recursive(true).mode(DIR_MODE).create(p)
     }
 
     fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
@@ -446,7 +446,7 @@ impl FsOps for RealFs {
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        let mut file = OpenOptions::new().append(true).create(true).open(path)?;
+        let mut file = appended(path)?;
         let offset = file.metadata()?.len();
         file.write_all(bytes)?;
         flush(&file, path, SyncKind::FileData)?;
@@ -482,7 +482,7 @@ impl FsOps for RealFs {
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        let mut file = OpenOptions::new().append(true).create(true).open(path)?;
+        let mut file = appended(path)?;
         let offset = file.metadata()?.len();
         file.write_all(bytes)?;
         Ok(offset)
@@ -492,6 +492,22 @@ impl FsOps for RealFs {
         fs::rename(from, to)?;
         self.fsync_dir(parent_dir(to))
     }
+}
+
+/// The mode of a file the store makes: its owner's alone, whatever the umask. A store's journal
+/// holds messages, identities and ref history.
+pub(crate) const FILE_MODE: u32 = 0o600;
+
+/// The mode of a directory the store makes: its owner's alone, whatever the umask.
+const DIR_MODE: u32 = 0o700;
+
+/// `path` opened to append to, made with [`FILE_MODE`] if it is missing.
+fn appended(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(FILE_MODE)
+        .open(path)
 }
 
 /// A new temp file in `dir`, named and made as tempfile names and makes one (`.tmp` and six
@@ -506,7 +522,7 @@ fn temp_file_in(dir: &Path) -> io::Result<NamedTempFile> {
             .read(true)
             .write(true)
             .create_new(true)
-            .mode(0o600)
+            .mode(FILE_MODE)
             .open(path)
     })
 }
@@ -1637,6 +1653,78 @@ mod tests {
             left.len(),
             2,
             "the replacements leave no temp file: {left:?}"
+        );
+    }
+
+    /// A store's directories and files are its owner's alone, whatever the umask: under a umask
+    /// of 0002, which would leave directories 0775 and files 0664, every directory `RealFs`
+    /// makes is 0700, the ones above the one asked for included, and every file a metadata
+    /// store makes and writes (the journal, the index columns, the sorted views, a ref, the
+    /// checkpoint, the lock, a file of the write queue) is 0600. The umask is the process's: the test sets it and puts it
+    /// back, and tests running beside it in one process only make files a little more open
+    /// meanwhile.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_store_made_under_umask_0002_is_its_owners_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use rustix::fs::Mode;
+        use swarmops_core::{ChangesetId, ObjectId};
+
+        use crate::meta::lock;
+        use crate::meta::{ChangesetMeta, MetaLock, MetaStore};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap().join("above/store");
+
+        // 1. A store, made and written under the umask.
+        let before = rustix::process::umask(Mode::from_raw_mode(0o002));
+        let written = (|| -> Result<(), Box<dyn std::error::Error>> {
+            RealFs.create_dir_all(root.as_std_path())?;
+            let store = MetaStore::create(&root)?;
+            let id = ChangesetId::new(ObjectId::new([1; 32]));
+            let mut write = store.write()?;
+            write.insert_changeset(ChangesetMeta::new(id, 0, 0, [2; 32], Vec::new()))?;
+            write.cas_ref("main", None, Some(id), "a")?;
+            write.commit()?;
+            store.flush()?;
+
+            // The lock file made afresh, and a queue file, by the lock's own opens.
+            let layout = crate::Layout::new(root.clone());
+            fs::remove_file(layout.meta_lock())?;
+            drop(MetaLock::acquire(&layout, std::time::Duration::ZERO)?);
+            let queued = root.join("meta/queued.req");
+            lock::open_flock_file(queued.as_std_path(), lock::Create::IfMissing)?;
+            Ok(())
+        })();
+        rustix::process::umask(before);
+        written.unwrap();
+
+        // 2. Every directory is 0700 and every file 0600.
+        let mut open = Vec::new();
+        let mut seen = 0;
+        let mut stack = vec![dir.path().join("above")];
+        while let Some(at) = stack.pop() {
+            let found = fs::symlink_metadata(&at).unwrap();
+            let (mode, wanted) = (found.permissions().mode() & 0o777, 0o700);
+            let wanted = if found.is_dir() { wanted } else { 0o600 };
+            if mode != wanted {
+                open.push(format!("{} is {mode:o}", at.display()));
+            }
+            seen += 1;
+            if found.is_dir() {
+                stack.extend(
+                    fs::read_dir(&at)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path()),
+                );
+            }
+        }
+        assert_eq!(open, Vec::<String>::new(), "not the owner's alone");
+        assert!(seen > 15, "the walk saw the store: {seen} paths");
+        assert!(
+            root.join("meta/refs/main").exists(),
+            "a ref file among them"
         );
     }
 
