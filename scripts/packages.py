@@ -47,8 +47,11 @@ its dependencies against that architecture's glibc. On a target this host runs, 
 the server packages beside the client's with apt-get and dnf, which fetch their dependencies:
 the accounts, the directories and the units must exist, `so-kit check` must pass, and removing
 them must remove their files and keep a file in /srv/so. On an emulated target the server
-packages, which hold no binary, are not installed. Needs docker; an emulated target and the
-server packages download packages from Debian's and AlmaLinux's mirrors. Exit 1 on a failure.
+packages, which hold no binary, are not installed. Needs docker. An emulated target downloads
+its C library, libgcc and the emulator at the versions the images hold: Debian's from the
+snapshot the Debian image was made from, AlmaLinux's from the AlmaLinux image's minor release.
+The server packages download their dependencies from the distributions' mirrors. Exit 1 on a
+failure.
 """
 
 import argparse
@@ -132,6 +135,10 @@ class Stage(enum.Enum):
 
 
 ALMALINUX_RELEASE = "9"
+# The Debian image's APT sources: each stanza's URIs line follows a comment naming the snapshot
+# of the archive the image was made from (`# http://snapshot.debian.org/archive/debian/<time>`).
+DEBIAN_SOURCES = "/etc/apt/sources.list.d/debian.sources"
+SNAPSHOT_LINE = re.compile(r"# (?P<uri>http://snapshot\.debian\.org/archive/\S+)")
 # How long one command in a container may take: an emulated target's downloads are the slowest.
 COMMAND_TIMEOUT = 900
 
@@ -1182,6 +1189,55 @@ def expect_removed(box: Container, root: str) -> None:
         box.run("test", "-e", f"{root}{path}", expect=1)
 
 
+def snapshot_sources(sources: str) -> str:
+    """`sources` with each stanza's URIs moved to the snapshot its comment names, which never
+    expires: what apt then fetches is what the image's own packages came from, whatever the
+    mirrors hold today."""
+    lines, snapshot, moved = [], None, 0
+    for line in sources.splitlines():
+        found = SNAPSHOT_LINE.fullmatch(line.strip())
+        if found:
+            snapshot = found["uri"]
+        if not line.startswith("URIs:"):
+            lines.append(line)
+            continue
+        if snapshot is None:
+            raise Failure(f"{DEBIAN_SOURCES}: '{line}' has no snapshot comment above it")
+        lines += [f"URIs: {snapshot}", "Check-Valid-Until: no"]
+        snapshot, moved = None, moved + 1
+    if moved == 0:
+        raise Failure(f"{DEBIAN_SOURCES} has no URIs line")
+    return "\n".join(lines) + "\n"
+
+
+def deb_version(box: "Container", package: str) -> str:
+    """The version of `package` the container's image holds."""
+    return box.run("dpkg-query", "--show", "--showformat", "${Version}", package).strip()
+
+
+def rpm_version(box: "Container", package: str) -> str:
+    """The version-release of `package` the container's image holds."""
+    return box.run("rpm", "--query", "--queryformat", "%{VERSION}-%{RELEASE}", package).strip()
+
+
+def pin_snapshot(box: "Container") -> None:
+    """Points the Debian container's APT at the snapshot its image was made from."""
+    sources = snapshot_sources(box.run("cat", DEBIAN_SOURCES))
+    with tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / "debian.sources"
+        path.write_text(sources)
+        box.copy_in(path, DEBIAN_SOURCES)
+
+
+def almalinux_minor(box: "Container") -> str:
+    """The image's AlmaLinux release, `9.<minor>`: its repositories, current or in the vault,
+    keep every package version of that release."""
+    release = box.run("sh", "-c", '. /etc/os-release && printf %s "$VERSION_ID"').strip()
+    if not release.startswith(f"{ALMALINUX_RELEASE}."):
+        raise Failure(f"the AlmaLinux image is release '{release}', not {ALMALINUX_RELEASE}.x")
+    return release
+
+
 def qemu(target: Target) -> str:
     """Debian's statically linked user-mode emulator for the target."""
     return f"qemu-{target.rpm}-static"
@@ -1194,12 +1250,16 @@ def smoke_deb(deb: Path, version: str, target: Target, emulator: Path) -> None:
     with Container(image(Stage.DEBIAN), deb.parent, network) as box:
         run_with: list[str] = []
 
-        # 1. An emulated target: its C library and libgcc (multiarch), and the emulator.
+        # 1. An emulated target: its C library and libgcc (multiarch) at the versions the image
+        # holds for its own architecture, and the emulator, all from the image's snapshot.
         if emulated:
+            pin_snapshot(box)
             box.run("dpkg", "--add-architecture", target.deb)
             box.run("apt-get", "update", "--quiet")
+            libc6, libgcc = (deb_version(box, p) for p in ("libc6", "libgcc-s1"))
             box.run("apt-get", "install", "--yes", "--quiet", "--no-install-recommends",
-                    "qemu-user-static", f"libc6:{target.deb}", f"libgcc-s1:{target.deb}")
+                    "qemu-user-static", f"libc6:{target.deb}={libc6}",
+                    f"libgcc-s1:{target.deb}={libgcc}")
             run_with = [qemu(target)]
 
         # 2. Install; what dpkg records; both binaries; the files; their checksums.
@@ -1230,14 +1290,16 @@ def smoke_rpm(rpm: Path, version: str, target: Target, emulator: Path) -> None:
         package = f"/packages/{rpm.name}"
         root, run_with, foreign = "", [], []
 
-        # 1. An emulated target: an AlmaLinux root of its architecture with glibc and libgcc,
-        # without scriptlets, which would run that architecture's programs.
+        # 1. An emulated target: an AlmaLinux root of its architecture with glibc and libgcc at
+        # the versions the image holds, from the image's minor release, without scriptlets,
+        # which would run that architecture's programs.
         if emulated:
             root = "/sysroot"
+            glibc, libgcc = (rpm_version(box, p) for p in ("glibc", "libgcc"))
             box.run("dnf", "--assumeyes", "--quiet", f"--forcearch={target.rpm}",
-                    f"--installroot={root}", f"--releasever={ALMALINUX_RELEASE}",
+                    f"--installroot={root}", f"--releasever={almalinux_minor(box)}",
                     "--setopt=install_weak_deps=False", "--setopt=tsflags=noscripts",
-                    "install", "glibc", "libgcc")
+                    "install", f"glibc-{glibc}", f"libgcc-{libgcc}")
             box.copy_in(emulator, f"/usr/local/bin/{qemu(target)}")
             run_with, foreign = [qemu(target), "-L", root], ["--ignorearch"]
 

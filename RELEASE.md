@@ -81,8 +81,11 @@ the macOS build waits, and nothing is published without it.
    binary, and removing the package must remove its files. The aarch64 packages are installed for
    aarch64, in Debian with that architecture's C library (multiarch) and into an AlmaLinux root of
    that architecture, against whose glibc `rpm` checks the dependencies, and run under QEMU's
-   user-mode emulator; these two containers download from Debian's and AlmaLinux's mirrors. The
-   job runs on the runner, which starts the containers; they mount the packages read-only.
+   user-mode emulator. These two containers download that C library, libgcc and the emulator at
+   the versions their images hold: Debian's from the snapshot (snapshot.debian.org) the Debian
+   image was made from, AlmaLinux's from the AlmaLinux image's minor release, which the vault
+   keeps; when Dependabot moves an image, they move with it. The job runs on the runner, which
+   starts the containers; they mount the packages read-only.
 5. **Publishes** (job `publish the release`, the only one with a write permission,
    `contents: write`, and only for a pushed tag): checks each archive and package against the
    SHA-256 its job wrote, writes `SHA256SUMS`, and creates the release `vX.Y.Z`, titled

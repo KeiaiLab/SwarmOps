@@ -484,8 +484,9 @@ jobs:
   # floor. Both binaries must print the version, the packages verify (rpm's seeing a tampered
   # binary) and remove cleanly. The aarch64 packages are
   # installed for aarch64 (Debian's multiarch, an AlmaLinux root of that architecture, whose glibc
-  # rpm checks the dependencies against) and run under QEMU; those two containers download from
-  # the distributions' mirrors.
+  # rpm checks the dependencies against) and run under QEMU; those two containers download the C
+  # library, libgcc and QEMU at the versions their images hold, from the Debian image's snapshot
+  # and the AlmaLinux image's minor release.
   # Beside them, the server kit's .deb and .rpm (`swarmops-server`, from packaging/server/ at the
   # tagged commit, dated alike). On x86_64 they are installed beside the client's with apt-get and
   # dnf, which download their dependencies: the account, directories and units must exist and
