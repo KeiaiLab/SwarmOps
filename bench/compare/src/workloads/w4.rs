@@ -211,11 +211,83 @@ pub fn recover(
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io::ErrorKind;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::time::Duration;
 
-    use super::{Opened, open_with};
+    use super::{Opened, open, open_with};
+    use crate::data::{chain, hex, id};
+    use crate::engines::{Db, Engine, Result, other};
     use crate::workloads::Seed;
+
+    /// The engine name the stub harness is called with.
+    const STUB_ENGINE: &str = "stub";
+
+    /// What the stub harness does for `__open`: it records its four arguments and the names of
+    /// the store's files as one tab-separated line in the file beside it, then prints what
+    /// `__open` prints. Called with no argument, it does nothing.
+    const STUB_HARNESS: &str = r#"#!/bin/sh
+[ "$#" -eq 0 ] && exit 0
+printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$(ls "$3")" >> "$0.calls"
+printf '{"open_us":2000,"first_us":30}'
+"#;
+
+    /// An engine that is only a name: the stub harness opens no store.
+    struct Stub;
+
+    impl Engine for Stub {
+        fn name(&self) -> &'static str {
+            STUB_ENGINE
+        }
+
+        fn multi_process(&self) -> bool {
+            false
+        }
+
+        fn durability(&self) -> &'static str {
+            "none"
+        }
+
+        fn create(&self, _: &Path) -> Result<Box<dyn Db>> {
+            Err(other("the stub engine creates no store"))
+        }
+
+        fn open(&self, _: &Path) -> Result<Box<dyn Db>> {
+            Err(other("the stub engine opens no store"))
+        }
+    }
+
+    /// The stub harness as an executable in `work`, and the file its calls go to.
+    fn stub_harness(work: &Path) -> (PathBuf, PathBuf) {
+        let exe = work.join("harness");
+        fs::write(&exe, STUB_HARNESS).expect("write the stub harness");
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).expect("make it executable");
+
+        // Another test's fork may still hold the descriptor the script was written through, and
+        // the kernel runs no file open for writing: wait until the stub runs.
+        loop {
+            match Command::new(&exe).status() {
+                Err(e) if e.kind() == ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                run => break assert!(run.expect("run the stub").success(), "the stub's dry run"),
+            }
+        }
+
+        let calls = work.join("harness.calls");
+        (exe, calls)
+    }
+
+    /// The stub harness's calls, each as its tab-separated fields.
+    fn calls(file: &Path) -> Vec<Vec<String>> {
+        fs::read_to_string(file)
+            .expect("the stub's calls")
+            .lines()
+            .map(|line| line.split('\t').map(str::to_owned).collect())
+            .collect()
+    }
 
     /// The files directly in `dir`, by name, with their bytes.
     fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
@@ -315,5 +387,54 @@ mod tests {
         })
         .expect("two opens");
         assert_eq!(dirs, [settled.dir.clone(), settled.dir.clone()]);
+    }
+
+    #[test]
+    fn w4_s_open_runs_the_harness_on_each_trial_s_directory() {
+        let work = tempfile::tempdir().expect("a work dir");
+        let (exe, log) = stub_harness(work.path());
+
+        // 1. A store kept as loaded, settled since by its first open: each trial's `__open` is
+        //    of a fresh copy, which still holds the journal.
+        let mut seed = loaded(work.path());
+        seed.keep_as_loaded()
+            .expect("copy the store as its load left it");
+        let kept = seed.as_loaded.as_ref().expect("the copy").path();
+        settle(&seed.dir);
+
+        let values = open(&Stub, &seed, 2, &exe).expect("two opens");
+
+        let target = hex(&id(chain::SEED, seed.n / 2));
+        let made = calls(&log);
+        assert_eq!(made.len(), 2, "{made:?}");
+        for call in &made {
+            let dir = Path::new(&call[2]);
+            assert_eq!(call[..2], ["__open", STUB_ENGINE], "{call:?}");
+            assert!(dir != seed.dir && dir != kept, "{call:?}: opened in place");
+            assert_eq!(call[3..], [target.as_str(), "0.jnl"], "{call:?}");
+        }
+        assert_ne!(made[0][2], made[1][2], "one copy opened twice");
+
+        // 2. What the harness printed is what the row holds.
+        let row = ["open_ms", "first_lookup_ms", "trials"].map(|name| values[name]);
+        assert_eq!(row, [2.0, 0.03, 2.0], "{values:?}");
+
+        // 3. A store not kept as loaded is opened where it is.
+        fs::remove_file(&log).expect("forget the calls");
+        let settled = loaded(work.path());
+
+        open(&Stub, &settled, 1, &exe).expect("one open");
+
+        let dir = settled.dir.to_string_lossy().into_owned();
+        assert_eq!(
+            calls(&log),
+            [[
+                "__open",
+                STUB_ENGINE,
+                dir.as_str(),
+                target.as_str(),
+                "0.jnl"
+            ]]
+        );
     }
 }
