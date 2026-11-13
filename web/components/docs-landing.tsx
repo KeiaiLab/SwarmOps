@@ -1,7 +1,8 @@
 // The /docs landing page when docs/README.md does not exist: one card per sidebar group, each
 // listing its pages, so every page is one click from /docs.
 import Link from 'next/link';
-import { DocsBody, DocsPage } from 'fumadocs-ui/layouts/docs/page';
+import { DocsBody } from 'fumadocs-ui/layouts/docs/page';
+import { DocsMain } from '@/components/docs/docs-main';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import type * as PageTree from 'fumadocs-core/page-tree';
 import { NAV_GROUPS } from '@/lib/docs-paths';
@@ -34,7 +35,7 @@ export function DocsLanding() {
 
   // 2. One card per group.
   return (
-    <DocsPage toc={[]}>
+    <DocsMain toc={[]}>
       <DocsBody>
         <h1>Documentation</h1>
         <p>The SwarmOps documentation, rendered from the repository&apos;s Markdown.</p>
@@ -62,6 +63,6 @@ export function DocsLanding() {
           </Card>
         ))}
       </div>
-    </DocsPage>
+    </DocsMain>
   );
 }

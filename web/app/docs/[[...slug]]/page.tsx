@@ -13,9 +13,10 @@
 import type { ComponentProps } from 'react';
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
-import { DocsBody, DocsPage } from 'fumadocs-ui/layouts/docs/page';
+import { DocsBody } from 'fumadocs-ui/layouts/docs/page';
 import { getMDXComponents } from '@/components/mdx';
 import { DocsLanding } from '@/components/docs-landing';
+import { DocsMain } from '@/components/docs/docs-main';
 import { KindBadge } from '@/components/docs/kind-badge';
 import { PageActions } from '@/components/docs/page-actions';
 import { PageMeta } from '@/components/docs/page-meta';
@@ -90,7 +91,7 @@ export default async function Page({ params }: Props) {
   }
 
   return (
-    <DocsPage
+    <DocsMain
       toc={toc}
       tableOfContent={{ enabled: sections >= TOC_MIN_SECTIONS }}
       tableOfContentPopover={{ enabled: sections >= TOC_MIN_SECTIONS }}
@@ -106,7 +107,7 @@ export default async function Page({ params }: Props) {
         )}
       </DocsBody>
       <PageActions source={file} />
-    </DocsPage>
+    </DocsMain>
   );
 }
 

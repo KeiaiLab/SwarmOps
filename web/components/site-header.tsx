@@ -6,6 +6,7 @@
 // no menu, no sideways scroll); under 640 px Search and the theme buttons show their icons only. The docs frame shows the same links (lib/layout.shared.tsx).
 import Link from 'next/link';
 import { Search } from 'lucide-react';
+import { SkipLink } from '@/components/skip-link';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { LATEST_RELEASE, releaseUrl } from '@/lib/release';
 import { NAV_LINKS, SITE_NAME } from '@/lib/site';
@@ -22,9 +23,7 @@ export function SiteHeader() {
 
   return (
     <>
-      <a className="skip-link" href="#main">
-        Skip to content
-      </a>
+      <SkipLink />
       <header className="sticky top-0 z-40 border-b bg-background">
         <div className="page flex flex-wrap items-center gap-x-1 sm:gap-x-2">
           {/* 1. The mark and name, home. */}
