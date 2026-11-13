@@ -3,7 +3,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-/// A git object id: the SHA-1 of the object ([`git_hash`]), 20 bytes. It prints as 40 lowercase
+/// A git object id: the SHA-1 of the object ([`GitOid::of`]), 20 bytes. It prints as 40 lowercase
 /// hex digits and parses from 40 hex digits of either case.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
@@ -26,6 +26,15 @@ impl GitOid {
             *byte = (nibble(pair[0])? << 4) | nibble(pair[1])?;
         }
         Some(GitOid(id))
+    }
+
+    /// The id git gives an object of `kind` whose bytes are `bytes`: the SHA-1 of the header
+    /// `"<kind> <len>\0"` followed by the bytes, by gix's SHA-1 (`gix::hash`, in the crate's one
+    /// module that sees gix), which runs git's collision detection as git does. `None` for bytes
+    /// that detection flags as a SHA-1 collision attack: git refuses to read such an object, so
+    /// it has no id to keep, write or compare.
+    pub fn of(kind: RawKind, bytes: &[u8]) -> Option<GitOid> {
+        checked_hash(kind, bytes)
     }
 }
 
@@ -128,18 +137,16 @@ impl fmt::Display for RawKind {
     }
 }
 
-/// The id git gives an object of `kind` whose bytes are `bytes`: the SHA-1 of the header
-/// `"<kind> <len>\0"` followed by the bytes, by gix's SHA-1 (`gix::hash`, in the crate's one
-/// module that sees gix), which runs git's collision detection as git does. Bytes that detection
-/// flags as a SHA-1 collision attack, an object git refuses to read, get [`GitOid::NULL`], which
-/// no object has, so that a comparison with any object's id fails. What keeps or writes an id
-/// (the export's oids and their memos, [`GixSink`](crate::GixSink), the import's renderings)
-/// refuses such bytes instead.
+/// [`GitOid::of`] for a comparison: the id git gives an object of `kind` whose bytes are `bytes`,
+/// and [`GitOid::NULL`], which no object has, for bytes git's collision detection flags, so that
+/// a comparison with any object's id fails. What keeps or writes an id (the export's oids and
+/// their memos, [`GixSink`](crate::GixSink), the import's renderings) takes [`GitOid::of`]'s
+/// `None` and refuses such bytes instead.
 pub fn git_hash(kind: RawKind, bytes: &[u8]) -> GitOid {
     checked_hash(kind, bytes).unwrap_or(GitOid::NULL)
 }
 
-/// [`git_hash`], `None` for bytes git's collision detection flags.
+/// [`GitOid::of`], for the crate: `None` for bytes git's collision detection flags.
 pub(crate) fn checked_hash(kind: RawKind, bytes: &[u8]) -> Option<GitOid> {
     #[cfg(test)]
     if flagged::holds(kind, bytes) {
@@ -174,5 +181,35 @@ pub(crate) mod flagged {
         FLAGGED.with(|flagged| {
             (flagged.borrow().iter()).any(|(of, held)| *of == kind && held.as_slice() == bytes)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The content of the blob the test has git's collision detection flag.
+    const CONTENT: &[u8] = b"a\n";
+    /// The oid git gives a blob of [`CONTENT`] (`git hash-object`).
+    const CONTENT_OID: &str = "78981922613b2afb6025042ff6bd878ac1994e85";
+
+    /// [`GitOid::of`] gives an object its oid, and none to one git's collision detection flags,
+    /// where [`git_hash`] gives the oid of no object.
+    #[test]
+    fn a_flagged_object_has_no_oid() {
+        // 1. An object git reads: its oid, the same from both.
+        let oid = GitOid::of(RawKind::Blob, CONTENT);
+        let hex = oid.map(|oid| oid.to_string());
+        assert_eq!(hex.as_deref(), Some(CONTENT_OID), "the blob's oid");
+        assert_eq!(oid, Some(git_hash(RawKind::Blob, CONTENT)), "git_hash");
+
+        // 2. The same bytes flagged as a blob: no oid, and the null one.
+        flagged::flag(RawKind::Blob, CONTENT);
+        assert_eq!(GitOid::of(RawKind::Blob, CONTENT), None, "a flagged blob");
+        assert_eq!(git_hash(RawKind::Blob, CONTENT), GitOid::NULL, "git_hash");
+
+        // 3. The flag is the object's: the bytes as a tag still have an oid.
+        let tag = GitOid::of(RawKind::Tag, CONTENT);
+        assert!(tag.is_some(), "the bytes as a tag, which no one flagged");
     }
 }
