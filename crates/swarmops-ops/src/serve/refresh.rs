@@ -301,6 +301,8 @@ fn housekeep(repo: &ServeRepo, refreshed: &mut Refreshed) {
     }
     let gc = GitCli::find().and_then(|git| git.gc_auto(repo.git_dir().as_std_path()));
     if let Err(e) = gc {
+        // The phase only labels the details of a remote that did not answer, which this
+        // warning drops: housekeeping is no push, and its message never says one.
         let failed = error::transport_error(e, SERVE_GIT, error::Phase::Push);
         refreshed
             .warnings

@@ -15,6 +15,11 @@
 //! which writes nothing. `serve.git` is behind the store until then, or until the next
 //! connection's refresh.
 //!
+//! Step 4 names the landed commit by walking the target's first parents down to the landed
+//! changeset, in the store and in `serve.git` alike. A land just made is the head, no step; a
+//! replay walks as many commits as landed on the target since, each read from `serve.git`: its
+//! cost grows with that depth, and no index shortens it.
+//!
 //! `pre-receive` judges steps 1 and 2 inside git's quarantine, `proc-receive` again once git has
 //! moved the pack into `serve.git` (M16 design §7): a conflict or a lost race is step 3's, an
 //! `ng` of this command alone, its objects left in `serve.git` with no ref naming them.
@@ -309,6 +314,9 @@ fn lines(side: &LinesOut) -> String {
 
 /// The commit `id`, a changeset on `target`'s first parents, exports to, with `target` exported
 /// into `serve.git` first: `None` when `target` is gone, or no longer reaches `id` that way.
+/// It walks as many first parents as `id` is below the head, in the store and then in
+/// `serve.git`: none for a land just made, the lands since for a replay (the module
+/// documentation).
 fn served_oid(ctx: &HookCtx<'_>, target: &str, id: ChangesetId) -> Result<Option<GitOid>, OpError> {
     // 1. Under serve.lock, the target exported.
     let Some((head, head_oid)) = export_target(ctx, target)? else {

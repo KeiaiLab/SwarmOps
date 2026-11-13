@@ -27,6 +27,10 @@
 //! skips step 6 so that its move reaches the store's refusal (`E_TAG_IMMUTABLE`). An annotated
 //! tag is no changeset, so its push is refused before the import (`annotated_tag`).
 //!
+//! A tag's move is refused at step 3b, by the store's rule on the move as it would be made, so
+//! after step 3 imported its tip: the refusal costs that import and moves nothing, and the
+//! objects stay in the store with no ref naming them.
+//!
 //! Once step 7 has deleted a store ref, the deletion stands: `serve.git`'s ref naming another
 //! commit than step 4 exported (moved by something that holds no `serve.lock`) is left as it
 //! is, the report is `ok`, and the next refresh removes the ref the store no longer has.
