@@ -58,6 +58,31 @@ fn v1_store() -> (TempDir, Utf8PathBuf, LocalOps) {
     (dir, root, ops)
 }
 
+/// [`new_store`] of FORMAT `format`: for a test that runs on each format.
+fn store_of(format: u32) -> (TempDir, Utf8PathBuf, LocalOps) {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let root = utf8(dir.path().join("store"));
+    let (ops, _) = LocalOps::init_as(&root, "acme", Some(format)).expect("create the store");
+    (dir, root, ops)
+}
+
+/// The formats a store is made in.
+const FORMATS: [u32; 3] = [1, 2, 3];
+
+/// Names of two branches, a tag and a remote-tracking ref, which FORMAT 2 and later take and
+/// FORMAT 1 does not.
+const LATER_NAMES: [&str; 4] = ["HEAD", "feature/x", "tags/v1", "remote/origin/main"];
+
+/// What a revision that is one of [`LATER_NAMES`] is on a store of `format` that holds no such
+/// ref: no revision at all on FORMAT 1 (`E_INVALID_ARG`), and from FORMAT 2 on a ref that does
+/// not exist (`E_REV_NOT_FOUND`).
+fn later_name_code(format: u32) -> ErrorCode {
+    match format {
+        1 => ErrorCode::InvalidArg,
+        _ => ErrorCode::RevNotFound,
+    }
+}
+
 fn agent() -> Identity {
     Identity::parse("agent/worker-17").expect("a valid agent name")
 }
@@ -3034,7 +3059,14 @@ fn hints_quote_what_they_interpolate() {
 
 #[test]
 fn resolve_errors_map_to_codes() {
-    let (_dir, root, ops) = v1_store();
+    for format in FORMATS {
+        resolve_errors_on(format);
+    }
+}
+
+/// [`resolve_errors_map_to_codes`] on a store of FORMAT `format`.
+fn resolve_errors_on(format: u32) {
+    let (_dir, root, ops) = store_of(format);
     // Before main exists, `main` (log's default) names nothing.
     let err = expect_err(ops.log(log_req(None)), ErrorCode::RevNotFound);
     assert_eq!(err.details["rev"], "main");
@@ -3063,9 +3095,14 @@ fn resolve_errors_map_to_codes() {
     );
 
     // A string that is not a revision at all is a malformed argument.
-    for rev in ["", "HEAD", "main^", "feature/x", &c1[..11]] {
+    for rev in ["", "main^", "main/x", &c1[..11]] {
         let err = expect_err(ops.show(show(rev)), ErrorCode::InvalidArg);
-        assert_eq!(err.details["rev"], rev);
+        assert_eq!(err.details["rev"], rev, "FORMAT {format}");
+    }
+    // A name only a later format takes is one too; where the format takes it, it names nothing.
+    for rev in LATER_NAMES {
+        let err = expect_err(ops.show(show(rev)), later_name_code(format));
+        assert_eq!(err.details["rev"], rev, "FORMAT {format}");
     }
 
     // A prefix that two changesets share is ambiguous; these two differ in the last digit
@@ -5573,7 +5610,14 @@ mod diff {
     /// checked before any revision is resolved.
     #[test]
     fn diff_errors_map_to_codes() {
-        let (_dir, root, ops) = v1_store();
+        for format in FORMATS {
+            diff_errors_on(format);
+        }
+    }
+
+    /// [`diff_errors_map_to_codes`] on a store of FORMAT `format`.
+    fn diff_errors_on(format: u32) {
+        let (_dir, root, ops) = store_of(format);
         let c1 = commit(&ops, None, vec![text("f", "1")]);
         let unknown = "0".repeat(64);
         for (from, to) in [
@@ -5587,10 +5631,17 @@ mod diff {
             assert_eq!(err.details["rev"], unknown.as_str());
         }
         let err = expect_err(
-            ops.diff(diff_req(&c1, "HEAD", DiffFormat::Names)),
+            ops.diff(diff_req(&c1, "main^", DiffFormat::Names)),
             ErrorCode::InvalidArg,
         );
-        assert_eq!(err.details["rev"], "HEAD");
+        assert_eq!(err.details["rev"], "main^");
+        for rev in LATER_NAMES {
+            let err = expect_err(
+                ops.diff(diff_req(&c1, rev, DiffFormat::Names)),
+                later_name_code(format),
+            );
+            assert_eq!(err.details["rev"], rev, "FORMAT {format}");
+        }
         insert_prefix_twins(&root);
         let err = expect_err(
             ops.diff(diff_req("abababababab", &c1, DiffFormat::Names)),
@@ -5651,7 +5702,14 @@ mod resolve_rev {
     /// Made through a request's `recording`, the revision is in that request's `Resolved`.
     #[test]
     fn resolve_rev_names_the_kind() {
-        let (_dir, root, ops) = v1_store();
+        for format in FORMATS {
+            resolve_rev_on(format);
+        }
+    }
+
+    /// [`resolve_rev_names_the_kind`] on a store of FORMAT `format`.
+    fn resolve_rev_on(format: u32) {
+        let (_dir, root, ops) = store_of(format);
         let c1 = commit(&ops, None, vec![text("f", "1")]);
         let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]);
         ops.ref_set(&agent(), set("main", &c2, None, true)).unwrap();
@@ -5684,9 +5742,13 @@ mod resolve_rev {
             let err = expect_err(resolve(&ops, rev), ErrorCode::RevNotFound);
             assert_eq!(err.details["rev"], rev);
         }
-        for rev in ["", "HEAD", "main^", "feature/x", &c1[..11]] {
+        for rev in ["", "main^", "main/x", &c1[..11]] {
             let err = expect_err(resolve(&ops, rev), ErrorCode::InvalidArg);
-            assert_eq!(err.details["rev"], rev);
+            assert_eq!(err.details["rev"], rev, "FORMAT {format}");
+        }
+        for rev in LATER_NAMES {
+            let err = expect_err(resolve(&ops, rev), later_name_code(format));
+            assert_eq!(err.details["rev"], rev, "FORMAT {format}");
         }
         insert_prefix_twins(&root);
         let err = expect_err(resolve(&ops, "abababababab"), ErrorCode::AmbiguousId);
