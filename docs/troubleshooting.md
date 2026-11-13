@@ -429,10 +429,11 @@ Use the store (the hint describes it), or pick another directory.
 
 ### Permission refused
 
-The store's objects, refs and checkpoint are created readable by their owner only (mode `0600`).
-A command that cannot read a file of the store fails with `E_IO`, `details.fs_op` and
-`details.store_file` naming it. Here the checkpoint of a copy was made unreadable
-(`chmod 000 chk/meta/journal.ckpt`):
+The store creates its files readable and writable by their owner only (mode `0600`) and its
+directories with mode `0700`; a store made by 0.11 or earlier keeps the modes it was made with
+([known limitations](known-limitations.md#platforms)). A command that cannot read a file of the
+store fails with `E_IO`, `details.fs_op` and `details.store_file` naming it. Here the checkpoint
+of a copy was made unreadable (`chmod 000 chk/meta/journal.ckpt`):
 
 ```text
 {"ok":false,"op":"repo_info","api":1,"error":{"code":"E_IO","message":"i/o error: read meta/journal.ckpt: Permission denied (os error 13)","retryable":false,"exit":1,"details":{"fs_op":"read","store_file":"meta/journal.ckpt"},"hint":null},"meta":{"repo":"chk","elapsed_ms":0,"resolved":{},"auth":"trust"}}
