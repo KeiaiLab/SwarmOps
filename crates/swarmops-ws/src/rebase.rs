@@ -3,7 +3,7 @@
 //!
 //! ```text
 //!  start     lock → names onto's head holds that the files cannot (and those of the edits -m
-//!            commits): E_WS_UNPORTABLE, nothing written
+//!            commits): E_WS_UNPORTABLE, nothing written but the scan's index cache
 //!            → what the host holds in the way of onto's changes that the update does not
 //!              carry (an ignored file, a file where a directory goes): E_WS_DIRTY, nothing
 //!              written
@@ -125,7 +125,8 @@ fn start(
 
     // 2. The names onto's head holds that the files cannot, and those of the edits `-m`
     //    commits or the update snapshots, are refused before anything is dropped, settled or
-    //    recorded.
+    //    recorded. The check takes the edits' names, so the scan runs first: a refusal may
+    //    leave the scan's index refreshed, which is a cache any scan rewrites, not state.
     let left = left_land(ctx, ws)?;
     let edits = unsettled(ctx, ws, message.as_deref(), PendingOp::Rebase, Rerun::Waits)?;
     let found = to_snapshot(ctx, ws, message.as_deref())?;
