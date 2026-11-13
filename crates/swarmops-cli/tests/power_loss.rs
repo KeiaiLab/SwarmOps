@@ -282,6 +282,21 @@ const RUN: &[Op] = &[
     Op::Batch { merge: 4 },
 ];
 
+/// How many frames [`RUN`] writes to `journal.log`.
+const RUN_FRAMES: usize = 17;
+
+/// How long `journal.log` is after [`RUN`] on a store of `format`, in bytes. The
+/// known-limitations page cites these lengths and [`RUN_FRAMES`] where it says how short the
+/// run's journal is: a change of the run changes them here and there together.
+fn run_journal_len(format: StoreFormat) -> u64 {
+    match format {
+        StoreFormat::V1 => 2_460,
+        StoreFormat::V2 => 2_732,
+        StoreFormat::V3 => 2_885,
+        other => panic!("no journal length for {other:?}"),
+    }
+}
+
 /// The ref [`LAND_UNDO_RUN`] lands on and undoes on: `main` moves only forward (the M15
 /// design §4).
 const RELEASE: &str = "release/1";
@@ -1039,6 +1054,13 @@ impl Recorded {
         self.begun(cut) + self.compacted.iter().filter(|&&write| write < cut).count()
     }
 
+    /// How long `journal.log` is once every step of the run is on disk.
+    fn journal_len(&self) -> u64 {
+        let whole = image_losing(self, self.timeline.steps(), &[]);
+        let log = whole.file(&self.log()).expect("the run's journal");
+        to_u64(log.len())
+    }
+
     /// How many filesystem calls the run made that change something (marks aside).
     fn calls(&self) -> usize {
         (self.calls.iter())
@@ -1654,6 +1676,11 @@ per_format! {
 /// module documentation. The slow variant checks every cut with more seeds.
 fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit(format) {
     let rec = record(format);
+    assert_eq!(
+        (rec.journal_len(), rec.frames.len()),
+        (run_journal_len(format), RUN_FRAMES),
+        "the run's journal, which the known-limitations page cites"
+    );
     let cuts: Vec<usize> = (0..=rec.timeline.steps()).collect();
     let swept = sweep(&rec, &cuts, &[0]);
     let sampled: Vec<usize> = cuts.iter().copied().filter(|cut| cut % 20 == 0).collect();
