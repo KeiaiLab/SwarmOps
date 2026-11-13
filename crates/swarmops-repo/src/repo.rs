@@ -734,6 +734,11 @@ fn lock_repo(layout: &Layout, fs: &StoreFs) -> Result<File, RepoError> {
 /// Whether the `meta/` of the store `layout` lays out, which a crashed create left without a
 /// `FORMAT`, holds the journal and checkpoint of another format this build creates and not
 /// `layout`'s ([`made_in`]): that create's, of the other format.
+///
+/// It knows the formats of [`format::INIT_FORMATS`] only, FORMAT 1 to 3. The `meta/` a crashed
+/// create of a later format left is none of them: the create opens it as its own and fails as
+/// on a damaged store. A build that adds a format adds it to that list, and to [`made_in`] what
+/// tells its files from the others'.
 fn of_another_format(layout: &Layout, fs: &StoreFs) -> Result<bool, IoFailure> {
     if made_in(layout, fs)? {
         return Ok(false);

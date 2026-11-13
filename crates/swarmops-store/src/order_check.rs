@@ -33,10 +33,12 @@
 //!   journal tests lay out, has no index clause.)
 //! - **W4, the sorted views.** A view file is renamed into place only from a temp file synced
 //!   since it was written (W6), only while the five index files are synced since they last
-//!   changed (a view must never cover records a power loss could take back), and only so that
-//!   the four view files' entry counts never grow along `ids.key`, `ids.rec`, `dh.key`, `dh.rec`,
-//!   the order a compaction renames them in, so that a crash between two renames leaves views a
-//!   reader takes. The directory fsync after each rename is [`FsOps::rename_durable`]'s own.
+//!   changed, no failed sync coming between (a view must never cover records a power loss could
+//!   take back, and a failed sync leaves its bytes not durable whatever a later one reports),
+//!   and only so that no view file ends in a partial entry and the four files' entry counts
+//!   never grow along `ids.key`, `ids.rec`, `dh.key`, `dh.rec`, the order a compaction renames
+//!   them in, so that a crash between two renames leaves views a reader takes. The directory
+//!   fsync after each rename is [`FsOps::rename_durable`]'s own.
 //! - **W5, the objects.** An object file is linked into its fan-out directory only from data
 //!   synced first, and a journal frame that records a changeset is appended only once every
 //!   object name linked, and every fan-out directory made, in this process is durable (its
