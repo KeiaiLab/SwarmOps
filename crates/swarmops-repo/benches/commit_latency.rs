@@ -16,10 +16,10 @@
 //!   lower bound of the work without syncs, beside `nosync`'s direct one.
 //!
 //! Besides criterion's estimate, each variant prints the nearest-rank percentiles of every
-//! commit it timed, warm-up included, and for `fsync_less_syncs` the syncing calls per commit
-//! (`percentiles commit/<fs>/<k>: …`, a line `just perf` shows). The product's default stays
-//! full fsync: the no-sync filesystem exists only in this bench. `docs/perf.md` records it;
-//! the gate only builds it.
+//! commit it timed, warm-up included, and `fsync_less_syncs`, the one variant that counts them,
+//! the syncing calls per commit (`percentiles commit/<fs>/<k>: …`, a line `just perf` shows).
+//! The product's default stays full fsync: the no-sync filesystem exists only in this bench.
+//! `docs/perf.md` records it; the gate only builds it.
 
 use std::hint::black_box;
 use std::io;
@@ -262,11 +262,19 @@ fn commit_latency(c: &mut Criterion) {
             }
             samples.sort_unstable();
             let n = samples.len();
-            let per_commit = small(calls) / small(n);
             let target = 5.0 + 0.3 * small(files);
+
+            // Only the subtracting variant watches its calls: the others have no count to say.
+            let counted = match syncs {
+                Syncs::Subtracted => {
+                    let per_commit = small(calls) / small(n);
+                    format!("; syncing calls per commit {per_commit:.1}")
+                }
+                Syncs::Skipped | Syncs::Made => String::new(),
+            };
             println!(
                 "percentiles commit/{name}: n {n} p50 {:.2} ms p90 {:.2} ms p99 {:.2} ms max \
-                 {:.2} ms; syncing calls per commit {per_commit:.1}; target {target:.1} ms",
+                 {:.2} ms{counted}; target {target:.1} ms",
                 millis(at(&samples, 500)),
                 millis(at(&samples, 900)),
                 millis(at(&samples, 990)),
