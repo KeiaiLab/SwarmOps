@@ -59,8 +59,9 @@ const COMMIT: &str = "commit";
 /// The variable that carries the client's protocol.
 const GIT_PROTOCOL: &str = "GIT_PROTOCOL";
 
-/// What a masked store path reads as in git's messages.
-const STORE_MASK: &str = "<store>";
+/// What a masked store path reads as in git's messages: the text every other line `serve`
+/// sends a client masks a host path with.
+const PATH_MASK: &str = "<path>";
 
 /// What is read when git is asked, as a [`SinkError::Read`] names it.
 const GIT_ANSWER: &str = "git's answer";
@@ -297,7 +298,7 @@ fn masks(repo: &ServeRepo) -> Vec<String> {
     masks
 }
 
-/// Copies `from` to `to` line by line, each of `masks` replaced by [`STORE_MASK`]. A write that
+/// Copies `from` to `to` line by line, each of `masks` replaced by [`PATH_MASK`]. A write that
 /// fails ends the copy's writing, not its reading: git is never blocked on a full pipe.
 fn copy_masked(from: impl Read, to: &mut impl Write, masks: &[String]) {
     let mut from = BufReader::new(from);
@@ -315,7 +316,7 @@ fn copy_masked(from: impl Read, to: &mut impl Write, masks: &[String]) {
         let text = masks
             .iter()
             .fold(String::from_utf8_lossy(&line).into_owned(), |text, mask| {
-                text.replace(mask.as_str(), STORE_MASK)
+                text.replace(mask.as_str(), PATH_MASK)
             });
         writing = to
             .write_all(text.as_bytes())
@@ -401,7 +402,7 @@ mod tests {
         copy_masked(input, &mut out, &masks);
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "fatal: <store>/git/serve.git: broken\nlast <store>"
+            "fatal: <path>/git/serve.git: broken\nlast <path>"
         );
     }
 
