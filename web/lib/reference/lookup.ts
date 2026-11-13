@@ -1,7 +1,7 @@
 // Exact names and their pages, for the search dialog's first hit (app/api/lookup):
 //
 //   "swarmops blob has", "blob has"  ->  /docs/reference/commands/blob-has
-//   "read_file"                      ->  /docs/reference/mcp-tools/read_file
+//   "read_file"                      ->  /docs/reference/mcp-tools/read-file
 //   "E_BUSY"                         ->  /docs/reference/errors#e_busy
 //
 // A name two pages share keeps the first: commands, then MCP tools, then error codes.
