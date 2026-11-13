@@ -50,14 +50,11 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use swarmops_core::ObjectId;
 use swarmops_store::{DEFAULT_INIT_FORMAT, LEAD_WAIT_ENV, MetaLock, StoreFormat};
-use swarmops_testkit::child::Child;
+use swarmops_testkit::child::{Child, SIGKILL};
 use swarmops_testkit::per_format;
 use swarmops_testkit::ws::Rng;
 
 use crate::support::{Run, Store, agent, swarmops};
-
-/// The signal `Child::kill` sends on Unix.
-const SIGKILL: i32 = 9;
 
 /// The kills the fast variant makes per format (`just check`).
 const FAST_KILLS: usize = 10;

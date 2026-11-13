@@ -20,6 +20,10 @@ pub const CHILD_TIMEOUT: Duration = Duration::from_secs(120);
 /// The signal `std::process::abort` raises: how a `SWARMOPS_TEST_CRASH_AT` crash ends.
 pub const SIGABRT: i32 = 6;
 
+/// The signal a kill sends: how a child that [`Child::finish`] killed at its deadline ends, and
+/// one that `kill -KILL` hit.
+pub const SIGKILL: i32 = 9;
+
 /// How often a wait looks whether a child has ended.
 const POLL: Duration = Duration::from_millis(1);
 
@@ -245,6 +249,17 @@ mod tests {
 
         assert_eq!(child.status.signal(), Some(SIGABRT), "{:?}", child.status);
         assert!(!child.status.core_dumped(), "{:?}", child.status);
+    }
+
+    /// A child still running at its deadline ends by SIGKILL, and is reported as killed.
+    #[test]
+    fn a_child_past_its_deadline_ends_by_sigkill() {
+        let mut child = Child::spawn(Command::new("sleep").arg("60"));
+
+        let (output, killed) = child.finish(Instant::now());
+
+        assert!(killed, "{:?}", output.status);
+        assert_eq!(output.status.signal(), Some(SIGKILL), "{:?}", output.status);
     }
 
     /// The limit asked for is the soft one, 1 byte; the hard limit is left as it was.

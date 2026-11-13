@@ -22,7 +22,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use swarmops_testkit::child::{self, CHILD_TIMEOUT, Child};
+use swarmops_testkit::child::{self, CHILD_TIMEOUT, Child, SIGKILL};
 use swarmops_testkit::git::fixture;
 use swarmops_testkit::remote::SshFault;
 use swarmops_testkit::serve::ServeSite;
@@ -66,9 +66,6 @@ const HOLD: Duration = CHILD_TIMEOUT;
 
 /// How often a wait looks again.
 const POLL: Duration = Duration::from_millis(50);
-
-/// `SIGKILL`'s number.
-const SIGKILL: i32 = 9;
 
 /// What the hook tells the client once a land is done.
 const LANDED: &str = "landed onto main as ";
