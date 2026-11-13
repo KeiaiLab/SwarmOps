@@ -35,29 +35,31 @@ const ENTRIES = Array.from({ length: 8 }, (_, i) => `entries[${i}].name: ${i + 1
 // Output wraps after , : { [ / instead of scrolling, as source.config.ts does for the docs.
 const BREAK_AFTER = /([,:{[/])/;
 
-/** Output lines with a break opportunity after each separator. */
+/** Output lines with a break opportunity after each separator: program output, so pre > samp. */
 export function OutputText({ lines }: { lines: string[] }) {
   return (
-    <samp className="code-out-text">
-      {lines.map((line, i) => (
-        <Fragment key={line}>
-          {i > 0 && '\n'}
-          {line
-            .split(BREAK_AFTER)
-            .filter((part) => part !== '')
-            .map((part, j) =>
-              BREAK_AFTER.test(part) ? (
-                <Fragment key={j}>
-                  {part}
-                  <wbr />
-                </Fragment>
-              ) : (
-                part
-              ),
-            )}
-        </Fragment>
-      ))}
-    </samp>
+    <pre className="code-out-text">
+      <samp>
+        {lines.map((line, i) => (
+          <Fragment key={line}>
+            {i > 0 && '\n'}
+            {line
+              .split(BREAK_AFTER)
+              .filter((part) => part !== '')
+              .map((part, j) =>
+                BREAK_AFTER.test(part) ? (
+                  <Fragment key={j}>
+                    {part}
+                    <wbr />
+                  </Fragment>
+                ) : (
+                  part
+                ),
+              )}
+          </Fragment>
+        ))}
+      </samp>
+    </pre>
   );
 }
 
