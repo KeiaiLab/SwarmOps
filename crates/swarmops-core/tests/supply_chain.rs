@@ -864,14 +864,14 @@ fn release_problems(workflow: &str) -> Vec<String> {
     // 1. The jobs that write.
     let mut writers = 0;
     for (id, lines) in jobs(workflow) {
-        let writes = shell_lines(&lines).iter().any(|line| {
+        let grants_write = shell_lines(&lines).iter().any(|line| {
             line.split('#')
                 .next()
                 .unwrap_or_default()
                 .trim_end()
                 .ends_with(": write")
         });
-        if !writes {
+        if !grants_write {
             continue;
         }
         writers += 1;
