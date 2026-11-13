@@ -20,9 +20,11 @@
 //!
 //! Asserted: no other failure in any window, every acknowledged push's branch at its commit,
 //! every land on `main` once and the store clean (`verify --deep`), every clone `git fsck
-//! --strict`. Recorded, never asserted: the first-attempt share (G21's 99.9 %), push and fetch
-//! p99 (G21's 2× git's), the first clone's ratio (G20's 2×). `serve-load: ` lines; docs/perf.md
-//! records the verdicts.
+//! --strict`; and the counts the lines print against counts they are not made from: the
+//! attempts counted record by record (`check_counts`), the clients' commands against their
+//! schedule's, the agents' lands against `main`'s chain. Recorded, never asserted: the
+//! first-attempt share (G21's 99.9 %), push and fetch p99 (G21's 2× git's), the first clone's
+//! ratio (G20's 2×). `serve-load: ` lines; docs/perf.md records the verdicts.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -40,12 +42,14 @@ use swarmops_git::serve::repo::ServeRepo;
 use swarmops_ops::LocalOps;
 use swarmops_ops::serve::refresh::{Freshness, freshness};
 use swarmops_testkit::landing::{
-    Change, CliLander, LandRecord, Stats, Workload, base_files, check_invariants, flagged, load1,
-    open_loop_lands, slot,
+    Change, CliLander, LandRecord, Outcome, Stats, Workload, base_files, check_invariants, flagged,
+    load1, open_loop_lands, slot,
 };
 use swarmops_testkit::remote::{GitServer, SshMode};
 use swarmops_testkit::serve::ServeSite;
-use swarmops_testkit::served_load::{GitClient, Server, Step, Traffic, first_attempt};
+use swarmops_testkit::served_load::{
+    Counts, GitClient, Server, Step, Traffic, first_attempt, outcome_counts,
+};
 use tempfile::TempDir;
 
 use crate::serve_perf::fast_import;
@@ -491,8 +495,41 @@ fn lock_holder(root: &Utf8Path) -> String {
     holders.join(", ")
 }
 
+/// How many commands of one [`Step`] `shape`'s clients are due: a client's slots, each one
+/// push and one fetch.
+fn scheduled(shape: &Shape) -> u64 {
+    let slots = |n: usize| open_loop_lands(SEED, n, INTERVAL, shape.duration);
+    u64::try_from((0..shape.clients).map(slots).sum::<usize>()).expect("fits")
+}
+
+/// `records`' attempts counted record by record ([`outcome_counts`]), which must be what
+/// `whole`, the summary a line prints, holds: the counts, or the first difference.
+///
+/// ```text
+/// records ──▶ Stats::from ──▶ whole: landed, retryable, other   (printed, cut into windows)
+///    └──────▶ outcome_counts: succeeded, retryable, other       (each record's own attempts)
+/// ```
+fn check_counts(records: &[Vec<LandRecord>], whole: &Stats) -> Result<Counts, String> {
+    let counts = outcome_counts(records)?;
+    let pairs = [
+        ("succeeded", counts.succeeded, whole.landed),
+        ("retryable", counts.retryable, whole.retryable),
+        ("other", counts.other, whole.other),
+    ];
+    for (name, counted, summed) in pairs {
+        if counted != summed {
+            return Err(format!(
+                "{name}: the records hold {counted}, the summary {summed}"
+            ));
+        }
+    }
+    Ok(counts)
+}
+
 /// Prints `side`'s lines for its clients' `traffic` (one per [`Step`], then its windows) and
-/// asserts that the windows add up to the run and that none holds another failure.
+/// asserts that the windows add up to the run, that none holds another failure, and that the
+/// counts are the records' own and the commands the schedule's ([`check_counts`],
+/// [`scheduled`]).
 fn report(side: Side, shape: &Shape, traffic: &[Traffic], load: (f64, f64)) {
     for step in Step::ALL {
         let records: Vec<Vec<LandRecord>> = (traffic.iter())
@@ -522,6 +559,15 @@ fn report(side: Side, shape: &Shape, traffic: &[Traffic], load: (f64, f64)) {
             load.1,
         );
         assert_windows(side.name(), step.name(), &records, &stats);
+        let counts = check_counts(&records, &stats)
+            .unwrap_or_else(|rule| panic!("{} {}: {rule}", side.name(), step.name()));
+        assert_eq!(
+            counts.commands,
+            scheduled(shape),
+            "{} {}: the commands run against the schedule's",
+            side.name(),
+            step.name()
+        );
     }
 }
 
@@ -760,6 +806,12 @@ fn served_traffic_under_load() {
     );
     assert_windows("serve", "lands", &lands, &landed);
 
+    // 2a. The agents' counts are their records' own; `check` then holds every land that
+    //     succeeded against main's chain, each on it once.
+    if let Err(rule) = check_counts(&lands, &landed) {
+        panic!("serve lands: {rule}");
+    }
+
     // 3. What the run must leave.
     served.check(&lands, &clients);
 }
@@ -794,4 +846,85 @@ fn git_traffic_under_load() {
     // 3. Every acknowledged push there, every clone whole.
     assert_acknowledged(&clients);
     fsck_all(side, &dirs);
+}
+
+/// The records of the two tests below: one client whose push succeeded at once, one whose push
+/// succeeded after a refusal and whose next ended in another failure.
+fn counted_records() -> Vec<Vec<LandRecord>> {
+    let refused = || Outcome::Retryable {
+        code: "E_BUSY".to_owned(),
+        hint: Some("connect again".to_owned()),
+    };
+    let command = |outcomes: Vec<Outcome>| LandRecord {
+        id: (outcomes.last() == Some(&Outcome::Success)).then(|| "ok".to_owned()),
+        outcomes,
+        ..LandRecord::default()
+    };
+    vec![
+        vec![command(vec![Outcome::Success])],
+        vec![
+            command(vec![refused(), Outcome::Success]),
+            command(vec![Outcome::Other]),
+        ],
+    ]
+}
+
+/// The counts a line prints are held against the records' own: a summary of the records
+/// passes, and one that is off by one in any of the three counts is refused by its name.
+#[test]
+fn a_summary_off_its_records_is_refused() {
+    // A summary with one count off by one.
+    type Skew = fn(&mut Stats);
+
+    let records = counted_records();
+    let whole = Stats::from(&records, WINDOW);
+    let counts = check_counts(&records, &whole).expect("the records' own summary");
+    assert_eq!(
+        (
+            counts.commands,
+            counts.succeeded,
+            counts.retryable,
+            counts.other
+        ),
+        (3, 2, 1, 1)
+    );
+
+    let off: [(&str, Skew); 3] = [
+        ("succeeded: ", |stats| stats.landed += 1),
+        ("retryable: ", |stats| stats.retryable -= 1),
+        ("other: ", |stats| stats.other += 1),
+    ];
+    for (name, change) in off {
+        let mut summary = whole.clone();
+        change(&mut summary);
+        let refusal = check_counts(&records, &summary).expect_err(name);
+        assert!(refusal.starts_with(name), "{refusal}");
+    }
+}
+
+/// A record no command's reruns give fails the count before any sum is compared, and the
+/// schedule's commands are each client's slots: 50 clients every 2 s for 10 minutes are due
+/// 300 each.
+#[test]
+fn a_malformed_record_and_the_schedule_are_counted() {
+    // 1. A success with no id.
+    let mut records = counted_records();
+    records[0][0].id = None;
+    let whole = Stats::from(&records, WINDOW);
+    let refusal = check_counts(&records, &whole).expect_err("a success without its id");
+    assert!(refusal.starts_with("its id None against"), "{refusal}");
+
+    // 2. The schedule.
+    let shape = |clients: usize, seconds: u64| Shape {
+        clients,
+        landers: 0,
+        duration: Duration::from_secs(seconds),
+        commits: 0,
+    };
+    assert_eq!(scheduled(&shape(50, 600)), 50 * 300);
+    assert_eq!(scheduled(&shape(0, 600)), 0);
+    let few: usize = (0..3)
+        .map(|n| open_loop_lands(SEED, n, INTERVAL, Duration::from_secs(7)))
+        .sum();
+    assert_eq!(scheduled(&shape(3, 7)), u64::try_from(few).expect("fits"));
 }
