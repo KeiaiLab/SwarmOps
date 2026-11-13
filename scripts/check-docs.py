@@ -67,11 +67,16 @@ reference and the pages FROZEN_DOCS names.
   perf-citations    Each figure with a unit of time or rate in README.md and docs/goals.md
                     has, in its table row or sentence, a link to a docs/perf.md anchor or a
                     quoted docs/perf.md section title (or its start, to a word's end).
+  changelog-links   CHANGELOG.md: each `## [X.Y.Z] - YYYY-MM-DD` section has a real date and
+                    is older, in version and date, than the one above it; `[X.Y.Z]` links the
+                    compare from the release below (the first, its tag) and `[Unreleased]` the
+                    compare from the newest release to stable, as RELEASE.md says.
 
 A default run enforces the rules ENFORCED names; `selftest` runs them all.
 """
 
 import argparse
+import datetime
 import enum
 import functools
 import html
@@ -123,6 +128,7 @@ class Rule(enum.Enum):
     NO_PROMPT = "no-prompt"
     CALLOUTS = "callouts"
     PERF_CITATIONS = "perf-citations"
+    CHANGELOG_LINKS = "changelog-links"
 
 
 # The rules a default run enforces. Two wait for the docs to change: spec-citations, until they
@@ -150,6 +156,7 @@ ENFORCED = frozenset({
     Rule.FENCE_LABEL,
     Rule.NO_PROMPT,
     Rule.CALLOUTS,
+    Rule.CHANGELOG_LINKS,
 })
 
 # The files read. git lists them, tracked or untracked but not ignored: a new page counts before
@@ -1064,6 +1071,14 @@ RATE_UNIT = r"(?:[A-Za-z]+/s|per second)\b"
 FIGURE = re.compile(rf"(?<![\w.,])[0-9][0-9,]*(?:\.[0-9]+)?\s?(?:{TIME_UNIT}|{RATE_UNIT})")
 PERF_LINK = re.compile(r"perf\.md#([^\s)>\"']+)")
 QUOTED = re.compile(r'"([^"]+)"|\u201c([^\u201d]+)\u201d')
+
+# The changelog's release sections and their compare links (RELEASE.md, step 6).
+CHANGELOG = "CHANGELOG.md"
+CHANGELOG_REPO = "https://github.com/KeiaiLab/SwarmOps"
+UNRELEASED = "Unreleased"
+SECTION_LABEL = re.compile(r"\[([^\]]+)\]")
+RELEASE_TITLE = re.compile(r"\[([0-9]+)\.([0-9]+)\.([0-9]+)\] - ([0-9]{4}-[0-9]{2}-[0-9]{2})")
+LINK_DEF = re.compile(r" {0,3}\[([^\]]+)\]:[ \t]*(\S+)[ \t]*")
 
 
 class Unit(enum.Enum):
@@ -2084,6 +2099,95 @@ def names_section(title: str, name: str) -> bool:
     return len(title) == len(name) or not title[len(name)].isalnum()
 
 
+@dataclass(frozen=True)
+class Release:
+    """A `## [X.Y.Z] - YYYY-MM-DD` section of the changelog, its line from 0."""
+
+    label: str
+    version: tuple[int, int, int]
+    day: datetime.date
+    line: int
+
+
+def changelog_links(repo: Repo) -> list[Finding]:
+    """CHANGELOG.md's release sections run from the newest down, each dated, and each label
+    links where RELEASE.md says: `[X.Y.Z]` to the compare from the release below it (the
+    first, to its tag), `[Unreleased]` to the compare from the newest release to stable. The
+    date against the tagged commit is release.yml's check: no tag exists here."""
+    if CHANGELOG not in repo.files:
+        return missing(CHANGELOG, Rule.CHANGELOG_LINKS)
+
+    releases, found = release_sections(repo)
+    found += release_order(releases)
+
+    # 1. The link each section's label needs, keyed by label, with its heading's line.
+    wanted = {}
+    for at, release in enumerate(releases):
+        below = releases[at + 1] if at + 1 < len(releases) else None
+        link = (f"{CHANGELOG_REPO}/compare/v{below.label}...v{release.label}" if below
+                else f"{CHANGELOG_REPO}/releases/tag/v{release.label}")
+        wanted[release.label] = (release.line, link)
+    unreleased = next((h for h in headings(repo, CHANGELOG) if h.title == f"[{UNRELEASED}]"), None)
+    if unreleased and releases:
+        link = f"{CHANGELOG_REPO}/compare/v{releases[0].label}...stable"
+        wanted[UNRELEASED] = (unreleased.line, link)
+
+    # 2. The definitions: a wrong one where it stands, a missing one at its heading.
+    defined = set()
+    for index, line in enumerate(repo.prose(CHANGELOG).split("\n")):
+        definition = LINK_DEF.fullmatch(line)
+        if not definition or definition[1] not in wanted:
+            continue
+        defined.add(definition[1])
+        link = wanted[definition[1]][1]
+        if definition[2] != link:
+            message = f"[{definition[1]}] links {definition[2]}, not {link}"
+            found.append(Finding(CHANGELOG, index + 1, Rule.CHANGELOG_LINKS, message))
+    for label, (line, link) in wanted.items():
+        if label not in defined:
+            message = f"no `[{label}]: {link}` line"
+            found.append(Finding(CHANGELOG, line + 1, Rule.CHANGELOG_LINKS, message))
+    return found
+
+
+def release_sections(repo: Repo) -> tuple[list[Release], list[Finding]]:
+    """The changelog's release sections in order, and a finding for each `## [label]` heading
+    that is neither `[Unreleased]` nor a release with a date that exists."""
+    releases = []
+    found = []
+    for head in headings(repo, CHANGELOG):
+        label = SECTION_LABEL.match(head.title)
+        if head.level != 2 or not label or label[1] == UNRELEASED:
+            continue
+
+        title = RELEASE_TITLE.fullmatch(head.title)
+        day = None
+        try:
+            day = datetime.date.fromisoformat(title[4]) if title else None
+        except ValueError:
+            pass
+        if not title or not day:
+            message = f"`## {head.title}` is not `## [X.Y.Z] - YYYY-MM-DD` with a real date"
+            found.append(Finding(CHANGELOG, head.line + 1, Rule.CHANGELOG_LINKS, message))
+            continue
+        version = (int(title[1]), int(title[2]), int(title[3]))
+        releases.append(Release(label[1], version, day, head.line))
+    return releases, found
+
+
+def release_order(releases: list[Release]) -> list[Finding]:
+    """A finding for each release whose version or date is not below the one above it."""
+    found = []
+    for above, release in itertools.pairwise(releases):
+        if release.version >= above.version:
+            message = f"{release.label} is not older than {above.label}, above it"
+            found.append(Finding(CHANGELOG, release.line + 1, Rule.CHANGELOG_LINKS, message))
+        elif release.day > above.day:
+            message = f"{release.label} is dated {release.day}, after {above.label}'s {above.day}"
+            found.append(Finding(CHANGELOG, release.line + 1, Rule.CHANGELOG_LINKS, message))
+    return found
+
+
 # The layout rules, each over the whole repository.
 LAYOUT_RULES = {
     Rule.README_SIZE: readme_size,
@@ -2101,6 +2205,7 @@ LAYOUT_RULES = {
     Rule.NO_PROMPT: no_prompt,
     Rule.CALLOUTS: callouts,
     Rule.PERF_CITATIONS: perf_citations,
+    Rule.CHANGELOG_LINKS: changelog_links,
 }
 
 
@@ -2427,6 +2532,22 @@ This page installs SwarmOps.
 {NEXT_LABEL} [Concepts](/docs/concepts.md): the words.
 """,
     INSTALLER: SELFTEST_INSTALLER,
+    CHANGELOG: f"""# Changelog
+
+## [Unreleased]
+
+## [0.2.0] - 2026-10-22
+
+Second.
+
+## [0.1.0] - 2026-10-20
+
+First.
+
+[Unreleased]: {CHANGELOG_REPO}/compare/v0.2.0...stable
+[0.2.0]: {CHANGELOG_REPO}/compare/v0.1.0...v0.2.0
+[0.1.0]: {CHANGELOG_REPO}/releases/tag/v0.1.0
+""",
     "docs/operate/stores.md": anatomy("Stores", Need.REQUIRED),
 } | {path: anatomy(path, Need.REQUIRED) for path in ANATOMY_PAGES} | {
     path: anatomy(path, Need.ABSENT) for path in LIGHT_PAGES
@@ -2566,6 +2687,24 @@ A sentence joined to a cited row by 8 ms
 ## Sources
 """,
     INSTALLER: SELFTEST_INSTALLER,
+    CHANGELOG: f"""# Changelog
+
+## [Unreleased]
+
+## [0.6.0] - 2026-10-31
+## [0.5.0] - 2026-10-30
+## [0.7.0] - 2026-10-29
+## [0.4.0] - 2026-11-02
+## [0.3.0] - 2026-02-30
+## [0.2.0]
+## [0.1.0] - 2026-10-20
+
+[Unreleased]: {CHANGELOG_REPO}/compare/v0.5.0...stable
+[0.5.0]: {CHANGELOG_REPO}/compare/v0.4.0...v0.5.0
+[0.7.0]: {CHANGELOG_REPO}/compare/v0.4.0...v0.7.0
+[0.4.0]: {CHANGELOG_REPO}/compare/v0.1.0...v0.4.0
+[0.1.0]: {CHANGELOG_REPO}/compare/v0.0.9...v0.1.0
+""",
 }
 # Where the broken tree's findings are: the first line of the page that holds the needle.
 SELFTEST_NEEDLES = (
@@ -2619,6 +2758,17 @@ SELFTEST_NEEDLES = (
     (GOALS, "#nowhere", Rule.PERF_CITATIONS),
     (GOALS, "#nowhere", Rule.LINKS),
     (GOALS, "by 8 ms", Rule.PERF_CITATIONS),
+    # The changelog: a release without its link, a version above the one before it, a date
+    # after it, a date that does not exist, a heading without one, the M11 mutation's stale
+    # `[Unreleased]`, a link from the wrong release, and the first release's not to its tag.
+    (CHANGELOG, "## [0.6.0]", Rule.CHANGELOG_LINKS),
+    (CHANGELOG, "## [0.7.0]", Rule.CHANGELOG_LINKS),
+    (CHANGELOG, "## [0.4.0]", Rule.CHANGELOG_LINKS),
+    (CHANGELOG, "2026-02-30", Rule.CHANGELOG_LINKS),
+    (CHANGELOG, "## [0.2.0]", Rule.CHANGELOG_LINKS),
+    (CHANGELOG, "[Unreleased]:", Rule.CHANGELOG_LINKS),
+    (CHANGELOG, "[0.5.0]:", Rule.CHANGELOG_LINKS),
+    (CHANGELOG, "[0.1.0]:", Rule.CHANGELOG_LINKS),
 )
 
 # The empty tree: every input a layout rule needs is missing, which is a finding.
@@ -2640,6 +2790,7 @@ SELFTEST_EMPTY_FINDINGS = frozenset({
     (DOCS, 1, Rule.CALLOUTS),
     (README, 1, Rule.PERF_CITATIONS),
     (GOALS, 1, Rule.PERF_CITATIONS),
+    (CHANGELOG, 1, Rule.CHANGELOG_LINKS),
 })
 
 
