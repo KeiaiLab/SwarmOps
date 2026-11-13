@@ -21,9 +21,9 @@
 //! its first, and one entry without texts that spans the rest; a later file whole, with every
 //! hunk the merge holds of it, or not at all. A merge holds a file's hunks past its first ones as
 //! one hunk that spans them too, so each file in a report covers every line of it where the sides'
-//! edits meet. From the first file left out, none follows, and `truncated` says so; the error's
-//! message still counts every conflicting path. So a report stays within a bound however many
-//! lines or files conflict:
+//! edits meet. From the first file left out, none follows, `truncated` says so and
+//! `files_left_out` counts them; the error's message still counts every conflicting path. So a
+//! report stays within a bound however many lines or files conflict:
 //!
 //! ```text
 //! report = ids, kinds, auto_merged, stale        a few hundred bytes for short lists
@@ -99,6 +99,7 @@ pub(crate) fn report(
     let kinds = (KINDS.into_iter())
         .filter(|kind| files.iter().any(|file| file.kind == *kind))
         .collect();
+    let left_out = conflicts.conflicts.len().saturating_sub(files.len());
     let mut out = ConflictReport::new(
         conflicts.base.to_string(),
         conflicts.ours.to_string(),
@@ -111,6 +112,7 @@ pub(crate) fn report(
         .map(ToString::to_string)
         .collect();
     out.stale = conflicts.stale.iter().map(ToString::to_string).collect();
+    out.files_left_out = bytes::to_u64(left_out);
     Ok(out)
 }
 
@@ -524,6 +526,7 @@ mod tests {
         let fits = report(&of(two), every_text).unwrap();
         assert_eq!(listed(&fits), [("a".to_owned(), 1), ("b".to_owned(), 50)]);
         assert!(!fits.truncated, "nothing left out");
+        assert_eq!(fits.files_left_out, 0, "every file listed");
 
         let files = vec![
             conflict("a", content(1)),
@@ -533,6 +536,7 @@ mod tests {
         let cut = report(&of(files), every_text).unwrap();
         assert_eq!(listed(&cut), [("a".to_owned(), 1)]);
         assert!(cut.truncated);
+        assert_eq!(cut.files_left_out, 2, "b, past the budget, and c after it");
     }
 
     /// The entry that spans a file's hunks past its first 128 says `truncated`, with each side's
@@ -636,6 +640,11 @@ mod tests {
         assert!(json.len() < 64 * 1024, "{} bytes", json.len());
         assert!(took < Duration::from_secs(1), "{took:?}");
         assert!(report.truncated);
+        assert_eq!(
+            report.files_left_out,
+            10_001 - bytes::to_u64(report.files.len()),
+            "every conflicting file the report does not list"
+        );
         let first = &report.files[0];
         assert_eq!(first.path, "a");
         let lines = |first, last| LinesOut::new(first, last);

@@ -3292,7 +3292,8 @@ pub struct ConflictReport {
     /// The files that conflict, in path order, while their entries stay within 24 KiB as JSON,
     /// texts aside: the first file always, with at least its first hunk, its hunks past the bound
     /// as one hunk that spans them, without texts; a later file whole, or else left out with
-    /// every file after it (`truncated`). The error's message counts every conflicting path.
+    /// every file after it (`truncated`, `files_left_out`). The error's message counts every
+    /// conflicting path.
     pub files: Vec<FileConflictOut>,
     /// The kinds of conflict in `files`, each once.
     pub kinds: Vec<ConflictKindOut>,
@@ -3308,6 +3309,10 @@ pub struct ConflictReport {
     /// Whether the report left something out: hunk texts, to stay within the request's
     /// `max_conflict_bytes`, or files and hunks, to stay within the bound of `files`.
     pub truncated: bool,
+    /// How many conflicting files `files` leaves out: every conflicting path the error's message
+    /// counts, less the files listed. Omitted when 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub files_left_out: u64,
 }
 
 impl ConflictReport {
@@ -3329,6 +3334,7 @@ impl ConflictReport {
             auto_merged: Vec::new(),
             stale: Vec::new(),
             truncated,
+            files_left_out: 0,
         }
     }
 }

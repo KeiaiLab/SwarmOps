@@ -3594,11 +3594,17 @@ expression: s.redact(&all)
           "type": "string"
         },
         "files": {
-          "description": "The files that conflict, in path order, while their entries stay within 24 KiB as JSON,\ntexts aside: the first file always, with at least its first hunk, its hunks past the bound\nas one hunk that spans them, without texts; a later file whole, or else left out with\nevery file after it (`truncated`). The error's message counts every conflicting path.",
+          "description": "The files that conflict, in path order, while their entries stay within 24 KiB as JSON,\ntexts aside: the first file always, with at least its first hunk, its hunks past the bound\nas one hunk that spans them, without texts; a later file whole, or else left out with\nevery file after it (`truncated`, `files_left_out`). The error's message counts every\nconflicting path.",
           "items": {
             "$ref": "#/$defs/FileConflictOut"
           },
           "type": "array"
+        },
+        "files_left_out": {
+          "description": "How many conflicting files `files` leaves out: every conflicting path the error's message\ncounts, less the files listed. Omitted when 0.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "kinds": {
           "description": "The kinds of conflict in `files`, each once.",
@@ -6327,11 +6333,17 @@ expression: s.redact(&all)
               "type": "string"
             },
             "files": {
-              "description": "The files that conflict, in path order, while their entries stay within 24 KiB as JSON,\ntexts aside: the first file always, with at least its first hunk, its hunks past the bound\nas one hunk that spans them, without texts; a later file whole, or else left out with\nevery file after it (`truncated`). The error's message counts every conflicting path.",
+              "description": "The files that conflict, in path order, while their entries stay within 24 KiB as JSON,\ntexts aside: the first file always, with at least its first hunk, its hunks past the bound\nas one hunk that spans them, without texts; a later file whole, or else left out with\nevery file after it (`truncated`, `files_left_out`). The error's message counts every\nconflicting path.",
               "items": {
                 "$ref": "#/$defs/FileConflictOut"
               },
               "type": "array"
+            },
+            "files_left_out": {
+              "description": "How many conflicting files `files` leaves out: every conflicting path the error's message\ncounts, less the files listed. Omitted when 0.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
             },
             "kinds": {
               "description": "The kinds of conflict in `files`, each once.",
@@ -6777,11 +6789,17 @@ expression: s.redact(&all)
               "type": "string"
             },
             "files": {
-              "description": "The files that conflict, in path order, while their entries stay within 24 KiB as JSON,\ntexts aside: the first file always, with at least its first hunk, its hunks past the bound\nas one hunk that spans them, without texts; a later file whole, or else left out with\nevery file after it (`truncated`). The error's message counts every conflicting path.",
+              "description": "The files that conflict, in path order, while their entries stay within 24 KiB as JSON,\ntexts aside: the first file always, with at least its first hunk, its hunks past the bound\nas one hunk that spans them, without texts; a later file whole, or else left out with\nevery file after it (`truncated`, `files_left_out`). The error's message counts every\nconflicting path.",
               "items": {
                 "$ref": "#/$defs/FileConflictOut"
               },
               "type": "array"
+            },
+            "files_left_out": {
+              "description": "How many conflicting files `files` leaves out: every conflicting path the error's message\ncounts, less the files listed. Omitted when 0.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
             },
             "kinds": {
               "description": "The kinds of conflict in `files`, each once.",
@@ -7174,11 +7192,17 @@ expression: s.redact(&all)
               "type": "string"
             },
             "files": {
-              "description": "The files that conflict, in path order, while their entries stay within 24 KiB as JSON,\ntexts aside: the first file always, with at least its first hunk, its hunks past the bound\nas one hunk that spans them, without texts; a later file whole, or else left out with\nevery file after it (`truncated`). The error's message counts every conflicting path.",
+              "description": "The files that conflict, in path order, while their entries stay within 24 KiB as JSON,\ntexts aside: the first file always, with at least its first hunk, its hunks past the bound\nas one hunk that spans them, without texts; a later file whole, or else left out with\nevery file after it (`truncated`, `files_left_out`). The error's message counts every\nconflicting path.",
               "items": {
                 "$ref": "#/$defs/FileConflictOut"
               },
               "type": "array"
+            },
+            "files_left_out": {
+              "description": "How many conflicting files `files` leaves out: every conflicting path the error's message\ncounts, less the files listed. Omitted when 0.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
             },
             "kinds": {
               "description": "The kinds of conflict in `files`, each once.",
@@ -7577,11 +7601,17 @@ expression: s.redact(&all)
               "type": "string"
             },
             "files": {
-              "description": "The files that conflict, in path order, while their entries stay within 24 KiB as JSON,\ntexts aside: the first file always, with at least its first hunk, its hunks past the bound\nas one hunk that spans them, without texts; a later file whole, or else left out with\nevery file after it (`truncated`). The error's message counts every conflicting path.",
+              "description": "The files that conflict, in path order, while their entries stay within 24 KiB as JSON,\ntexts aside: the first file always, with at least its first hunk, its hunks past the bound\nas one hunk that spans them, without texts; a later file whole, or else left out with\nevery file after it (`truncated`, `files_left_out`). The error's message counts every\nconflicting path.",
               "items": {
                 "$ref": "#/$defs/FileConflictOut"
               },
               "type": "array"
+            },
+            "files_left_out": {
+              "description": "How many conflicting files `files` leaves out: every conflicting path the error's message\ncounts, less the files listed. Omitted when 0.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
             },
             "kinds": {
               "description": "The kinds of conflict in `files`, each once.",
