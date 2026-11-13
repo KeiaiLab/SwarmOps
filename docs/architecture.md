@@ -427,10 +427,15 @@ it checked. A relocated land holds the lock one object round longer.
 
 **Batched writers** (the M18 D2 design §3). A land's publish and a commit's insert take a turn
 at the store's write queue, `meta/queue/`; every other write (`ref set`, `op undo`, the git
-import's frames) takes `meta/lock` as before. A writer that finds the lock free leads at once,
-with its request in memory and no queue file, so an uncontended write makes the filesystem
-calls it made before. One that finds it taken writes a small request of ids and fields (the
-changesets it names are flushed already, so durable before any frame names them), holds an
+import's frames, a sync's detached land and the lock pass in which a land confirms its target
+before it reports the land done) takes `meta/lock` as before, so a land can still get `E_BUSY`
+from those plain waits. A writer that finds the lock free leads at once, with its request in
+memory and no queue file, so an uncontended write makes the `FsOps` calls it made before; as
+leader it still lists `meta/queue/` for a dead leader's manifest and for leftover files. A
+request over 64 KiB, or a `meta/queue/` that cannot be used or written, takes no turn at the
+queue: its writer waits for the lock as a plain write does. A writer that finds the lock taken
+writes a small request of ids and fields (the changesets it names are flushed already, so
+durable before any frame names them), holds an
 `flock` on it as its sign of life, and waits for the lock while it polls for its answer every
 millisecond; a waiter that gets the lock with its request still unclaimed leads in turn. The
 lock's holder, a commit or a land, repairs what a crash left and settles what a dead leader
@@ -439,9 +444,10 @@ first, each in a frame of its own, as a lone publish or insert plans it, on what
 before it queued: a land is relocated onto the land before it, through an in-memory overlay
 of the objects that member made, and an advance is compared against the target the member
 before it left. A batch holds at most 32 members and plans for at most 50 ms
-([limits](reference/limits.md#internal-values)). With another member planned, the leader
-writes a manifest of the members, their frames and their answers, so that the next holder can
-answer or put back the claims a dead leader left, and only then claims them. The staged
+([limits](reference/limits.md#internal-values)). With another member planned or declined (a
+request of another version is declined too), the leader writes a manifest of the members, their
+frames and their answers, so that the next holder can answer or put back the claims a dead
+leader left, and only then claims them. The staged
 objects are then put and flushed once, and every frame is committed with one sync of
 `journal.log` (above): however many members, a batch makes one object flush, one
 `journal.log` sync, one `journal.off` sync per sector of entries and one replace of each moved
@@ -766,14 +772,16 @@ sweep runs once per `FORMAT`.
   its answer without the lock. A batch plans its waiting requests in submission order; the
   `flock` behind it still is not first-in, first-out, and lands are still ordered by their
   compare-and-swap and relocation, not by the queue. A request still unclaimed at
-  `lock_timeout` is withdrawn, nothing of it recorded, and fails with `E_BUSY`. A request the
-  holder claimed waits past `lock_timeout` for its answer, 60 s at most: a holder stopped or
-  stuck after its claim answers nothing, and the waiter then withdraws it with `E_BUSY` too,
-  which there says nothing of the request: that holder, once it runs again, commits what it
-  claimed. `meta.recovered` reports what the leader's recovery repaired; a waiter answered by a
-  leader reports none. A crashed leader's manifest lets the next holder answer each claimed
-  member whose frame is in the journal and put the others back in the queue, so a member is
-  answered once or runs again, never both.
+  `lock_timeout` is withdrawn, nothing of it recorded, and fails with `E_BUSY`. A writer that
+  waits without a request (one over 64 KiB, or a `meta/queue/` it cannot use), and a declined
+  member's rerun alone, which waits only for what is left of its first wait, give the same
+  `E_BUSY` when the lock stays taken. A request the holder claimed waits past `lock_timeout` for
+  its answer, 60 s at most: a holder stopped or stuck after its claim answers nothing, and the
+  waiter then withdraws it with `E_BUSY` too, which there says nothing of the request: that
+  holder, once it runs again, commits what it claimed. `meta.recovered` reports what the
+  leader's recovery repaired; a waiter answered by a leader reports none. A crashed leader's
+  manifest lets the next holder answer each claimed member whose frame is in the journal and
+  put the others back in the queue, so a member is answered once or runs again, never both.
 - **Readers** take no lock (above). Under commits that land during every one of its 32 rounds,
   a snapshot gives up with the retryable `E_BUSY` instead of reading on.
 
