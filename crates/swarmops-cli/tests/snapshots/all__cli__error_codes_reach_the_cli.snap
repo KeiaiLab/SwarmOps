@@ -1943,6 +1943,34 @@ expression: s.transcript()
     }
   },
   {
+    "args": "serve --root [tmp]",
+    "env": {
+      "SSH_ORIGINAL_COMMAND": "git-upload-pack 'store'"
+    },
+    "exit": 5,
+    "stdout": "0068ERR E_AUTH: serve names no caller: --as is not given, and SWARMOPS_AGENT does not name one for serve",
+    "stderr": {
+      "ok": false,
+      "op": "serve",
+      "api": 1,
+      "error": {
+        "code": "E_AUTH",
+        "message": "serve names no caller: --as is not given, and SWARMOPS_AGENT does not name one for serve",
+        "retryable": false,
+        "exit": 5,
+        "details": {
+          "reason": "no_identity"
+        },
+        "hint": "name the caller with --as <family>/<instance> on serve's command line: the command= of its authorized_keys line, or the web server's CGI entry"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
     "args": "serve --root [tmp] --as agent/worker-17",
     "env": {
       "SSH_ORIGINAL_COMMAND": "git-upload-pack 'store'"
@@ -1993,6 +2021,63 @@ expression: s.transcript()
           "ref": "store"
         },
         "hint": null
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "serve --root [tmp] --as person/bob",
+    "env": {
+      "SSH_ORIGINAL_COMMAND": "git-upload-pack 'store'"
+    },
+    "exit": 5,
+    "stdout": "0042ERR E_POLICY_DENIED: access.toml has version 2, not 1 (line 1)",
+    "stderr": {
+      "ok": false,
+      "op": "serve",
+      "api": 1,
+      "error": {
+        "code": "E_POLICY_DENIED",
+        "message": "access.toml has version 2, not 1 (line 1)",
+        "retryable": false,
+        "exit": 5,
+        "details": {
+          "line": 1,
+          "reason": "access_file_invalid"
+        },
+        "hint": "the operator writes access.toml in the store's root: version = 1, then one [[grant]] per set of callers (who, read, push, force, land)"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "serve --root [tmp] --as person/bob",
+    "env": {
+      "SSH_ORIGINAL_COMMAND": "git-upload-pack 'store'"
+    },
+    "exit": 5,
+    "stdout": "004eERR E_AUTH: the store has no access.toml: serve grants nothing without one",
+    "stderr": {
+      "ok": false,
+      "op": "serve",
+      "api": 1,
+      "error": {
+        "code": "E_AUTH",
+        "message": "the store has no access.toml: serve grants nothing without one",
+        "retryable": false,
+        "exit": 5,
+        "details": {
+          "reason": "no_access_file"
+        },
+        "hint": "the operator writes access.toml in the store's root: version = 1, then one [[grant]] per set of callers (who, read, push, force, land)"
       },
       "meta": {
         "elapsed_ms": "[elapsed_ms]",

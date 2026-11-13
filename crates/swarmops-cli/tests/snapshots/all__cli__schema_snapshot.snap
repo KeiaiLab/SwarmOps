@@ -3032,7 +3032,7 @@ expression: s.redact(&all)
       "oneOf": [
         {
           "const": "E_EXISTS",
-          "description": "`init` found a store at the target path already.",
+          "description": "`init` found a store at the target path already. Also a name that is taken: a remote\nthat `remote add` finds recorded, a directory that `clone` finds holding something else,\nand a git tag that names another commit, which an export moves only by force\n(`details.reason` `tag_exists`, with `ref`, `git_head` and `head_changeset`).",
           "type": "string"
         },
         {
@@ -3067,7 +3067,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_TOO_LARGE",
-          "description": "The content is larger than the operation allows. `details` has one of four shapes:\n`{size, limit, scope}` for a limit of SwarmOps (`scope` `put` for one content, `commit`\nfor a commit's contents together, `request` for a request's text, with the flag that\nnamed it as `changes` or `resolve`), where a commit adds the change's `index` and `path`,\nand `file` for a client file; `{scope, size, limit, remote}` for a push past a remote's\nlimit (`scope` `remote_file`, which adds `path`, or `remote_push`); `{store_limit, max,\ngot}` for an object longer than an object holds (`store_limit` `object_bytes`); and from\n`git import`, `{commit, path, size, max}` for a blob and `{object, kind, size, max}` for a\ncommit, a tree or a tag.",
+          "description": "The content is larger than the operation allows. `details` has one of these shapes:\n`{size, limit, scope}` for a limit of SwarmOps (`scope` `put` for one content, `commit`\nfor a commit's contents together, `request` for a request's text, with the flag that\nnamed it as `changes` or `resolve`), where a commit adds the change's `index` and `path`,\nand `file` for a client file; `{scope, size, limit, remote}` for a push past a remote's\nlimit (`scope` `remote_file`, which adds `path`, or `remote_push`); `{store_limit, max,\ngot}` for an object longer than an object holds (`store_limit` `object_bytes`); and from\n`git import`, `{commit, path, size, max}` for a blob and `{object, kind, size, max}` for a\ncommit, a tree or a tag; and from a workspace, `{path, size, max}` for a file a commit\nreads that is longer than an object holds, and `{limit, max}` for a bootstrap whose\n`.worktreeinclude` lists more to copy than it may (`limit` `files` or `bytes`).",
           "type": "string"
         },
         {
@@ -3162,12 +3162,12 @@ expression: s.redact(&all)
         },
         {
           "const": "E_AUTH",
-          "description": "The serving entry could not name the caller, or no grant of the store's access file\nnames it.",
+          "description": "The serving entry could not name the caller (`details.reason` `no_identity`, or under\n`--user-family` `no_remote_user` and `remote_user_invalid`), no grant of the store's\naccess file names it (`unknown_identity`), or the store has no access file\n(`no_access_file`).",
           "type": "string"
         },
         {
           "const": "E_POLICY_DENIED",
-          "description": "The store's access file grants this identity no such action.",
+          "description": "The store's access file grants this identity no such action (`details.reason`\n`not_granted`, with `identity`, `action` and `ref`), or the file is not valid, so that it\ngrants no one anything (`access_file_invalid`, with the `line`, or `bytes` and `limit` for\na file past its size limit), or a fetch wants an object that is no commit a served ref\nreaches (`not_served`).",
           "type": "string"
         },
         {
@@ -3237,7 +3237,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_REMOTE_REJECTED",
-          "description": "The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or\na rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a\npack whose checksum does not match, or one its refs reach is missing; no tracking ref\nmoved) or `unclassified` (a failure git's messages do not explain, never retried), with\n`remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the\ntoken redacted).",
+          "description": "The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or\na rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a\npack whose checksum does not match, or one its refs reach is missing, or corrupt in the\nstore's mirror already; no tracking ref moved) or `unclassified` (a failure git's\nmessages do not explain, never retried), with `remote` and what git said (`refs`,\n`remote_messages`, `git_exit`, `stderr_tail`, the token redacted).",
           "type": "string"
         },
         {
@@ -10908,7 +10908,7 @@ expression: s.redact(&all)
           "oneOf": [
             {
               "const": "E_EXISTS",
-              "description": "`init` found a store at the target path already.",
+              "description": "`init` found a store at the target path already. Also a name that is taken: a remote\nthat `remote add` finds recorded, a directory that `clone` finds holding something else,\nand a git tag that names another commit, which an export moves only by force\n(`details.reason` `tag_exists`, with `ref`, `git_head` and `head_changeset`).",
               "type": "string"
             },
             {
@@ -10943,7 +10943,7 @@ expression: s.redact(&all)
             },
             {
               "const": "E_TOO_LARGE",
-              "description": "The content is larger than the operation allows. `details` has one of four shapes:\n`{size, limit, scope}` for a limit of SwarmOps (`scope` `put` for one content, `commit`\nfor a commit's contents together, `request` for a request's text, with the flag that\nnamed it as `changes` or `resolve`), where a commit adds the change's `index` and `path`,\nand `file` for a client file; `{scope, size, limit, remote}` for a push past a remote's\nlimit (`scope` `remote_file`, which adds `path`, or `remote_push`); `{store_limit, max,\ngot}` for an object longer than an object holds (`store_limit` `object_bytes`); and from\n`git import`, `{commit, path, size, max}` for a blob and `{object, kind, size, max}` for a\ncommit, a tree or a tag.",
+              "description": "The content is larger than the operation allows. `details` has one of these shapes:\n`{size, limit, scope}` for a limit of SwarmOps (`scope` `put` for one content, `commit`\nfor a commit's contents together, `request` for a request's text, with the flag that\nnamed it as `changes` or `resolve`), where a commit adds the change's `index` and `path`,\nand `file` for a client file; `{scope, size, limit, remote}` for a push past a remote's\nlimit (`scope` `remote_file`, which adds `path`, or `remote_push`); `{store_limit, max,\ngot}` for an object longer than an object holds (`store_limit` `object_bytes`); and from\n`git import`, `{commit, path, size, max}` for a blob and `{object, kind, size, max}` for a\ncommit, a tree or a tag; and from a workspace, `{path, size, max}` for a file a commit\nreads that is longer than an object holds, and `{limit, max}` for a bootstrap whose\n`.worktreeinclude` lists more to copy than it may (`limit` `files` or `bytes`).",
               "type": "string"
             },
             {
@@ -11038,12 +11038,12 @@ expression: s.redact(&all)
             },
             {
               "const": "E_AUTH",
-              "description": "The serving entry could not name the caller, or no grant of the store's access file\nnames it.",
+              "description": "The serving entry could not name the caller (`details.reason` `no_identity`, or under\n`--user-family` `no_remote_user` and `remote_user_invalid`), no grant of the store's\naccess file names it (`unknown_identity`), or the store has no access file\n(`no_access_file`).",
               "type": "string"
             },
             {
               "const": "E_POLICY_DENIED",
-              "description": "The store's access file grants this identity no such action.",
+              "description": "The store's access file grants this identity no such action (`details.reason`\n`not_granted`, with `identity`, `action` and `ref`), or the file is not valid, so that it\ngrants no one anything (`access_file_invalid`, with the `line`, or `bytes` and `limit` for\na file past its size limit), or a fetch wants an object that is no commit a served ref\nreaches (`not_served`).",
               "type": "string"
             },
             {
@@ -11113,7 +11113,7 @@ expression: s.redact(&all)
             },
             {
               "const": "E_REMOTE_REJECTED",
-              "description": "The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or\na rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a\npack whose checksum does not match, or one its refs reach is missing; no tracking ref\nmoved) or `unclassified` (a failure git's messages do not explain, never retried), with\n`remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the\ntoken redacted).",
+              "description": "The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or\na rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a\npack whose checksum does not match, or one its refs reach is missing, or corrupt in the\nstore's mirror already; no tracking ref moved) or `unclassified` (a failure git's\nmessages do not explain, never retried), with `remote` and what git said (`refs`,\n`remote_messages`, `git_exit`, `stderr_tail`, the token redacted).",
               "type": "string"
             },
             {

@@ -46,8 +46,8 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | [`E_NOTHING_TO_LAND`](#e_nothing_to_land) | 1 | no | The land has nothing to add to the target: its head is on the target already, or its change is (`details.reason` says which). |
 | [`E_NOTHING_TO_UNDO`](#e_nothing_to_undo) | 1 | no | The operation moved no ref, so there is nothing to restore. |
 | [`E_OP_NOT_FOUND`](#e_op_not_found) | 6 | no | The store has no operation with that id. |
-| [`E_AUTH`](#e_auth) | 5 | no | The serving entry could not name the caller, or no grant of the store's access file names it. |
-| [`E_POLICY_DENIED`](#e_policy_denied) | 5 | no | The store's access file grants this identity no such action. |
+| [`E_AUTH`](#e_auth) | 5 | no | The serving entry could not name the caller (`details.reason` `no_identity`, or under `--user-family` `no_remote_user` and `remote_user_invalid`), no grant of the store's access file names it (`unknown_identity`), or the store has no access file (`no_access_file`). |
+| [`E_POLICY_DENIED`](#e_policy_denied) | 5 | no | The store's access file grants this identity no such action (`details.reason` `not_granted`, with `identity`, `action` and `ref`), or the file is not valid, so that it grants no one anything (`access_file_invalid`, with the `line`, or `bytes` and `limit` for a file past its size limit), or a fetch wants an object that is no commit a served ref reaches (`not_served`). |
 | [`E_MAINTENANCE_BUSY`](#e_maintenance_busy) | 4 | yes | Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and running the operation again once it is done can succeed. |
 | [`E_FORMAT_REQUIRED`](#e_format_required) | 1 | no | The ref name is one the store's format does not take but a later one does: `details` names `name`, `needs` (the format that takes it) and `store` (the store's); `swarmops upgrade` moves the store to it. |
 | [`E_TAG_IMMUTABLE`](#e_tag_immutable) | 1 | no | A tag was asked to move from one target to another: a tag is created and deleted, never moved (`details.name`). |
@@ -61,7 +61,7 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | [`E_GIT_EXPORT_DIVERGED`](#e_git_export_diverged) | 3 | no | `git export`: the branch holds commits that are not the export of the source ref's head or of an ancestor of it, so the branch did not move; there is no silent merge, and the request's `force` moves it anyway. |
 | [`E_GIT_WRITE`](#e_git_write) | 1 | no | `git export` could not write the repository; `details.reason` says what failed: `io` (the filesystem refused a write; `details.path` names the file, relative to the git directory), `ref_locked` (the branch's lock file, `refs/heads/<branch>.lock`, exists: another git process holds it, or an earlier export died holding it, and git itself says to remove it once no git process runs; `details.path` names it) or `ref_name_conflict` (an existing ref stands where the branch's name needs a directory, or the other way round; `details.branch`). |
 | [`E_REMOTE_DIVERGED`](#e_remote_diverged) | 3 | no | A push or a sync found the remote branch elsewhere than it can move from: `details.reason` says why (`remote_moved`: it moved since the last fetch, and the push's compare-and-swap sent nothing; `not_fast_forward`; `behind`: the store ref is behind the remote; `diverged`; `lossy_history`; `no_common_base`: the sync found no changeset both hold), with `remote`, `branch` and, where known, `expected` and `main_moved`. |
-| [`E_REMOTE_REJECTED`](#e_remote_rejected) | 5 | no | The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or a rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a pack whose checksum does not match, or one its refs reach is missing; no tracking ref moved) or `unclassified` (a failure git's messages do not explain, never retried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the token redacted). |
+| [`E_REMOTE_REJECTED`](#e_remote_rejected) | 5 | no | The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or a rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a pack whose checksum does not match, or one its refs reach is missing, or corrupt in the store's mirror already; no tracking ref moved) or `unclassified` (a failure git's messages do not explain, never retried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the token redacted). |
 | [`E_REMOTE_UNREACHABLE`](#e_remote_unreachable) | 4 | yes | The network or the remote's host did not answer: `details.phase` (`fetch`, `push`, `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`, `ssh`). |
 | [`E_REMOTE_NOT_FOUND`](#e_remote_not_found) | 6 | no | The store records no remote of that name (`details.remote`). |
 | [`E_WS_EXISTS`](#e_ws_exists) | 1 | no | `ws create` found a workspace of that name already, made by other arguments (`details.name`, `details.path` of the existing one). |
@@ -81,7 +81,7 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 
 Exit 1. Retryable: no.
 
-`init` found a store at the target path already.
+`init` found a store at the target path already. Also a name that is taken: a remote that `remote add` finds recorded, a directory that `clone` finds holding something else, and a git tag that names another commit, which an export moves only by force (`details.reason` `tag_exists`, with `ref`, `git_head` and `head_changeset`).
 
 ## E_NOT_A_REPO
 
@@ -123,7 +123,7 @@ A file operation named a directory.
 
 Exit 1. Retryable: no.
 
-The content is larger than the operation allows. `details` has one of four shapes: `{size, limit, scope}` for a limit of SwarmOps (`scope` `put` for one content, `commit` for a commit's contents together, `request` for a request's text, with the flag that named it as `changes` or `resolve`), where a commit adds the change's `index` and `path`, and `file` for a client file; `{scope, size, limit, remote}` for a push past a remote's limit (`scope` `remote_file`, which adds `path`, or `remote_push`); `{store_limit, max, got}` for an object longer than an object holds (`store_limit` `object_bytes`); and from `git import`, `{commit, path, size, max}` for a blob and `{object, kind, size, max}` for a commit, a tree or a tag.
+The content is larger than the operation allows. `details` has one of these shapes: `{size, limit, scope}` for a limit of SwarmOps (`scope` `put` for one content, `commit` for a commit's contents together, `request` for a request's text, with the flag that named it as `changes` or `resolve`), where a commit adds the change's `index` and `path`, and `file` for a client file; `{scope, size, limit, remote}` for a push past a remote's limit (`scope` `remote_file`, which adds `path`, or `remote_push`); `{store_limit, max, got}` for an object longer than an object holds (`store_limit` `object_bytes`); and from `git import`, `{commit, path, size, max}` for a blob and `{object, kind, size, max}` for a commit, a tree or a tag; and from a workspace, `{path, size, max}` for a file a commit reads that is longer than an object holds, and `{limit, max}` for a bootstrap whose `.worktreeinclude` lists more to copy than it may (`limit` `files` or `bytes`).
 
 ## E_EMPTY_COMMIT
 
@@ -237,13 +237,13 @@ The store has no operation with that id.
 
 Exit 5. Retryable: no.
 
-The serving entry could not name the caller, or no grant of the store's access file names it.
+The serving entry could not name the caller (`details.reason` `no_identity`, or under `--user-family` `no_remote_user` and `remote_user_invalid`), no grant of the store's access file names it (`unknown_identity`), or the store has no access file (`no_access_file`).
 
 ## E_POLICY_DENIED
 
 Exit 5. Retryable: no.
 
-The store's access file grants this identity no such action.
+The store's access file grants this identity no such action (`details.reason` `not_granted`, with `identity`, `action` and `ref`), or the file is not valid, so that it grants no one anything (`access_file_invalid`, with the `line`, or `bytes` and `limit` for a file past its size limit), or a fetch wants an object that is no commit a served ref reaches (`not_served`).
 
 ## E_MAINTENANCE_BUSY
 
@@ -327,7 +327,7 @@ A push or a sync found the remote branch elsewhere than it can move from: `detai
 
 Exit 5. Retryable: no.
 
-The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or a rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a pack whose checksum does not match, or one its refs reach is missing; no tracking ref moved) or `unclassified` (a failure git's messages do not explain, never retried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the token redacted).
+The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or a rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a pack whose checksum does not match, or one its refs reach is missing, or corrupt in the store's mirror already; no tracking ref moved) or `unclassified` (a failure git's messages do not explain, never retried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the token redacted).
 
 ## E_REMOTE_UNREACHABLE
 

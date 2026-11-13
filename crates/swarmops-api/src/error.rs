@@ -53,7 +53,10 @@ macro_rules! error_codes {
 }
 
 error_codes! {
-    /// `init` found a store at the target path already.
+    /// `init` found a store at the target path already. Also a name that is taken: a remote
+    /// that `remote add` finds recorded, a directory that `clone` finds holding something else,
+    /// and a git tag that names another commit, which an export moves only by force
+    /// (`details.reason` `tag_exists`, with `ref`, `git_head` and `head_changeset`).
     ExistsAlready => "E_EXISTS", EXIT_ERROR, false;
     /// No store at the given path, or no store was named.
     NotARepo => "E_NOT_A_REPO", EXIT_NOT_FOUND, false;
@@ -67,7 +70,7 @@ error_codes! {
     PathNotFound => "E_PATH_NOT_FOUND", EXIT_NOT_FOUND, false;
     /// A file operation named a directory.
     IsDir => "E_IS_DIR", EXIT_ERROR, false;
-    /// The content is larger than the operation allows. `details` has one of four shapes:
+    /// The content is larger than the operation allows. `details` has one of these shapes:
     /// `{size, limit, scope}` for a limit of SwarmOps (`scope` `put` for one content, `commit`
     /// for a commit's contents together, `request` for a request's text, with the flag that
     /// named it as `changes` or `resolve`), where a commit adds the change's `index` and `path`,
@@ -75,7 +78,9 @@ error_codes! {
     /// limit (`scope` `remote_file`, which adds `path`, or `remote_push`); `{store_limit, max,
     /// got}` for an object longer than an object holds (`store_limit` `object_bytes`); and from
     /// `git import`, `{commit, path, size, max}` for a blob and `{object, kind, size, max}` for a
-    /// commit, a tree or a tag.
+    /// commit, a tree or a tag; and from a workspace, `{path, size, max}` for a file a commit
+    /// reads that is longer than an object holds, and `{limit, max}` for a bootstrap whose
+    /// `.worktreeinclude` lists more to copy than it may (`limit` `files` or `bytes`).
     TooLarge => "E_TOO_LARGE", EXIT_ERROR, false;
     /// The commit changes nothing and `allow_empty` is off.
     EmptyCommit => "E_EMPTY_COMMIT", EXIT_ERROR, false;
@@ -137,10 +142,16 @@ error_codes! {
     /// The store has no operation with that id.
     OpNotFound => "E_OP_NOT_FOUND", EXIT_NOT_FOUND, false;
     // `serve`'s (M14): the caller and the store's access file.
-    /// The serving entry could not name the caller, or no grant of the store's access file
-    /// names it.
+    /// The serving entry could not name the caller (`details.reason` `no_identity`, or under
+    /// `--user-family` `no_remote_user` and `remote_user_invalid`), no grant of the store's
+    /// access file names it (`unknown_identity`), or the store has no access file
+    /// (`no_access_file`).
     Auth => "E_AUTH", EXIT_AUTH, false;
-    /// The store's access file grants this identity no such action.
+    /// The store's access file grants this identity no such action (`details.reason`
+    /// `not_granted`, with `identity`, `action` and `ref`), or the file is not valid, so that it
+    /// grants no one anything (`access_file_invalid`, with the `line`, or `bytes` and `limit` for
+    /// a file past its size limit), or a fetch wants an object that is no commit a served ref
+    /// reaches (`not_served`).
     PolicyDenied => "E_POLICY_DENIED", EXIT_AUTH, false;
     /// Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and
     /// running the operation again once it is done can succeed.
@@ -228,10 +239,10 @@ error_codes! {
     RemoteDiverged => "E_REMOTE_DIVERGED", EXIT_CONFLICT, false;
     /// The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or
     /// a rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a
-    /// pack whose checksum does not match, or one its refs reach is missing; no tracking ref
-    /// moved) or `unclassified` (a failure git's messages do not explain, never retried), with
-    /// `remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the
-    /// token redacted).
+    /// pack whose checksum does not match, or one its refs reach is missing, or corrupt in the
+    /// store's mirror already; no tracking ref moved) or `unclassified` (a failure git's
+    /// messages do not explain, never retried), with `remote` and what git said (`refs`,
+    /// `remote_messages`, `git_exit`, `stderr_tail`, the token redacted).
     RemoteRejected => "E_REMOTE_REJECTED", EXIT_AUTH, false;
     /// The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,
     /// `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,

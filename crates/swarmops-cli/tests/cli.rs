@@ -42,6 +42,34 @@ const ACCESS: &str = "version = 1\n\n[[grant]]\nwho = [\"person/bob\"]\n";
 /// A fetch of the store `store`, as git over ssh asks `serve` for it.
 const UPLOAD_STORE: &str = "git-upload-pack 'store'";
 
+/// One refusal of `serve` before git starts: its code, its `details.reason`, the caller `--as`
+/// names (none: the flag is not given) and the store's `access.toml` (none: no file).
+type ServeRefusal = (
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+    Option<&'static str>,
+);
+
+/// Every reason `serve` refuses a connection for, in an order that ends without an access file.
+const SERVE_REFUSALS: [ServeRefusal; 5] = [
+    ("E_AUTH", "no_identity", None, Some(ACCESS)),
+    ("E_AUTH", "unknown_identity", Some(AGENT), Some(ACCESS)),
+    (
+        "E_POLICY_DENIED",
+        "not_granted",
+        Some("person/bob"),
+        Some(ACCESS),
+    ),
+    (
+        "E_POLICY_DENIED",
+        "access_file_invalid",
+        Some("person/bob"),
+        Some("version = 2\n"),
+    ),
+    ("E_AUTH", "no_access_file", Some("person/bob"), None),
+];
+
 /// A store path under `/mnt/`, where WSL mounts Windows drives: `init` and every open refuse it
 /// by its name, so it need not exist, and nothing is made there.
 const MNT_STORE: &str = "/mnt/swarmops-cli-test/store";
@@ -1740,20 +1768,8 @@ fn error_codes_reach_the_cli() {
         raised.push("E_WS_LOCKED");
         drop(held);
     }
-    // `serve`'s (M14), refused before git starts: a caller no grant of the access file names,
-    // and one it names without a read.
-    let access = format!("{store}/access.toml");
-    fs::write(&access, ACCESS).unwrap();
-    let ssh = [("SSH_ORIGINAL_COMMAND", UPLOAD_STORE)];
-    let root = s.tmp();
-    for (code, who) in [("E_AUTH", AGENT), ("E_POLICY_DENIED", "person/bob")] {
-        let refused = s.serve(&ssh, &["serve", "--root", &root, "--as", who]);
-        assert_eq!(refused.code(), code, "{who}");
-        let message = refused["error"]["message"].as_str().unwrap();
-        assert!(!message.contains(&root), "no host path: {message}");
-        raised.push(code);
-    }
-    fs::remove_file(&access).unwrap();
+    // `serve`'s (M14), refused before git starts, each reason once.
+    raised.extend(serve_refusals(&mut s, &store));
 
     // Last, as it damages the store: verify finds the blob gone.
     let blob = hash_object(ObjectKind::Blob, b"pub fn f() {}\n");
@@ -1796,6 +1812,37 @@ fn error_codes_reach_the_cli() {
         assert_ne!(raised.contains(&code), listed, "{code}");
     }
     insta::assert_json_snapshot!(s.transcript());
+}
+
+/// Runs `serve` on the store `store` once for each of [`SERVE_REFUSALS`], refused before git
+/// starts: no caller named, a caller no grant of the access file names, one it names without a
+/// read, an access file that is not valid, and no access file. Each gives its code and
+/// `details.reason`, and a message that names no host path. The codes, in that order.
+fn serve_refusals(s: &mut Session, store: &str) -> Vec<&'static str> {
+    let access = format!("{store}/access.toml");
+    let ssh = [("SSH_ORIGINAL_COMMAND", UPLOAD_STORE)];
+    let root = s.tmp();
+    let mut raised = Vec::new();
+    for (code, reason, who, file) in SERVE_REFUSALS {
+        // 1. The access file this reason needs, then the caller.
+        match file {
+            Some(text) => fs::write(&access, text).unwrap(),
+            None => fs::remove_file(&access).unwrap(),
+        }
+        let mut args = vec!["serve", "--root", &root];
+        if let Some(who) = who {
+            args.extend(["--as", who]);
+        }
+
+        // 2. The refusal, by code and reason, with no host path in its message.
+        let refused = s.serve(&ssh, &args);
+        assert_eq!(refused.code(), code, "{reason}");
+        assert_eq!(refused["error"]["details"]["reason"], reason, "{args:?}");
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(!message.contains(&root), "no host path: {message}");
+        raised.push(code);
+    }
+    raised
 }
 
 /// The table grows by exactly one code, `E_STORE_TOO_NEW`: exit 1, not retryable.
