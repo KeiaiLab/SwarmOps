@@ -1485,7 +1485,8 @@ fn a_phase_log_counts_what_each_phase_did() {
     assert_eq!(synced["status"], "up_to_date", "{synced}");
     let named: Vec<&str> = idle.iter().map(|(phase, _)| phase.as_str()).collect();
     assert!(!named.contains(&"sync.publish"), "{idle:?}");
-    assert_eq!(&idle[..2], [("sync.fetch".to_owned(), 0), ("sync.plan".to_owned(), 0)]);
+    let opening = [("sync.fetch".to_owned(), 0), ("sync.plan".to_owned(), 0)];
+    assert_eq!(&idle[..2], opening);
 }
 
 /// The objects the first sync of [`a_phase_log_counts_what_each_phase_did`] derives, the fetch's
