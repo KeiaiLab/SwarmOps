@@ -1229,9 +1229,10 @@ per_format! {
 /// Each exits 0 with a warning that names the append that failed (`append_durable
 /// meta/journal.off`, relative to the store's root, never with the store's own path), and
 /// readers see it already; while `journal.off` refuses writes, the next write fails, unable to
-/// list the frame, with `E_IO` (`committed: false`: its transaction never began), not retryable,
-/// since running it again meets the same refusal until the file's mode changes (ruling M16-R8),
-/// its `details` naming the same append and its hint what to fix, and reports no recovery.
+/// list the frame, with `E_IO` (`committed: false`: its transaction never began), not retryable:
+/// retryable means that running the same command again can succeed, and this one meets the same
+/// refusal until the file's mode changes. Its `details` name the same append and its hint what
+/// to fix, and it reports no recovery.
 /// Once `journal.off` takes writes, the same commit run again finds its changeset (the store
 /// holds it once), the same move finds it applied, each reporting in `meta.recovered` the
 /// listing its write made and what it replayed, not as a warning; and the store verifies clean.

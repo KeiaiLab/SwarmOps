@@ -7,11 +7,12 @@
 //! (one thread, signatures at a fixed time): `init`; commits and ref moves (a create, moves, a
 //! delete) with a compaction and a checkpoint among them; then commits past the checkpoint, whose
 //! index records no sync has made durable, the last of them naming by id a blob that a writer of
-//! its own linked and did not flush, so that only the commit makes its name durable. The slow variant's run ends with a transaction of
-//! more than 1,024 changesets, which its writer compacts after, as every writer does past that
-//! many records: an index sync, the compaction, a `Compacted` frame, the checkpoint. For a power failure after any step of the run, and a
-//! seed, the [`Image`] of what the disk may hold is written to a temp dir, and the binary must
-//! find in it, as RocksDB's crash tests put it, no hole:
+//! its own linked and did not flush, so that only the commit makes its name durable. The slow
+//! variant's run ends with a transaction of more than 1,024 changesets, which its writer compacts
+//! after, as every writer does past that many records: an index sync, the compaction, a
+//! `Compacted` frame, the checkpoint. For a power failure after any step of the run, and a seed,
+//! the [`Image`] of what the disk may hold is written to a temp dir, and the binary must find in
+//! it, as RocksDB's crash tests put it, no hole:
 //!
 //! - no store before `init` returned: `info` says `E_NOT_A_REPO`, and `init` then makes one;
 //! - otherwise a store in the state of a prefix of the transactions issued that holds every one
