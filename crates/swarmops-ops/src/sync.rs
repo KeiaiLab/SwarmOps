@@ -7,7 +7,8 @@
 //! [`swarmops_git::sync`]; this module takes the mirror's lock once, runs the fetch's and the
 //! push's locked forms under it, and moves `main` with this request's own ref move, so the
 //! journal, the op log and the envelope see it. Both are MCP tools, which take a remote by its
-//! name only.
+//! name only. A `so://` remote is synced natively ([`crate::native`]'s sync), under the same
+//! lock; its `sync status` reads its tracking ref.
 //!
 //! ```text
 //!   git/lock, once                       E_BUSY at once when held
@@ -51,6 +52,7 @@ use swarmops_store::SYSTEM_GIT;
 
 use crate::error;
 use crate::local::{LocalOps, Recording, Resolved};
+use crate::native;
 use crate::phase::{self, Phase, Span};
 use crate::push::mark_published;
 
@@ -95,6 +97,9 @@ impl Recording<'_> {
         // 2. The mirror's lock, once, held by every attempt.
         let mirror = Mirror::open(self.ops.store_path()).map_err(error::mirror_error)?;
         let lock = mirror.lock().map_err(error::mirror_error)?;
+        if native::url::is_native(&remote.url) {
+            return self.sync_native(who, &remote, mode, max_attempts, &lander);
+        }
         let mut syncing = Syncing {
             rec: self,
             lock: &lock,
@@ -122,16 +127,13 @@ impl Recording<'_> {
         let remote = self.sync_remote(&remote)?;
 
         // 1. What the last fetch saw, and what main names.
-        let seen = self.seen(&remote)?;
-        let head = match seen {
-            Some(oid) => self.known(oid)?.map(|changeset| (oid, changeset)),
-            None => None,
-        };
+        let (seen, head) = self.seen_head(&remote)?;
         let main = self.main_now()?;
 
         // 2. The base, and how far each side is above it.
-        let standing = match (main, head) {
-            (Some(main), Some((_, theirs))) => self.standing(&remote, main, theirs)?,
+        let theirs = head.as_ref().map(|(_, changeset)| *changeset);
+        let standing = match (main, theirs) {
+            (Some(main), Some(theirs)) => self.standing(&remote, main, theirs)?,
             (Some(main), None) => {
                 let (ahead, cut) = self.chain_len(main)?;
                 Standing {
@@ -141,7 +143,7 @@ impl Recording<'_> {
                     truncated: cut,
                 }
             }
-            (None, Some((_, theirs))) => {
+            (None, Some(theirs)) => {
                 let (behind, cut) = self.chain_len(theirs)?;
                 Standing {
                     base: None,
@@ -174,15 +176,44 @@ impl Recording<'_> {
         let mut out = SyncStatus::new(
             remote.name,
             remote.branch,
-            seen.is_some(),
+            seen,
             standing.ahead,
             standing.behind,
             unpublished,
             truncated,
         );
-        out.remote_head = head.map(|(oid, changeset)| remote_head(oid, changeset));
+        out.remote_head = head.map(|(sha, changeset)| RemoteHead::new(sha, changeset.to_string()));
         out.base = standing.base.map(|base| base.to_string());
         Ok(out)
+    }
+
+    /// Whether a fetch saw the remote's followed branch, and its head as a git id and a
+    /// changeset: the mirror's tracking ref of a git remote, the store's of a native one.
+    fn seen_head(
+        &self,
+        remote: &RemoteInfo,
+    ) -> Result<(bool, Option<(String, ChangesetId)>), OpError> {
+        // 1. A native remote: its tracking ref, its git id the commit it exports to.
+        if native::url::is_native(&remote.url) {
+            let tracking = format!("remote/{}/{}", remote.name, remote.branch);
+            let state = self.ops.repo.get_ref(&tracking).map_err(error::op)?;
+            let Some(head) = state.map(|state| state.target) else {
+                return Ok((false, None));
+            };
+            let exported = self.ops.repo.derived::<ExportOid>(head, &());
+            let sha = exported.map_err(error::op)?.git_oid().to_string();
+            return Ok((true, Some((sha, head))));
+        }
+
+        // 2. A git remote: the mirror's tracking ref, if the store imported it.
+        let seen = self.seen(remote)?;
+        let head = match seen {
+            Some(oid) => self
+                .known(oid)?
+                .map(|changeset| (oid.to_string(), changeset)),
+            None => None,
+        };
+        Ok((seen.is_some(), head))
     }
 
     /// The remote named `name`, its URL as stored (`remote list` masks a credential), or
@@ -732,11 +763,6 @@ fn drop_reason(by: engine::DropReason) -> Result<DropReason, OpError> {
         engine::DropReason::NoOp => Ok(DropReason::NoOp),
         _ => Err(error::unknown_variant("DropReason")),
     }
-}
-
-/// The remote's head `oid`, the changeset `changeset`, as the wire gives it.
-fn remote_head(oid: GitOid, changeset: ChangesetId) -> RemoteHead {
-    RemoteHead::new(oid.to_string(), changeset.to_string())
 }
 
 /// `n` as a count on the wire.

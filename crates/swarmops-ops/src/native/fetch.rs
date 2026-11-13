@@ -168,7 +168,7 @@ pub(crate) fn keep_tag(
 }
 
 /// `wire_hello`: the upstream takes protocol [`WIRE_PROTOCOL`].
-fn hello(link: &mut dyn Link) -> Result<WireHello, OpError> {
+pub(super) fn hello(link: &mut dyn Link) -> Result<WireHello, OpError> {
     let kinds = OBJECT_KINDS.map(str::to_owned).to_vec();
     let req = WireHelloReq::new(WIRE_PROTOCOL, WIRE_PROTOCOL, kinds, Vec::new());
     let hello: WireHello = ask(link, WIRE_HELLO, req)?;
@@ -181,7 +181,7 @@ fn hello(link: &mut dyn Link) -> Result<WireHello, OpError> {
 
 /// Every page of `wire_refs`: the upstream's refs a host fetches (`main`, `release/*`,
 /// branches, tags), by name.
-fn refs(link: &mut dyn Link) -> Result<BTreeMap<String, ChangesetId>, OpError> {
+pub(super) fn refs(link: &mut dyn Link) -> Result<BTreeMap<String, ChangesetId>, OpError> {
     let mut heads = BTreeMap::new();
     let mut after = None;
     loop {
@@ -340,7 +340,7 @@ fn move_refs(repo: &LocalRepo, remote: &str, fetched: &mut Fetched) -> Result<()
 }
 
 /// Asks `op` with `req` and reads its result; the upstream's refusal is returned as it is.
-fn ask<Q: Serialize, R: DeserializeOwned>(
+pub(super) fn ask<Q: Serialize, R: DeserializeOwned>(
     link: &mut dyn Link,
     op: &str,
     req: Q,
@@ -366,7 +366,7 @@ fn get(
 }
 
 /// The request line of `op` with `req`.
-fn request<Q: Serialize>(op: &str, req: Q) -> Result<Vec<u8>, OpError> {
+pub(super) fn request<Q: Serialize>(op: &str, req: Q) -> Result<Vec<u8>, OpError> {
     let request = WireRequest::new(op, WIRE_PROTOCOL, req);
     serde_json::to_vec(&request).map_err(|e| {
         error::error(
@@ -377,7 +377,7 @@ fn request<Q: Serialize>(op: &str, req: Q) -> Result<Vec<u8>, OpError> {
 }
 
 /// The result an answer `line` carries, or the refusal it carries.
-fn outcome<R: DeserializeOwned>(line: &[u8]) -> Result<R, OpError> {
+pub(super) fn outcome<R: DeserializeOwned>(line: &[u8]) -> Result<R, OpError> {
     let unreadable = || {
         refused(
             "answer_line",
@@ -445,7 +445,7 @@ fn store_blobs(repo: &LocalRepo, chunk: Vec<Hashed>) -> Result<(), OpError> {
 }
 
 /// The blobs changeset `object`'s delta puts.
-fn puts(object: &Hashed) -> Result<Vec<BlobId>, OpError> {
+pub(super) fn puts(object: &Hashed) -> Result<Vec<BlobId>, OpError> {
     let changeset = Changeset::decode(object.payload()).map_err(|_| {
         let corrupt = StoreError::Corrupt { id: object.id() };
         error::op(RepoError::from(corrupt))
@@ -463,7 +463,7 @@ fn held(repo: &LocalRepo, id: ChangesetId) -> Result<bool, OpError> {
 }
 
 /// A changeset id as the wire writes it.
-fn changeset_id(text: &str) -> Result<ChangesetId, OpError> {
+pub(super) fn changeset_id(text: &str) -> Result<ChangesetId, OpError> {
     let id = text
         .parse()
         .map_err(|_| refused("answer_line", format!("{text:?} is no changeset id")))?;
@@ -556,7 +556,7 @@ impl Recording<'_> {
     }
 
     /// The commit changeset `id` exports to, as a git id.
-    fn export_sha(&self, id: ChangesetId) -> Result<String, OpError> {
+    pub(super) fn export_sha(&self, id: ChangesetId) -> Result<String, OpError> {
         let exported = self.ops.repo.derived::<ExportOid>(id, &());
         Ok(exported.map_err(error::op)?.git_oid().to_string())
     }
@@ -568,7 +568,7 @@ impl Recording<'_> {
 }
 
 /// `E_REMOTE_REJECTED` `not_native`: `remote`'s server answered in git's pkt-lines, `said`.
-fn not_native(remote: &str, said: &str) -> OpError {
+pub(super) fn not_native(remote: &str, said: &str) -> OpError {
     let message = format!("{remote} does not speak native sync: it said {said:?}");
     error::error(ErrorCode::RemoteRejected, message)
         .with_details(error::details([

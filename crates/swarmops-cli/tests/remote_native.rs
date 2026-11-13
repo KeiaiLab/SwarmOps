@@ -13,7 +13,6 @@
 //! envelope lines and chunks), one damages the answer, one answers as a server older than native
 //! sync does.
 
-#[cfg(feature = "test-hooks")]
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -798,4 +797,743 @@ fn merges_and_renames_cross_with_their_ids() {
         "no octopus crossed"
     );
     assert_clean(host.path());
+}
+
+// ---- sync and push (the native sync design §1 N3–N10, §2.4 S1–S4, §6 N-5) ----
+
+/// The served store's grants for hosts that write: ada reads, pushes any ref and lands on
+/// `main`; bob only reads.
+const WRITE_ACCESS: &str = r#"version = 1
+
+[[grant]]
+who = ["person/ada"]
+read = true
+push = ["**"]
+land = ["main"]
+
+[[grant]]
+who = ["person/bob"]
+read = true
+"#;
+
+/// The identity of a key that may only read.
+const BOB: &str = "person/bob";
+
+/// The agent of a second host.
+const OTHER_AGENT: &str = "agent/worker-18";
+
+impl Site {
+    /// [`Site::new`], ada granted read, push and land, bob read ([`WRITE_ACCESS`]).
+    fn writable() -> Site {
+        let site = Site::new();
+        site.grant_writes();
+        site
+    }
+
+    /// Writes [`WRITE_ACCESS`] as the served store's `access.toml`.
+    fn grant_writes(&self) {
+        let access = self.served.store(STORE).join("access.toml");
+        fs::write(access, WRITE_ACCESS).expect("write access");
+    }
+
+    /// `sync origin` on `host` through `ssh`, with `args` after it.
+    fn sync(&self, host: &str, ssh: &str, args: &[&str]) -> Run {
+        let mut line = vec!["sync", ORIGIN];
+        line.extend(args);
+        self.on(host, ssh, &line, &[])
+    }
+
+    /// `push origin <target>` on `host` through `ssh`.
+    fn push(&self, host: &str, ssh: &str, target: &str) -> Run {
+        self.on(host, ssh, &["push", ORIGIN, target], &[])
+    }
+}
+
+/// A change on the host's `main` putting `content` at `path` as [`AGENT`], `main` moved to it.
+fn host_commit(host: &str, path: &str, content: &str) -> String {
+    commit_as(host, AGENT, path, content)
+}
+
+/// A change on `main` of the store at `store` putting `content` at `path` as `agent`, `main`
+/// moved to it.
+fn commit_as(store: &str, agent: &str, path: &str, content: &str) -> String {
+    let changes = serde_json::json!([{"path": path, "op": "put", "content": {"inline": content}}]);
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let file = dir.path().join("changes.json");
+    fs::write(&file, changes.to_string()).expect("write the changes");
+    let line = [
+        "--repo",
+        store,
+        "--as",
+        agent,
+        "commit",
+        "-m",
+        path,
+        "--changes",
+        &path_text(&file),
+        "--advance",
+        "main",
+    ];
+    text(&run(&line, &[]).ok()["changeset"])
+}
+
+/// `show <id>`'s result in the store at `store`.
+fn show(store: &str, id: &str) -> Value {
+    run(&["--repo", store, "show", id], &[]).ok()
+}
+
+/// Each changeset of `main`'s first-parent chain in the store at `store`, newest first.
+fn first_parents(store: &str) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut at = ref_in(store, "main");
+    while let Some(id) = at {
+        let shown = show(store, &id);
+        at = shown["parents"]
+            .as_array()
+            .and_then(|p| p.first())
+            .map(text);
+        chain.push(id);
+    }
+    chain
+}
+
+/// How many times each of `changes` was landed on `main` of the store at `store`: how many of
+/// its first parents name it in `squashed_from`.
+fn landed_counts(store: &str, changes: &[String]) -> Vec<usize> {
+    let mut counts = vec![0; changes.len()];
+    for id in first_parents(store) {
+        let shown = show(store, &id);
+        let from = shown["squashed_from"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for (n, change) in changes.iter().enumerate() {
+            counts[n] += from
+                .iter()
+                .filter(|named| *named == change.as_str())
+                .count();
+        }
+    }
+    counts
+}
+
+/// Asserts that each of `changes` is landed on the served `main` exactly once.
+fn assert_landed_once(site: &Site, changes: &[String]) {
+    let counts = landed_counts(&site.store(), changes);
+    assert_eq!(counts, vec![1; changes.len()], "{changes:?}");
+}
+
+/// A sync lands each change of the host on the upstream, adopts what landed with its ids, and
+/// moves the host's `main` to the upstream's head: both hold the same history.
+#[test]
+fn sync_moves_main_to_the_upstream_head_with_the_same_ids() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    let old = ref_in(host.path(), "main").expect("main");
+    let changes = [
+        host_commit(host.path(), "a.txt", "a\n"),
+        host_commit(host.path(), "b.txt", "b\n"),
+    ];
+    let mine = ref_in(host.path(), "main").expect("main");
+
+    let synced = site.sync(host.path(), &site.ssh(), &[]).ok();
+    let head = site.main_head();
+    assert_eq!(synced["status"], "pushed", "{synced}");
+    assert_eq!(synced["main"]["old"], mine.as_str(), "{synced}");
+    assert_eq!(synced["main"]["new"], head.as_str(), "{synced}");
+    let published = synced["published"].as_array().expect("published");
+    assert_eq!(published.len(), 2, "{synced}");
+    for (entry, change) in published.iter().zip(&changes) {
+        assert_eq!(entry["changeset"], change.as_str(), "{synced}");
+    }
+    assert_eq!(published[1]["landed_as"], head.as_str(), "{synced}");
+
+    // The same ids, parents and all, on both; the changes once each, above the old head.
+    assert_eq!(ref_in(host.path(), "main"), Some(head.clone()));
+    assert_eq!(ref_in(host.path(), TRACKING_MAIN), Some(head));
+    assert_eq!(history(host.path(), "main"), history(&site.store(), "main"));
+    assert_eq!(first_parents(&site.store())[2], old);
+    assert_landed_once(&site, &changes);
+    assert_clean(host.path());
+    assert_clean(&site.store());
+}
+
+/// Each change is landed by the upstream once, under the key of its id on `main`; a sync
+/// again lands nothing.
+#[test]
+fn push_lands_each_change_once_with_its_key() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    let changes = [
+        host_commit(host.path(), "a.txt", "a\n"),
+        host_commit(host.path(), "b.txt", "b\n"),
+        host_commit(host.path(), "c.txt", "c\n"),
+    ];
+    site.sync(host.path(), &site.ssh(), &[]).ok();
+
+    // 1. One landed changeset per change, each keyed ss1-, the keys apart.
+    let landed: Vec<Value> = first_parents(&site.store())[..3]
+        .iter()
+        .map(|id| show(&site.store(), id))
+        .collect();
+    let mut keys = HashSet::new();
+    for shown in &landed {
+        let key = text(&shown["land_key"]);
+        assert!(key.starts_with("ss1-") && key.len() == 64, "{shown}");
+        assert!(keys.insert(key), "{shown}");
+    }
+    assert_landed_once(&site, &changes);
+
+    // 2. Again: up to date, nothing landed, no frame on the upstream.
+    let journal = run(&["--repo", &site.store(), "op", "log"], &[]).ok();
+    let again = site.sync(host.path(), &site.ssh(), &[]).ok();
+    assert_eq!(again["status"], "up_to_date", "{again}");
+    assert_eq!(again["published"], serde_json::json!([]), "{again}");
+    assert_eq!(
+        run(&["--repo", &site.store(), "op", "log"], &[]).ok(),
+        journal
+    );
+}
+
+/// A land whose answer never reached the host (U5) is not landed again: the next sync finds
+/// it by its key and moves `main` to the upstream's head.
+#[test]
+fn a_push_whose_answer_was_lost_replays() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    let change = host_commit(host.path(), "a.txt", "a\n");
+    let mine = ref_in(host.path(), "main").expect("main");
+
+    // 1. The upstream lands; its answer is dropped on the way, and the connection with it.
+    let losing = site.ssh_through("{ LC_ALL=C sed -u '/\"op\":\"wire_land\"/Q'; kill -KILL $$; }");
+    let cut = site.sync(host.path(), &losing, &[]);
+    let error = cut.err("E_REMOTE_UNREACHABLE");
+    assert_eq!(error["retryable"], true, "{cut}");
+    assert_landed_once(&site, std::slice::from_ref(&change));
+    assert_eq!(ref_in(host.path(), "main"), Some(mine));
+
+    // 2. Again: nothing lands twice; main is the upstream's head.
+    let again = site.sync(host.path(), &site.ssh(), &[]).ok();
+    assert_eq!(again["published"], serde_json::json!([]), "{again}");
+    let dropped = again["dropped"].as_array().expect("dropped");
+    assert_eq!(dropped.len(), 1, "{again}");
+    assert_eq!(dropped[0]["changeset"], change.as_str(), "{again}");
+    assert_eq!(ref_in(host.path(), "main"), Some(site.main_head()));
+    assert_landed_once(&site, &[change]);
+    assert_clean(host.path());
+}
+
+/// A change another host landed already, the same changeset, is recognised by its key and not
+/// landed again.
+#[test]
+fn a_change_landed_from_another_host_is_not_landed_twice() {
+    let site = Site::writable();
+    let (first, _) = site.cloned();
+    let change = host_commit(first.path(), "a.txt", "a\n");
+    let second = Store::copy_of(&first);
+
+    site.sync(first.path(), &site.ssh(), &[]).ok();
+    let head = site.main_head();
+    let again = site.sync(second.path(), &site.ssh(), &[]).ok();
+    assert_eq!(again["published"], serde_json::json!([]), "{again}");
+    assert_eq!(again["dropped"][0]["changeset"], change.as_str(), "{again}");
+    assert_eq!(site.main_head(), head);
+    assert_eq!(ref_in(second.path(), "main"), Some(head));
+    assert_landed_once(&site, &[change]);
+}
+
+/// Two hosts that sync at once each land every change of theirs once; both end on the same
+/// upstream head, and the upstream's `main` stays linear.
+#[test]
+fn two_hosts_sync_at_once_and_each_change_lands_once() {
+    let site = Site::writable();
+    let (first, _) = site.cloned();
+    let second = Store::copy_of(&first);
+    let mut changes = Vec::new();
+    for n in 0..3 {
+        changes.push(host_commit(first.path(), &format!("first-{n}.txt"), "1\n"));
+        changes.push(commit_as(
+            second.path(),
+            OTHER_AGENT,
+            &format!("second-{n}.txt"),
+            "2\n",
+        ));
+    }
+
+    // 1. Both at once, each until it is done (a lost race is retryable).
+    let ssh = site.ssh();
+    std::thread::scope(|scope| {
+        for host in [&first, &second] {
+            let ssh = &ssh;
+            let site = &site;
+            scope.spawn(move || {
+                for _ in 0..8 {
+                    let synced = site.sync(host.path(), ssh, &[]);
+                    if synced.exit() == 0 {
+                        return;
+                    }
+                    assert_eq!(synced.envelope()["error"]["retryable"], true, "{synced}");
+                }
+                panic!("no sync of {} succeeded", host.path());
+            });
+        }
+    });
+
+    // 2. Each lands once; both hosts end on the upstream's head after one more sync.
+    assert_landed_once(&site, &changes);
+    for host in [&first, &second] {
+        site.sync(host.path(), &site.ssh(), &[]).ok();
+        assert_eq!(ref_in(host.path(), "main"), Some(site.main_head()));
+        assert_clean(host.path());
+    }
+    let linear = history(&site.store(), "main");
+    assert!(
+        linear.iter().all(|(_, parents)| parents.len() <= 1),
+        "{linear:?}"
+    );
+    assert_clean(&site.store());
+}
+
+/// A change that conflicts with the upstream's `main` is `E_CONFLICT`, naming it, its agent and
+/// the paths; it and the later ones are not landed, the earlier ones are, and the host's `main`
+/// ends at the upstream's head, before the refused ones, never past them.
+#[test]
+fn a_conflict_names_the_change_and_its_paths_and_moves_no_main() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    let early = host_commit(host.path(), "early.txt", "early\n");
+    let clash = host_commit(host.path(), "README.md", "host\n");
+    let late = host_commit(host.path(), "late.txt", "late\n");
+    let theirs = site.land("README.md", "upstream\n");
+
+    let failed = site.sync(host.path(), &site.ssh(), &[]);
+    let error = failed.err("E_CONFLICT");
+    assert_eq!(error["details"]["change"], clash.as_str(), "{failed}");
+    assert_eq!(error["details"]["agent"], AGENT, "{failed}");
+    let refused = serde_json::json!([clash, late]);
+    assert_eq!(error["details"]["refused"], refused, "{failed}");
+    assert!(failed.to_string().contains("README.md"), "{failed}");
+
+    // The early change landed once, the clash and the late one not; main is the upstream's.
+    assert_landed_once(&site, std::slice::from_ref(&early));
+    assert_eq!(landed_counts(&site.store(), &[clash, late]), [0, 0]);
+    let head = site.main_head();
+    assert_ne!(head, theirs);
+    assert_eq!(ref_in(host.path(), "main"), Some(head));
+    assert_clean(host.path());
+}
+
+/// The refused change, rebased on the host onto what it was refused against and resolved
+/// there, is landed by the next sync under its new id; the refused id never is.
+#[test]
+fn a_conflict_resolved_on_the_host_lands_at_the_next_sync() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    let base = ref_in(host.path(), "main").expect("main");
+    let clash = host_commit(host.path(), "README.md", "host\n");
+    let theirs = site.land("README.md", "upstream\n");
+    site.sync(host.path(), &site.ssh(), &[]).err("E_CONFLICT");
+    assert_eq!(ref_in(host.path(), "main"), Some(theirs.clone()));
+
+    // 1. The refused change rebased onto main, which is the upstream's, its side taken.
+    let resolved = site.work.path().join("resolved.json");
+    let resolutions = serde_json::json!({
+        "against": theirs,
+        "files": {"README.md": {"take": "ours"}},
+    });
+    fs::write(&resolved, resolutions.to_string()).expect("write the resolutions");
+    let rebased = run(
+        &[
+            "--repo",
+            host.path(),
+            "--as",
+            AGENT,
+            "rebase",
+            &clash,
+            "--base",
+            &base,
+            "--resolve",
+            &path_text(&resolved),
+        ],
+        &[],
+    )
+    .ok();
+    let again = text(&rebased["changeset"]);
+    let set = ["ref", "set", "main", &again, "--expect", &theirs];
+    let mut line = vec!["--repo", host.path(), "--as", AGENT];
+    line.extend(set);
+    run(&line, &[]).ok();
+
+    // 2. The next sync lands it; the refused id never lands.
+    let synced = site.sync(host.path(), &site.ssh(), &[]).ok();
+    assert_eq!(
+        synced["published"][0]["changeset"],
+        again.as_str(),
+        "{synced}"
+    );
+    assert_landed_once(&site, &[again]);
+    assert_eq!(landed_counts(&site.store(), &[clash]), [0]);
+    let readme = run(&["--repo", &site.store(), "cat", "main:README.md"], &[]).ok();
+    assert_eq!(readme["content"], "host\n", "{readme}");
+    assert_eq!(ref_in(host.path(), "main"), Some(site.main_head()));
+}
+
+/// Work done with no network syncs later: every change lands once, in order.
+#[test]
+fn offline_work_syncs_later_in_order() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    let offline = site.offline();
+    site.sync(host.path(), &offline, &[])
+        .err("E_REMOTE_UNREACHABLE");
+    let changes: Vec<String> = (0..4)
+        .map(|n| host_commit(host.path(), &format!("offline-{n}.txt"), "o\n"))
+        .collect();
+    site.sync(host.path(), &offline, &[])
+        .err("E_REMOTE_UNREACHABLE");
+
+    site.sync(host.path(), &site.ssh(), &[]).ok();
+    assert_landed_once(&site, &changes);
+    let landed: Vec<String> = first_parents(&site.store())[..4]
+        .iter()
+        .rev()
+        .map(|id| text(&show(&site.store(), id)["squashed_from"][0]))
+        .collect();
+    assert_eq!(landed, changes);
+}
+
+/// With no network, everything on the host's own store runs; fetch, push and sync fail
+/// retryable, and nothing moves.
+#[test]
+fn a_host_with_no_network_commits_lands_reads_and_verifies() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    let offline = site.offline();
+
+    // 1. The host's own operations.
+    let change = host_commit(host.path(), "a.txt", "a\n");
+    let staged = commit_on(host.path(), &change, "b.txt");
+    let landed = run(
+        &["--repo", host.path(), "--as", AGENT, "land", &staged],
+        &[],
+    )
+    .ok();
+    assert_eq!(landed["status"], "landed", "{landed}");
+    run(&["--repo", host.path(), "log", "main"], &[]).ok();
+    assert_clean(host.path());
+
+    // 2. The remote's: refused retryable, no ref moved.
+    let branch = [
+        "--repo",
+        host.path(),
+        "--as",
+        AGENT,
+        "ref",
+        "set",
+        "feature/o",
+        &change,
+    ];
+    run(&[&branch[..], &["--create"]].concat(), &[]).ok();
+    let refs = run(&["--repo", host.path(), "ref", "list"], &[]).ok();
+    for args in [
+        vec!["fetch", ORIGIN],
+        vec!["push", ORIGIN, "feature/o"],
+        vec!["sync", ORIGIN],
+    ] {
+        let failed = site.on(host.path(), &offline, &args, &[]);
+        let error = failed.err("E_REMOTE_UNREACHABLE");
+        assert_eq!(error["retryable"], true, "{failed}");
+    }
+    assert_eq!(run(&["--repo", host.path(), "ref", "list"], &[]).ok(), refs);
+}
+
+/// A changeset on `parent` in the store at `store` putting `path`, which no ref names.
+fn commit_on(store: &str, parent: &str, path: &str) -> String {
+    let changes = serde_json::json!([{"path": path, "op": "put", "content": {"inline": "x\n"}}]);
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let file = dir.path().join("changes.json");
+    fs::write(&file, changes.to_string()).expect("write the changes");
+    let line = [
+        "--repo",
+        store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        path,
+        "--changes",
+        &path_text(&file),
+        "--parent",
+        parent,
+    ];
+    text(&run(&line, &[]).ok()["changeset"])
+}
+
+impl Site {
+    /// An ssh command that reaches no host, as ssh with no route does: exit 255, nothing said.
+    fn offline(&self) -> String {
+        let script = self.work.path().join("ssh-offline");
+        write_script(&script, "#!/bin/sh\nexit 255\n");
+        path_text(&script)
+    }
+}
+
+/// The upstream's op log names the connection's identity as the lander of each change, and
+/// the landed changeset keeps the change's agent as its author.
+#[test]
+fn the_remote_log_names_the_lander_and_the_change_keeps_its_agent() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    host_commit(host.path(), "a.txt", "a\n");
+    site.sync(host.path(), &site.ssh(), &[]).ok();
+
+    let landed = show(&site.store(), &site.main_head());
+    assert_eq!(landed["author"]["agent"], AGENT, "{landed}");
+    assert_eq!(landed["lander"]["agent"], ADA, "{landed}");
+    let log = run(&["--repo", &site.store(), "op", "log"], &[]).ok();
+    let lands: Vec<&Value> = (log["ops"].as_array().expect("ops").iter())
+        .filter(|op| op["kind"] == "land")
+        .collect();
+    assert_eq!(lands.len(), 1, "{log}");
+    assert_eq!(lands[0]["ref_moves"][0]["actor"], ADA, "{log}");
+    assert_eq!(lands[0]["changesets"][0]["agent"], AGENT, "{log}");
+    assert!(!log.to_string().contains("unknown/unknown"), "{log}");
+}
+
+/// A landed changeset names the change it came from in `squashed_from` and its key in
+/// `land_key`, in both stores.
+#[test]
+fn landed_changes_name_their_origin() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    let change = host_commit(host.path(), "a.txt", "a\n");
+    site.sync(host.path(), &site.ssh(), &[]).ok();
+    let head = site.main_head();
+
+    for store in [site.store(), host.path().to_owned()] {
+        let shown = show(&store, &head);
+        assert_eq!(
+            shown["squashed_from"],
+            serde_json::json!([change]),
+            "{shown}"
+        );
+        assert!(text(&shown["land_key"]).starts_with("ss1-"), "{shown}");
+    }
+}
+
+/// Each agent's key is decided by its own grants: ada's lands, bob's, which only reads, is
+/// refused and moves nothing.
+#[test]
+fn one_key_per_agent_is_decided_by_its_own_grants() {
+    let site = Site::writable();
+    let (ada, _) = site.cloned();
+    let bob = Store::copy_of(&ada);
+    let mine = host_commit(ada.path(), "ada.txt", "a\n");
+    let his = commit_as(bob.path(), OTHER_AGENT, "bob.txt", "b\n");
+    let bob_main = ref_in(bob.path(), "main");
+
+    site.sync(ada.path(), &site.ssh(), &[]).ok();
+    let refused = site.sync(bob.path(), &site.served.ssh_command(BOB), &[]);
+    assert_eq!(refused.envelope()["ok"], false, "{refused}");
+    assert_landed_once(&site, &[mine]);
+    assert_eq!(landed_counts(&site.store(), &[his]), [0]);
+    assert_eq!(ref_in(bob.path(), "main"), bob_main);
+}
+
+/// The upstream's refusals reach the host as its envelopes: a caller with no grant, a ref rule,
+/// a conflict.
+#[test]
+fn refusals_reach_the_client_as_envelopes() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    host_commit(host.path(), "a.txt", "a\n");
+
+    // 1. No grant to upload.
+    let refused = site.sync(host.path(), &site.served.ssh_command(BOB), &[]);
+    let error = refused.envelope()["error"].clone();
+    assert_eq!(error["code"], "E_POLICY_DENIED", "{refused}");
+
+    // 2. A tag the upstream holds at another changeset is never moved.
+    let head = site.main_head();
+    site.so(&["ref", "set", "tags/v1", &head, "--create"]);
+    let mine = ref_in(host.path(), "main").expect("main");
+    let tag = [
+        "--repo",
+        host.path(),
+        "--as",
+        AGENT,
+        "ref",
+        "set",
+        "tags/v1",
+        &mine,
+        "--create",
+    ];
+    run(&tag, &[]).ok();
+    site.push(host.path(), &site.ssh(), "tags/v1")
+        .err("E_TAG_IMMUTABLE");
+    assert_eq!(site.ref_at("tags/v1"), Some(head));
+
+    // 3. A conflict.
+    host_commit(host.path(), "README.md", "host\n");
+    site.land("README.md", "upstream\n");
+    site.sync(host.path(), &site.ssh(), &[]).err("E_CONFLICT");
+}
+
+/// The upstream's store held busy by another writer for the whole of its lock's wait reaches
+/// the host as `E_BUSY`, retryable, and nothing moves.
+#[test]
+#[ignore = "slow, ~12 s: waits out the upstream store's 10 s lock timeout"]
+fn a_busy_upstream_reaches_the_client_as_e_busy() {
+    use std::time::Duration;
+
+    use swarmops_store::MetaLock;
+
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    host_commit(host.path(), "a.txt", "a\n");
+    let main = ref_in(host.path(), "main");
+
+    let layout = swarmops_testkit::store::layout_of(site.store());
+    let held = MetaLock::acquire(&layout, Duration::from_secs(1)).expect("take meta/lock");
+    let busy = site.sync(host.path(), &site.ssh(), &["--max-attempts", "1"]);
+    drop(held);
+    let error = busy.err("E_BUSY");
+    assert_eq!(error["retryable"], true, "{busy}");
+    assert_eq!(ref_in(host.path(), "main"), main);
+}
+
+/// A branch pushed is created, then advanced, on the upstream at the host's own ids.
+#[test]
+fn push_of_a_branch_advances_it_with_ids_kept() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    let main = ref_in(host.path(), "main").expect("main");
+    let first = commit_on(host.path(), &main, "x.txt");
+    let set = |new: &str, old: Option<&str>| {
+        let mut line = vec![
+            "--repo",
+            host.path(),
+            "--as",
+            AGENT,
+            "ref",
+            "set",
+            "feature/x",
+            new,
+        ];
+        match old {
+            Some(old) => line.extend(["--expect", old]),
+            None => line.push("--create"),
+        }
+        run(&line, &[]).ok();
+    };
+    set(&first, None);
+
+    let created = site.push(host.path(), &site.ssh(), "feature/x").ok();
+    assert_eq!(created["status"], "created", "{created}");
+    assert_eq!(created["head_changeset"], first.as_str(), "{created}");
+    assert_eq!(site.ref_at("feature/x"), Some(first.clone()));
+
+    let second = commit_on(host.path(), &first, "y.txt");
+    set(&second, Some(&first));
+    let pushed = site.push(host.path(), &site.ssh(), "feature/x").ok();
+    assert_eq!(pushed["status"], "pushed", "{pushed}");
+    assert_eq!(site.ref_at("feature/x"), Some(second.clone()));
+    assert_eq!(
+        history(&site.store(), "feature/x"),
+        history(host.path(), "feature/x")
+    );
+    assert_eq!(ref_in(host.path(), "remote/origin/feature/x"), Some(second));
+    let again = site.push(host.path(), &site.ssh(), "feature/x").ok();
+    assert_eq!(again["status"], "up_to_date", "{again}");
+    assert_clean(&site.store());
+}
+
+/// A tag pushed is created at the host's id; one the upstream holds elsewhere is never moved.
+#[test]
+fn a_tag_is_created_and_never_moved() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    let main = ref_in(host.path(), "main").expect("main");
+    let tagged = commit_on(host.path(), &main, "t.txt");
+    for (tag, at) in [("tags/v1", &tagged), ("tags/v2", &tagged)] {
+        let line = [
+            "--repo",
+            host.path(),
+            "--as",
+            AGENT,
+            "ref",
+            "set",
+            tag,
+            at,
+            "--create",
+        ];
+        run(&line, &[]).ok();
+    }
+    site.so(&["ref", "set", "tags/v2", &main, "--create"]);
+
+    let created = site.push(host.path(), &site.ssh(), "tags/v1").ok();
+    assert_eq!(created["status"], "created", "{created}");
+    assert_eq!(site.ref_at("tags/v1"), Some(tagged));
+    let again = site.push(host.path(), &site.ssh(), "tags/v1").ok();
+    assert_eq!(again["status"], "up_to_date", "{again}");
+
+    site.push(host.path(), &site.ssh(), "tags/v2")
+        .err("E_TAG_IMMUTABLE");
+    assert_eq!(site.ref_at("tags/v2"), Some(main));
+}
+
+/// A first sync to an upstream with no `main` creates it at the host's head, ids kept.
+#[test]
+fn the_first_push_to_an_empty_remote_keeps_ids() {
+    let site = Site::bare();
+    site.grant_writes();
+    let host = Store::init();
+    run(&["--repo", host.path(), "remote", "add", ORIGIN, URL], &[]).ok();
+    host_commit(host.path(), "a.txt", "a\n");
+    let head = host_commit(host.path(), "b.txt", "b\n");
+
+    let synced = site.sync(host.path(), &site.ssh(), &[]).ok();
+    assert_eq!(synced["status"], "pushed", "{synced}");
+    assert_eq!(site.ref_at("main"), Some(head.clone()));
+    assert_eq!(history(&site.store(), "main"), history(host.path(), "main"));
+    assert_eq!(ref_in(host.path(), TRACKING_MAIN), Some(head));
+    assert_clean(&site.store());
+}
+
+/// `main` and `release/*` are landed, never moved, by a native push: until a push lands them,
+/// it says to sync.
+#[test]
+fn a_push_of_main_says_to_sync() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    host_commit(host.path(), "a.txt", "a\n");
+    let refused = site.push(host.path(), &site.ssh(), "main");
+    let error = refused.err("E_INVALID_ARG");
+    assert_eq!(error["details"]["reason"], "land_with_sync", "{refused}");
+    assert_eq!(site.ref_at("main"), Some(site.main_head()));
+}
+
+/// `sync status` of a native remote reads its tracking ref, with no network.
+#[test]
+fn sync_status_reads_the_tracking_ref() {
+    let site = Site::writable();
+    let (host, _) = site.cloned();
+    let head = site.main_head();
+    host_commit(host.path(), "a.txt", "a\n");
+    let status = site
+        .on(
+            host.path(),
+            &site.offline(),
+            &["sync", "status", ORIGIN],
+            &[],
+        )
+        .ok();
+    assert_eq!(status["fetched"], true, "{status}");
+    assert_eq!(
+        status["remote_head"]["changeset"],
+        head.as_str(),
+        "{status}"
+    );
+    assert_eq!(status["ahead"], 1, "{status}");
+    assert_eq!(status["behind"], 0, "{status}");
 }

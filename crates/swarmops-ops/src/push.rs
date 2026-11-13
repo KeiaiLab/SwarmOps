@@ -18,6 +18,9 @@
 //!     git push --force-with-lease=<branch>:<seen> E:<branch>
 //!     refs/remotes/<remote>/<branch>      seen → E, by compare-and-swap; git gc --auto
 //! ```
+//!
+//! A `so://` remote is pushed natively ([`crate::native`]'s push): a branch or a tag moved by
+//! compare-and-swap with its ids kept; `main` and `release/*` are landed by `sync`.
 
 use swarmops_api::{ErrorCode, LossyClass, OpError, PushReq, PushResp, PushStatus, RemoteInfo};
 use swarmops_core::ChangesetId;
@@ -33,6 +36,7 @@ use swarmops_store::{Recovered, RefKind, SYSTEM_GIT, TailRepair};
 
 use crate::error::{self, Phase};
 use crate::local::{LocalOps, Recording, Resolved};
+use crate::native;
 use crate::phase::{self, Span};
 
 /// Marks `new` as what `main` was last matched to on `remote`'s `branch` (the sync's floor, the
@@ -111,6 +115,17 @@ impl Recording<'_> {
             source_ref, branch, ..
         } = req;
         let name = remote.name.as_str();
+
+        // 0. A native remote: a branch or a tag, there, moved by its own protocol.
+        if native::url::is_native(&remote.url) {
+            if swarmops_store::ref_kind(&source_ref) != Some(RefKind::Tag) {
+                check_source_kind(&source_ref)?;
+            }
+            self.source_head(&source_ref)?;
+            let branch = branch.unwrap_or_else(|| default_branch(remote, &source_ref));
+            check_target(&branch)?;
+            return self.push_native(remote, &source_ref, &branch);
+        }
 
         // 1. The store ref (a branch, a ref name, and there), the URL and the branch; no git yet.
         check_source_kind(&source_ref)?;

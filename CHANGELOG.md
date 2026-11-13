@@ -82,6 +82,15 @@ collects the changes on `stable` that no release holds yet, until the next relea
   again asks for no object it stored. Git ids in the answer are the commits the changesets export
   to. A server without native sync is `E_REMOTE_REJECTED` `not_native`, with no fallback;
   `push` and `sync` of a `so://` remote come later.
+- `sync` and `push` of a `so://` remote (the native sync design §1 N3–N10, §2.4 S1–S4). `sync`
+  sends what the upstream lacks, has it land each change of `main` in order, keyed by the
+  change's id on the target (`ss1-`), then fetches and moves `main` to the upstream's head: one id
+  for every changeset on both stores. A change the upstream's history already holds by its key is
+  dropped, never landed twice. On `E_CONFLICT` the earlier changes stay landed, `main` moves to
+  the upstream's head, and the error names the refused changes, which, rebased onto `main`, the
+  next sync lands under their new ids. `push` of a branch or a tag moves it there by
+  compare-and-swap with its ids kept, a tag only when absent; a `push` of `main` or `release/*`
+  is `E_INVALID_ARG` `land_with_sync`. `sync status` reads the tracking ref.
 
 ### Changed
 
