@@ -140,8 +140,10 @@ installs the same tool versions as `ci.yml`'s: move them together.
 - **Packages are files on the release, not a repository.** There is no apt or dnf repository to
   add, so `apt upgrade` and `dnf upgrade` do not see a new release: install the next release's
   package. The packages carry no signature of their own (`rpm --checksig` finds their digests,
-  not a key's signature): check them against `SHA256SUMS`. No npm or PyPI package yet: those need
-  registry accounts.
+  not a key's signature): check them against `SHA256SUMS`. Fedora's dnf5 says "skipped OpenPGP
+  checks" for them, and an rpm set to require signatures needs `--nosignature`. Signing waits for
+  a key the maintainers provision, with the apt and dnf repository. No npm or PyPI package yet:
+  those need registry accounts.
 - **No crates.io publishing.** Every crate is `publish = false` until a release policy has been
   exercised on binary releases. Publishing a crate needs a decision of its own, and its own
   version and MSRV policy.
