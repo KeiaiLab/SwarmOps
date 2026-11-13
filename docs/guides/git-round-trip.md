@@ -133,7 +133,8 @@ already, where it stopped; a first import skips none.
 An imported changeset is its git commit. Its author, committer and times are the commit's, and its
 `git.oid` metadata holds the commit's id, which the changeset renders back to when nothing was lost.
 It records no agent, so `log` shows it as `unknown/unknown`. The same git commit is the same
-changeset in every store.
+changeset in every store whose history below it was imported; a store that made a change keeps
+that change's own id, and stores are compared by git commit id.
 
 The full request and response types are in `so schema GitImportReq` and `so schema GitImportResp`.
 

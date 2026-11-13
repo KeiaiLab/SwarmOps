@@ -99,7 +99,8 @@ reaches a commit an earlier import took with a loss skips it rather than refusin
 
 - **One changeset per commit.** Its author, committer and their times are the commit's, its
   `git.oid` metadata the commit's id, and a merge keeps all its parents in their order. The same
-  git commit is the same changeset in every store.
+  git commit is the same changeset in every store whose history below it was imported; a store
+  that made a change keeps that change's own id, and stores are compared by git commit id.
 - **No agent.** An imported changeset records no agent: `log`, `show` and `op log` give its agent
   as `unknown/unknown`, and `show`'s `signatures` give the git author and committer.
 - **Operations in `op log`.** Each journal frame of new changesets is an operation of kind
