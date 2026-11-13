@@ -1,11 +1,12 @@
 //! The request of an ssh connection (M14 design §2.1): `SSH_ORIGINAL_COMMAND` split as git quotes
-//! it, with no shell, into the git service and the store it names; and that store's directory
-//! under `--root`.
+//! it, with no shell, into the git service and the store it names, or into native sync's
+//! session on a store (the native sync design §2.1); and that store's directory under `--root`.
 //!
 //! ```text
 //! git-upload-pack '~/acme.git/'  ─▶  service UploadPack, path ~/acme.git/
 //!                                ─▶  one `/` or `~/` off the front, one `/`, then `.git`, off
 //!                                    the end: acme, which the remote-name grammar must take
+//! swarmops serve --stdio 'acme'  ─▶  Native { store: acme }, the path read as above
 //! ```
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -14,7 +15,7 @@ use swarmops_git::serve::child::Service;
 
 use super::refused;
 
-/// The command line of M11's store-to-store sync, which a forced command does not serve yet.
+/// The command line of native sync's session, before one space and the quoted store.
 const STDIO_COMMAND: &str = "swarmops serve --stdio";
 
 /// The commands a forced command serves, as git's clients spell them, each before one space and
@@ -56,11 +57,45 @@ impl SshRequest {
     }
 }
 
-/// The request `command` (`SSH_ORIGINAL_COMMAND`) makes. `swarmops serve --stdio` is
-/// `E_INVALID_ARG` `not_served`: M11 serves it. Another command is `unknown_command`, and a path
-/// that is not one store's name, quoted as git quotes it, `bad_path`.
+/// What an ssh client asked for: a git service, or native sync's session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SshCommand {
+    /// `git-upload-pack` or `git-receive-pack` on a store.
+    Git(SshRequest),
+    /// `swarmops serve --stdio '<store>'`: the native wire on the store named `store`.
+    Native {
+        /// The store's name, read as a git path's is.
+        store: String,
+    },
+}
+
+/// The command `command` (`SSH_ORIGINAL_COMMAND`) asks for: native sync's session on one store,
+/// its name quoted as git quotes a path, or a git service ([`parse_ssh`]). A native line that
+/// names no one store is `E_INVALID_ARG` `bad_path`.
+pub fn parse_command(command: &str) -> Result<SshCommand, OpError> {
+    // 1. Native sync: the line, one space, the quoted store.
+    let Some(rest) = command.strip_prefix(STDIO_COMMAND) else {
+        return parse_ssh(command).map(SshCommand::Git);
+    };
+    if !(rest.is_empty() || rest.starts_with(' ')) {
+        return parse_ssh(command).map(SshCommand::Git);
+    }
+
+    // 2. Its store, as a git path names one.
+    let quoted = rest.strip_prefix(' ').unwrap_or(rest);
+    let path =
+        dequote(quoted).ok_or_else(|| bad_path("the path is not quoted as git quotes it"))?;
+    let store = store_name(&path).ok_or_else(|| bad_path("the path names no store"))?;
+    Ok(SshCommand::Native { store })
+}
+
+/// The git request `command` (`SSH_ORIGINAL_COMMAND`) makes. Native sync's line is
+/// `E_INVALID_ARG` `not_served`: [`parse_command`] reads it. Another command is
+/// `unknown_command`, and a path that is not one store's name, quoted as git quotes it,
+/// `bad_path`.
 pub fn parse_ssh(command: &str) -> Result<SshRequest, OpError> {
-    // 1. M11's sync, refused by its own reason.
+    // 1. Native sync, no git service.
     let stdio = command
         .strip_prefix(STDIO_COMMAND)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '));
@@ -68,7 +103,7 @@ pub fn parse_ssh(command: &str) -> Result<SshRequest, OpError> {
         return Err(refused(
             ErrorCode::InvalidArg,
             "not_served",
-            "swarmops serve --stdio, store-to-store sync, is not served yet",
+            "swarmops serve --stdio is native sync, no git service",
         ));
     }
 
@@ -173,7 +208,7 @@ mod tests {
     use swarmops_api::OpError;
     use swarmops_git::serve::child::Service;
 
-    use super::{SshRequest, parse_ssh, store_under};
+    use super::{SshCommand, SshRequest, parse_command, parse_ssh, store_under};
 
     /// The reason an error gives in its details.
     fn reason(error: &OpError) -> &str {
@@ -248,7 +283,7 @@ mod tests {
         }
     }
 
-    /// What is no git service is `unknown_command`; M11's sync is `not_served`.
+    /// What is no git service is `unknown_command`, through either parser.
     #[test]
     fn parse_ssh_refuses_other_commands() {
         for line in [
@@ -257,13 +292,48 @@ mod tests {
             "git-upload-archive 'acme'",
             "git upload-pack",
             "sh -c 'x'",
+            "swarmops serve --stdioX 'acme'",
         ] {
-            let error = parse_ssh(line).unwrap_err();
-            assert_eq!(error.code.as_str(), "E_INVALID_ARG", "{line:?}");
-            assert_eq!(reason(&error), "unknown_command", "{line:?}: {error:?}");
+            for error in [
+                parse_ssh(line).unwrap_err(),
+                parse_command(line).unwrap_err(),
+            ] {
+                assert_eq!(error.code.as_str(), "E_INVALID_ARG", "{line:?}");
+                assert_eq!(reason(&error), "unknown_command", "{line:?}: {error:?}");
+            }
         }
-        let error = parse_ssh("swarmops serve --stdio").unwrap_err();
-        assert_eq!(reason(&error), "not_served", "{error:?}");
+    }
+
+    /// Native sync's line names its store as a git path does; `parse_ssh`, which git's
+    /// services call, refuses it `not_served`, and a line that names no store is `bad_path`.
+    #[test]
+    fn parse_command_reads_native_sync() {
+        // 1. The store, through the path's forms.
+        for quoted in ["'acme'", "'/acme.git'", "'~/acme/'"] {
+            let line = format!("swarmops serve --stdio {quoted}");
+            let native = SshCommand::Native {
+                store: "acme".to_owned(),
+            };
+            assert_eq!(parse_command(&line).unwrap(), native, "{line}");
+            let error = parse_ssh(&line).unwrap_err();
+            assert_eq!(reason(&error), "not_served", "{error:?}");
+        }
+
+        // 2. A git service, as parse_ssh reads it.
+        let git = parse_command("git-upload-pack 'acme'").unwrap();
+        let request = SshRequest::new(Service::UploadPack, "acme");
+        assert_eq!(git, SshCommand::Git(request));
+
+        // 3. No store, or not one.
+        for line in [
+            "swarmops serve --stdio",
+            "swarmops serve --stdio acme",
+            "swarmops serve --stdio '/a/b'",
+            "swarmops serve --stdio 'acme' 'x'",
+        ] {
+            let error = parse_command(line).unwrap_err();
+            assert_eq!(reason(&error), "bad_path", "{line:?}: {error:?}");
+        }
     }
 
     /// A store under the root is its canonical directory; one that is missing is
