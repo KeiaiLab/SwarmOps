@@ -19,6 +19,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
+#[cfg(feature = "test-hooks")]
+use swarmops_api::UndoResp;
 use swarmops_api::{
     AncestryReq, AncestryResp, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetSummary,
     CommitReq, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES,
@@ -30,12 +32,22 @@ use swarmops_api::{
 use swarmops_core::{
     ChangesetId, LeafKind, ObjectId, ObjectKind, RepoPath, Signature, hash_object,
 };
+#[cfg(feature = "test-hooks")]
+use swarmops_ops::NOW_ENV;
 use swarmops_ops::identity::{
     AGENT_ENV, RUN_ID_ENV, identity_info, require_identity, resolve_identity_from,
 };
 use swarmops_ops::{LocalOps, Resolved};
 use swarmops_repo::{Change, CommitRequest, LocalRepo};
 use swarmops_store::{ChangesetMeta, Layout, MetaStore};
+#[cfg(feature = "test-hooks")]
+use swarmops_store::{FAIL_AT_ENV, FS_CALLS_ENV};
+#[cfg(feature = "test-hooks")]
+use swarmops_testkit::child::{run, this_test};
+#[cfg(feature = "test-hooks")]
+use swarmops_testkit::fs::copy_dir;
+#[cfg(feature = "test-hooks")]
+use swarmops_testkit::test_name;
 use tempfile::TempDir;
 
 fn utf8(path: impl Into<PathBuf>) -> Utf8PathBuf {
@@ -1345,6 +1357,114 @@ fn a_protected_or_done_undo_records_its_repair() {
     assert_eq!(recovered.frames_listed, 1, "{recovered:?}");
 }
 
+/// Set only in the children [`an_undo_s_post_commit_warning_reaches_its_result`] spawns: the
+/// store they undo on.
+#[cfg(feature = "test-hooks")]
+const UNDO_CHILD_ROOT: &str = "SWARMOPS_TEST_OPS_UNDO_CHILD_ROOT";
+
+/// Set with [`UNDO_CHILD_ROOT`]: the id of the operation the child undoes.
+#[cfg(feature = "test-hooks")]
+const UNDO_CHILD_ID: &str = "SWARMOPS_TEST_OPS_UNDO_CHILD_ID";
+
+/// How such a child reports how its undo ended, among the harness's output: `ok <UndoResp>` or
+/// `failed <code>`.
+#[cfg(feature = "test-hooks")]
+const UNDO_REPORT: &str = "undo-child: ";
+
+/// A child's part of [`an_undo_s_post_commit_warning_reaches_its_result`]: undoes operation
+/// `id` on the store at `root`, opened with the test hooks its environment sets, and reports
+/// how it ended ([`UNDO_REPORT`]).
+#[cfg(feature = "test-hooks")]
+fn undo_as_child(root: &str, id: String) {
+    let undone =
+        LocalOps::open(Utf8Path::new(root)).and_then(|ops| ops.undo(&agent(), UndoReq::new(id)));
+    match undone {
+        Ok(resp) => println!("{UNDO_REPORT}ok {}", serde_json::to_string(&resp).unwrap()),
+        Err(e) => println!("{UNDO_REPORT}failed {:?}", e.code),
+    }
+}
+
+/// An undo's failure after its commit point reaches its result as a warning, through `LocalOps`:
+/// the undo of a ref's move, run in a child once for each filesystem call it makes, that call
+/// failing ([`FAIL_AT_ENV`]). Where the call comes after the commit point, the undo is made,
+/// and its response carries one warning that says so and names the failure; a response without a warning
+/// is of an undo no failure touched.
+#[test]
+#[cfg(feature = "test-hooks")]
+fn an_undo_s_post_commit_warning_reaches_its_result() {
+    if let Ok(root) = std::env::var(UNDO_CHILD_ROOT) {
+        undo_as_child(&root, std::env::var(UNDO_CHILD_ID).expect("the id to undo"));
+        return;
+    }
+
+    // 1. The template: `release/r` moved from c1 to c2, the move to undo.
+    let (dir, template, ops) = new_store();
+    let who = agent();
+    let c1 = commit(&ops, None, vec![text("f", "1")]); // op 0
+    let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]); // op 1
+    ops.ref_set(&who, set("release/r", &c1, None, true))
+        .unwrap(); // op 2
+    ops.ref_set(&who, set("release/r", &c2, Some(&c1), false))
+        .unwrap(); // op 3
+    let id = op_id(&ops, 3);
+    drop(ops);
+
+    // The undo in a child, on a copy of the template named `name`, under `hook`: the copy and
+    // what the child reported.
+    let undo_on = |name: &str, hook: (&str, &str)| -> (Utf8PathBuf, String) {
+        let root = utf8(dir.path().join(name));
+        copy_dir(template.as_std_path(), root.as_std_path());
+        let mut child = this_test(&test_name!(
+            "an_undo_s_post_commit_warning_reaches_its_result"
+        ));
+        child
+            .env(UNDO_CHILD_ROOT, &root)
+            .env(UNDO_CHILD_ID, &id)
+            .env(hook.0, hook.1);
+        let out = run(&mut child);
+        let printed = String::from_utf8_lossy(&out.stdout);
+        let report = (printed.lines())
+            .find_map(|line| line.split_once(UNDO_REPORT))
+            .unwrap_or_else(|| panic!("{name}: no report: {out:?}"));
+        (root, report.1.to_owned())
+    };
+
+    // 2. A dry run counts the calls an undo makes.
+    let count = utf8(dir.path().join("calls"));
+    let (_, clean) = undo_on("dry", (FS_CALLS_ENV, count.as_str()));
+    assert!(clean.starts_with("ok "), "{clean}");
+    let calls: usize = fs::read_to_string(&count).unwrap().trim().parse().unwrap();
+
+    // 3. Each call failed in turn: an undo that reports a warning was made, and names the
+    //    failure once.
+    let mut warned = Vec::new();
+    for k in 1..=calls {
+        let (root, report) = undo_on(&format!("fail-{k}"), (FAIL_AT_ENV, &k.to_string()));
+        let Some(resp) = report.strip_prefix("ok ") else {
+            continue;
+        };
+        let resp: UndoResp = serde_json::from_str(resp).expect("an undo's response");
+        if resp.warnings.is_empty() {
+            continue;
+        }
+        let [warning] = &resp.warnings[..] else {
+            panic!("call {k}: one warning: {resp:?}");
+        };
+        assert!(
+            warning.contains("is committed") && warning.contains("Input/output error"),
+            "call {k}: {warning}"
+        );
+        assert_eq!((resp.undone, resp.already_applied), (3, false), "call {k}");
+        let after = LocalOps::open(&root).unwrap();
+        assert_eq!(ref_target(&after, "release/r"), c1, "call {k}: undone");
+        warned.push(k);
+    }
+    assert!(
+        !warned.is_empty(),
+        "no call of {calls} failed after the commit point"
+    );
+}
+
 /// The id `op log` lists for operation `op`.
 fn op_id(ops: &LocalOps, op: u64) -> String {
     let mut req = OpLogReq::default();
@@ -1674,33 +1794,43 @@ mod advance {
     /// The same advancing request made again in the second it signs in (a commit signs in whole
     /// seconds) is the same changeset, its move made already: a replay that says so in
     /// `advanced.already_applied`, and writes no frame.
+    ///
+    /// The test runs itself again as a child whose signing time stands still ([`NOW_ENV`]), so
+    /// that no pair of requests straddles a second, however loaded the host.
     #[test]
+    #[cfg(feature = "test-hooks")]
     fn an_advancing_request_made_again_is_a_replay() {
-        let who = agent();
-        // Only two requests in the same second of the clock make the same changeset: a pair that
-        // straddles a second runs again, on a fresh store.
-        for _ in 0..10 {
-            let (_dir, root, ops) = new_store();
-            let c1 = commit(&ops, None, vec![text("f", "1")]);
-            ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
-            let req = advancing(Some(&c1), vec![text("f", "2")], "main");
-            let second = unix_secs();
-            let first = ops.commit(&who, req.clone()).unwrap();
-            let written = frames(&root);
-            let again = ops.commit(&who, req);
-            if unix_secs() != second {
-                continue;
-            }
-            let again = again.unwrap();
-            assert_eq!(again.changeset, first.changeset);
-            let mut replay = Advanced::new("main".to_owned(), first.changeset, true);
-            replay.old = Some(c1);
-            assert_eq!(again.advanced, Some(replay));
-            assert_eq!(again.warnings, Vec::<String>::new());
-            assert_eq!(frames(&root), written, "no new frame");
+        /// What the child prints once its two requests are checked.
+        const DONE: &str = "replay-child: made twice in one second";
+
+        // 1. The parent: this test again, with the second its commits sign in.
+        if std::env::var_os(NOW_ENV).is_none() {
+            let name = test_name!("an_advancing_request_made_again_is_a_replay");
+            let out = run(this_test(&name).env(NOW_ENV, "1760000000"));
+            let printed = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success(), "{out:?}");
+            assert_eq!(printed.matches(DONE).count(), 1, "the child ran: {out:?}");
             return;
         }
-        panic!("ten pairs of requests each straddled a second of the clock");
+
+        // 2. The child: the request, twice.
+        let who = agent();
+        let (_dir, root, ops) = new_store();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let req = advancing(Some(&c1), vec![text("f", "2")], "main");
+        let before = frames(&root).len();
+        let first = ops.commit(&who, req.clone()).unwrap();
+        let again = ops.commit(&who, req).unwrap();
+
+        // 3. One changeset, one move, one frame.
+        assert_eq!(again.changeset, first.changeset);
+        let mut replay = Advanced::new("main".to_owned(), first.changeset, true);
+        replay.old = Some(c1);
+        assert_eq!(again.advanced, Some(replay));
+        assert_eq!(again.warnings, Vec::<String>::new());
+        assert_eq!(frames(&root).len(), before + 1, "two requests, one frame");
+        println!("{DONE}");
     }
 
     /// An advancing commit's move is recorded for the agent that asked, as a `ref_set`'s is: the
