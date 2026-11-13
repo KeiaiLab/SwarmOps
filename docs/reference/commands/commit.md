@@ -230,7 +230,7 @@ new key for each commit; [Commit keys](../../guides/commit-and-land.md#commit-ke
 | `E_TYPE_CONFLICT` | 1 | A change puts an entry below a file, or a file onto a directory. |
 | `E_REV_NOT_FOUND` | 6 | `--parent` names a ref or id the store does not hold. |
 | `E_CAS_MISMATCH` | 4 | With `--advance`, REF no longer names the parent. Nothing was recorded. |
-| `E_BUSY` | 4 | Another writer held the store's lock for the whole wait. Nothing was committed: run it again. |
+| `E_BUSY` | 4 | Another writer held the store's lock for the whole wait. Nothing was committed, unless the lock's holder had claimed the commit and left it unanswered 60 s past the wait: that holder may still commit it ([Retry rules](../../develop/cli-scripting.md#retry-rules)). |
 
 Exit 4 is retryable; [Retry rules](../../develop/cli-scripting.md#retry-rules) say how. After
 `E_CAS_MISMATCH`, do not re-send your old whole-file puts on top of `actual`: they would revert

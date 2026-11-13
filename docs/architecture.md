@@ -748,12 +748,15 @@ sweep runs once per `FORMAT`.
   writers"): the lock's holder commits them in its batch and answers each, and the waiter reads
   its answer without the lock. A batch plans its waiting requests in submission order; the
   `flock` behind it still is not first-in, first-out, and lands are still ordered by their
-  compare-and-swap and relocation, not by the queue. `E_BUSY` means the request was still
-  unclaimed at `lock_timeout`: the writer withdraws it and nothing of it is recorded. A request
-  the holder claimed waits past `lock_timeout` for its answer. `meta.recovered` reports what the
-  leader's recovery repaired; a waiter answered by a leader reports none. A crashed leader's
-  manifest lets the next holder answer each claimed member whose frame is in the journal and
-  put the others back in the queue, so a member is answered once or runs again, never both.
+  compare-and-swap and relocation, not by the queue. A request still unclaimed at
+  `lock_timeout` is withdrawn, nothing of it recorded, and fails with `E_BUSY`. A request the
+  holder claimed waits past `lock_timeout` for its answer, 60 s at most: a holder stopped or
+  stuck after its claim answers nothing, and the waiter then withdraws it with `E_BUSY` too,
+  which there says nothing of the request: that holder, once it runs again, commits what it
+  claimed. `meta.recovered` reports what the leader's recovery repaired; a waiter answered by a
+  leader reports none. A crashed leader's manifest lets the next holder answer each claimed
+  member whose frame is in the journal and put the others back in the queue, so a member is
+  answered once or runs again, never both.
 - **Readers** take no lock (above). Under commits that land during every one of its 32 rounds,
   a snapshot gives up with the retryable `E_BUSY` instead of reading on.
 

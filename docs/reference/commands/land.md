@@ -289,7 +289,8 @@ Without a key, a land run again after it succeeded fails with `E_NOTHING_TO_LAND
 - `--max-attempts` outside 1 to 32 is `E_INVALID_ARG`, before anything is read.
 - No identity is `E_IDENTITY_REQUIRED` (exit 5).
 - `E_BUSY` (exit 4): another writer held the store's lock for the whole wait; nothing was
-  recorded.
+  recorded, unless the lock's holder had claimed the land and left it unanswered 60 s past the
+  wait: that holder may still land it. Run it again with the same `--key`.
 
 ### Performance
 

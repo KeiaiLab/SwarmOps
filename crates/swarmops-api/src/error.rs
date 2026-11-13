@@ -121,8 +121,10 @@ error_codes! {
     /// with a warning (but in `git import`, which stops there: `E_IO`). `details.fs_op` and `details.store_file` name the append that failed.
     IoTransient => "E_IO_TRANSIENT", EXIT_RETRYABLE, true;
     /// Another writer held the store's metadata lock for the whole wait, or commits landed during
-    /// every one of a read's attempts to take a snapshot; nothing was committed (a commit's
-    /// flushed objects may remain, for GC), and running the operation again can succeed.
+    /// every one of a read's attempts to take a snapshot, and running the operation again can
+    /// succeed. Nothing was committed (a commit's flushed objects may remain, for GC), unless the
+    /// lock's holder had claimed the write into its batch and left it unanswered 60 s past the
+    /// wait: that holder may still commit it when it runs again.
     Busy => "E_BUSY", EXIT_RETRYABLE, true;
     /// A bug in SwarmOps, such as a caught panic.
     Internal => "E_INTERNAL", EXIT_ERROR, false;

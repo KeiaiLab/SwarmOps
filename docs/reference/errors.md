@@ -39,7 +39,7 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | [`E_UNSUPPORTED_FS`](#e_unsupported_fs) | 1 | no | The store path is not on a native Linux filesystem (for example WSL's `/mnt/*`). |
 | [`E_IO`](#e_io) | 1 | no | The filesystem refused an operation: `details.fs_op` names it, and `details.store_file` the file of the store it was on, relative to the store's root. |
 | [`E_IO_TRANSIENT`](#e_io_transient) | 4 | yes | A journal append failed, and the store cut what it wrote back off the journal (`details.committed` is `false`): nothing was committed, so running the same operation again is safe. |
-| [`E_BUSY`](#e_busy) | 4 | yes | Another writer held the store's metadata lock for the whole wait, or commits landed during every one of a read's attempts to take a snapshot; nothing was committed (a commit's flushed objects may remain, for GC), and running the operation again can succeed. |
+| [`E_BUSY`](#e_busy) | 4 | yes | Another writer held the store's metadata lock for the whole wait, or commits landed during every one of a read's attempts to take a snapshot, and running the operation again can succeed. |
 | [`E_INTERNAL`](#e_internal) | 1 | no | A bug in SwarmOps, such as a caught panic. |
 | [`E_CONFLICT`](#e_conflict) | 3 | no | The change conflicts with the target: `details.report` lists each conflicting file with its kind, its hunks and who changed it on the target. |
 | [`E_CAS_RETRY_EXHAUSTED`](#e_cas_retry_exhausted) | 4 | yes | The target moved before every one of the land's attempts could publish; nothing was recorded, and running the land again can succeed. |
@@ -195,7 +195,7 @@ A journal append failed, and the store cut what it wrote back off the journal (`
 
 Exit 4. Retryable: yes.
 
-Another writer held the store's metadata lock for the whole wait, or commits landed during every one of a read's attempts to take a snapshot; nothing was committed (a commit's flushed objects may remain, for GC), and running the operation again can succeed.
+Another writer held the store's metadata lock for the whole wait, or commits landed during every one of a read's attempts to take a snapshot, and running the operation again can succeed. Nothing was committed (a commit's flushed objects may remain, for GC), unless the lock's holder had claimed the write into its batch and left it unanswered 60 s past the wait: that holder may still commit it when it runs again.
 
 ## E_INTERNAL
 

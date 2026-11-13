@@ -406,7 +406,9 @@ const MAX_LAND_KEY: usize = 64;
 ///   `{head, theirs}` (the hint is `swarmops log <head>`).
 /// - `E_BUSY` (retryable): the store's `Busy` (a writer's lock wait ran out) or
 ///   `SnapshotContended` (a read's snapshot rounds ran out); either way nothing was committed (a
-///   commit's flushed objects may remain, for GC). The hint says which, and to retry.
+///   commit's flushed objects may remain, for GC), but for a write the lock's holder claimed and
+///   left unanswered 60 s past the wait, which that holder may still commit. The hint
+///   says which, and to retry.
 /// - `E_NOT_A_REPO`, while opening: the store's `Format`, and an `Io` error of kind
 ///   `NotADirectory`. The hint is `swarmops init <path>` when the path holds no `FORMAT` file;
 ///   with one, the store is damaged or of a layout this build does not read.
