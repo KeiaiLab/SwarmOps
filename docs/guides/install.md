@@ -272,7 +272,7 @@ each archive against the SHA-256 its build wrote before it publishes anything
 
 ## How do I build from source?
 
-With Rust 1.99 or newer, the workspace's `rust-version`, one command builds a tag and installs both
+With Rust 1.100 or newer, the workspace's `rust-version`, one command builds a tag and installs both
 names into `~/.cargo/bin`:
 
 ```sh
@@ -292,7 +292,7 @@ Its last lines, the build's cut (`…`):
 The zstd and BLAKE3 crates compile C, so the host also needs a C compiler. Add `--bin swarmops` to
 install the long name alone, if the name `so` is taken.
 
-From a clone, `rust-toolchain.toml` pins Rust 1.99.0, which rustup installs on the first build;
+From a clone, `rust-toolchain.toml` pins Rust 1.100.0, which rustup installs on the first build;
 rustup may warn that the toolchain file overrides your default toolchain, which is the pin at work:
 
 ```sh
@@ -420,7 +420,7 @@ This guide draws on these documents, on the installer and on the v0.11.0 release
 
 - [scripts/install.sh](../../scripts/install.sh): the installer, its options and its messages.
 - [Operating SwarmOps](../operations.md#install): Install, Before you start and Upgrades.
-- [Toolchain, MSRV and platforms](../policies/msrv-and-platforms.md): Rust 1.99.0 and the platforms.
+- [Toolchain, MSRV and platforms](../policies/msrv-and-platforms.md): Rust 1.100.0 and the platforms.
 - [Versioning and stability](../policies/versioning-and-stability.md): what a release may break.
 - [Releasing SwarmOps](../../RELEASE.md): how a release is built, checked and published.
 - [v0.11.0 on the releases page](https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.11.0): its

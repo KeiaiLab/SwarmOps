@@ -5,7 +5,7 @@ SwarmOps is pre-release. This page is how changes get made, for people and agent
 
 ## Start here
 
-1. Install the tools. Rust 1.99.0 comes from `rust-toolchain.toml` through rustup. CI installs
+1. Install the tools. Rust 1.100.0 comes from `rust-toolchain.toml` through rustup. CI installs
    `just` 1.58.0, `cargo-nextest` 0.9.146 and `cargo-deny` 0.20.2
    (`.github/workflows/ci.yml`). The last check step needs Python 3.11 or newer as `python3`;
    [Setup](#setup) lists the rest.
@@ -62,7 +62,7 @@ SwarmOps is pre-release. This page is how changes get made, for people and agent
 
 Linux today (x86_64 and aarch64 release builds); macOS and Windows are the next milestone, M12
 ([docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md)).
-Install Rust with rustup; `rust-toolchain.toml` selects Rust 1.99.0 with rustfmt and clippy.
+Install Rust with rustup; `rust-toolchain.toml` selects Rust 1.100.0 with rustfmt and clippy.
 Then the tools the gates use:
 
 ```sh

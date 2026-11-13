@@ -2,14 +2,14 @@
 
 ## The toolchain
 
-`rust-toolchain.toml` pins Rust **1.99.0** (with rustfmt, clippy and llvm-tools), so every
+`rust-toolchain.toml` pins Rust **1.100.0** (with rustfmt, clippy and llvm-tools), so every
 local build and every CI run uses exactly that compiler. The one exception is fuzzing:
 cargo-fuzz needs a nightly toolchain, so `just fuzz` runs `cargo +nightly fuzz`, while
 `just check` formats and lints the fuzz crate on the pinned toolchain.
 
 ## The MSRV is the pinned toolchain
 
-`rust-version = "1.99"` in the workspace `Cargo.toml` makes the minimum supported Rust version
+`rust-version = "1.100"` in the workspace `Cargo.toml` makes the minimum supported Rust version
 the pinned one, for now. Three reasons:
 
 - SwarmOps ships two binaries, `swarmops` and `so` (the same program), and publishes no crate,

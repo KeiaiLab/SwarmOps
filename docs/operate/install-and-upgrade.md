@@ -105,7 +105,7 @@ before `0.8.0`.
 
 ## Install from a clone
 
-The repository's `rust-toolchain.toml` pins Rust 1.99.0, which rustup installs on the first build
+The repository's `rust-toolchain.toml` pins Rust 1.100.0, which rustup installs on the first build
 (rustup may warn that the toolchain file overrides your default toolchain: that is the pin at
 work). The zstd and BLAKE3 crates compile C, so the host also needs a C compiler.
 
