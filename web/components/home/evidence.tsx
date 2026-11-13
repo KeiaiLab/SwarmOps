@@ -1,6 +1,7 @@
 // The goals the home page shows, generated from docs/goals.md (web/lib/goals.ts). A row shows
 // the verdicts its Measured cell records as counts, never one word for the whole row, then the
-// cell itself, whole, and the ledger sections it cites.
+// cell itself, whole, and the ledger sections it cites. A figure's paragraph holds its source:
+// the target links the goals table, the measured cell its ledger sections.
 //
 //   G1  Many writers, one store         | 50 × 1,000 commits: ... (met) ... not measured yet
 //   Target: 10 to 50 processes; ...     | Ledger: v0.6.0 — 2026-10-28 · D2-8
@@ -59,7 +60,7 @@ function Ledger({ row }: { row: GoalRow }) {
     return null;
   }
   return (
-    <p className="mt-3 text-sm text-muted-foreground">
+    <span className="mt-3 block text-muted-foreground">
       <span className="caption mr-2">Ledger</span>
       {row.ledger.map((link, i) => (
         <span key={link.url}>
@@ -69,7 +70,7 @@ function Ledger({ row }: { row: GoalRow }) {
           </a>
         </span>
       ))}
-    </p>
+    </span>
   );
 }
 
@@ -83,7 +84,9 @@ function GoalEntry({ row }: { row: GoalRow }) {
           <InlineMarkdown text={row.goal} />
         </h3>
         <p className="mt-2 text-sm">
-          <span className="caption mr-2 text-muted-foreground">Target</span>
+          <a className={LINK + ' caption mr-2'} href={ALL_GOALS_URL}>
+            Target
+          </a>
           <InlineMarkdown text={row.target} />
         </p>
         <div className="mt-3">
@@ -91,13 +94,13 @@ function GoalEntry({ row }: { row: GoalRow }) {
         </div>
       </div>
 
-      {/* 2. The measured cell as docs/goals.md writes it, and its ledger sections. */}
+      {/* 2. The measured cell as docs/goals.md writes it, and in the same paragraph its ledger sections. */}
       <div className="min-w-0">
         <p className="text-sm">
           <span className="caption mr-2 text-muted-foreground">Measured</span>
           <InlineMarkdown text={row.measured} />
+          <Ledger row={row} />
         </p>
-        <Ledger row={row} />
       </div>
     </article>
   );
