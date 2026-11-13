@@ -19,15 +19,15 @@ const SHORT_ID: usize = 12;
 /// The last line of a result that holds more than it printed.
 const TRUNCATED: &str = "(truncated)\n";
 
-/// Gives `op`'s `result` in git's shape; `None` for another operation, or for a result that lacks
-/// a field the shape reads.
-pub(crate) fn text(op: &str, result: &Value) -> Option<String> {
+/// Gives `op`'s `result` in git's shape, a next step named with `program`, the name the binary
+/// was run by; `None` for another operation, or for a result that lacks a field the shape reads.
+pub(crate) fn text(op: &str, result: &Value, program: &str) -> Option<String> {
     match op {
         "ws_status" => status(result),
         "log" => log(result),
         "diff" | "ws_diff" => diff(result),
         "ws_commit" => commit(result),
-        "clone_repo" => clone(result),
+        "clone_repo" => clone(result, program),
         _ => None,
     }
 }
@@ -219,18 +219,24 @@ fn commit(result: &Value) -> Option<String> {
 }
 
 /// `clone` as what it made and the step a git user expects it to have taken: a store holds no
-/// working tree, `ws create` makes one.
-fn clone(result: &Value) -> Option<String> {
+/// working tree, `<program> ws create` makes one.
+fn clone(result: &Value, program: &str) -> Option<String> {
     let url = string(result.get("remote")?, "url")?;
     let imported = result.get("imported")?.as_u64()?;
     let main = match string(result, "main") {
         Some(main) => format!("main at {}", short(main)),
         None => "no main".to_owned(),
     };
+    let noun = if imported == 1 {
+        "changeset"
+    } else {
+        "changesets"
+    };
     Some(format!(
-        "Cloned {} into a store: {imported} changesets, {main}\n\
-         No working tree yet: so ws create NAME\n",
-        printable(url)
+        "Cloned {} into a store: {imported} {noun}, {main}\n\
+         No working tree yet: {} ws create NAME\n",
+        printable(url),
+        printable(program)
     ))
 }
 
@@ -263,7 +269,7 @@ mod tests {
     /// `op`'s text for `result`, a result object as 0.11.0 printed it.
     fn shaped(op: &str, result: &str) -> Option<String> {
         let result: Value = serde_json::from_str(result).expect("a test result is JSON");
-        text(op, &result)
+        text(op, &result, "so")
     }
 
     /// A workspace two changesets behind `main`, in a rebase, with one change of each kind.
@@ -425,35 +431,33 @@ mod tests {
         {"path":"x","status":"renamed"}],
         "truncated":true}"#;
 
+    /// [`UNIFIED`] as a patch.
+    const PATCH: &str = "--- /dev/null\n\
+                         +++ b/a.txt\n\
+                         @@ -0,0 +1,2 @@\n\
+                         +a\n\
+                         +b\n\
+                         --- a/base.txt\n\
+                         +++ b/base.txt\n\
+                         @@ -1,2 +1,2 @@\n \
+                         base\n\
+                         -line2\n\
+                         +line2 changed\n\
+                         Binary files /dev/null and b/bin.dat differ\n\
+                         --- a/gone.txt\n\
+                         +++ /dev/null\n\
+                         @@ -1,1 +0,0 @@\n\
+                         -bye\n\
+                         --- a/tail.txt\n\
+                         +++ b/tail.txt\n\
+                         @@ -1,1 +1,1 @@\n\
+                         -old\n\
+                         +new\n\
+                         \\ No newline at end of file\n";
+
     #[test]
     fn a_unified_diff_is_a_patch() {
-        assert_eq!(
-            shaped("ws_diff", UNIFIED).as_deref(),
-            Some(
-                "--- /dev/null\n\
-                 +++ b/a.txt\n\
-                 @@ -0,0 +1,2 @@\n\
-                 +a\n\
-                 +b\n\
-                 --- a/base.txt\n\
-                 +++ b/base.txt\n\
-                 @@ -1,2 +1,2 @@\n \
-                 base\n\
-                 -line2\n\
-                 +line2 changed\n\
-                 Binary files /dev/null and b/bin.dat differ\n\
-                 --- a/gone.txt\n\
-                 +++ /dev/null\n\
-                 @@ -1,1 +0,0 @@\n\
-                 -bye\n\
-                 --- a/tail.txt\n\
-                 +++ b/tail.txt\n\
-                 @@ -1,1 +1,1 @@\n\
-                 -old\n\
-                 +new\n\
-                 \\ No newline at end of file\n"
-            )
-        );
+        assert_eq!(shaped("ws_diff", UNIFIED).as_deref(), Some(PATCH));
     }
 
     #[test]
@@ -487,6 +491,20 @@ mod tests {
         );
     }
 
+    /// No file prints nothing, as git; a file whose mode alone changed prints its two header
+    /// lines and no hunk.
+    #[test]
+    fn an_empty_diff_and_a_mode_change() {
+        let empty = r#"{"from":"a","to":"b","files":[],"truncated":false}"#;
+        assert_eq!(shaped("diff", empty).as_deref(), Some(""));
+        let mode = r#"{"from":"a","to":"b","files":[{"path":"run.sh","status":"modified",
+            "old_kind":"file","new_kind":"exec","binary":false}],"truncated":false}"#;
+        assert_eq!(
+            shaped("diff", mode).as_deref(),
+            Some("--- a/run.sh\n+++ b/run.sh\n")
+        );
+    }
+
     #[test]
     fn a_diff_without_a_field_has_no_shape() {
         assert_eq!(
@@ -508,12 +526,17 @@ mod tests {
 
     #[test]
     fn a_control_character_in_a_diff_is_escaped() {
+        // The whole text, so that the lines beside the escaped one are pinned too.
         let patch = UNIFIED.replace(r"line2 changed\n", r"line2\r\n");
-        let text = shaped("ws_diff", &patch).expect("a patch");
-        assert!(text.contains("\n+line2\\r\n"), "{text}");
+        assert_eq!(
+            shaped("ws_diff", &patch),
+            Some(PATCH.replace("+line2 changed\n", "+line2\\r\n"))
+        );
         let names = NAMES.replace(r#""path":"x""#, r#""path":"x\ty""#);
-        let text = shaped("ws_diff", &names).expect("a listing");
-        assert!(text.contains("?\tx\\ty\n"), "{text}");
+        assert_eq!(
+            shaped("ws_diff", &names).as_deref(),
+            Some("A\ta.txt\nM\tbase.txt\nD\tgone.txt\nT\tlink\n?\tx\\ty\n(truncated)\n")
+        );
     }
 
     /// `ws commit` of three files, as 0.11.0 printed it.
@@ -566,15 +589,25 @@ mod tests {
                  No working tree yet: so ws create NAME\n"
             )
         );
+        // One changeset: the noun is singular, as a commit's line.
+        let one = CLONE.replace(r#""imported":2"#, r#""imported":1"#);
+        assert_eq!(
+            shaped("clone_repo", &one).as_deref(),
+            Some(
+                "Cloned https://example.com/team/app.git into a store: 1 changeset, \
+                 main at 8fea89701cbc\n\
+                 No working tree yet: so ws create NAME\n"
+            )
+        );
         // An empty remote: nothing imported, no `main`.
         let mut empty: Value = serde_json::from_str(CLONE).expect("a test result is JSON");
         empty["imported"] = 0.into();
         empty.as_object_mut().expect("an object").remove("main");
         assert_eq!(
-            text("clone_repo", &empty).as_deref(),
+            text("clone_repo", &empty, "swarmops").as_deref(),
             Some(
                 "Cloned https://example.com/team/app.git into a store: 0 changesets, no main\n\
-                 No working tree yet: so ws create NAME\n"
+                 No working tree yet: swarmops ws create NAME\n"
             )
         );
         assert_eq!(

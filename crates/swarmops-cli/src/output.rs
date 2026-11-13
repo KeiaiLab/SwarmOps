@@ -25,6 +25,7 @@
 
 use std::fmt;
 use std::fmt::Write as _;
+use std::path::Path;
 
 use serde::Serialize;
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -182,8 +183,21 @@ fn human<T: Serialize>(envelope: &Envelope<T>) -> String {
 /// result that lacks a field the shape reads.
 fn git_shape<T: Serialize>(op: &str, result: &T) -> Option<String> {
     let value = serde_json::to_value(result).ok()?;
-    gitshape::text(op, &value)
+    gitshape::text(op, &value, &program())
 }
+
+/// The name this process was run by, as clap reads it: the file name of its first argument
+/// (`so`, `swarmops`); [`PROGRAM`] when there is none, or it is not UTF-8.
+fn program() -> String {
+    let first = std::env::args_os().next();
+    let name = (first.as_deref())
+        .and_then(|first| Path::new(first).file_name())
+        .and_then(|name| name.to_str());
+    name.unwrap_or(PROGRAM).to_owned()
+}
+
+/// The program's name when the first argument gives none.
+const PROGRAM: &str = "swarmops";
 
 /// The one line a land's `result` prints as ([the module documentation](self)), for operation
 /// `op`; `None` for another operation's, or a result without what the line says, which prints
