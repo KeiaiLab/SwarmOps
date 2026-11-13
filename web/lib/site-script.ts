@@ -3,8 +3,8 @@
 //
 //   1. theme   before paint: `dark` on <html> from localStorage.theme (system, light, dark; the
 //              key the docs' provider uses) and the system preference
-//   2. control clicks on [data-theme-set] store the choice; aria-pressed marks it, also after a
-//              client-side page change (a mutation observer)
+//   2. control clicks and arrow keys on the [data-theme-set] radios store the choice;
+//              aria-checked marks it, also after a client-side page change (a mutation observer)
 //   3. copy    clicks on button[data-copy] copy its text and say `Copied` in the live region
 //   4. search  `/` (outside a field) or Ctrl/Cmd+K follows the [data-search] link
 //
@@ -30,7 +30,8 @@ export const SITE_SCRIPT = `(function () {
     var buttons = doc.querySelectorAll('[data-theme-set]');
     for (var i = 0; i < buttons.length; i++) {
       var on = buttons[i].getAttribute('data-theme-set') === theme;
-      buttons[i].setAttribute('aria-pressed', on ? 'true' : 'false');
+      buttons[i].setAttribute('aria-checked', on ? 'true' : 'false');
+      buttons[i].tabIndex = on ? 0 : -1;
     }
   }
 
@@ -51,6 +52,18 @@ export const SITE_SCRIPT = `(function () {
   new MutationObserver(function () {
     mark(stored());
   }).observe(root, { childList: true, subtree: true });
+
+  // Arrow keys move the checked theme along the radios, Home and End to the first and last.
+  var STEP = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
+  function choose(radio, key) {
+    var radios = radio.parentElement.querySelectorAll('[data-theme-set]');
+    var at = Array.prototype.indexOf.call(radios, radio);
+    var next = key === 'Home' ? 0 : key === 'End' ? radios.length - 1 : (at + STEP[key] + radios.length) % radios.length;
+    var theme = radios[next].getAttribute('data-theme-set');
+    try { localStorage.setItem(KEY, theme); } catch (e) {}
+    apply(theme);
+    radios[next].focus();
+  }
 
   function copy(button) {
     var region = button.parentElement && button.parentElement.querySelector('[aria-live="polite"]');
@@ -90,6 +103,13 @@ export const SITE_SCRIPT = `(function () {
 
   doc.addEventListener('keydown', function (event) {
     var target = event.target;
+    var radio = target && target.closest && target.closest('[data-theme-set]');
+    var moves = Object.prototype.hasOwnProperty.call(STEP, event.key) || event.key === 'Home' || event.key === 'End';
+    if (radio && moves) {
+      event.preventDefault();
+      choose(radio, event.key);
+      return;
+    }
     var typing = target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
     var slash = event.key === '/' && !typing && !event.ctrlKey && !event.metaKey && !event.altKey;
     var combo = (event.ctrlKey || event.metaKey) && (event.key === 'k' || event.key === 'K');

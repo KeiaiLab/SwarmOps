@@ -1,5 +1,6 @@
-// The product header's theme control: three buttons (System, Light, Dark), one pressed. Server
-// rendered; the site script (lib/site-script.ts) marks the stored choice and handles the clicks.
+// The product header's theme control: a radio group of three (System, Light, Dark), one checked.
+// Server rendered; the site script (lib/site-script.ts) marks the stored choice and handles the
+// clicks and the arrow keys. Only the checked radio is in the tab order (the radio pattern).
 // Under 1024 px each button shows its icon, its name stays readable by assistive technology.
 import { Monitor, Moon, Sun } from 'lucide-react';
 
@@ -14,15 +15,17 @@ const DEFAULT_THEME = 'system';
 
 export function ThemeToggle() {
   return (
-    <div role="group" aria-label="Theme" className="flex items-center rounded-md border border-input">
+    <div role="radiogroup" aria-label="Theme" className="flex items-center rounded-md border border-input">
       {CHOICES.map(({ theme, name, Icon }) => (
         <button
           key={theme}
           type="button"
+          role="radio"
           data-theme-set={theme}
-          aria-pressed={theme === DEFAULT_THEME}
+          aria-checked={theme === DEFAULT_THEME}
+          tabIndex={theme === DEFAULT_THEME ? 0 : -1}
           title={name}
-          className="inline-flex min-h-11 min-w-7 items-center justify-center gap-1 px-1 sm:min-w-8 lg:px-2 text-sm text-muted-foreground transition-colors duration-120 hover:text-foreground aria-pressed:bg-muted aria-pressed:text-foreground [&_svg]:size-4"
+          className="inline-flex min-h-11 min-w-7 items-center justify-center gap-1 px-1 sm:min-w-8 lg:px-2 text-sm text-muted-foreground transition-colors duration-120 hover:text-foreground aria-checked:bg-muted aria-checked:text-foreground [&_svg]:size-4"
         >
           <Icon aria-hidden="true" />
           <span className="max-lg:sr-only">{name}</span>
