@@ -1,0 +1,217 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init --format 1 [tmp]/store",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "store",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c1 --changes [tmp]/c1.json",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c1]",
+        "root": "[id1]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c2 --changes [tmp]/c2.json --parent [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c2]",
+        "parent": "[c1]",
+        "root": "[id2]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c3 --changes [tmp]/c3.json --parent [c2]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c3]",
+        "parent": "[c2]",
+        "root": "[id3]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store repair",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repair",
+      "api": 1,
+      "result": {
+        "actions": [
+          {
+            "kind": "rebuild_offsets",
+            "target": "journal_offsets",
+            "done": true
+          }
+        ],
+        "after": {
+          "objects_checked": 9,
+          "changesets_checked": 3,
+          "found": 0
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store repair --dry-run",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repair",
+      "api": 1,
+      "result": {
+        "actions": [],
+        "after": {
+          "objects_checked": 9,
+          "changesets_checked": 3,
+          "found": 0
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store upgrade",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "upgrade",
+      "api": 1,
+      "result": {
+        "from": 1,
+        "to": 3,
+        "upgraded": true
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store gc",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "gc",
+      "api": 1,
+      "result": {
+        "removed": [
+          {
+            "kind": "upgrade_residue",
+            "count": 5
+          }
+        ],
+        "bytes": 357,
+        "orphan_objects": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store gc --dry-run",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "gc",
+      "api": 1,
+      "result": {
+        "removed": [],
+        "bytes": 0,
+        "orphan_objects": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

@@ -4938,6 +4938,85 @@ fn git_export_import_golden() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// The width of one FORMAT 1 `journal.off` entry: a frame's offset, eight bytes.
+const OFFSET_ENTRY: usize = 8;
+
+/// The maintenance commands on a FORMAT 1 store: `repair` writes `journal.off` again from the
+/// journal after one of its entries was zeroed, and a dry run then finds nothing; `upgrade`
+/// takes the store to the current format; `gc` removes the old format's files the upgrade
+/// left (the M6 design §8.2), and a dry run then finds nothing.
+#[test]
+fn gc_repair_upgrade_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", "--format", "1", &store]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+
+    // 1. Three commits, then the entry of the middle frame zeroed: not a torn tail, which an
+    // open mends by itself, but damage only repair mends.
+    let c1 = s.commit(&store, None, "a.txt", "1\n", "c1");
+    let c2 = s.commit(&store, Some(&c1), "a.txt", "2\n", "c2");
+    s.commit(&store, Some(&c2), "a.txt", "3\n", "c3");
+    let off = Layout::new(Utf8PathBuf::from(&store)).journal_off();
+    let mut entries = fs::read(&off).unwrap();
+    entries[OFFSET_ENTRY..2 * OFFSET_ENTRY].fill(0);
+    fs::write(&off, entries).unwrap();
+
+    // 2. repair rebuilds the offsets; a dry run after it has nothing to do.
+    let repair = s.run(&["--repo", &store, "repair"]);
+    assert_eq!(
+        repair["result"]["actions"],
+        json!([{"kind": "rebuild_offsets", "target": "journal_offsets", "done": true}]),
+        "{}",
+        repair.json
+    );
+    assert_eq!(repair["result"]["after"]["found"], 0, "{}", repair.json);
+    let again = s.run(&["--repo", &store, "repair", "--dry-run"]);
+    assert_eq!(again["result"]["actions"], json!([]), "{}", again.json);
+
+    // 3. upgrade, from FORMAT 1 to the current format.
+    let upgrade = s.run(&["--repo", &store, "upgrade"]);
+    assert_eq!(upgrade["result"]["from"], 1, "{}", upgrade.json);
+    assert_eq!(upgrade["result"]["upgraded"], true, "{}", upgrade.json);
+
+    // 4. gc removes what the upgrade left; a dry run after it finds nothing.
+    let gc = s.run(&["--repo", &store, "gc"]);
+    assert_eq!(
+        gc["result"]["removed"][0]["kind"], "upgrade_residue",
+        "{}",
+        gc.json
+    );
+    let clean = s.run(&["--repo", &store, "gc", "--dry-run"]);
+    assert_eq!(clean["result"]["removed"], json!([]), "{}", clean.json);
+
+    insta::assert_json_snapshot!(s.transcript());
+}
+
+/// The maintenance commands, whose reference pages show a step of a golden above.
+const MAINTENANCE_PAGES: [&str; 3] = ["gc", "repair", "upgrade"];
+
+/// What a reference page says where no golden step shows the command.
+const NO_EXAMPLE: &str = "No recorded example yet.";
+
+/// The reference pages of gc, repair and upgrade show a recorded CLI example: a golden step
+/// runs each (`docs/reference/commands/<name>.md`, `### CLI` under `## Examples`).
+#[test]
+fn maintenance_pages_show_an_example() {
+    let dir = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/reference/commands");
+    for name in MAINTENANCE_PAGES {
+        let file = dir.join(format!("{name}.md"));
+        let page = fs::read_to_string(&file).unwrap_or_else(|e| panic!("{file}: {e}"));
+
+        // The CLI example: from its heading to the next heading of any level.
+        let (_, cli) = page
+            .split_once("### CLI\n")
+            .unwrap_or_else(|| panic!("{file}: no CLI example"));
+        let cli = cli.split("\n#").next().unwrap_or_default();
+        assert!(!cli.contains(NO_EXAMPLE), "{file}: {cli}");
+        assert!(cli.contains(&format!(" {name}")), "{file}: {cli}");
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Running the binary.
 // ---------------------------------------------------------------------------------------------

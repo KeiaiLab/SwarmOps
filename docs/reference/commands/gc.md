@@ -42,7 +42,35 @@ List what it would remove, and remove nothing.
 
 ### CLI
 
-No recorded example yet.
+```sh
+swarmops --repo [tmp]/store gc
+```
+
+```json
+{
+  "ok": true,
+  "op": "gc",
+  "api": 1,
+  "result": {
+    "removed": [
+      {
+        "kind": "upgrade_residue",
+        "count": 5
+      }
+    ],
+    "bytes": 357,
+    "orphan_objects": 0
+  },
+  "meta": {
+    "repo": "[tmp]/store",
+    "elapsed_ms": "[elapsed_ms]",
+    "resolved": {},
+    "auth": "trust"
+  }
+}
+```
+
+Exit code 0. Recorded by the CLI tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time.
 
 ### MCP
 
