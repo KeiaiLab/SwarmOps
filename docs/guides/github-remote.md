@@ -32,7 +32,7 @@ addresses, and the program's own update, which asks this project's releases page
 latest release ([Install](install.md#how-do-i-update)). Neither touches the store or the
 remote.*
 
-> ### In short
+> ## In short
 >
 > - **Nothing is rewritten.** A commit fetched from GitHub keeps its id through any number of
 >   round trips; a change made in the store exports to the same commit every time.

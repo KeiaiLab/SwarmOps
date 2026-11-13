@@ -23,7 +23,7 @@ wire. This page says what changes when the remote is a store.
 *Each client store keeps a git mirror of the served store and moves packs with its own git; the
 served store records what each key pushed.*
 
-> ### In short
+> ## In short
 >
 > - **Git commit ids are shared.** A commit on the served `main` has the same id and tree in every
 >   store that fetched it; changeset ids are each store's own.

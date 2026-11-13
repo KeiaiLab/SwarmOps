@@ -1396,6 +1396,10 @@ const RULES = [
 // The rules the built tree passes; each other rule reports PENDING until a fix slice clears it,
 // then joins this list. None leaves it.
 const ENFORCED = new Set([
+  'structure',
+  'next-version',
+  'tool-comparison',
+  'comparative-link',
   'header-links',
   'lookup',
   'literal-size',
