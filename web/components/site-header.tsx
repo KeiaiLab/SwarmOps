@@ -3,7 +3,7 @@
 //   [mark] SwarmOps   Docs Product Roadmap Changelog GitHub     [Search /]  v0.11.0  [theme]
 //
 // One 56 px bar, --page-max wide. Under 1024 px the five links take a second 44 px row (one nav,
-// no menu, no sideways scroll); under 640 px Search and the theme buttons show their icons only. The docs frame shows the same links (lib/layout.shared.tsx).
+// no menu, no sideways scroll), wrapping to a third where a narrow screen cannot hold them all; under 640 px Search and the theme buttons show their icons only. The docs frame shows the same links (lib/layout.shared.tsx).
 import Link from 'next/link';
 import { Search } from 'lucide-react';
 import { SkipLink } from '@/components/skip-link';
@@ -32,8 +32,8 @@ export function SiteHeader() {
             {SITE_NAME}
           </Link>
 
-          {/* 2. The five sections, each once; a second row under 1024 px. */}
-          <nav aria-label="Sections" className="order-last -mx-2 flex w-full border-t lg:order-none lg:mx-0 lg:w-auto lg:flex-1 lg:border-t-0">
+          {/* 2. The five sections, each once; a second row under 1024 px, wrapped, never wider than the page. */}
+          <nav aria-label="Sections" className="order-last -mx-2 flex w-full flex-wrap border-t lg:order-none lg:mx-0 lg:w-auto lg:flex-1 lg:border-t-0">
             {NAV_LINKS.map((link) =>
               link.external ? (
                 <a key={link.url} href={link.url} className={ITEM}>
