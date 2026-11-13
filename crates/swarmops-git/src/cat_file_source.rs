@@ -111,10 +111,11 @@ impl CatFileSource {
     /// user's git ([`GitCli::find`]).
     ///
     /// [`SourceError::NotARepo`] or [`SourceError::Unsupported`] as [`GixSource::open`] refuses
-    /// it; [`SourceError::Io`] when git cannot be found or started.
+    /// it; [`SourceError::Io`] when git cannot be found or started, or is older than the oldest
+    /// release the transport runs, with the version it reported.
     pub fn open(git_dir: &Path) -> Result<CatFileSource, SourceError> {
         let refs = GixSource::open(git_dir)?;
-        CatFileSource::start(refs, git_dir, None)
+        CatFileSource::start(&user_git()?, refs, git_dir, None)
     }
 
     /// Opens the bare repository `git_dir` as [`CatFileSource::open`] does, its objects looked
@@ -127,18 +128,18 @@ impl CatFileSource {
         quarantine: &Path,
     ) -> Result<CatFileSource, SourceError> {
         let refs = GixSource::open_quarantine(git_dir, quarantine)?;
-        CatFileSource::start(refs, git_dir, Some(quarantine))
+        CatFileSource::start(&user_git()?, refs, git_dir, Some(quarantine))
     }
 
-    /// The source of `refs`, its child started on `git_dir`, `quarantine` first when given.
+    /// The source of `refs`, its child `git` started on `git_dir`, `quarantine` first when
+    /// given.
     fn start(
+        git: &GitCli,
         refs: GixSource,
         git_dir: &Path,
         quarantine: Option<&Path>,
     ) -> Result<CatFileSource, SourceError> {
         // 1. git, its maps bounded and replacements off, in the command's own configuration.
-        // `find` fails only with `GitMissing`.
-        let git = GitCli::find().map_err(|_| io_error(&"no git to run"))?;
         let (window, mapped, bases) = (
             CAT_FILE_WINDOW.to_string(),
             CAT_FILE_MAPPED.to_string(),
@@ -150,7 +151,9 @@ impl CatFileSource {
             ("core.deltaBaseCacheLimit", OsStr::new(&bases)),
             ("core.useReplaceRefs", OsStr::new("false")),
         ];
-        let mut command = git.serve_command(git_dir, &config);
+        let mut command = git
+            .serve_command(git_dir, &config)
+            .map_err(|e| io_error(&e.not_started().unwrap_or_default()))?;
         command
             .args(["cat-file", "--batch-command"])
             .env(NO_LAZY_FETCH, "1")
@@ -366,6 +369,11 @@ fn ended(error: Option<&io::Error>) -> SourceError {
     SourceError::Io { reason }
 }
 
+/// The user's git. `find` fails only with `GitMissing`.
+fn user_git() -> Result<GitCli, SourceError> {
+    GitCli::find().map_err(|_| io_error(&"no git to run"))
+}
+
 /// `error` as [`SourceError::Io`].
 fn io_error(error: &dyn fmt::Display) -> SourceError {
     SourceError::Io {
@@ -385,7 +393,7 @@ mod tests {
     use super::{Answer, CatFileSource, answer};
     use crate::serve::repo::ServeRepo;
     use crate::transport::GitCli;
-    use crate::{GitOid, GitSink as _, GitSource as _, GixSink, RawKind, SourceError};
+    use crate::{GitOid, GitSink as _, GitSource as _, GixSink, GixSource, RawKind, SourceError};
 
     const OID: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -438,7 +446,7 @@ mod tests {
         // 1. git pack-objects of the one id.
         let git = GitCli::find().unwrap();
         let level = [("pack.compression", OsStr::new("0"))];
-        let mut packer = git.serve_command(git_dir, &level);
+        let mut packer = git.serve_command(git_dir, &level).unwrap();
         packer
             .args(["pack-objects", "-q", "objects/pack/pack"])
             .stdin(Stdio::piped())
@@ -462,6 +470,24 @@ mod tests {
             .expect("git wrote a pack");
         fs::set_permissions(&pack, fs::Permissions::from_mode(0o644)).unwrap();
         pack
+    }
+
+    /// A git older than the oldest served is refused by its version when the source opens, not
+    /// by an answer `cat-file` never gives.
+    #[test]
+    fn an_old_git_is_refused_by_its_version() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = ServeRepo::open(camino::Utf8Path::from_path(root.path()).unwrap()).unwrap();
+        let git_dir = repo.git_dir().as_std_path();
+        let old = GitCli::reporting(root.path(), "2.30.0");
+
+        let refs = GixSource::open(git_dir).unwrap();
+        let refused = CatFileSource::start(&old, refs, git_dir, None);
+        assert!(
+            matches!(&refused, Err(SourceError::Io { reason })
+                if reason.contains("git 2.30.0 is older than 2.39")),
+            "{refused:?}"
+        );
     }
 
     /// A packed object whose bytes are not the ones its id names is `Corrupt`, whether git

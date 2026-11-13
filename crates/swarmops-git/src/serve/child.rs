@@ -20,8 +20,9 @@ use std::thread;
 use super::repo::{PACK_OBJECTS_HOOK, ServeError, ServeRepo};
 use crate::GixSource;
 use crate::oid::{GitOid, RawKind};
+use crate::sink::SinkError;
 use crate::source::GitSource as _;
-use crate::transport::GitCli;
+use crate::transport::{GitCli, TransportError};
 
 /// What `upload-pack` serves: no partial clone filter (M14 design §1), and no object that no
 /// served ref reaches, so that a refused push's objects are never fetched.
@@ -61,6 +62,9 @@ const GIT_PROTOCOL: &str = "GIT_PROTOCOL";
 /// What a masked store path reads as in git's messages.
 const STORE_MASK: &str = "<store>";
 
+/// What is read when git is asked, as a [`SinkError::Read`] names it.
+const GIT_ANSWER: &str = "git's answer";
+
 /// The store's directory above `serve.git`: `<store>/git/serve.git`.
 const STORE_DEPTH: usize = 2;
 
@@ -98,6 +102,10 @@ impl ChildEnv {
 
 /// Runs `service` on `repo` with `env`, its stdin and stdout the connection's; its exit. git's
 /// stderr reaches this process's with the store's path masked.
+///
+/// A git that is missing, older than the oldest release the transport runs, or that the host
+/// does not start is a [`SinkError::Read`] of git's answer, never a failure of a file of `git/`;
+/// so for [`check_wants`] and [`pack_objects`].
 pub fn run(
     git: &GitCli,
     service: Service,
@@ -119,7 +127,7 @@ pub fn run(
 
     // 2. The command: the service on `.` (the working directory is serve.git), the client's
     //    protocol or none, the caller's variables, the connection's stdin and stdout.
-    let mut command = git.serve_command(repo.git_dir().as_std_path(), &config);
+    let mut command = serve_command(git, repo, &config)?;
     command.args(service_args(service));
     match &env.git_protocol {
         Some(protocol) => command.env(GIT_PROTOCOL, protocol),
@@ -205,7 +213,7 @@ pub fn check_wants(git: &GitCli, repo: &ServeRepo, wants: &[GitOid]) -> Result<W
     let listed: String = wants.iter().map(|oid| oid.to_string() + "\n").collect();
 
     // 1. Each a commit.
-    let mut cat_file = git.serve_command(repo.git_dir().as_std_path(), &[]);
+    let mut cat_file = serve_command(git, repo, &[])?;
     cat_file.args(["cat-file", "--batch-check=%(objecttype)"]);
     let typed = with_input(cat_file, listed.clone().into_bytes())?;
     let commits = String::from_utf8_lossy(&typed.stdout)
@@ -217,7 +225,7 @@ pub fn check_wants(git: &GitCli, repo: &ServeRepo, wants: &[GitOid]) -> Result<W
     }
 
     // 2. None past what the refs reach: the wants from stdin, every ref after --not.
-    let mut reach = git.serve_command(repo.git_dir().as_std_path(), &[]);
+    let mut reach = serve_command(git, repo, &[])?;
     reach.args(["rev-list", "--count", "--stdin", "--not", "--all"]);
     let counted = with_input(reach, listed.into_bytes())?;
     let count = String::from_utf8_lossy(&counted.stdout).trim().to_owned();
@@ -235,7 +243,7 @@ pub fn pack_objects(
     repo: &ServeRepo,
     args: &[OsString],
 ) -> Result<Child, ServeError> {
-    let mut command = git.serve_command(repo.git_dir().as_std_path(), &[]);
+    let mut command = serve_command(git, repo, &[])?;
     command
         .args(args)
         .stdin(Stdio::piped())
@@ -316,20 +324,46 @@ fn copy_masked(from: impl Read, to: &mut impl Write, masks: &[String]) {
     }
 }
 
+/// git's command on `repo` with `config`, as [`GitCli::serve_command`] builds it; a git it
+/// refuses is [`unanswered`].
+fn serve_command(
+    git: &GitCli,
+    repo: &ServeRepo,
+    config: &[(&str, &OsStr)],
+) -> Result<Command, ServeError> {
+    git.serve_command(repo.git_dir().as_std_path(), config)
+        .map_err(|e| refused(&e))
+}
+
+/// The error of a git no child was started of: none to run, or one too old.
+fn refused(e: &TransportError) -> ServeError {
+    unanswered(e.not_started().unwrap_or_else(|| "git failed".to_owned()))
+}
+
 /// The error of a git child that did not start or could not be waited for.
 fn failed(e: &io::Error) -> ServeError {
-    ServeError::Io {
-        what: "serve.git".to_owned(),
-        reason: format!("running git: {e}"),
-    }
+    unanswered(format!("running git: {e}"))
+}
+
+/// The error of a git that gave no answer for `reason`: not a failure of a file of `git/`,
+/// which `serve.git` would be named for.
+fn unanswered(reason: String) -> ServeError {
+    ServeError::Sink(SinkError::Read {
+        what: GIT_ANSWER.to_owned(),
+        reason,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::{Service, Wants, check_tips, copy_masked, service_args, service_config};
-    use crate::serve::repo::ServeRepo;
+    use super::{
+        ChildEnv, Service, Wants, check_tips, check_wants, copy_masked, pack_objects, run,
+        service_args, service_config,
+    };
+    use crate::serve::repo::{ServeError, ServeRepo};
+    use crate::transport::GitCli;
     use crate::{GitSink as _, GixSink, RawKind};
 
     /// Each service's configuration: upload-pack's for reading, receive-pack's for pushing,
@@ -368,6 +402,44 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "fatal: <store>/git/serve.git: broken\nlast <store>"
+        );
+    }
+
+    /// A git older than the oldest served runs no service and no check: each is refused with
+    /// the version it reported, before a child starts.
+    #[test]
+    fn an_old_git_serves_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = ServeRepo::open(camino::Utf8Path::from_path(root.path()).unwrap()).unwrap();
+        let old = GitCli::reporting(root.path(), "2.30.0");
+        let want = "0123456789abcdef0123456789abcdef01234567".parse().unwrap();
+
+        let refusals = [
+            run(&old, Service::UploadPack, &repo, &ChildEnv::new()).map(drop),
+            check_wants(&old, &repo, &[want]).map(drop),
+            pack_objects(&old, &repo, &[]).map(drop),
+        ];
+        for refusal in refusals {
+            let text = refusal.as_ref().map_err(ToString::to_string);
+            assert!(
+                matches!(&text, Err(text) if text.contains("git 2.30.0 is older than 2.39")),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// A git the host will not start is no failure of a file of `git/`: the error names git,
+    /// not `serve.git`.
+    #[test]
+    fn a_git_that_does_not_start_is_no_file_error() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = ServeRepo::open(camino::Utf8Path::from_path(root.path()).unwrap()).unwrap();
+        let git = GitCli::unrunnable(root.path());
+
+        let refused = run(&git, Service::UploadPack, &repo, &ChildEnv::new());
+        assert!(
+            matches!(&refused, Err(ServeError::Sink(e)) if e.to_string().contains("no git to run")),
+            "{refused:?}"
         );
     }
 

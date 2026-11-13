@@ -198,8 +198,16 @@ impl GitCli {
     /// configuration in the environment, [`CONFIG`] then `config`, which wins. The caller adds
     /// the service and its arguments, and the stdio it serves on (stdin is closed here).
     ///
+    /// The version is checked first, as for every other child (once per process and binary):
+    /// [`TransportError::GitMissing`] or [`TransportError::GitTooOld`], and no command.
+    ///
     /// [`base_command`]: GitCli::base_command
-    pub(crate) fn serve_command(&self, git_dir: &Path, config: &[(&str, &OsStr)]) -> Command {
+    pub(crate) fn serve_command(
+        &self,
+        git_dir: &Path,
+        config: &[(&str, &OsStr)],
+    ) -> Result<Command, TransportError> {
+        self.check_version()?;
         let mut command = self.base_command();
         for key in SERVE_DROPPED_VARS {
             command.env_remove(key);
@@ -218,7 +226,7 @@ impl GitCli {
                 .env(format!("GIT_CONFIG_KEY_{n}"), key)
                 .env(format!("GIT_CONFIG_VALUE_{n}"), value);
         }
-        command
+        Ok(command)
     }
 
     /// Whether `ancestor` is `descendant` or one of its ancestors in the bare repository
@@ -827,6 +835,21 @@ pub enum TransportError {
     Sha256,
 }
 
+impl TransportError {
+    /// Why no child was started, in words: `no git to run`, `git 2.30.0 is older than 2.39`.
+    /// `None` for the failure of a git that ran.
+    pub(crate) fn not_started(&self) -> Option<String> {
+        match self {
+            TransportError::GitMissing => Some("no git to run".to_owned()),
+            TransportError::GitTooOld { found } => {
+                let [major, minor] = MIN_GIT;
+                Some(format!("git {found} is older than {major}.{minor}"))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// What did not answer, as `details.cause` names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1302,12 +1325,42 @@ fn is_loopback(host: &str) -> bool {
 }
 
 #[cfg(test)]
+impl GitCli {
+    /// A stand-in git in `dir`, for tests: a script that answers `git version` with
+    /// `version` and exits 0 whatever else it is asked.
+    pub(crate) fn reporting(dir: &Path, version: &str) -> GitCli {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let script =
+            format!("#!/bin/sh\n[ \"$1\" = version ] && echo 'git version {version}'\nexit 0\n");
+        GitCli::stand_in(dir, &script, std::fs::Permissions::from_mode(0o755))
+    }
+
+    /// A stand-in git in `dir`, for tests, that the host refuses to start: a file without
+    /// its executable bits.
+    pub(crate) fn unrunnable(dir: &Path) -> GitCli {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        GitCli::stand_in(dir, "", std::fs::Permissions::from_mode(0o644))
+    }
+
+    /// The git of the file `dir/stand-in-git`, written with `bytes` and `mode`.
+    fn stand_in(dir: &Path, bytes: &str, mode: std::fs::Permissions) -> GitCli {
+        let binary = dir.join("stand-in-git");
+        std::fs::write(&binary, bytes).expect("write the stand-in git");
+        std::fs::set_permissions(&binary, mode).expect("set its mode");
+        let env = [(OsString::from(GIT_ENV), binary.into_os_string())];
+        GitCli::find_with_env(env).expect("the stand-in is a file")
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
 
-    use super::GitCli;
+    use super::{GitCli, TransportError};
 
     /// A serving child gets `GIT_DIR` and the configuration `serve` gives it, never the caller's
     /// variables that point git at another repository or configuration.
@@ -1332,7 +1385,9 @@ mod tests {
         // 2. The child: its repository, its configuration, and what the caller gave it.
         let git_dir = Path::new("/srv/so/acme/git/serve.git");
         let config = [("receive.fsckObjects", OsStr::new("true"))];
-        let command = git.serve_command(git_dir, &config);
+        let command = git
+            .serve_command(git_dir, &config)
+            .expect("a git new enough");
         let env: BTreeMap<&OsStr, Option<&OsStr>> = command.get_envs().collect();
         let value = |key: &str| env.get(OsStr::new(key)).copied().flatten();
         assert_eq!(value("GIT_DIR"), Some(git_dir.as_os_str()), "{env:?}");
@@ -1365,5 +1420,32 @@ mod tests {
             "{entries:?}"
         );
         assert_eq!(command.get_args().count(), 0, "no argument of the caller's");
+    }
+
+    /// A serving child is built only for a git of the oldest release served or a newer one; an
+    /// older one is refused with the version it reported, in words that name both.
+    #[test]
+    fn serve_command_checks_the_version() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let git_dir = Path::new("/srv/so/acme/git/serve.git");
+
+        // 1. The oldest release served.
+        let (oldest, older) = (dir.path().join("oldest"), dir.path().join("older"));
+        for made in [&oldest, &older] {
+            std::fs::create_dir(made).expect("a directory");
+        }
+        let served = GitCli::reporting(&oldest, "2.39.0").serve_command(git_dir, &[]);
+        assert!(served.is_ok(), "{served:?}");
+
+        // 2. One release older.
+        let refused = GitCli::reporting(&older, "2.38.5")
+            .serve_command(git_dir, &[])
+            .expect_err("an old git");
+        let found = "2.38.5".to_owned();
+        assert_eq!(refused, TransportError::GitTooOld { found });
+        assert_eq!(
+            refused.not_started().as_deref(),
+            Some("git 2.38.5 is older than 2.39")
+        );
     }
 }
