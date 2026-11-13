@@ -1537,3 +1537,188 @@ fn sync_status_reads_the_tracking_ref() {
     assert_eq!(status["ahead"], 1, "{status}");
     assert_eq!(status["behind"], 0, "{status}");
 }
+
+/// A sync killed at any point, on the upstream (U1–U5: objects put, flushed, adopted, inside
+/// and after the land) or on the host (H1–H5: what it fetched stored, adopted, the tracking
+/// ref moved, `main` moved), then run again, converges: every change on the upstream's `main`
+/// exactly once, the host's `main` there, both stores clean.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn a_host_killed_at_each_point_converges() {
+    kill_sweep(Step::Coarse);
+}
+
+/// [`a_host_killed_at_each_point_converges`] at every store call of either side.
+#[cfg(feature = "test-hooks")]
+#[test]
+#[ignore = "slow, ~5 min: a sync crashed at each store call of the upstream and of the host"]
+fn a_host_killed_at_each_point_converges_at_every_call() {
+    kill_sweep(Step::Every);
+}
+
+/// Which side of a sync a crash kills.
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Side {
+    /// The upstream's `serve --stdio`.
+    Upstream,
+    /// The host's `sync`.
+    Host,
+}
+
+/// How many crash points the coarse sweep spreads evenly over each side: each of the windows
+/// [`Seen`] names spans more than a twelfth of its side's calls (the host's H4 window, the
+/// narrowest, about a tenth).
+#[cfg(feature = "test-hooks")]
+const KILL_SPREAD: u64 = 12;
+
+/// The calls at the end of each side the coarse sweep crashes at each of.
+#[cfg(feature = "test-hooks")]
+const KILL_TAIL: u64 = 2;
+
+/// The titles of the sweep's two changes, which their landed changesets keep.
+#[cfg(feature = "test-hooks")]
+const SWEPT: [&str; 2] = ["large.txt", "small.txt"];
+
+/// What a crash left before the sync ran again.
+#[cfg(feature = "test-hooks")]
+#[derive(Default, Debug)]
+struct Seen {
+    /// The upstream held a change adopted, not yet landed (U3).
+    adopted: bool,
+    /// The upstream landed every change, and the host's `main` had not moved (U5, H3, H4).
+    landed: bool,
+    /// The host's tracking ref was at the upstream's new head, its `main` not (H4).
+    fetched: bool,
+}
+
+/// The sweep of [`a_host_killed_at_each_point_converges`].
+#[cfg(feature = "test-hooks")]
+fn kill_sweep(step: Step) {
+    // 1. An upstream and a host with two changes of its own, one of a large file.
+    let site = Site::writable();
+    let (template, _) = site.cloned();
+    let large: String = (0..LARGE)
+        .map(|i| char::from(b'a' + u8::try_from(i % 26).expect("a letter")))
+        .collect();
+    let changes = [
+        host_commit(template.path(), SWEPT[0], &large),
+        host_commit(template.path(), SWEPT[1], "small\n"),
+    ];
+    let upstream = site.served.store(STORE);
+    let mine = ref_in(template.path(), "main");
+
+    // 2. Each side's crashes, then the sync again on a sound connection.
+    let mut seen = Seen::default();
+    for side in [Side::Upstream, Side::Host] {
+        let calls = side_calls(&site, &template, &upstream, side);
+        for k in crash_points(calls, step) {
+            let host = Store::copy_of(&template);
+            let crashing = sweep_site(&upstream, side, Some(k));
+            let mut extra = Vec::new();
+            let at = k.to_string();
+            if side == Side::Host {
+                extra.push((CRASH_AT_ENV, at.as_str()));
+            }
+            let cut = site.on(
+                host.path(),
+                &crashing.ssh_command(ADA),
+                &["sync", ORIGIN],
+                &extra,
+            );
+            if side == Side::Host {
+                assert!(cut.aborted(), "crash at {k} of {calls}: {cut}");
+            }
+
+            // What it left.
+            let served = path_text(&crashing.store(STORE));
+            let adopted = run(&["--repo", &served, "show", &changes[0]], &[]).exit() == 0;
+            let counts = titled(&served);
+            let main = ref_in(host.path(), "main");
+            seen.adopted |= adopted && counts == [0, 0];
+            seen.landed |= counts == [1, 1] && main == mine;
+            seen.fetched |= main == mine
+                && ref_in(host.path(), TRACKING_MAIN) == ref_in(&served, "main")
+                && counts == [1, 1];
+
+            // Again, through a sound connection to what the crash left.
+            let sound = match side {
+                Side::Upstream => sweep_site(&crashing.store(STORE), side, None),
+                Side::Host => crashing,
+            };
+            let again = site.on(host.path(), &sound.ssh_command(ADA), &["sync", ORIGIN], &[]);
+            assert_eq!(again.exit(), 0, "{side:?} crash at {k}: {again}");
+            let served = path_text(&sound.store(STORE));
+            assert_eq!(titled(&served), [1, 1], "{side:?} crash at {k}");
+            assert_eq!(ref_in(host.path(), "main"), ref_in(&served, "main"));
+            assert_clean(host.path());
+            assert_clean(&served);
+        }
+    }
+    assert!(
+        seen.adopted,
+        "no crash left a change adopted and not landed (U3): {seen:?}"
+    );
+    assert!(
+        seen.landed,
+        "no crash left every change landed, main unmoved: {seen:?}"
+    );
+    assert!(
+        seen.fetched,
+        "no crash left the landed head fetched, main unmoved (H4): {seen:?}"
+    );
+}
+
+/// How many changesets of `main`'s history in the store at `store` carry each title of
+/// [`SWEPT`]: each change's landed changeset keeps its title.
+#[cfg(feature = "test-hooks")]
+fn titled(store: &str) -> [usize; 2] {
+    let log = run(&["--repo", store, "log", "main", "--limit", LOG_LIMIT], &[]).ok();
+    let entries = log["entries"].as_array().expect("entries");
+    SWEPT.map(|title| entries.iter().filter(|e| e["title"] == title).count())
+}
+
+/// A served root holding a copy of the store at `from`; its `serve` crashes at store call `k`
+/// when `side` is the upstream's.
+#[cfg(feature = "test-hooks")]
+fn sweep_site(from: &Path, side: Side, k: Option<u64>) -> ServeSite {
+    let mut served = ServeSite::new::<Swarmops>();
+    if let (Side::Upstream, Some(k)) = (side, k) {
+        served = served.with_env(&[(CRASH_AT_ENV, &k.to_string())]);
+    }
+    swarmops_testkit::fs::copy_dir(from, &served.store(STORE));
+    served
+}
+
+/// How many store calls `side` makes in an uncut sync of a copy of `template` with `upstream`.
+#[cfg(feature = "test-hooks")]
+fn side_calls(site: &Site, template: &Store, upstream: &Path, crashed: Side) -> u64 {
+    let host = Store::copy_of(template);
+    let file = host.tmp().join("fs-calls");
+    let file_text = path_text(&file);
+    let mut served = ServeSite::new::<Swarmops>();
+    let mut extra = Vec::new();
+    match crashed {
+        Side::Upstream => served = served.with_env(&[(FS_CALLS_ENV, &file_text)]),
+        Side::Host => extra.push((FS_CALLS_ENV, file_text.as_str())),
+    }
+    swarmops_testkit::fs::copy_dir(upstream, &served.store(STORE));
+    let ssh = served.ssh_command(ADA);
+    site.on(host.path(), &ssh, &["sync", ORIGIN], &extra).ok();
+    reported_calls(&file)
+}
+
+/// The calls a sweep of `calls` crashes at.
+#[cfg(feature = "test-hooks")]
+fn crash_points(calls: u64, step: Step) -> Vec<u64> {
+    match step {
+        Step::Every => (1..=calls).collect(),
+        Step::Coarse => {
+            let every = (calls / KILL_SPREAD).max(1);
+            let tail = calls.saturating_sub(KILL_TAIL);
+            (1..=calls)
+                .filter(|k| k % every == 0 || *k > tail)
+                .collect()
+        }
+    }
+}
