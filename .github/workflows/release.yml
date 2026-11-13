@@ -81,8 +81,10 @@ jobs:
         id: version
         run: |
           python3 -I - <<'EOF'
+          import datetime
           import os
           import re
+          import subprocess
           import sys
           import tomllib
 
@@ -120,6 +122,28 @@ jobs:
           body = body.strip("\n")
           if not body.strip():
               fail(f"CHANGELOG.md's '{heading}' section is empty")
+
+          # The section's date is the tagged commit's UTC date, as committed (a replay that
+          # moves the commit to another day moves it too).
+          committed = subprocess.run(
+              ["git", "show", "--no-patch", "--format=%ct", os.environ["GITHUB_SHA"]],
+              capture_output=True, text=True, check=True,
+          ).stdout.strip()
+          day = datetime.datetime.fromtimestamp(int(committed), datetime.UTC).date().isoformat()
+          if lines[start] != f"{heading} - {day}":
+              fail(f"CHANGELOG.md's heading is '{lines[start]}', not '{heading} - {day}',"
+                   " the tagged commit's UTC date (RELEASE.md)")
+
+          # The links: the section's, from the release before it (the first release's, its tag),
+          # and [Unreleased]'s, from this tag.
+          repo = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
+          older = re.compile(r"## \[(\d[^\]]*)\]")
+          previous = next((m[1] for line in lines[end:] if (m := older.match(line))), None)
+          link = (f"{repo}/compare/v{previous}...{tag}" if previous
+                  else f"{repo}/releases/tag/{tag}")
+          for want in (f"[{version}]: {link}", f"[Unreleased]: {repo}/compare/{tag}...stable"):
+              if want not in lines:
+                  fail(f"CHANGELOG.md has no '{want}' line (RELEASE.md)")
           files = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/blob/{tag}/"
           body = re.sub(
               r"\]\((?![a-z][a-z0-9+.-]*:|#|/)([^)\s]+)\)",

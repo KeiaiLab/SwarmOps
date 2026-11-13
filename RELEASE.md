@@ -22,9 +22,11 @@ the macOS build waits, and nothing is published without it.
    `Cargo.toml` (`v0.1.0` for `version = "0.1.0"`); `CHANGELOG.md` has a non-empty
    `## [X.Y.Z] - YYYY-MM-DD` section, which becomes the release notes (its relative links made
    absolute, to the tag's files, then a line on checking a download against `SHA256SUMS`; at
-   most the 125,000 characters a release takes); `stable` holds the tagged commit; and every
-   golden file of the previous release tag is unchanged (`just golden-frozen`). No other job
-   starts unless these pass.
+   most the 125,000 characters a release takes); the section's date is the UTC date the tagged
+   commit was committed; the file defines `[X.Y.Z]` as the compare link from the release before
+   (the first release's, its tag) and points `[Unreleased]` at `compare/vX.Y.Z...stable`;
+   `stable` holds the tagged commit; and every golden file of the previous release tag is
+   unchanged (`just golden-frozen`). No other job starts unless these pass.
 2. **Runs the release gate** (job `just check`): `just check` on the tagged commit, with the tools
    and versions of CI's `check` job but without its cache or the runner's target directory, so
    that it builds from clean.
@@ -251,7 +253,9 @@ installs the same tool versions as `ci.yml`'s: move them together.
    `[X.Y.Z]: https://github.com/KeiaiLab/SwarmOps/compare/vA.B.C...vX.Y.Z` from the previous
    release `vA.B.C` (`[0.1.0]: https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.1.0` for the
    first), and point `[Unreleased]` at `compare/vX.Y.Z...stable`. The new section is the
-   release's notes: the workflow refuses a tag without one. It opens with a summary of at most
+   release's notes: the workflow refuses a tag without one, or with another date or other links.
+   A commit replayed onto `stable` gets a new commit date: date the section on the day the
+   release commit lands. It opens with a summary of at most
    60 words, in sentences of at most 25, that names no milestone or slice id. Incompatible
    changes and security fixes each get a group of their own; a release with neither says so in
    one line. A release that an installed build must not take unasked says so in a group's
