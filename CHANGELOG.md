@@ -203,6 +203,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Fixed
 
+- A fetch whose serving binary was replaced while `serve` ran reads `serve`'s refusal line again
+  on a loaded host, where it read `bad pack header`: the pack-objects hook without its program
+  now reads what `upload-pack` feeds it before it exits, so `upload-pack` is not killed by
+  SIGPIPE before it relays the refusal.
 - `remote add` and `clone` refuse an `http://` or `https://` URL whose user is a token, as they
   refused a password, with `E_INVALID_ARG` and `details.reason` `credential_in_url`.
 - A remote an earlier version stored with a token as its URL's user is refused the same way by

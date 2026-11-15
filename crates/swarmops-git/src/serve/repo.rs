@@ -111,12 +111,14 @@ pub const PRE_RECEIVE_SCRIPT: &str = concat!(
 /// M17 design §5). It is a shell function, one line, so that it can look for the binary first
 /// as [`HOOK_SCRIPT`] does: git sends this command's stderr to the client too, and it says
 /// [`FETCH_HOOK_GONE`] and exits 1 instead of `sh`'s error, which would name the binary.
+/// Before it exits it reads its stdin to the end: `upload-pack` writes the wants after starting
+/// it, and a hook that ended first kills it with SIGPIPE before the refusal reaches the client.
 pub const PACK_OBJECTS_HOOK: &str = concat!(
     "swarmops_pack_objects() { if ",
     program_there!(),
     "; then exec \"$SWARMOPS_SERVE_EXE\" serve --hook pack-objects \"$@\"; fi; echo '",
     fetch_hook_gone!(),
-    "' >&2; exit 1; }; swarmops_pack_objects",
+    "' >&2; while read -r line; do :; done; exit 1; }; swarmops_pack_objects",
 );
 
 /// The store's git directory, which the mirror shares: `<store>/git`.

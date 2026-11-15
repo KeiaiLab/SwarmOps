@@ -401,7 +401,8 @@ fn the_other_hooks_are_pinned() {
                         if [ -f \"$SWARMOPS_SERVE_EXE\" ] && [ -x \"$SWARMOPS_SERVE_EXE\" ]; \
                         then exec \"$SWARMOPS_SERVE_EXE\" serve --hook pack-objects \"$@\"; fi; \
                         echo 'swarmops serve: the hook program cannot start; the fetch is \
-                        refused' >&2; exit 1; }; swarmops_pack_objects";
+                        refused' >&2; while read -r line; do :; done; exit 1; }; \
+                        swarmops_pack_objects";
     assert_eq!(PACK_OBJECTS_HOOK, pack_objects);
     assert_eq!(format!("{PUSH_HOOK_GONE}\n"), PUSH_REFUSED);
     assert_eq!(format!("{FETCH_HOOK_GONE}\n"), FETCH_REFUSED);
@@ -449,6 +450,61 @@ fn a_hook_without_its_program_says_so() {
         let (code, stderr) = hooked(&mut pack_objects_hook(), program);
         assert_eq!(stderr, FETCH_REFUSED, "pack-objects with {program:?}");
         assert_eq!(code, Some(1), "pack-objects with {program:?}");
+    }
+}
+
+/// What `upload-pack` feeds `pack-objects` after starting it: the wants, then the haves.
+const FED: &[u8] = b"91457a0b04553c36c599e9ba27cc15844622cdd4\n--not\n\n";
+
+/// The fetch's hook without its program reads what git feeds it to the end before it exits:
+/// `upload-pack` writes the wants once the hook started, and a hook that ended already kills it
+/// with SIGPIPE before it relays the refusal, so the client reads `bad pack header` instead.
+#[test]
+fn a_gone_fetch_hook_reads_what_git_feeds_it() {
+    // 1. The hook without its program, and its refusal.
+    let root = Root::new();
+    let mut hook = pack_objects_hook();
+    hook.env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env(SERVE_EXE, root.dir.path().join("gone"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = hook.spawn().expect("start the hook");
+    let mut refusal = String::new();
+    let mut stderr = BufReader::new(child.stderr.take().expect("a piped stderr"));
+    stderr.read_line(&mut refusal).expect("read the refusal");
+    assert_eq!(refusal, FETCH_REFUSED);
+
+    // 2. Time for a hook that reads nothing to end, as a loaded host gives it.
+    let deadline = Instant::now() + SHORT;
+    while child.try_wait().expect("look at the hook").is_none() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    // 3. What git writes then still goes in, and the hook ends on its end with the refusal's
+    //    code.
+    let mut stdin = child.stdin.take().expect("a piped stdin");
+    let fed = std::io::Write::write_all(&mut stdin, FED);
+    drop(stdin);
+    let code = ended(&mut child);
+    fed.expect("the hook reads what git feeds it");
+    assert_eq!(code, Some(1));
+}
+
+/// The exit code of `child`, which must end within [`LONG`].
+fn ended(child: &mut Child) -> Option<i32> {
+    let deadline = Instant::now() + LONG;
+    loop {
+        if let Some(status) = child.try_wait().expect("look at the child") {
+            return status.code();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the hook did not end once its input did");
+        }
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
