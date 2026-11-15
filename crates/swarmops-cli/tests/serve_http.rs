@@ -792,7 +792,9 @@ fn http_hook_program_gone_is_masked() {
     // 1. A site whose binary vanishes while the switch is there, and a clone behind the store.
     Vanishing::install();
     let switch_dir = TempDir::new().unwrap();
-    let switch = switch_dir.path().join("vanish");
+    // Canonical, so that the stand-in's `/proc/<pid>/exe` matches its link and opens its gate.
+    let switch_root = fs::canonicalize(switch_dir.path()).unwrap();
+    let switch = switch_root.join("vanish");
     let served = ServeSite::new::<Vanishing>().with_env(&[(VANISH, switch.to_str().unwrap())]);
     let site = Site::on(served).with_linear();
     let work = site.clone("work", Protocol::V2, &[]);
@@ -801,7 +803,7 @@ fn http_hook_program_gone_is_masked() {
         let stderr = text(&output.stderr);
         assert!(!output.status.success(), "{stderr}");
         assert!(stderr.contains(line), "no {line:?} in: {stderr}");
-        let program_dir = switch_dir.path().to_str().unwrap();
+        let program_dir = switch_root.to_str().unwrap();
         assert!(!stderr.contains(program_dir), "a host path: {stderr}");
     };
 
