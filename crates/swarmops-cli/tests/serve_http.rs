@@ -747,7 +747,8 @@ impl Program for Vanishing {
 impl Vanishing {
     /// Writes the stand-in, whole: it runs the binary, and while [`VANISH`]'s file is there
     /// runs it from a link of its own that it removes once the run has started, so that the
-    /// run names its hooks a program that is gone.
+    /// run names its hooks a program that is gone. The run reads its request only once the
+    /// link is gone, and a hook runs only on a request: none can find the program still there.
     fn install() {
         let script = format!(
             "#!/bin/sh\n\
@@ -755,10 +756,12 @@ impl Vanishing {
              \x20 exec '{bin}' \"$@\"\n\
              fi\n\
              link=\"${VANISH}.$$\"\n\
+             gone=\"$link.gone\"\n\
              ln '{bin}' \"$link\" 2>/dev/null || cp '{bin}' \"$link\" || exit 70\n\
-             # A background command's stdin is /dev/null unless it is handed over.\n\
+             # A background command's stdin is /dev/null unless it is handed over; the request\n\
+             # goes in once the link is gone.\n\
              exec 3<&0\n\
-             \"$link\" \"$@\" <&3 3<&- &\n\
+             {{ until [ -e \"$gone\" ]; do sleep 0.01; done; cat <&3; }} | \"$link\" \"$@\" 3<&- &\n\
              run=$!\n\
              exec 3<&-\n\
              until [ \"$(readlink \"/proc/$run/exe\" 2>/dev/null)\" = \"$link\" ]; do\n\
@@ -766,7 +769,11 @@ impl Vanishing {
              \x20 sleep 0.01\n\
              done\n\
              rm -f \"$link\"\n\
-             wait \"$run\"\n",
+             : > \"$gone\"\n\
+             wait \"$run\"\n\
+             status=$?\n\
+             rm -f \"$gone\"\n\
+             exit \"$status\"\n",
             bin = support::BIN,
         );
         let temp = format!("{}.{}", Vanishing::BIN, std::process::id());
