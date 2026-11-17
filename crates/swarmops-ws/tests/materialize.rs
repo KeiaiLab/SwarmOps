@@ -1057,7 +1057,8 @@ fn a_new_path_without_a_parent_is_still_not_found() {
 /// case collision on a volume that folds case.
 #[test]
 fn a_new_path_meets_the_portability_rules() {
-    // 1. The reserved name at the root, on disk.
+    // 1. The reserved name at the root, on disk: the agent's file, or on a host that folds case
+    //    the workspace's own directory, which answers to the name there.
     let f = Fixture::new();
     let base = f.commit(
         None,
@@ -1065,7 +1066,9 @@ fn a_new_path_meets_the_portability_rules() {
     );
     f.create("w", &base, &["src"]);
     let dir = f.beside("w");
-    write(&dir, ".SWARMWS", "x\n");
+    if !f.folds_case() {
+        write(&dir, ".SWARMWS", "x\n");
+    }
     let files = tree_of(&dir);
     let saved = std::fs::read(state::path_in(&dir)).unwrap();
     let refused = swarmops_ws::materialize(&f.ctx(), expand("w", &[".SWARMWS"])).unwrap_err();

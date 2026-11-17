@@ -1527,6 +1527,16 @@ fn commit_w(f: &Fixture, message: &str) -> String {
     swarmops_ws::commit(&f.ctx(), req).unwrap().changeset
 }
 
+/// What a host that folds case makes of a second spelling written beside the first (see
+/// [`Fixture::folds_case`]): the first's own file or directory, written again, so workspace `w`
+/// has nothing to commit.
+fn one_spelling_is_no_change(f: &Fixture) {
+    let mut req = WsCommitReq::new("w".to_owned(), "rename".to_owned());
+    req.status_after = StatusAfter::None;
+    let refused = swarmops_ws::commit(&f.ctx(), req).unwrap_err();
+    assert_eq!(refused.code, "E_EMPTY_COMMIT", "{refused:?}");
+}
+
 /// A cut land whose head's operation lies past the journal's operation cap is not known to be
 /// absent: the record stays, and `ws rebase` says to finish the land first.
 #[test]
@@ -1971,8 +1981,15 @@ enum Lib {
     Kept,
 }
 
-/// Renames `src/Lib/a.rs` of workspace `w` to `src/lib/a.rs`. The base.
+/// Renames `src/Lib/a.rs` of workspace `w` to `src/lib/a.rs`, and commits it. The base.
 fn rename_directory(f: &Fixture, lib: Lib) -> String {
+    let b = move_to_lib(f, lib);
+    commit_w(f, "rename directory");
+    b
+}
+
+/// Moves `src/Lib/a.rs` of workspace `w` to `src/lib/a.rs` in its files, uncommitted. The base.
+fn move_to_lib(f: &Fixture, lib: Lib) -> String {
     // 1. The base: `src/Lib/a.rs`, and `src/Lib/keep.rs` when it is kept.
     let mut files = vec![
         Put::File("src/a.txt", "a\n"),
@@ -1990,7 +2007,6 @@ fn rename_directory(f: &Fixture, lib: Lib) -> String {
         std::fs::remove_dir(dir.join("src/Lib")).unwrap();
     }
     write(&dir, "src/lib/a.rs", "x\n");
-    commit_w(f, "rename directory");
     b
 }
 
@@ -2029,8 +2045,14 @@ fn a_file_under_a_renamed_directory_still_collides() {
     for lib in [Lib::Alone, Lib::Kept] {
         for rebase in [false, true] {
             // 1. The workspace renames `a.rs` into `src/lib`; `src/Lib` stays by a file of the
-            //    base or one the target adds.
+            //    base or one the target adds. A host that folds case holds no `src/lib` beside
+            //    a `src/Lib` its own file keeps: the move is no change there.
             let f = Fixture::new();
+            if lib == Lib::Kept && f.folds_case() {
+                move_to_lib(&f, lib);
+                one_spelling_is_no_change(&f);
+                continue;
+            }
             let b = rename_directory(&f, lib);
             if lib == Lib::Alone {
                 let gained = f.side(Some(&b), &[Put::File("src/Lib/b.rs", "b\n")]);
@@ -2095,9 +2117,15 @@ fn a_file_in_a_subdirectory_keeps_the_old_spelling() {
     let dir = f.beside("w");
     std::fs::remove_file(dir.join("src/Lib/a.rs")).unwrap();
     write(&dir, "src/lib/a.rs", "x\n");
+
+    // 2. A host that folds case holds no `src/lib` beside `src/Lib`: the move is no change.
+    if f.folds_case() {
+        one_spelling_is_no_change(&f);
+        return;
+    }
     commit_w(&f, "rename");
 
-    // 2. Refused as a case collision.
+    // 3. Refused as a case collision.
     let watched = Watched::new(&f.ops);
     let refused = swarmops_ws::land(&f.ctx_over(&watched), land_of("w", None)).unwrap_err();
     assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
@@ -2125,10 +2153,15 @@ fn a_file_outside_the_prefixes_keeps_no_directory() {
     volume.case_insensitive = true;
     f.simulate("w", volume);
 
-    // 2. `src/Lib/sub/a.rs` moves to `src/lib/sub/a.rs`, and the land goes through.
+    // 2. `src/Lib/sub/a.rs` moves to `src/lib/sub/a.rs`, and the land goes through. A host that
+    //    folds case holds no `src/lib` beside the `src/Lib` it made: the move is no change.
     let dir = f.beside("w");
     std::fs::remove_file(dir.join("src/Lib/sub/a.rs")).unwrap();
     write(&dir, "src/lib/sub/a.rs", "x\n");
+    if f.folds_case() {
+        one_spelling_is_no_change(&f);
+        return;
+    }
     commit_w(&f, "rename");
     let done = swarmops_ws::land(&f.ctx(), land_of("w", None)).unwrap();
     assert_eq!(done.land.status, LandStatus::Landed);

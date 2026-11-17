@@ -940,8 +940,9 @@ mod tests {
         path
     }
 
-    /// The permission bits of `path`, a link never followed.
-    #[cfg(unix)]
+    /// The permission bits of `path`, a link never followed. Read by the FIFO test alone, which
+    /// runs on Linux.
+    #[cfg(target_os = "linux")]
     fn mode_of(path: &Utf8Path) -> u32 {
         RealHost.symlink_metadata(path).unwrap().unwrap().mode
     }

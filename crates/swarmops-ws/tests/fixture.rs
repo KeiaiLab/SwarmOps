@@ -238,6 +238,18 @@ impl Fixture {
         state::replace(&RealFs::new(), &dir, &file).unwrap();
     }
 
+    /// Whether the host's volume under the fixture folds case, probed as `create` probes a
+    /// workspace's: such a host holds one spelling of a name, so a test that puts two on disk
+    /// (under [`Fixture::simulate`], on a host that keeps them apart) checks there what one
+    /// spelling gives instead.
+    pub fn folds_case(&self) -> bool {
+        let dir = self.beside("case-probe");
+        std::fs::create_dir(&dir).unwrap();
+        let volume = swarmops_ws::volume::probe(&RealHost::default(), &dir).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+        volume.case_insensitive
+    }
+
     /// Makes workspace `name` beside the store, on `base`, with neither prefixes nor `all` (the
     /// CLI's default), its `workspace.json` then as `how` says; its directory.
     pub fn create_bare(&self, name: &str, base: &str, how: Bare) -> Utf8PathBuf {
