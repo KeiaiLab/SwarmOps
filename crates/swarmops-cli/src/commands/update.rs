@@ -119,6 +119,10 @@ const MAX_KEPT_BYTES: usize = 64 * 1024;
 /// The most characters of a program's answer an error quotes.
 const MAX_QUOTED_CHARS: usize = 200;
 
+/// How the installer's last line starts when a file of the release could not be downloaded:
+/// the archive, or its SHA256SUMS.
+const NOT_FETCHED: &str = "Cannot download ";
+
 /// The mode of the files written beside the binaries: the installer's for its receipt.
 const FILE_MODE: u32 = 0o644;
 
@@ -347,9 +351,15 @@ fn background(env: Env<'_>, found: &Found) -> UpdateOut {
                     to: latest,
                 })
             }
+            // Fetched and refused, it is not tried again. Anything else may pass, so it is
+            // tried at the next checks and says nothing, until its last try.
             Err(error) => {
-                state.record_failure(&latest);
-                Some(Note::failed(latest, &why(&error)))
+                if was_refused(&error) || state.record_try(&latest) {
+                    state.record_failure(&latest);
+                    Some(Note::failed(latest, &why(&error)))
+                } else {
+                    None
+                }
             }
         },
         Some(false) => state.sight_unmarked(&latest),
@@ -382,6 +392,20 @@ fn compared(out: &mut UpdateOut, installed: Option<&Version>, latest: &Version) 
     }
     out.latest = Some(latest.to_string());
     out.notes = Some(update::notes_address(latest));
+}
+
+/// Whether `error`, an update's, says that the release was fetched and refused, which no later
+/// try changes: the staged binaries are not the release's (`details.step` `verify`), or the
+/// installer ended with a line that is not a download's ([`NOT_FETCHED`]). Anything else may
+/// pass: a download that failed, an installer that was stopped at its deadline or could not
+/// run, a file that could not be renamed or removed.
+fn was_refused(error: &OpError) -> bool {
+    let detail = |name: &str| error.details.get(name).and_then(Value::as_str);
+    match detail("step") {
+        Some("verify") => true,
+        Some("install") => detail("installer").is_some_and(|line| !line.starts_with(NOT_FETCHED)),
+        _ => false,
+    }
 }
 
 /// What a failure to install says in a note: the installer's last line, else the error's own.
@@ -724,12 +748,13 @@ impl Install {
         for (done, name) in NAMES.iter().enumerate() {
             let installed = self.dir.join(name);
             fs::rename(staging.join(name), &installed).map_err(|e| {
+                // What to do comes first: a note keeps the start of the line.
                 let state = if done == 0 {
                     "nothing was replaced"
                 } else {
-                    "swarmops was replaced and so was not: run update again"
+                    "swarmops was replaced and so was not, so run update again"
                 };
-                let why = format!("cannot replace {}: {e}; {state}", installed.display());
+                let why = format!("{state}: cannot replace {}: {e}", installed.display());
                 failed_step("swap", &why).with_details(path_details("swap", &installed))
             })?;
         }
@@ -1736,6 +1761,56 @@ mod tests {
         assert_eq!(why(&install), "no macOS build");
         let verify = failed_step("verify", "the downloaded so does not print");
         assert_eq!(why(&verify), "the downloaded so does not print");
+    }
+
+    #[test]
+    fn only_a_release_that_was_fetched_and_refused_is_not_tried_again() {
+        let installer = |line: &str| {
+            let mut details = step_details("install");
+            details.insert("installer_exit".to_owned(), 1.into());
+            details.insert("installer".to_owned(), line.into());
+            failed_step("install", "the installer did not install").with_details(details)
+        };
+
+        // 1. Refused: what the installer checked, and what the staged binaries said.
+        for line in [
+            "x.tar.gz does not match its line in SHA256SUMS: nothing was installed.",
+            "SwarmOps 1.2.3 has no macOS build (its SHA256SUMS lists no x.tar.gz):",
+            "This system has glibc 2.17; the release binaries need 2.28 or newer.",
+            "it said nothing",
+        ] {
+            assert!(was_refused(&installer(line)), "{line}");
+        }
+        assert!(was_refused(&failed_step("verify", "not the release")));
+
+        // 2. May pass: a download, a deadline, an installer that did not run, a rename.
+        for line in [
+            "Cannot download https://example.com/v1.2.3/x.tar.gz: is 1.2.3 a release? https://e",
+            "Cannot download https://example.com/v1.2.3/SHA256SUMS.",
+        ] {
+            assert!(!was_refused(&installer(line)), "{line}");
+        }
+        let mut stopped = step_details("install");
+        stopped.insert("deadline_s".to_owned(), 180.into());
+        assert!(!was_refused(
+            &failed_step("install", "stopped").with_details(stopped)
+        ));
+        assert!(!was_refused(&failed_step(
+            "install",
+            "cannot run the installer"
+        )));
+        assert!(!was_refused(&failed_step("swap", "cannot replace")));
+
+        // The installer says a download's failure in those words, and in no other.
+        let downloads = INSTALLER.matches("fetch \"$release_url/").count();
+        let said = INSTALLER
+            .matches(&format!("die \"{NOT_FETCHED}$release_url/"))
+            .count();
+        assert_eq!(
+            (downloads, said),
+            (3, 2),
+            "one fetch only looks, and says nothing"
+        );
     }
 
     /// This test binary is no release's build and has no receipt beside it: the forms that

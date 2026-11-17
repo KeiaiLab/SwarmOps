@@ -17,7 +17,7 @@
 //! | File | Holds |
 //! | --- | --- |
 //! | [`RECEIPT_FILE`] | The installer's receipt, TOML: `receipt = 1` and `auto_update = true` or `false`. |
-//! | [`LOCK_FILE`] | The lock one update holds, and [`State`]: a line each for the release last seen unmarked, announced and failed. Its modification time is when a check was last claimed. |
+//! | [`LOCK_FILE`] | The lock one update holds, and [`State`]: a line each for the release last seen unmarked, announced, tried and failed. Its modification time is when a check was last claimed. |
 //! | [`NOTE_FILE`] | One line, a [`Note`]: what the next command at a terminal says once. |
 //! | [`STAGING_DIR`] | The directory a new release is unpacked and tried in before it replaces anything. |
 //!
@@ -50,8 +50,10 @@
 //! [`release_at`]). It is installed automatically when it carries the mark for the minor line
 //! the running build is of ([`mark_address`]). A release without the mark is announced, and
 //! only at its second sighting ([`State::sight_unmarked`]): a release is the latest before its
-//! marks are uploaded. A release that failed to install is not tried again automatically
-//! ([`State::record_failure`]).
+//! marks are uploaded. A release that was fetched and refused is not tried again automatically
+//! ([`State::record_failure`]); one that could not be fetched, or was not installed for another
+//! reason a later day may not have, is tried at the next checks, [`MAX_TRIES`] times in all
+//! ([`State::record_try`]).
 
 use std::cmp::Ordering;
 use std::ffi::{OsStr, OsString};
@@ -92,6 +94,11 @@ pub const RELEASES_URL: &str = "https://github.com/KeiaiLab/SwarmOps/releases";
 /// that a build of that minor line may install the release automatically.
 pub const MARK_PREFIX: &str = "auto-update-from-";
 
+/// How many times a release is tried automatically when it could not be fetched, or was not
+/// installed for another reason a later day may not have: a dropped connection or a slow link
+/// passes, and a release that will never install is not downloaded every day for good.
+pub const MAX_TRIES: u32 = 3;
+
 /// The one receipt version this build reads and writes.
 const RECEIPT_VERSION: i64 = 1;
 
@@ -102,6 +109,7 @@ const AUTO_UPDATE_KEY: &str = "auto_update";
 /// The words a line of the lock file starts with.
 const SEEN: &str = "seen";
 const ANNOUNCED: &str = "announced";
+const TRIED: &str = "tried";
 const FAILED: &str = "failed";
 
 /// The words a note starts with.
@@ -621,6 +629,9 @@ pub struct State {
     seen: Option<Version>,
     /// `announced <release>`: the release an `available` note was written for.
     announced: Option<Version>,
+    /// `tried <release> <times>`: the release that could not be installed for a reason a
+    /// later day may not have, and how many times it was tried.
+    tried: Option<(Version, u32)>,
     /// `failed <release>`: the release that could not be installed.
     failed: Option<Version>,
     /// The lines of other words, as read: a later build's.
@@ -638,6 +649,17 @@ impl State {
                 SEEN => &mut state.seen,
                 ANNOUNCED => &mut state.announced,
                 FAILED => &mut state.failed,
+                TRIED => {
+                    let tried = rest.split_once(' ').and_then(|(release, times)| {
+                        let digits = times.bytes().all(|byte| byte.is_ascii_digit());
+                        let times = digits.then(|| times.parse::<u32>().ok()).flatten()?;
+                        Some((Version::parse(release)?, times))
+                    });
+                    if tried.is_some() {
+                        state.tried = tried;
+                    }
+                    continue;
+                }
                 _ => {
                     state.other.push(line.to_owned());
                     continue;
@@ -652,16 +674,20 @@ impl State {
 
     /// The file's content: a line for each word that names a release, then the lines kept.
     pub fn text(&self) -> String {
+        let line =
+            |word: &str, release: &Option<Version>| Some(format!("{word} {}\n", release.as_ref()?));
+        let tried = self
+            .tried
+            .as_ref()
+            .map(|(release, times)| format!("{TRIED} {release} {times}\n"));
         let named = [
-            (SEEN, &self.seen),
-            (ANNOUNCED, &self.announced),
-            (FAILED, &self.failed),
+            line(SEEN, &self.seen),
+            line(ANNOUNCED, &self.announced),
+            tried,
+            line(FAILED, &self.failed),
         ];
-        let named = named
-            .into_iter()
-            .filter_map(|(word, release)| Some(format!("{word} {}\n", release.as_ref()?)));
         let other = self.other.iter().map(|line| format!("{line}\n"));
-        named.chain(other).collect()
+        named.into_iter().flatten().chain(other).collect()
     }
 
     /// Records that `release`, the latest, carries no mark for this build's line, and gives
@@ -687,14 +713,32 @@ impl State {
         self.failed.as_ref() == Some(release)
     }
 
-    /// Records that `release` could not be installed.
+    /// Records that `release` could not be installed, for good: it is not tried again
+    /// automatically. The tries counted for it are forgotten.
     pub fn record_failure(&mut self, release: &Version) {
         self.failed = Some(release.clone());
+        self.tried = None;
     }
 
-    /// Forgets the failure, as an `update` the user ran does. Whether there was one.
+    /// Records one more try of `release` that did not install it, for a reason a later day
+    /// may not have, and says whether that was the last: the [`MAX_TRIES`]th, after which the
+    /// caller records the failure ([`State::record_failure`]). The tries of another release
+    /// count for nothing.
+    pub fn record_try(&mut self, release: &Version) -> bool {
+        let before = match &self.tried {
+            Some((tried, times)) if tried == release => *times,
+            _ => 0,
+        };
+        let times = before.saturating_add(1);
+        self.tried = Some((release.clone(), times));
+        times >= MAX_TRIES
+    }
+
+    /// Forgets the failure and the tries, as an `update` the user ran does, and an automatic
+    /// one that went well. Whether there was either.
     pub fn forget_failure(&mut self) -> bool {
-        self.failed.take().is_some()
+        let failed = self.failed.take().is_some();
+        self.tried.take().is_some() || failed
     }
 }
 
@@ -1439,6 +1483,57 @@ mod tests {
         // In any order, with blank lines; a word met twice says what its last line says.
         let mixed = State::parse("failed 0.11.1\n\nseen 0.12.0\nseen 0.13.0\nannounced 0.12.0");
         assert_eq!(mixed, state);
+
+        // The tries of a release: its version and how many.
+        let text = "seen 0.13.0\ntried 0.13.0 2\nfailed 0.11.1\n";
+        let state = State::parse(text);
+        assert_eq!(state.tried, Some((v("0.13.0"), 2)));
+        assert_eq!(state.text(), text);
+        for broken in [
+            "tried",
+            "tried 0.13.0",
+            "tried 0.13.0 x",
+            "tried x 2",
+            "tried 0.13.0 +2",
+        ] {
+            assert_eq!(State::parse(broken).tried, None, "{broken:?}");
+            assert_eq!(State::parse(broken).text(), "", "{broken:?}");
+        }
+    }
+
+    #[test]
+    fn a_release_that_could_not_be_fetched_is_tried_a_few_times() {
+        let release = v("0.13.0");
+        let mut state = State::default();
+
+        // 1. Each try is counted in the file; the last one says so.
+        for times in 1..MAX_TRIES {
+            let mut day = State::parse(&state.text());
+            assert!(!day.record_try(&release), "try {times}");
+            assert_eq!(day.text(), format!("tried 0.13.0 {times}\n"));
+            assert!(!day.has_failed(&release));
+            state = day;
+        }
+        assert!(state.record_try(&release), "the last try");
+
+        // 2. Recorded as failed, the tries are gone, and so is the failure once forgotten.
+        state.record_failure(&release);
+        assert_eq!(state.text(), "failed 0.13.0\n");
+        assert!(state.forget_failure());
+        assert_eq!(state, State::default());
+        assert!(!state.forget_failure());
+
+        // 3. Another release starts at one; tries alone are forgotten too.
+        assert!(!state.record_try(&release));
+        assert!(!state.record_try(&release));
+        assert!(!state.record_try(&v("0.14.0")));
+        assert_eq!(state.text(), "tried 0.14.0 1\n");
+        assert!(state.forget_failure());
+        assert_eq!(state.text(), "");
+
+        // 4. A count no file should hold does not wrap.
+        let mut full = State::parse(&format!("tried 0.13.0 {}\n", u32::MAX));
+        assert!(full.record_try(&release));
     }
 
     #[test]

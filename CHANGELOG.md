@@ -36,7 +36,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   gives a note still unprinted (`pending`); `--background` installs the latest release only when
   it holds the mark for the installed minor line (the file `auto-update-from-<major>.<minor>`,
   asked for by one more HEAD request), notes a release without the mark at its second sighting,
-  and does not try a release again that failed. It works only on an install with the installer's receipt, in a release's build: otherwise
+  does not try a release again that it downloaded and could not install, and tries one that
+  could not be downloaded at the next two checks before it counts it as failed. It works only on an install with the installer's receipt, in a release's build: otherwise
   `E_INVALID_ARG` with `details.reason` `no_receipt` (a package, an archive unpacked by hand) or
   `not_a_release_build` (a clone); also `receipt`, `exe_unknown` and `curl_missing`. A second
   update of the same install is `E_BUSY` (`details.reason` `update_running`); a releases page

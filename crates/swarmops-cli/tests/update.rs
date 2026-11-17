@@ -979,6 +979,106 @@ fn a_release_that_fails_in_the_background_is_not_tried_again() {
     assert_ne!(site.install.identity()[0].0, before[0].0);
 }
 
+/// One look by the run in the background of an old install, at a latest release that carries
+/// the mark.
+fn look_at_a_marked_release(site: &Site) -> Value {
+    site.latest_is(REAL);
+    site.mark_is(true);
+    let env = [(VERSION_HOOK, OLD), (AUTO_UPDATE, "on")];
+    site.run("so", &["update", "--background"], &env).ok()
+}
+
+/// A release whose files cannot be downloaded, as when a connection drops, is no release that
+/// failed: nothing is said, and the next day's look tries it again. One that can never be
+/// downloaded is tried three times, then remembered as failed and said once.
+#[test]
+fn a_release_that_cannot_be_fetched_is_tried_again_the_next_day() {
+    if !automatic_update_can_be_on() {
+        return;
+    }
+    let state = |site: &Site| site.install.read(LOCK_FILE).unwrap_or_default();
+
+    // 1. The marked release is not there to download: counted, and nothing said.
+    let site = Site::new();
+    let before = site.install.identity();
+    let first = look_at_a_marked_release(&site);
+    assert_eq!(first["updated"], false, "{first}");
+    assert!(first.get("pending").is_none(), "{first}");
+    assert!(!site.install.file(NOTE_FILE).exists());
+    assert_eq!(state(&site), format!("tried {REAL} 1\n"));
+    assert_eq!(site.install.identity(), before);
+    assert!(!site.release.downloads().is_empty(), "a download was tried");
+
+    // 2. The next look finds it: installed, and the try forgotten.
+    site.publish(REAL);
+    let second = look_at_a_marked_release(&site);
+    assert_eq!(second["updated"], true, "{second}");
+    assert_eq!(
+        second["pending"],
+        json!({"kind": "updated", "from": OLD, "to": REAL})
+    );
+    assert_eq!(state(&site), "");
+    assert_ne!(site.install.identity()[0].0, before[0].0);
+
+    // 3. A release that never comes: two tries say nothing, the third is the failure.
+    let site = Site::new();
+    let before = site.install.identity();
+    for times in 1..=2 {
+        let tried = look_at_a_marked_release(&site);
+        assert!(tried.get("pending").is_none(), "try {times}: {tried}");
+        assert_eq!(state(&site), format!("tried {REAL} {times}\n"));
+    }
+    let failed = look_at_a_marked_release(&site);
+    assert_eq!(failed["pending"], json!({"kind": "failed", "to": REAL}));
+    let note = site.install.read(NOTE_FILE).expect("a note");
+    assert!(
+        note.starts_with(&format!("failed {REAL} Cannot download ")),
+        "{note}"
+    );
+    assert_eq!(state(&site), format!("failed {REAL}\n"));
+
+    // 4. And then it is left: the latest release alone is asked for.
+    fs::remove_file(site.install.file(NOTE_FILE)).expect("the note was printed");
+    let asked = site.curl.calls().len();
+    let tried = site.release.downloads().len();
+    site.latest_is(REAL);
+    let env = [(VERSION_HOOK, OLD), (AUTO_UPDATE, "on")];
+    let left = site.run("so", &["update", "--background"], &env).ok();
+    assert!(left.get("pending").is_none(), "{left}");
+    assert_eq!(site.curl.calls().len(), asked + 1);
+    assert_eq!(site.release.downloads().len(), tried);
+    assert_eq!(site.install.identity(), before);
+}
+
+/// A second rename that fails leaves `swarmops` new and `so` as it was. The error says what to
+/// do before it names the file, so that a line cut short still says it.
+#[test]
+fn a_replacement_stopped_after_swarmops_says_first_to_update_again() {
+    let site = Site::new();
+    site.publish(REAL);
+    let before = site.install.identity();
+
+    // A directory that holds a file is in `so`'s place: no file can be renamed over it.
+    let so = site.install.file("so");
+    fs::remove_file(&so).expect("remove so");
+    fs::create_dir(&so).expect("a directory named so");
+    fs::write(so.join("kept"), "x").expect("a file in it");
+
+    site.latest_is(REAL);
+    let error = site.run("swarmops", &["update"], &[]).err("E_IO");
+    assert_eq!(error["exit"], 1);
+    assert_eq!(error["details"]["step"], "swap");
+    assert_eq!(error["details"]["path"], site.install.bin("so"));
+    let message = error["message"].as_str().expect("a message");
+    let first = "swarmops was replaced and so was not, so run update again: cannot replace ";
+    assert!(message.starts_with(first), "{message}");
+
+    let swarmops = fs::metadata(site.install.file("swarmops")).expect("swarmops");
+    assert_ne!(swarmops.ino(), before[0].0, "swarmops was replaced");
+    assert!(so.join("kept").is_file(), "so is as it was");
+    assert!(!site.install.file(STAGING_DIR).exists());
+}
+
 #[test]
 fn background_does_nothing_where_automatic_update_is_off() {
     let site = Site::new();

@@ -116,7 +116,8 @@ stand-ins on the testing host, and not yet run against GitHub.
 
 Exit 2 for `E_INVALID_ARG`, 4 for `E_BUSY` and `E_REMOTE_UNREACHABLE`, which can be run again,
 and 1 for `E_IO`. Up to and including `verify`, nothing was replaced, and the message says so.
-A `swap` that failed on `so` has replaced `swarmops`: run `update` again.
+A `swap` that failed on `so` has replaced `swarmops`, and its message starts by saying so: run
+`update` again.
 
 ### Automatic update's switch
 
@@ -160,13 +161,18 @@ missing or answers as another program, it stops there: it replaces no program wh
 cannot tell. When the release is newer than what is installed, and no older than the program
 that runs:
 
-1. A release that failed to install before is left alone, until an `update` you run goes well.
+1. A release remembered as failed is left alone, until an `update` you run goes well.
 2. One more HEAD request asks whether the release holds the file
    `auto-update-from-<major>.<minor>`, named for the minor line installed: the release's mark
    that a build of that line may install it unasked. GitHub sees the minor line in that address.
 3. **302**, the redirect to a file the release holds: the release is installed as above, with
-   three minutes for the installer. The note is `updated <from> <to>`, or, when it failed,
-   `failed <to> <the installer's last line>`, and the failure is remembered.
+   three minutes for the installer. The note is `updated <from> <to>`. A release that was
+   downloaded and refused, by the installer (a checksum that does not match, a host it has no
+   build for) or because a staged binary is not the release, is remembered as failed at once,
+   with the note `failed <to> <the installer's last line>`. One that could not be downloaded,
+   was stopped at the three minutes, or could not be renamed into place may go well another
+   day: the try is counted and nothing is said, the next day's check tries again, and the third
+   try that fails is remembered as the failure, with its note.
 4. **404**, no such file: the release is announced, not installed. The first time a release is
    seen unmarked, only that is remembered; the note `available <to>` is written the next time it
    is still unmarked, and once. A release is the latest before its marks are uploaded.
@@ -223,7 +229,7 @@ note. A directory the caller cannot write is never claimed in, so nothing is sta
 | File | What it is |
 | --- | --- |
 | `.swarmops-receipt` | The installer's receipt: `receipt = 1` and `auto_update = true` or `false`. |
-| `.swarmops-update.lock` | The lock, and what the background run remembers: a line each for the release last `seen` unmarked, `announced` and `failed`. Its modification time is when a check was last claimed. |
+| `.swarmops-update.lock` | The lock, and what the background run remembers: a line each for the release last `seen` unmarked, `announced`, `tried` (with how many times) and `failed`. Its modification time is when a check was last claimed. |
 | `.swarmops-update.note` | One line: the note a background run left, which `--status` gives as `pending`. |
 | `.swarmops-update.d` | The staging directory, there only while an update runs; one left behind is removed by the next. |
 

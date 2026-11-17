@@ -775,9 +775,12 @@ SwarmOps' own network code:
   lock, which a command's claim holds for an instant.
 - **What a background run leaves** is the note, one line (`updated <from> <to>`,
   `available <to>`, `failed <to> <why>`), and in the lock file a line each for the release
-  last `seen` unmarked, `announced` and `failed`: a release without a mark is announced at its
-  second sighting, since every release is the latest before its marks are uploaded, and one
-  that failed to install is not tried again until an `update` someone runs goes well.
+  last `seen` unmarked, `announced`, `tried` and `failed`: a release without a mark is
+  announced at its second sighting, since every release is the latest before its marks are
+  uploaded. One that was downloaded and refused (its checksum, the host, the staged binaries)
+  is `failed` at once and not tried again until an `update` someone runs goes well. One that
+  could not be downloaded, or was stopped at the deadline, is `tried` again at the next
+  checks and says nothing, and is `failed` at its third try.
 
 **The mirror.** `git/mirror.git` is a cache that SwarmOps alone writes: fetched packs land in it,
 the import reads it (`GixSource`), and a push's export is written into it (`GixSink`). A remote's

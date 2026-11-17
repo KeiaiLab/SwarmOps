@@ -1303,7 +1303,11 @@ left).
   needs a newer glibc than that installer knows of, that holds no archive for the host, or
   that changed the archive's layout fails there: the background run notes the failure, does
   not try that release again, and the host waits for `so update`, which fails the same way, or
-  for the installer from get.swarmops.cc. *Documented
+  for the installer from get.swarmops.cc. A download that fails, or does not end within the
+  background run's three minutes, is not such a failure: it is tried again at the next day's
+  check, in silence, and counts as one only at its third try. A host whose link never
+  downloads the archive in three minutes therefore ends there too, after three days, and
+  `so update`, which allows ten minutes, is what installs the release. *Documented
   ([the versioning policy](policies/versioning-and-stability.md#what-automatic-update-crosses)
   lists what a release must keep). Found: the update design's review.*
 - **The update's tests have run on macOS only.** The tests of `update` and of automatic update
