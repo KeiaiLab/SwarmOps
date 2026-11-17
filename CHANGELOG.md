@@ -109,6 +109,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   and the push hooks' pkt-line, proc-receive and pre-receive input, with seed corpora;
   `swarmops-ops` gains a `fuzzing` feature that exposes the two private parsers to them (issue #36).
 
+- The workspace builds and its test suite passes on macOS (aarch64, APFS), M12's first step. A
+  store's volume is checked there as on Linux: APFS and journaled HFS+ are taken, any other volume
+  is refused with `E_UNSUPPORTED_FS` before a file is made. No release ships a macOS build yet.
+
 ### Changed
 
 - `git import` and `git export` refuse an empty `git_path` with `E_INVALID_ARG`
@@ -203,6 +207,15 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Fixed
 
+- A `serve` that refuses a request writes its error envelope to stderr before the refusal its
+  client reads. A git that ends the connection on reading the refusal (2.54 does) signals what
+  serves it, which without an sshd between them is `serve` itself, and the envelope could be lost.
+- A push whose ref another push took is reported as stale with a git that updates a push's refs
+  in one batch (2.54 does), which words the refusal `incorrect old value provided`; it could be
+  reported as declined.
+- On a volume that folds case, a tracked file renamed by case alone, or under a directory that
+  was, reads as deleted under its old name and added under its new one; the old name read as
+  still present, and landing the rename was refused as a case collision (`E_WS_UNPORTABLE`).
 - A fetch whose serving binary was replaced while `serve` ran reads `serve`'s refusal line again
   on a loaded host, where it read `bad pack header`: the pack-objects hook without its program
   now reads what `upload-pack` feeds it before it exits, so `upload-pack` is not killed by
