@@ -6,11 +6,12 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
-use clap::{Arg, ArgAction, CommandFactory};
+use clap::{Arg, CommandFactory};
 use swarmops_api::ErrorCode;
 
 use super::{cli_page, command_page, limits, schema_types};
 use crate::cli::{self, Cli};
+pub(super) use crate::help::{option_form, value_names};
 
 /// The variable that makes `regen_reference` write the pages.
 const REGEN_VAR: &str = "SWARMOPS_REGEN_REFERENCE";
@@ -305,47 +306,6 @@ fn is_bool(arg: &Arg) -> bool {
         .map(|value| value.get_name().to_owned())
         .collect();
     names == ["true", "false"]
-}
-
-/// How an option is written: `-n, --limit <N>`, `--pretty[=<BOOL>]`, `--path <P>...`.
-pub(super) fn option_form(arg: &Arg) -> String {
-    let mut form = String::new();
-    if let Some(short) = arg.get_short() {
-        let _ = write!(form, "-{short}, ");
-    }
-    if let Some(long) = arg.get_long() {
-        let _ = write!(form, "--{long}");
-    }
-
-    // A flag takes no value.
-    if !arg.get_action().takes_values() {
-        return form;
-    }
-    let value = format!("<{}>", value_names(arg).join(" "));
-    let optional = arg.get_num_args().is_some_and(|n| n.min_values() == 0);
-    match (optional, arg.is_require_equals_set()) {
-        (true, true) => {
-            let _ = write!(form, "[={value}]");
-        }
-        (true, false) => {
-            let _ = write!(form, " [{value}]");
-        }
-        (false, _) => {
-            let _ = write!(form, " {value}");
-        }
-    }
-    if matches!(arg.get_action(), ArgAction::Append) {
-        form.push_str("...");
-    }
-    form
-}
-
-/// An argument's value names, or its id in capitals when it names none.
-pub(super) fn value_names(arg: &Arg) -> Vec<String> {
-    match arg.get_value_names() {
-        Some(names) => names.iter().map(ToString::to_string).collect(),
-        None => vec![arg.get_id().as_str().to_uppercase()],
-    }
 }
 
 /// An argument's default, as a table cell: empty when it has none.

@@ -1,0 +1,91 @@
+---
+source: crates/swarmops-cli/tests/help.rs
+expression: screen
+---
+Source control for coding-agent swarms
+
+Usage: so [OPTIONS] <COMMAND>
+
+Start here:
+  init        Create a store in a directory
+  clone       Make a store from a git remote
+  info        Describe the store
+  whoami      Show the identity your changes carry
+
+Record and land changes:
+  ws          Work in a directory of your own: edit, commit, land
+  commit      Record a changeset from a list of changes
+  land        Merge a change onto a ref and publish it there
+  land-check  Say what landing changes would come to, writing nothing
+  land-group  Land several changes in order as one operation
+  rebase      Merge a change onto a ref's head, moving no ref
+  revert      Take back a changeset or a range by landing its inverse
+  blob        Store content as a blob for a commit to name
+
+Read history:
+  log         List history along first parents, newest first
+  show        Show one changeset
+  diff        List the files that differ between two revisions
+  cat         Print one file at a revision, or part of it
+  ls          List one directory at a revision
+  history     List the changesets that changed a path
+  ancestry    Compare two revisions' ancestry
+  merge-base  Find where a revision forks from another
+  resolve     Name the changeset a revision names
+
+Refs and operations:
+  ref         List refs, or move one by compare-and-swap
+  op          List the store's operations, or undo one
+
+Git and remotes:
+  git         Bring history in from git, or send it back
+  remote      Add, remove or list the store's git remotes
+  fetch       Fetch a git remote into the store
+  push        Send a ref to a git remote's branch, never by force
+  sync        Land main's unpublished changes on a remote, and push
+  auth        Keep, list or remove your logins, or hand one to git
+
+Store upkeep:
+  verify      Check the store's consistency
+  gc          Remove the store's leftovers, never an object
+  repair      Rebuild what the journal can rebuild, then verify
+  upgrade     Move the store to the latest format (irreversible)
+
+Agents and servers:
+  mcp         Serve the store's operations to an agent over MCP
+  serve       Serve stores to stock git over ssh or HTTP
+  derive      Derive new changesets' derived values ahead of readers
+  schema      Print the JSON Schema of the request and response types
+
+Examples:
+  $ export SWARMOPS_REPO="$PWD/acme" SWARMOPS_AGENT=person/ada
+  $ so init acme
+  $ so commit -m first --changes changes.json --advance main
+  $ so ws create fix-1
+  $ so ws commit --ws fix-1 -m "Fix the typo"
+  $ so ws land --ws fix-1
+  $ so --human log
+
+Output:
+  Every command prints one JSON envelope on stdout, or with --human a short
+  text, and exits 0 or with its error's code. mcp, serve, derive --follow and
+  auth git-credential print something else there.
+
+Learn more:
+  so <command> --help   A command's arguments, options and long help
+  Quick start           https://swarmops.cc/docs/guides/quick-start
+  Every command         https://swarmops.cc/docs/reference/cli
+  Envelope, exit codes  https://swarmops.cc/docs/develop/cli-scripting
+  Error codes           https://swarmops.cc/docs/reference/errors
+
+Options:
+      --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
+      --as <AGENT>       The agent to act as, <family>/<instance> (default:
+                         $SWARMOPS_AGENT)
+      --json             Print the JSON envelope: the default, unless
+                         $SWARMOPS_FORMAT is human
+      --human            Print a short text rendering instead of JSON
+      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
+                         terminal)
+  -h, --help             Print help
+  -V, --version          Print version

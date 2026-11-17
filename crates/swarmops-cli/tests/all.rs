@@ -24,6 +24,7 @@ mod git;
 mod git_text;
 mod github_live;
 mod gitlike;
+mod help;
 mod intake_perf;
 mod landing;
 mod mcp;

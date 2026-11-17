@@ -48,6 +48,7 @@ mod context;
 mod entry;
 mod gitlike;
 mod gitshape;
+mod help;
 mod mcp;
 mod output;
 #[cfg(test)]

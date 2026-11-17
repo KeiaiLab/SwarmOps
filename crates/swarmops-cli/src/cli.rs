@@ -20,7 +20,7 @@ use swarmops_api::{DEFAULT_BLOB_GET_MAX_BYTES, DEFAULT_CHECK_TIMEOUT_S, DEFAULT_
 use swarmops_api::{DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_CONFLICT_BYTES};
 use swarmops_api::{RefTxnMoveIn, Rev};
 
-use crate::output;
+use crate::{help, output};
 
 /// The envelope's `op` for a command line that names no operation.
 pub const NO_OP: &str = "swarmops";
@@ -326,8 +326,11 @@ A connection whose store has not moved since serve.git's last export takes no lo
 const SERVE_USER_FAMILY_HELP: &str = "With --cgi: name the caller <FAMILY>/$REMOTE_USER, the user \
 the web server authenticated";
 
-/// Source control for coding-agent swarms. Every command but mcp, serve, derive --follow and
-/// auth git-credential prints one JSON envelope on stdout.
+/// Source control for coding-agent swarms.
+///
+/// Every command but mcp, serve, derive --follow and auth git-credential prints one JSON
+/// envelope on stdout. The program's own help screen is laid out by the `help` module, which
+/// shows the first line of this and says the rest under its own headings.
 #[derive(Parser, Debug)]
 #[command(name = "swarmops", version = crate::version::version())]
 pub struct Cli {
@@ -1715,9 +1718,10 @@ pub fn parse(args: &[OsString]) -> Parsed {
     // Parsing gives `grammar` the name the line invokes the program by, for its usage lines: the
     // file name of the first word, if it is UTF-8. Without one, clap's subcommand usage lines and
     // messages name no program (`Usage: ref set …`), so name it `swarmops` here.
-    let mut grammar = command();
-    if args
-        .first()
+    // The help screens the CLI lays out itself name the program the same way in their examples.
+    let first = args.first().map(OsString::as_os_str);
+    let mut grammar = help::shaped(command(), help::invoked(first));
+    if first
         .and_then(|first| Path::new(first).file_name()?.to_str())
         .is_none()
     {
