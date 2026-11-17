@@ -21,11 +21,11 @@
 //! ```
 //!
 //! `version` is read first, and a file of another version is refused, never rewritten. `host` is
-//! the key a login is looked up by: a [`host_key`], so `host` or `host:port` in lower case, once
-//! in the file. `provider` is an open string: `gh` is the one this build knows ([`Provider`]). An
-//! entry of another provider needs only its `provider` and its `host`; it is listed, and its
-//! token is never used. `source` says how the token was obtained and `scopes`, a list of strings,
-//! what the provider granted; a token read from stdin has no known scopes.
+//! the key a login is looked up by: a [`transport::host_key`], so `host` or `host:port` in lower
+//! case, once in the file. `provider` is an open string: `gh` is the one this build knows
+//! ([`Provider`]). An entry of another provider needs only its `provider` and its `host`; it is
+//! listed, and its token is never used. `source` says how the token was obtained and `scopes`,
+//! a list of strings, what the provider granted; a token read from stdin has no known scopes.
 //!
 //! Unlike the store's `remotes.toml`, a rewrite keeps what this build does not know: every
 //! top-level key and table, every key of an entry it does not replace, and every entry of
@@ -51,7 +51,7 @@
 //! | `auth_file_kind` | is a symbolic link, or not a regular file, or was replaced by another file each time it was opened |
 //! | `auth_file_mode` | can be read or written by its group or by others |
 //! | `auth_file_version` | names no `version`, or not this build's |
-//! | `auth_file` | holds more than 64 KiB, is not UTF-8 or not TOML, or holds an entry that is not a login: no `provider` or `host`, a host met twice, or, for a provider this build knows, a host that is no [`host_key`], a token that is none, or a `source` or `scopes` of another shape |
+//! | `auth_file` | holds more than 64 KiB, is not UTF-8 or not TOML, or holds an entry that is not a login: no `provider` or `host`, a host met twice, or, for a provider this build knows, a host that is no [`transport::host_key`], a token that is none, or a `source` or `scopes` of another shape |
 //!
 //! A file that cannot be read at all is `E_IO`. No message quotes the file's content.
 //!
@@ -72,7 +72,7 @@ use std::os::unix::fs::MetadataExt as _;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::Value;
 use swarmops_api::{AuthEntry, AuthLogin, AuthLogout, AuthStatus, ErrorCode, OpError};
-use swarmops_git::transport::{StoredToken, host_key};
+use swarmops_git::transport::{self, StoredToken};
 use swarmops_store::{FsOps as _, RealFs};
 
 use crate::{error, identity, userdir};
@@ -131,7 +131,7 @@ impl Provider {
         }
     }
 
-    /// The host a login with the provider is for, as a [`host_key`]: `github.com`.
+    /// The host a login with the provider is for, as a [`transport::host_key`]: `github.com`.
     pub const fn host(self) -> &'static str {
         match self {
             Provider::Gh => "github.com",
@@ -293,9 +293,9 @@ pub fn logout(file: Option<&Utf8Path>, provider: Provider) -> Result<AuthLogout,
     Ok(out)
 }
 
-/// The token of the login the login file `file` keeps for `host`, a [`host_key`]: the entry
-/// whose `host` is exactly `host`, when its provider is one this build knows. `None` when there
-/// is no file, no login for that host, or a login of another provider, whose token is never
+/// The token of the login the login file `file` keeps for `host`, a [`transport::host_key`]: the
+/// entry whose `host` is exactly `host`, when its provider is one this build knows. `None` when
+/// there is no file, no login for that host, or a login of another provider, whose token is never
 /// used. No other host's token is given: not a subdomain's, not another port's.
 ///
 /// `E_INVALID_ARG` for a file this build does not read (`details.reason` `auth_file_kind`,
@@ -516,7 +516,7 @@ fn listed(entry: &toml::Table) -> Result<AuthEntry, &'static str> {
     }
     let keyed = [true, false]
         .into_iter()
-        .any(|https| host_key(host, https).as_deref() == Some(host));
+        .any(|https| transport::host_key(host, https).as_deref() == Some(host));
     if !keyed {
         return Err("names a host that is no host or host:port in lower case");
     }

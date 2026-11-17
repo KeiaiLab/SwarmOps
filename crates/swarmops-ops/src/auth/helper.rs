@@ -8,8 +8,8 @@
 //!
 //! 1. `protocol` is `https`, or `http` with a `host` that is a literal loopback address (the
 //!    rule a remote's URL is held to).
-//! 2. `host`, as a [`host_key`] under that protocol, equals the `host` of a login whose provider
-//!    this build knows: the exact-host rule of the remote commands (`lookup`), so no
+//! 2. `host`, as a [`transport::host_key`] under that protocol, equals the `host` of a login
+//!    whose provider this build knows: the exact-host rule of the remote commands (`lookup`), so no
 //!    subdomain's login and no other port's is given.
 //!
 //! Anything else has no answer: another protocol, a host with no login, a request without the
@@ -30,7 +30,7 @@ use std::io::{self, Write};
 use std::net::IpAddr;
 
 use swarmops_api::OpError;
-use swarmops_git::transport::host_key;
+use swarmops_git::transport;
 
 use super::file;
 
@@ -92,8 +92,8 @@ pub fn git_credential(
     Ok(token.map(|token| HelperAnswer { token }))
 }
 
-/// The login host `request` asks a credential for: its `host` as a [`host_key`] under its
-/// `protocol`. `None` when either key is missing or not UTF-8, the protocol is not `https` or
+/// The login host `request` asks a credential for: its `host` as a [`transport::host_key`] under
+/// its `protocol`. `None` when either key is missing or not UTF-8, the protocol is not `https` or
 /// `http`, the host has no key, or the protocol is `http` and the host no loopback address.
 fn asked_host(request: &[u8]) -> Option<String> {
     let (mut protocol, mut host) = (None, None);
@@ -117,11 +117,11 @@ fn asked_host(request: &[u8]) -> Option<String> {
         b"http" => false,
         _ => return None,
     };
-    let key = host_key(std::str::from_utf8(host?).ok()?, https)?;
+    let key = transport::host_key(std::str::from_utf8(host?).ok()?, https)?;
     (https || is_loopback(&key)).then_some(key)
 }
 
-/// Whether the host of `key`, a [`host_key`], is a literal loopback address.
+/// Whether the host of `key`, a [`transport::host_key`], is a literal loopback address.
 fn is_loopback(key: &str) -> bool {
     let address = match key.strip_prefix('[') {
         Some(rest) => rest.split(']').next().unwrap_or_default(),
