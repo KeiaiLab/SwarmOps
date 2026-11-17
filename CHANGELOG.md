@@ -138,6 +138,17 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - The workspace builds and its test suite passes on macOS (aarch64, APFS), M12's first step. A
   store's volume is checked there as on Linux: APFS and journaled HFS+ are taken, any other volume
   is refused with `E_UNSUPPORTED_FS` before a file is made. No release ships a macOS build yet.
+- The installer (`curl -fsSL https://get.swarmops.cc/install.sh | bash`) installs on an Apple
+  silicon Mac: the `aarch64-apple-darwin` archive, checked against `SHA256SUMS`, into
+  `~/.local/bin`, with zsh's and login bash's startup files in the `PATH` hint; `--version`, `--dir`, an update and
+  `--uninstall` work there. An Intel Mac is refused. On a Mac, a release whose `SHA256SUMS` lists
+  no macOS archive, as 0.11.0 and every release before it, ends with
+  `SwarmOps X.Y.Z has no macOS build (its SHA256SUMS lists no …)`, and installs nothing. On Linux nothing changes but `--help`'s platform paragraph; any other system
+  now reads `SwarmOps runs on Linux and macOS; Windows is next.`
+- The release workflow builds `swarmops` and `so` for `aarch64-apple-darwin` on the maintainers'
+  Mac (a self-hosted runner labelled `macos-local`, which the release now needs), for macOS 11 or
+  newer, smoke-runs them and publishes `swarmops-<version>-aarch64-apple-darwin.tar.gz` with the
+  Linux archives, in `SHA256SUMS`. `THIRD-PARTY-LICENSES` gains `errno`, compiled for macOS only.
 
 ### Changed
 

@@ -144,7 +144,9 @@ Each message below is one the script prints; `X`, `V` and `DIR` stand for what i
 | --- | --- | --- |
 | `Unknown option 'X'; see --help.` (exit 2) | A misspelt option. | `… \| bash -s -- --version 0.1.0` |
 | `X needs a value; see --help.` (exit 2) | `--version` or `--dir` last on the line. | Give the value: `--dir ~/bin`. |
-| `SwarmOps runs on Linux today; macOS and Windows are next.` then `This system is X.` | Not Linux. | No release build runs there yet. |
+| `SwarmOps runs on Linux and macOS; Windows is next.` then `This system is X.` | Neither Linux nor macOS. | No release build runs there yet. |
+| `SwarmOps V has no macOS build (its SHA256SUMS lists no swarmops-V-aarch64-apple-darwin.tar.gz): nothing was installed. Releases up to 0.11.0 hold Linux builds only.` | A Mac, and a release whose `SHA256SUMS` has no line for the macOS archive: one from before the macOS build. | No release holds a macOS build yet; the first one after 0.11.0 is to. |
+| `No release build runs on an Intel Mac (x86_64): the macOS build is for Apple silicon (arm64) only.` | A Mac with an Intel CPU. | No release build runs there. |
 | `No release build runs on X, only on x86_64 and aarch64.` | Another CPU architecture. | Build from source ([Install](guides/install.md#how-do-i-build-from-source)). |
 | `This system's C library is musl; …` | Alpine and other musl systems. | Build from source. |
 | `This system has glibc V; the release binaries need 2.34 or newer.` | An older distribution. | Build from source, or a newer host. |

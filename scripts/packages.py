@@ -336,8 +336,10 @@ def read_archive(path: Path) -> Release:
                    license_expression(notices, target))
 
 
-# THIRD-PARTY-LICENSES lists each crate as `<name> <version>[ (build)][ (<target> only)]:
-# <expression>; used under <license> [n]...`; a (build) crate is not in the binaries.
+# THIRD-PARTY-LICENSES lists each crate as `<name> <version>[ (build)][ (<targets> only)]:
+# <expression>; used under <license> [n]...`; a (build) crate is not in the binaries, and a
+# (<targets> only) crate is in the binaries of the targets it names alone: one triple, or several
+# separated by `, ` once the release has more than two targets.
 CRATE_LINE = re.compile(r"\S+ \S+(?P<marks>(?: \([^)]+\))*): [^;]+; used under (?P<used>.+?) \[")
 
 
@@ -350,8 +352,11 @@ def license_expression(notices: str, target: Target) -> str:
         if match is None:
             continue
         crates += 1
-        marks = match["marks"]
-        if "(build)" in marks or (" only)" in marks and f"({target.triple} only)" not in marks):
+        marks = re.findall(r"\(([^)]+)\)", match["marks"])
+        if "build" in marks:
+            continue
+        only = [mark.removesuffix(" only").split(", ") for mark in marks if mark.endswith(" only")]
+        if any(target.triple not in triples for triples in only):
             continue
         licenses.update(match["used"].split(" AND "))
     if crates == 0:

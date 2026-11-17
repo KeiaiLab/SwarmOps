@@ -4,7 +4,8 @@ After this page `swarmops` and `so` run on a host, and you can move the host and
 new release.
 
 **You need:** SwarmOps 0.2.0 or newer for the installer, 0.8.0 for the packages; Linux with glibc
-2.34 or newer (`ldd --version`); git for a clone (`git --version`); no prior page.
+2.34 or newer (`ldd --version`), or a Mac (below); git for a clone (`git --version`); no prior
+page.
 
 Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages).
@@ -14,6 +15,11 @@ Commands and outputs here follow the
 - **Linux.** SwarmOps is built and tested on x86_64 Linux
   ([platforms](../policies/msrv-and-platforms.md)). The release builds run on x86_64 and aarch64
   Linux with glibc 2.34 or newer.
+- **Or macOS on Apple silicon**, macOS 11 or newer, from the first release after 0.11.0: no
+  release holds a macOS build yet, and until one does a Mac installs
+  [from a clone](#install-from-a-clone). The installer and the archive are the ways there; the
+  packages are Linux's, and there is no build for an Intel Mac
+  ([Install, On a Mac](../guides/install.md#on-a-mac)).
 - **git** on the host, for `git clone` of this repository, and 2.39 or later for a store's git
   remote: `swarmops clone`, `fetch`, `push` and `sync` run it. `swarmops git import` and
   `swarmops git export` read and write git repositories themselves.
@@ -39,8 +45,9 @@ curl -fsSL https://get.swarmops.cc/install.sh | bash
 `scripts/install.sh`, which swarmops.cc serves, downloads the latest release's archive for this
 host's target, checks it against the release's `SHA256SUMS`, and puts `swarmops` and `so` in
 `~/.local/bin`, or `/usr/local/bin` when run as root; nothing is installed on a mismatch. It
-refuses a host the release builds do not run on (not Linux, not x86_64 or aarch64, musl, or
-glibc older than 2.34) before it downloads anything. Each binary is written under a temporary
+refuses a host the release builds do not run on (neither Linux nor macOS; on Linux, not x86_64 or
+aarch64, musl, or glibc older than 2.34; an Intel Mac) before it downloads anything, and on a Mac
+a release that holds no macOS archive, as 0.11.0 and older do not. Each binary is written under a temporary
 name in the directory and renamed into place, so an interrupted run leaves the old binary, never
 half a new one.
 
@@ -155,7 +162,10 @@ From v0.1.0 on, each release on the
 target, `swarmops-<version>-x86_64-unknown-linux-gnu.tar.gz` and
 `swarmops-<version>-aarch64-unknown-linux-gnu.tar.gz` (`swarmops`, `so`, the license, the
 third-party licenses, the README and the changelog), and a `SHA256SUMS` file to check them
-against. The binaries need glibc 2.34 or newer. On glibc 2.34-2.38 hosts (Ubuntu 22.04, Debian 12,
+against. From the first release after 0.11.0 on, the release workflow adds
+`swarmops-<version>-aarch64-apple-darwin.tar.gz` for Apple silicon Macs
+([checking it on a Mac](../guides/install.md#how-do-i-check-a-release-archive-by-hand)). The Linux
+binaries need glibc 2.34 or newer. On glibc 2.34-2.38 hosts (Ubuntu 22.04, Debian 12,
 RHEL 9) every start of the release `swarmops` and `so` binaries prints one `ld.so` line on stderr,
 `weak version 'GLIBC_2.39' not found (required by …)`; exit codes, stdout envelopes and the MCP
 protocol are unaffected, and on glibc 2.39 nothing is printed. [RELEASE.md](../../RELEASE.md) has
@@ -283,5 +293,5 @@ never changes: a changeset's id is the same under every `FORMAT`.
 
 **Next:** [Stores](stores.md): choose where a store lives, and create it.
 
-- [Install SwarmOps on Linux](../guides/install.md): pinning, the packages, checks by hand and what
+- [Install SwarmOps on Linux and macOS](../guides/install.md): pinning, the packages, checks by hand and what
   the installer's errors mean.

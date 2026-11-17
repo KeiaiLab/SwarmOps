@@ -1151,6 +1151,16 @@ left).
 
 ## Platforms
 
+- **macOS: Apple silicon only, in no release yet, and outside CI.** The workspace builds and its
+  test suite passes on macOS (aarch64, APFS), the installer takes an Apple silicon Mac, and the
+  release workflow builds, smoke-runs and packs `aarch64-apple-darwin` on the maintainers' Mac;
+  but 0.11.0 and older hold Linux archives only, so the installer has nothing to install there
+  until the next release, and that release waits on a self-hosted runner labelled `macos-local`.
+  No workflow runs `just check` on macOS, which is M12's exit criterion. The binaries are built
+  for macOS 11 or newer and were run on macOS 27 only. There is no build for an Intel Mac
+  (`x86_64-apple-darwin`): the installer refuses one. The binaries carry the linker's ad-hoc
+  signature, no Developer ID signature and no notarization. No `.deb`, `.rpm` or Homebrew formula
+  is made for macOS. *Target: M12. Found: the macOS install work.*
 - **Directory fsync failures are assumed fail-stop.** On ext4 with a journal, XFS and btrfs a
   failed directory fsync makes every later sync fail until the filesystem is mounted again, so a
   later sync that succeeds covers the entries made before it (storage spec §2 rule 5). ext4

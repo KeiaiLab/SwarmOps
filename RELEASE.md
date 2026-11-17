@@ -12,9 +12,11 @@ check below passes, and nothing otherwise.
 
 ## What the release workflow does
 
-On a pushed `v*` tag, with no secret but each job's own token, on the maintainers' own host:
-every job runs on the self-hosted runners labelled `swarmops-local` that run CI, none on
-GitHub's hosted runners.
+On a pushed `v*` tag, with no secret but each job's own token, on the maintainers' own hosts:
+every job runs on the self-hosted runners labelled `swarmops-local` that run CI, but the macOS
+build, which runs on the maintainers' Mac, on a self-hosted runner labelled `macos-local`; none
+runs on GitHub's hosted runners. That Mac's runner must be registered and online: until it is,
+the macOS build waits, and nothing is published without it.
 
 1. **Checks the tag** (job `tag, version and notes`): the tag is `v` and the workspace version of
    `Cargo.toml` (`v0.1.0` for `version = "0.1.0"`); `CHANGELOG.md` has a non-empty
@@ -26,7 +28,7 @@ GitHub's hosted runners.
 2. **Runs the release gate** (job `just check`): `just check` on the tagged commit, with the tools
    and versions of CI's `check` job but without its cache or the runner's target directory, so
    that it builds from clean.
-3. **Builds the binaries** (job `build <target>`, one per target): `swarmops` and `so` with
+3. **Builds the binaries** (job `build <target>`, one per Linux target): `swarmops` and `so` with
    `cargo build --release --locked` on the pinned toolchain, without the `test-hooks` feature, for
    `x86_64-unknown-linux-gnu`, natively, and `aarch64-unknown-linux-gnu`, cross-compiled with
    Ubuntu's aarch64 GCC, each inside an `ubuntu:24.04` container pinned by digest (glibc 2.39),
@@ -40,7 +42,25 @@ GitHub's hosted runners.
    unless the archive holds exactly these files. `THIRD-PARTY-LICENSES` gives each third-party
    crate compiled into the binaries with its license and the license texts; it is committed, and
    `just check`, which the release gate runs, fails when it no longer matches `Cargo.lock`.
-4. **Makes and installs the packages** (job `packages <target>`, one per target):
+
+   The macOS build (job `build aarch64-apple-darwin`) is the same build for
+   `aarch64-apple-darwin`, Apple silicon, natively on the maintainers' Mac and in no container:
+   the pinned toolchain with that Mac's Xcode command line tools as linker and C compiler, into a
+   target directory of its own, emptied first. Its cargo home is a directory of the run too,
+   emptied first, so the crates are downloaded afresh and nothing under `~/.cargo` is read; the
+   job fails when a `.cargo/config.toml` lies above the workspace or the runner's environment
+   sets `RUSTFLAGS`, `RUSTC_WRAPPER`, `RUSTUP_TOOLCHAIN` or a `CARGO_*` variable. The toolchain
+   itself is that Mac's rustup's, the pinned version. `MACOSX_DEPLOYMENT_TARGET=11.0` pins the oldest
+   macOS the binaries start on. Each binary must be for arm64 alone, link against nothing outside
+   `/usr/lib` and `/System/Library` (`otool -L`), name macOS 11.0 as its minimum
+   (`otool -l`, `LC_BUILD_VERSION`), carry the linker's ad-hoc signature (`codesign --verify`),
+   print the tag's version, and pass the Linux builds' store test. It is packed into
+   `swarmops-X.Y.Z-aarch64-apple-darwin.tar.gz` with the Linux archives' layout by Python's
+   `tarfile`, macOS's `tar` having no option to sort or to set owners and dates: entries in byte
+   order of their names, owned by 0:0, dated at the tagged commit, with fixed modes, and a gzip
+   header without name or time. No Intel (`x86_64-apple-darwin`) build is made, and no package:
+   the `.deb` and `.rpm` are Linux's.
+4. **Makes and installs the packages** (job `packages <target>`, one per Linux target):
    [`scripts/packages.py`](scripts/packages.py) makes `swarmops_X.Y.Z_<arch>.deb` and
    `swarmops-X.Y.Z-1.<arch>.rpm` (`amd64` and `x86_64`, `arm64` and `aarch64`) from the target's
    archive alone, checked against its SHA-256 first: the archive's binaries, byte for byte, in
@@ -63,7 +83,8 @@ GitHub's hosted runners.
 5. **Publishes** (job `publish the release`, the only one with a write permission,
    `contents: write`, and only for a pushed tag): checks each archive and package against the
    SHA-256 its job wrote, writes `SHA256SUMS`, and creates the release `vX.Y.Z`, titled
-   `SwarmOps X.Y.Z`, with the archives, the packages, `SHA256SUMS` and the notes. A version with a
+   `SwarmOps X.Y.Z`, with the three archives (two for Linux, one for macOS), the packages,
+   `SHA256SUMS` and the notes. A version with a
    pre-release part, such as `0.2.0-rc.1`, is published as a pre-release; its packages carry the
    version as `0.2.0~rc.1`, which `dpkg` and `rpm` order before `0.2.0`, and their file names keep
    `0.2.0-rc.1`.
@@ -72,7 +93,8 @@ GitHub's hosted runners.
 --repo KeiaiLab/SwarmOps`: it builds, smoke-runs, packs, makes the packages of and installs them for
 the workspace version of the branch's commit, and publishes nothing: `publish` runs for a pushed
 `v*` tag only, and the tag's checks and `just check` (which CI runs on every push) are skipped. The
-run's artifacts hold its archives and packages for 14 days.
+run's artifacts hold its archives and packages for 14 days. The macOS build is part of a rehearsal,
+so one shows whether the Mac's runner is there before a tag is pushed.
 
 Like CI, the workflow pins every action by commit, starts from `permissions: {}`, keeps no
 credentials in its checkouts, and CI's zizmor job audits it. The container images it builds and
@@ -91,11 +113,16 @@ installs the same tool versions as `ci.yml`'s: move them together.
   archives with `actions/attest-build-provenance`, which needs `id-token: write` and
   `attestations: write` there too, and step 9 below gains
   `gh attestation verify <archive> --repo KeiaiLab/SwarmOps`.
-- **Linux today (x86_64 and aarch64, glibc 2.34 or newer); macOS and Windows are milestone M12,
-  developed separately.** The aarch64 binaries are
-  cross-compiled and only smoke-tested, under QEMU; the test suite runs on x86_64
-  ([docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md)). There is no
-  macOS, Windows or static (musl) build.
+- **Linux (x86_64 and aarch64, glibc 2.34 or newer) and, from the first release after 0.11.0,
+  macOS on Apple silicon; Windows is the rest of milestone M12.** The aarch64 Linux binaries are
+  cross-compiled and only smoke-tested, under QEMU; the test suite runs on x86_64 Linux in CI
+  ([docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md)). The macOS
+  binaries are built and smoke-tested on the maintainers' Mac, where no workflow runs
+  `just check` yet, and they are signed ad hoc by the linker, with no Developer ID and no
+  notarization, which Gatekeeper asks of a file that carries its quarantine mark, as a
+  browser's download does; a download by `curl`, the installer's, carries none. There is no
+  Intel Mac, Windows or static (musl) build. No release has run the macOS job yet: 0.11.0 and
+  older hold Linux archives only.
 - **Packages are files on the release, not a repository.** There is no apt or dnf repository to
   add, so `apt upgrade` and `dnf upgrade` do not see a new release: install the next release's
   package. The packages carry no signature of their own (`rpm --checksig` finds their digests,
@@ -135,7 +162,36 @@ installs the same tool versions as `ci.yml`'s: move them together.
      `python3 -I scripts/repo-settings.py check` reads the host, so it runs here and not in
      `just check`;
    - when a page was added since the last release, `web/addresses.txt` lists it: run
-     `node scripts/check-site.mjs --write-addresses` in `web/` and commit the result.
+     `node scripts/check-site.mjs --write-addresses` in `web/` and commit the result;
+   - the macOS sentences name the right release. The installer's `MACOS_AFTER`
+     (`scripts/install.sh` and its copy `web/public/install.sh`), the message
+     `scripts/test-install.py` expects, and the sentences beside "0.11.0" in
+     `docs/guides/install.md`, `docs/guides/parallel-agents.md`,
+     `docs/operate/install-and-upgrade.md`, `docs/policies/msrv-and-platforms.md`,
+     `docs/troubleshooting.md`, `docs/known-limitations.md`, CHANGELOG.md's macOS entry and
+     this file's "Not there yet" hold that 0.11.0 is the last release without a macOS archive.
+     When this commit's release workflow has no `build aarch64-apple-darwin` job, this
+     release holds none either: name this release there instead. After the first release that
+     holds one, the pages name that release as the first with a macOS build.
+
+     Other sentences say the same without a version, and turn false with the first release
+     that holds a macOS archive. Change them when the sentences above come to name that
+     release:
+     - README.md: the status line's "no macOS or Windows build yet", "When not to use it"
+       ("an Apple silicon macOS build is set up for the next one") and the roadmap paragraph
+       ("the macOS build awaits its first release");
+     - `docs/guides/install.md`: "No release holds that build yet" and "from the next release
+       on", with the sample run that follows them;
+     - `docs/roadmap.md`: the M12 rows ("in no release yet") and its paragraph;
+     - `docs/known-limitations.md`: the Platforms entry on the macOS build ("until the next
+       release");
+     - `web/content/product/index.md` ("set up for the next release"),
+       `web/components/home/hero.tsx` ("no macOS or Windows build yet", and `PLATFORMS`),
+       `web/components/home/fit.tsx` ("Linux only, for now") and
+       `web/components/markdown-page.tsx` ("Runs on: Linux, …");
+     - `web/scripts/check-site.mjs`, rule S8: `TRIPLE` reads only the `-unknown-linux-`
+       targets of `install.sh`, and `UNSUPPORTED` requires Home to name macOS as without a
+       build. Until both change, the site's check holds Home to the old sentence.
 4. **Write the changelog.** Move the entries under **Unreleased** in
    [CHANGELOG.md](CHANGELOG.md) to a new `## [X.Y.Z] - YYYY-MM-DD` section, mark breaking
    changes, and leave an empty **Unreleased** section. The section's date is the UTC date of the
@@ -168,7 +224,8 @@ installs the same tool versions as `ci.yml`'s: move them together.
 6. **Land that commit on `stable`** and wait for `tests-pass` to be green for it. Push `stable`
    before the tag: the workflow refuses a tagged commit that `stable` does not hold. Then rehearse
    the release on it, `gh workflow run release.yml --ref stable --repo KeiaiLab/SwarmOps`, and
-   wait for its build and packages jobs to pass: a packaging failure found there costs no tag.
+   wait for its build and packages jobs to pass, the macOS build among them: a packaging failure
+   or a missing runner found there costs no tag.
 7. **Tag** the commit with an annotated tag, unsigned until a signing key is registered (then
    `git tag -s`), and push the tag:
 
@@ -190,6 +247,9 @@ installs the same tool versions as `ci.yml`'s: move them together.
    run `swarmops --version`. Then install a package the same way, checked against the same
    `SHA256SUMS`, on a Debian or Ubuntu host (`sudo apt install ./swarmops_X.Y.Z_amd64.deb`) or a
    RHEL-family one (`sudo dnf install ./swarmops-X.Y.Z-1.x86_64.rpm`), run `so --version`, and
-   remove it (`sudo apt remove swarmops`, `sudo dnf remove swarmops`).
+   remove it (`sudo apt remove swarmops`, `sudo dnf remove swarmops`). On an Apple silicon Mac,
+   run the installer for the version into a scratch directory
+   (`curl -fsSL https://get.swarmops.cc/install.sh | bash -s -- --version X.Y.Z --dir /tmp/so-check`)
+   and both binaries' `--version`.
 10. **Afterwards**, check that `stable` carries the release commit and the tag, and that the next
     change starts a new **Unreleased** entry.

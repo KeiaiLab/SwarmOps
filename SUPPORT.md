@@ -58,7 +58,7 @@ fix ([SECURITY.md](SECURITY.md#which-versions-get-fixes)).
 
 ## Where is the documentation?
 
-In the repository: the [README](README.md), [Install SwarmOps on Linux](docs/guides/install.md),
+In the repository: the [README](README.md), [Install SwarmOps on Linux and macOS](docs/guides/install.md),
 the [quick start](docs/guides/quick-start.md), [Concepts](docs/concepts.md) and
 [Operating SwarmOps](docs/operations.md), the guide for whoever runs SwarmOps for a swarm of coding
 agents on one host.
