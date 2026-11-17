@@ -1036,10 +1036,19 @@ fn create_refuses_a_path_that_leads_under_mnt_before_touching_it() {
     // component at a time, as the kernel will once its missing directories exist (a `..` takes
     // back the name before it, there or not), and refuses before anything is created.
     let before = entries("/mnt");
-    for (store, leads_to) in [
+    // The directory the path starts from must be one itself: macOS's /tmp is a symlink to
+    // /private/tmp, so `/tmp/..` is /private there, and /usr takes its place.
+    #[cfg(not(target_os = "macos"))]
+    let stores = [
         ("/tmp/../mnt/x", "/mnt/x"),
         ("/tmp/../mnt/no/such/../drive/store", "/mnt/no/drive/store"),
-    ] {
+    ];
+    #[cfg(target_os = "macos")]
+    let stores = [
+        ("/usr/../mnt/x", "/mnt/x"),
+        ("/usr/../mnt/no/such/../drive/store", "/mnt/no/drive/store"),
+    ];
+    for (store, leads_to) in stores {
         match LocalRepo::create(Utf8Path::new(store), "x") {
             Err(RepoError::Store(StoreError::UnsupportedFs(refused))) => {
                 assert_eq!(refused, leads_to);
