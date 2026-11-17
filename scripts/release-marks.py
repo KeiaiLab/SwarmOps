@@ -27,7 +27,8 @@ not installed. This script computes the files a release gets from CHANGELOG.md's
   3. The words are read wherever the group's heading has them, in any case, and with any
      spacing or punctuation between and around them: `(breaking; no automatic update)`,
      `- no-automatic-update` and `(no automatic updates):` withhold too. A heading of another
-     depth that says them, such as `#### Detail (no automatic update)`, is a finding when the
+     depth that says them, such as `#### Detail (no automatic update)`, or
+     `## Changed (no automatic update)` inside the release's section, is a finding when the
      release is on a line's way: it is no group, and a mark given against a heading someone
      wrote to withhold it would be installed unasked.
   4. A group that says `breaking` and not those words withholds nothing; the line is printed
@@ -166,7 +167,8 @@ def sections(changelog: str) -> dict[tuple[int, int, int], list[Heading]]:
 
     A section is a `## [X.Y.Z]` heading and what follows it, up to the next `## ` heading;
     `Unreleased` and a pre-release's section are no release's. Lines inside a code fence are
-    not headings.
+    not headings. A `## ` heading that says the words is no boundary to hide them behind: one
+    that ends a release's section is that release's heading, as a release's own is its own.
     """
     found: dict[tuple[int, int, int], list[Heading]] = {}
     current = None
@@ -179,9 +181,16 @@ def sections(changelog: str) -> dict[tuple[int, int, int], list[Heading]]:
             continue
         if line.startswith("## "):
             heading = SECTION.match(line)
-            current = numbers(heading.group(1)) if heading else None
-            if current is not None:
-                found.setdefault(current, [])
+            release = numbers(heading.group(1)) if heading else None
+            if release is not None:
+                found.setdefault(release, [])
+            # Read for the words before it closes the section: it is no group, so the release
+            # it stands in, or the one it opens, stops with a finding and gets no mark.
+            said = words(line)
+            owner = release if release is not None else current
+            if owner is not None and WITHHOLD in said:
+                found[owner].append(Heading(line.strip(), False, said))
+            current = release
             continue
         heading = HEADING.match(line)
         if heading is None or current is None:
@@ -567,6 +576,8 @@ def selftest_plans(failures: list[str]) -> None:
         "### Changed\n\n#### Detail (no automatic update)",
         "### Changed\n\n##### Stores: No automatic update",
         "# Changed (no automatic update)",
+        "## Changed (no automatic update)",
+        "### Changed\n\n## Stores: no-automatic-update",
     ):
         try:
             of("0.13.0", g13=body)
@@ -583,6 +594,19 @@ def selftest_plans(failures: list[str]) -> None:
     except Finding:
         pass
     expect("a heading that is no group, not crossed", of("0.12.1", g13=deeper), ["0.12"], [])
+
+    # A release's own `## ` heading that says them is no group either; and a `## ` heading
+    # that says them where no release's section is open is no release's.
+    own = "## [0.13.0] - 2027-01-02"
+    said = CHANGELOG.format(g13="### Added", g121="### Fixed").replace(own, f"{own} ({WITHHOLD})")
+    try:
+        plan("0.13.0", said, INSTALLER_TEXT)
+        failures.append("a release's heading that says the words: no finding")
+    except Finding as finding:
+        if not str(finding).startswith(f"heading: 0.13.0 has the heading `{own} ({WITHHOLD})`"):
+            failures.append(f"a release's heading that says the words: {finding}")
+    outside = "### Added\n\n## Notes\n\n## Changed (no automatic update)"
+    expect("a heading in no release's section", of("0.14.0", g13=outside), ["0.12", "0.13"], [])
 
     # 5. A later release is withheld from the line that would cross the change, not from the
     # line after it; the first release's own group and a pre-release's count for nothing.
