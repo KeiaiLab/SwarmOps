@@ -153,22 +153,13 @@ fn test_release() -> bool {
     false
 }
 
-/// The version `value` holds, as [`TEST_VERSION_ENV`]'s: three numbers between dots, and after a
-/// hyphen a pre-release of letters, digits, dots and hyphens, the installer's rule for
-/// `--version`. `None` for anything else.
+/// The version `value` holds, as [`TEST_VERSION_ENV`]'s: one `update` reads as a version
+/// ([`swarmops_ops::update::Version::parse`]), which is the installer's rule for `--version`.
+/// `None` for anything else.
 #[cfg(feature = "test-hooks")]
 fn hooked_version(value: Option<std::ffi::OsString>) -> Option<String> {
     let value = value?.into_string().ok()?;
-    let (triple, pre) = match value.split_once('-') {
-        Some((triple, pre)) => (triple, Some(pre)),
-        None => (value.as_str(), None),
-    };
-    let number = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
-    let label = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-');
-    let shaped = triple.split('.').count() == 3
-        && triple.split('.').all(number)
-        && pre.is_none_or(|pre| !pre.is_empty() && pre.bytes().all(label));
-    shaped.then_some(value)
+    swarmops_ops::update::Version::parse(&value).map(|_| value)
 }
 
 /// Whether `value`, as [`TEST_UPDATE_RELEASE_ENV`]'s, makes the build a release's: `1` alone.

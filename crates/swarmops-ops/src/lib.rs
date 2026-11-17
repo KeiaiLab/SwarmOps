@@ -24,6 +24,10 @@
 //! - [`auth`] keeps the user's logins, a token per host, in one file under that directory:
 //!   `auth login`, `auth status` and `auth logout`, client-side operations on no store.
 //!
+//! - [`update`] holds what the program's own update decides without a file or the network: the
+//!   order of versions, the installer's receipt, whether an install updates itself, and what an
+//!   automatic update remembers and says. The CLI reads the files and runs the children.
+//!
 //! - Maintenance (M6): `gc`, `repair` and `upgrade`, [`StoreOps`](swarmops_api::StoreOps) methods
 //!   that record nothing, so they take no identity.
 //!
@@ -51,6 +55,7 @@ mod remote;
 mod repair;
 pub mod serve;
 mod sync;
+pub mod update;
 mod upgrade;
 pub mod userdir;
 

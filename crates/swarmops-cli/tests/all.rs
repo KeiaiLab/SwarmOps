@@ -211,3 +211,15 @@ fn the_isolation_check_finds_a_bare_run() {
     let whole = "Command::new(env!(\"CARGO_BIN_EXE_swarmops\")).arg(\"info\");\n";
     assert!(unisolated(whole).is_some(), "{whole}");
 }
+
+/// The isolation turns automatic update off in the words the program reads: the test kit, which
+/// names no crate above the repository, spells the variable and its value itself.
+#[test]
+fn the_isolation_s_switch_is_the_one_the_program_reads() {
+    use swarmops_ops::update::{AUTO_UPDATE_ENV, Switch};
+
+    let isolation = support::isolation();
+    let switch = isolation.iter().find(|(name, _)| *name == AUTO_UPDATE_ENV);
+    let (_, value) = switch.expect("the isolation names the program's variable");
+    assert_eq!(Switch::of(Some(value.as_os_str())), Switch::Off);
+}
