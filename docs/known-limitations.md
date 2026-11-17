@@ -1205,6 +1205,37 @@ left).
   *Unscheduled: signing needs a key the maintainers hold. Found: the 2026-10-29 ops wave's review
   (issue #24).*
 
+## Updating the program
+
+- **Only the latest release is looked at.** A build that updates itself asks GitHub for the
+  latest release, and that release for the mark of the build's own minor line
+  (`auto-update-from-<major>.<minor>`), and for nothing else. Where the latest release holds no
+  such mark, builds of that line install nothing unasked: not that release, and not an earlier
+  one that did hold their mark and that they missed, a patch release with a fix among them. A
+  line the maintainers withheld a release from stays behind for good, since every later release
+  crosses the same change: its builds say once, at a terminal, that the release is out, and
+  stay as they are until `so update` is run there. *Documented
+  ([`update`](reference/commands/update.md#in-the-background)). Found: the update design's
+  review.*
+- **A release's marks are uploaded by hand, after it is published.** The maintainers run
+  `just release-marks` once they have checked a release ([RELEASE.md](../RELEASE.md#checklist),
+  step 9). Until then, and for good when the step is forgotten, the release is announced and
+  not installed, and no check fails over it. *Unscheduled. Found: the update design's review.*
+- **What is withheld is what the changelog's headings say.** A release is kept from automatic
+  update only by a group heading that says `no automatic update`, which the maintainers write
+  for a release that changes what stores older builds can open, or that needs a step by hand.
+  A release with a `(breaking)` group and no such heading is installed unasked, and a script
+  that relied on what it changed meets the change at its next run; the line an update prints
+  links the release's notes. *Documented ([RELEASE.md](../RELEASE.md#checklist), step 4). Found:
+  the update design's review.*
+- **`update`'s requests have not been run against GitHub.** Its tests answer them from
+  stand-ins on the testing host. Three answers are assumed: that a HEAD request for
+  `releases/latest` is answered with a redirect whose address curl reports
+  (`%{redirect_url}`), that a release's file is answered 302 and a missing one 404, and that a
+  release takes a file of one line as a mark. *Planned: asked by hand before the first release
+  that holds the command ([RELEASE.md](../RELEASE.md#not-there-yet)). Found: the update
+  design's review.*
+
 ## Performance
 
 - **Part of each lock pass through the binary is unexplained.** In the quiet-window run the lock

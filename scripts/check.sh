@@ -63,3 +63,6 @@ python3 -I scripts/bench-gate.py selftest
 # The release cut's golden check (`just golden-frozen`) still catches a changed, a deleted
 # golden file and an unresolvable tag.
 python3 -I scripts/golden-frozen.py selftest
+# `just release-marks` still gives each release the marks its rules say, and runs gh as it
+# should: against a stand-in for gh, with no network.
+python3 -I scripts/release-marks.py selftest

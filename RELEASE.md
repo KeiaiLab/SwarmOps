@@ -134,6 +134,23 @@ installs the same tool versions as `ci.yml`'s: move them together.
   version and MSRV policy.
 - **Before the first release that promises store compatibility**, add a test that opens a store
   written by the previous release (from 1.0 on, the versioning policy asks for one).
+- **`so update`'s requests have not met GitHub.** They are tested against stand-ins on the
+  testing host. Before the first release that holds the command is tagged, ask GitHub by hand
+  what the command will ask, and record the answers in
+  [docs/known-limitations.md](docs/known-limitations.md#updating-the-program), which says they
+  are assumed:
+
+  ```sh
+  r=https://github.com/KeiaiLab/SwarmOps/releases
+  curl -sI -o /dev/null -w '%{redirect_url} %{http_code}\n' "$r/latest"
+  curl -sI -o /dev/null -w '%{http_code}\n' "$r/download/v0.11.0/SHA256SUMS"
+  curl -sI -o /dev/null -w '%{http_code}\n' "$r/download/v0.11.0/auto-update-from-0.11"
+  ```
+
+  The command needs `…/releases/tag/v0.11.0 302` (or `301`), then `302` for a file the release
+  holds and `404` for one it does not. Whether a release takes a file of one line as a mark
+  shows at the first `just release-marks X.Y.Z --upload`, which fails when the release does
+  not list the file afterwards.
 
 ## Checklist
 
@@ -177,6 +194,15 @@ installs the same tool versions as `ci.yml`'s: move them together.
    - the installer's `UPDATE_AFTER` (`scripts/install.sh` and its copy) names the last release
      without `so update`, 0.11.0, and `scripts/test-install.py`'s `NO_UPDATE` and `FIRST_UPDATE`
      agree: when this release does not hold the command either, name this release there.
+   - what an installed build expects of a release did not change, or the changelog says so
+     under a group that withholds the release ([step 4](#checklist)): `so update` in every
+     release after 0.11.0 runs the installer that was built into it, not this release's. That
+     installer asks for `swarmops-X.Y.Z-<target>.tar.gz` with `swarmops` and `so` in a
+     directory of the archive's name, for the archive's line in `SHA256SUMS`, and for its own
+     options `--version` and `--dir`; and `so update` asks `releases/latest` for a redirect to
+     `releases/tag/vX.Y.Z` and each binary's `--version` for `swarmops X.Y.Z`. A release that
+     moves any of these is one those builds fail to install, each once
+     ([known limitations](docs/known-limitations.md#updating-the-program)).
 
      Other sentences say the same without a version, and turn false with the first release
      that holds a macOS archive. Change them when the sentences above come to name that
@@ -206,7 +232,14 @@ installs the same tool versions as `ci.yml`'s: move them together.
    release's notes: the workflow refuses a tag without one. It opens with a summary of at most
    60 words, in sentences of at most 25, that names no milestone or slice id. Incompatible
    changes and security fixes each get a group of their own; a release with neither says so in
-   one line. The first release also brings up to
+   one line. A release that an installed build must not take unasked says so in a group's
+   heading, with the words `no automatic update` in its parentheses, such as
+   `### Changed (breaking, no automatic update)`: `just release-marks` reads the headings
+   ([step 9](#checklist)). Two things call for it, and nothing else does: the release changes
+   what stores older builds can open (`init`, or a writer by default, starts to make a store
+   that an older release refuses), or it needs a step by hand before or after the binaries are
+   replaced. A group that says `(breaking)` alone does not withhold a release: its changes are
+   in the notes that the update's line links. The first release also brings up to
    date what says nothing is released yet: README's status badge, status line, maturity row and
    install section, the README's documentation table, `docs/operations.md`'s install section,
    SECURITY.md's "Which versions get fixes?" section, CHANGELOG.md's introduction, the
@@ -255,5 +288,42 @@ installs the same tool versions as `ci.yml`'s: move them together.
    run the installer for the version into a scratch directory
    (`curl -fsSL https://get.swarmops.cc/install.sh | bash -s -- --version X.Y.Z --dir /tmp/so-check`)
    and both binaries' `--version`.
+
+   Then say which installed builds may take the release unasked. Until this is done, a build
+   that updates itself only remembers that it saw the release:
+
+   ```sh
+   just release-marks X.Y.Z            # prints each minor line, marked or withheld, and why
+   just release-marks X.Y.Z --upload   # uploads the marks with gh, then checks the release
+   ```
+
+   A mark is a file of the release named `auto-update-from-<major>.<minor>`: a build of that
+   minor line installs the release when the file is there, and announces it otherwise
+   ([`update`, In the background](docs/reference/commands/update.md#in-the-background)). The
+   first command runs no `gh` and writes nothing. It gives a mark to each earlier minor line
+   of the same major version that holds `so update`, and withholds it from a line whose way
+   to this release crosses a release with a `no automatic update` group ([step 4](#checklist)).
+   Read what it prints before the second command: a line withheld stays where it is until
+   someone runs `so update` there, and no later release reaches it unasked either. A release
+   whose check above found a defect gets no mark
+   ([When a published release is bad](#when-a-published-release-is-bad)).
 10. **Afterwards**, check that `stable` carries the release commit and the tag, and that the next
     change starts a new **Unreleased** entry.
+
+## When a published release is bad
+
+Installs that update themselves take a marked release within a day of use, so a bad one is
+stopped first and fixed second:
+
+1. **Withdraw the marks**: `just release-marks X.Y.Z --withdraw` removes every
+   `auto-update-from-*` file from the release and checks that none is left. From then on no
+   build installs the release unasked. A build that already has it keeps it: nothing installs
+   an older version, so there is no way back but the installer with `--version`, on each host.
+2. **Fix forward.** Land the fix on `stable` and release `X.Y.Z+1` by the checklist above. Its
+   marks, uploaded at its step 9, are what moves the installs on, those that took the bad
+   release and those that did not.
+3. **Never reuse a tag or replace a release's files.** A build that has `X.Y.Z` sees nothing
+   newer in a second `X.Y.Z`, and one that is downloading meets a checksum that does not match.
+
+Deleting the release is not needed. Where it is deleted all the same, `releases/latest` names
+the release before it, and no build goes back to that one.

@@ -95,6 +95,8 @@ default: check
 # Then scripts/bench-gate.py's selftest shows that the benchmark gate still finds what it is for,
 # scripts/repo-settings.py's that each rule over .github/repo-settings.json does, offline, and
 # scripts/golden-frozen.py's that the release cut's golden check (`golden-frozen`) still does.
+# Last, scripts/release-marks.py's shows that `release-marks` still gives each release the marks
+# its rules say, and runs gh as it should, against a stand-in for gh and offline.
 # The definition of done: fmt, clippy, tests, hook proof, docs, deny, notices, script checks.
 check:
     cargo fmt --all --check
@@ -128,6 +130,7 @@ check:
     python3 -I scripts/bench-gate.py selftest
     python3 -I scripts/repo-settings.py selftest
     python3 -I scripts/golden-frozen.py selftest
+    python3 -I scripts/release-marks.py selftest
 
 # The release cut (.github/workflows/release.yml) runs this: every golden file of the previous
 # release tag (the hash contract's, FORMAT 3's confirmed ones; not `golden3/provisional/`) is
@@ -137,6 +140,18 @@ check:
 # The released golden files are unchanged since the previous release tag (or `tag`).
 golden-frozen tag="":
     python3 -I scripts/golden-frozen.py check {{ tag }}
+
+# RELEASE.md's step 9 runs this once the release is checked. A build that updates itself installs
+# the latest release only when the release holds the file `auto-update-from-<major>.<minor>` of
+# the build's minor line; the script works out from CHANGELOG.md's headings which lines release
+# `version` (X.Y.Z, no `v`) gets that file for, and prints each line with the reason, marked or
+# withheld. Without an argument more it runs no gh and writes nothing. `--upload` puts the files
+# on the release vX.Y.Z with gh and checks that the release then holds exactly those;
+# `--withdraw` removes every such file from it, which stops the release from being installed
+# automatically.
+# Says which builds may install release `version` automatically; `--upload` uploads its marks.
+release-marks version *args:
+    python3 -I scripts/release-marks.py marks {{ version }} {{ args }}
 
 # The test hooks are on (`--all-features`), as in `just check`. The ignored switches that rewrite
 # or rebuild fixtures on purpose (`regenerate_golden`, `regenerate_git_fixtures`,

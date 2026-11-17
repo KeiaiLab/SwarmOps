@@ -187,6 +187,16 @@ collects the changes on `stable` that no release holds yet, until the next relea
   `update` replaces only a build that has it. The workflow's smoke runs set `SWARMOPS_AUTO_UPDATE=off`, and ask
   for the version with the new test hook `SWARMOPS_TEST_VERSION` set, which a release build
   ignores.
+- Which releases an install takes unasked is decided per release, by its marks: the files
+  `auto-update-from-<major>.<minor>` that the maintainers upload once they have checked the
+  release (`just release-marks X.Y.Z`, RELEASE.md step 9). A release is marked for each earlier
+  minor line of its major version that holds `so update`, a release with a `(breaking)` group
+  too. It is withheld from a line whose way to it crosses a release with a group whose heading
+  says `no automatic update`: one that changes what stores older builds can open, or that needs
+  a step by hand. Such a release is announced on that line, once, and installed by `so update`
+  alone. `just release-marks X.Y.Z --withdraw` removes a release's marks, which stops it from
+  being installed unasked. Only the latest release is looked at, so a line the latest release
+  is withheld from installs nothing unasked, an earlier marked release included.
 - Four types in `schema`'s output, 198 in all, for `update`: `UpdateOut`
   (the installed version, what was replaced, the latest release and its notes' page, the install
   directory, and a note still to be printed), `AutoUpdate` (whether an install updates itself:

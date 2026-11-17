@@ -133,6 +133,10 @@ A change is done when `just check` passes on it. It runs, in order:
 12. `scripts/golden-frozen.py selftest`: the release cut's golden check (`just golden-frozen`,
     which the release workflow runs on a pushed tag) still catches a changed or deleted golden
     file of the previous release and a tag that does not resolve.
+13. `scripts/release-marks.py selftest`: `just release-marks`, which says after a release which
+    builds may install it automatically ([RELEASE.md](RELEASE.md), step 9), still gives each
+    crafted changelog the marks its rules say, and uploads and withdraws them as it should,
+    against a stand-in for `gh` and with no network.
 
 The third lockfile, `bench/compare/Cargo.lock`, which `just check` does not build, is checked
 where it is built, by `just bench-compare` and the weekly scheduled run, with a policy of its
