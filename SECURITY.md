@@ -33,8 +33,9 @@ access to the store, and lost data after a crash, are not vulnerabilities. The d
 
 The trust model is M1's: SwarmOps runs on one host, as a library linked into each `swarmops`
 process, with no daemon and no network service. Since M13, `clone`, `fetch`, `push` and `sync`
-reach a git remote, through the user's own git as a child process: SwarmOps opens no connection
-itself. Every agent and person that runs `swarmops`
+reach a git remote, through the user's own git as a child process, and `auth login` without
+`--with-token` reaches the provider's login addresses, through the user's own curl as a child
+process: SwarmOps opens no connection itself. Every agent and person that runs `swarmops`
 against a store is a trusted local user acting for the same owner, and the store directory's
 filesystem permissions are the access boundary. A login (`swarmops auth login`) keeps a token in
 one file of the user's, outside every store, whose own mode is its boundary. Within that model,
@@ -138,7 +139,7 @@ these are vulnerabilities:
   `swarmops/auth.toml` in the user's state directory. The token is there in plain text, by design
   and with no keyring: the file is made with mode `0600` in a directory made with mode `0700`, and
   any process that runs as the same user can read it. The token is read from stdin, never from an
-  argument. A login file that is a symbolic link, or that its group or others can read or write,
+  argument, or granted by the provider's device flow (below). A login file that is a symbolic link, or that its group or others can read or write,
   is refused, and its mode is never changed for the user. `clone`, `fetch`, `push`, `sync` and
   `remote add` send the token to a remote over https (or over http to a loopback address) that
   names no token variable and whose host and port are the login's, exactly; it reaches git as a
@@ -151,6 +152,19 @@ these are vulnerabilities:
   or port; a login file made with a wider mode; or a login file read through a link, is a
   vulnerability. No store, remote or request can
   name the login file: only the user's environment does.
+- **The device flow (`auth login --gh` without `--with-token`).** SwarmOps asks GitHub for a
+  device code and then for the token by running the user's `curl` (`SWARMOPS_CURL`, else the
+  first on `PATH`), which is trusted as the user's git is. The child runs without a shell, with
+  the arguments `-q --config -` alone, the whole request on its stdin, and a cleared environment
+  but for `PATH`, the proxy variables and the certificate variables. It speaks https only, with
+  TLS 1.2 or later, and follows no redirect. The two addresses are constants at `github.com`: no
+  flag, variable, store, remote or answer changes them. The client ID, a public value, comes
+  from `SWARMOPS_GH_CLIENT_ID`. What GitHub answers is checked before it is used: the code and
+  the page shown on stderr can hold no control character, the page is at `github.com` over
+  https, and an answer with a refresh token is refused. A way for a store, a remote or an answer
+  to send these requests elsewhere; a device code or a token in an argument, an envelope, an
+  error or on stderr; or an answer that reaches the terminal unchecked, is a vulnerability. A
+  proxy the user's environment names, and the certificates it trusts, are the user's.
 - **The SwarmOps supply chain.** A dependency or a CI workflow that could change what we build
   or run. `cargo deny check` (advisories, licenses, bans, sources) runs over every lockfile the
   project builds: the workspace's and the fuzz crate's in every `just check`, and

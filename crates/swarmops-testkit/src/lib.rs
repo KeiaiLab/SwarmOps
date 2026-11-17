@@ -24,6 +24,8 @@
 //! - [`cli`]: runs of the real `swarmops` binary, their envelopes checked against the contract,
 //!   racers behind a barrier, a store with the commands the tests run on it, and the crash and
 //!   error sweeps' template ([`cli::sweep`]).
+//! - [`curl`]: a stand-in for the `curl` a login's device flow runs, which answers what a test
+//!   queued and records each run.
 //! - [`measure`]: what the store's benches and measurement tests share.
 //! - [`openmetrics`]: a reader of the OpenMetrics text format, for the text `health` prints.
 //! - [`git`]: the git fixtures: repositories real git made from the scripts in
@@ -72,6 +74,7 @@ pub mod bulk;
 pub mod child;
 #[cfg(feature = "cli")]
 pub mod cli;
+pub mod curl;
 #[cfg(feature = "cli")]
 pub mod differential;
 pub mod faults;

@@ -102,7 +102,7 @@ retry advice; this is that table, all 55 codes, each raised by some command.
 | `E_WS_STALE` | 1 | no | A workspace's base is gone from its target's history. | [Workspaces](#e_ws_stale) |
 | `E_CHECK_FAILED` | 1 | no | A workspace's check or bootstrap command failed or timed out. | [Workspaces](#e_check_failed) |
 | `E_REF_NOT_FOUND` | 6 | no | `ref log` names a ref the journal records no move of, or an OpenCode hook a start the store does not hold. | [Arguments and revisions](#e_ref_not_found) |
-| `E_AUTH` | 5 | no | `swarmops serve` names no caller, or no grant of the store's `access.toml` names it. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees) |
+| `E_AUTH` | 5 | no | `swarmops serve` names no caller, or no grant of the store's `access.toml` names it; or GitHub refused a login by the device flow. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees), [A login that fails](#a-login-that-fails) |
 | `E_POLICY_DENIED` | 5 | no | The store's `access.toml` grants the caller no such action, or the file is invalid. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees) |
 | `E_MAINTENANCE_BUSY` | 4 | yes | Another `gc`, `repair` or `upgrade` holds the store's maintenance lease. | [Making room](operate/making-room.md#2-remove-the-leftovers-of-interrupted-writes) |
 
@@ -1315,6 +1315,29 @@ Exit 4, retryable. The network or the remote's host did not answer: `details.pha
 `push` or `ls_remote`, and `details.cause` is `dns`, `connect`, `timeout`, `tls`, `disconnected` or
 `ssh`. Nothing changed in the store: run the command again once the network is back. Local
 commands keep working meanwhile ([When sync stops](guides/github-remote.md#when-sync-stops)).
+
+A login that GitHub did not answer has `details.phase` `login`, with `details.host` and no
+`details.remote`, and curl's exit code in `details.curl_exit`: no login was kept, and the command
+can be run again ([A login that fails](#a-login-that-fails)).
+
+### A login that fails
+
+`swarmops auth login --gh` asks GitHub for a token by its device flow
+([`auth login`](reference/commands/auth-login.md#asking-github-for-the-token)); with
+`--with-token` it reads one from stdin and none of these but the last applies. No login is kept
+when it fails.
+
+| Error | `details.reason` | Means | What to do |
+| --- | --- | --- | --- |
+| `E_INVALID_ARG` | `client_id_unset` | This build has no client ID, and `SWARMOPS_GH_CLIENT_ID` names none. | Set the variable to the client ID of an OAuth app with the device flow on, or log in with `--with-token`. |
+| `E_INVALID_ARG` | `client_id`, `scope` | The client ID or a `--scope` is not one. | A client ID is letters, digits, dots, hyphens and underscores; a scope lower-case letters, underscores and colons. |
+| `E_INVALID_ARG` | `curl_missing` | No `curl` on `PATH`, and `SWARMOPS_CURL` names none by an absolute path. | Install curl, or log in with `--with-token`, which needs none. |
+| `E_AUTH` | `access_denied`, `expired_token` | The code was refused on GitHub's page, or not approved in time. | Run the login again for a new code. |
+| `E_AUTH` | `device_flow_disabled`, `bad_client_id` | The OAuth app has the device flow off, or GitHub knows no app by the client ID. | Turn the device flow on in the app's settings; check `SWARMOPS_GH_CLIENT_ID`. |
+| `E_AUTH` | `expiring_token` | GitHub granted a token that expires, with a refresh token, which SwarmOps does not use. | Use an OAuth app, whose tokens do not expire, or `--with-token`. |
+| `E_AUTH` | `unexpected_answer` | The answer is none the device flow has; `details.http_status` gives the status. | Run it again; look at a proxy that answers in GitHub's place (`HTTPS_PROXY`). |
+| `E_REMOTE_UNREACHABLE` | | GitHub did not answer; `details.cause` and `details.curl_exit` say how. | Run it again once the network is back. |
+| `E_INVALID_ARG` | `auth_dir`, `auth_file…` | The login file cannot keep the login. | The hint, and [`auth login`](reference/commands/auth-login.md#a-file-that-is-refused), say what to fix. |
 
 ### `E_REMOTE_NOT_FOUND`
 

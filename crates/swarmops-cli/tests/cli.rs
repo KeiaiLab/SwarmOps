@@ -269,12 +269,28 @@ fn auth_login_refusals_golden() {
     assert_eq!(unnamed["error"]["details"]["source"], "SWARMOPS_AUTH_FILE");
     replies.push(unnamed);
 
-    // 3. The grammar: a login names its provider and how the token comes, and no flag takes
-    //    the token; auth alone is no command.
-    let no_way = s.run_env(&env, &["auth", "login", "--gh"]);
-    assert_eq!((no_way.exit, no_way.code()), (2, "E_INVALID_ARG"));
-    assert_eq!(no_way["op"], "auth_login");
-    replies.push(no_way);
+    // 3. A login without --with-token asks GitHub for the token, in the name of an OAuth app:
+    //    this build has none, and the harness's host has no curl to ask with.
+    let no_app = s.run_env(&env, &["auth", "login", "--gh"]);
+    assert_eq!((no_app.exit, no_app.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(no_app["op"], "auth_login");
+    assert_eq!(no_app["error"]["details"]["reason"], "client_id_unset");
+    replies.push(no_app);
+    let app = [env[0], ("SWARMOPS_GH_CLIENT_ID", "example-client-id")];
+    let no_curl = s.run_env(&app, &["auth", "login", "--gh"]);
+    assert_eq!((no_curl.exit, no_curl.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(no_curl["error"]["details"]["reason"], "curl_missing");
+    replies.push(no_curl);
+    let scope = ["auth", "login", "--gh", "--scope", "Not A Scope"];
+    let no_scope = s.run_env(&app, &scope);
+    assert_eq!((no_scope.exit, no_scope.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(no_scope["error"]["details"]["reason"], "scope");
+    replies.push(no_scope);
+
+    // 4. The grammar: a login names its provider, a token handed over has no scope to ask
+    //    for, and no flag takes the token; auth alone is no command.
+    let both = ["auth", "login", "--gh", "--with-token", "--scope", "repo"];
+    assert_eq!(Session::run_raw(&env, &both, Some(LOGIN_TOKEN)).exit, 2);
     let no_provider = s.step(&env, &["auth", "login", "--with-token"], Some(LOGIN_TOKEN));
     assert_eq!((no_provider.exit, no_provider.code()), (2, "E_INVALID_ARG"));
     replies.push(no_provider);

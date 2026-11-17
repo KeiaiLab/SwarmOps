@@ -1286,7 +1286,7 @@ pub(crate) fn url_refused(why: UrlRefused) -> OpError {
         UrlRefused::CredentialInUrl => (
             "a remote's URL holds no password",
             "leave the token to git's credential helper, name its variable with --token-env, or \
-             log in (swarmops auth login)",
+             log in (swarmops auth login --gh)",
         ),
         UrlRefused::OptionLike => (
             "a remote's URL or host does not start with -",

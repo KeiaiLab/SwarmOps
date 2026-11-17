@@ -237,7 +237,7 @@ The store has no operation with that id.
 
 Exit 5. Retryable: no.
 
-The serving entry could not name the caller (`details.reason` `no_identity`, or under `--user-family` `no_remote_user` and `remote_user_invalid`), no grant of the store's access file names it (`unknown_identity`), or the store has no access file (`no_access_file`).
+The serving entry could not name the caller (`details.reason` `no_identity`, or under `--user-family` `no_remote_user` and `remote_user_invalid`), no grant of the store's access file names it (`unknown_identity`), or the store has no access file (`no_access_file`). Or a provider refused a login by its device flow (`auth login`): `details.reason` is `access_denied`, `expired_token`, `device_flow_disabled`, `bad_client_id`, `expiring_token` (the token came with a refresh token, which SwarmOps does not use) or `unexpected_answer`, with `details.provider`, `details.host`, the provider's own word for the refusal when it gave one (`details.provider_error`) and the HTTP status (`details.http_status`); no login was kept.
 
 ## E_POLICY_DENIED
 
@@ -333,7 +333,7 @@ The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (
 
 Exit 4. Retryable: yes.
 
-The network or the remote's host did not answer: `details.phase` (`fetch`, `push`, `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`, `ssh`). Nothing changed in the store; running the command again can succeed.
+The network or the remote's host did not answer: `details.phase` (`fetch`, `push`, `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`, `ssh`). Nothing changed in the store; running the command again can succeed. A login whose provider did not answer (`auth login`) has `details.phase` `login`, with `details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no login was kept.
 
 ## E_REMOTE_NOT_FOUND
 

@@ -29,11 +29,14 @@
 //! `{"auth":"anonymous"}`, with `agent` omitted rather than null.
 //!
 //! `auth login`, `auth status` and `auth logout` use no store either: they read and write the
-//! user's login file (the `auth` module), and their envelopes have no `meta.repo`.
+//! user's login file (the `auth` module), and their envelopes have no `meta.repo`. A login
+//! without `--with-token` gets its token by GitHub's device flow (the `device_flow` module),
+//! which writes the code to enter and its page to stderr before the envelope.
 //! `auth git-credential` reads that file for git, and prints no envelope on stdout, which
 //! carries git's credential protocol: its envelope, when it fails, goes to stderr.
 
 mod auth;
+mod device_flow;
 pub(crate) mod prepare;
 mod run;
 mod serve;

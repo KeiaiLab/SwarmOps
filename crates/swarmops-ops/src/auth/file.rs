@@ -197,14 +197,7 @@ pub fn login(
 ) -> Result<AuthLogin, OpError> {
     // 1. A token that is one, and a file to keep it in.
     check_token(token)?;
-    let Some(file) = file else {
-        let refused = error::error(
-            ErrorCode::InvalidArg,
-            format!("no directory for the login file: set {AUTH_FILE_ENV}"),
-        );
-        return Err(refused.with_details(error::details([("reason", "auth_dir".into())])));
-    };
-    let mut logins = Logins::read(file)?;
+    let (file, mut logins) = opened(file)?;
 
     // 2. The entry, in the place of the one it replaces.
     let mut entry = toml::Table::new();
@@ -228,6 +221,31 @@ pub fn login(
     kept.source = Some(source.key().to_owned());
     kept.scopes = scopes.map(<[String]>::to_vec);
     Ok(AuthLogin::new(kept, file.as_str(), at.is_some()))
+}
+
+/// Whether [`login`] could keep a login with `provider` in the login file `file`, asked before
+/// there is a token: by the device flow, which has a person approve a code first and should not
+/// ask for that when the login could not be kept. Nothing is written.
+///
+/// [`login`]'s errors but the token's: a host with no login file (`details.reason` `auth_dir`),
+/// a file this build does not read, and a file whose login for the provider's host is another
+/// provider's (`provider_mismatch`).
+pub fn can_keep(file: Option<&Utf8Path>, provider: Provider) -> Result<(), OpError> {
+    let (_, logins) = opened(file)?;
+    logins.position(provider).map(|_| ())
+}
+
+/// The login file `file`, read for a login to be written into it. `E_INVALID_ARG`
+/// (`details.reason` `auth_dir`) on a host that names no login file.
+fn opened(file: Option<&Utf8Path>) -> Result<(&Utf8Path, Logins), OpError> {
+    let Some(file) = file else {
+        let refused = error::error(
+            ErrorCode::InvalidArg,
+            format!("no directory for the login file: set {AUTH_FILE_ENV}"),
+        );
+        return Err(refused.with_details(error::details([("reason", "auth_dir".into())])));
+    };
+    Ok((file, Logins::read(file)?))
 }
 
 /// `auth status`: the logins the login file `file` holds, in its order, those of providers this
@@ -942,6 +960,9 @@ mod tests {
         assert_eq!(error.details["auth_file"], path.as_str());
         let error = logout(Some(&path), Provider::Gh).unwrap_err();
         assert_eq!(reason(&error), ("E_INVALID_ARG", "provider_mismatch"));
+        // The device flow hears it before it asks anyone for a token.
+        let error = can_keep(Some(&path), Provider::Gh).unwrap_err();
+        assert_eq!(reason(&error), ("E_INVALID_ARG", "provider_mismatch"));
         assert_eq!(fs::read_to_string(&path).unwrap(), text, "left as it was");
     }
 
@@ -1067,5 +1088,12 @@ mod tests {
         assert_eq!((out.file, out.removed), (None, false));
         let error = login(None, Provider::Gh, Source::WithToken, None, TOKEN).unwrap_err();
         assert_eq!(reason(&error), ("E_INVALID_ARG", "auth_dir"));
+        let error = can_keep(None, Provider::Gh).unwrap_err();
+        assert_eq!(reason(&error), ("E_INVALID_ARG", "auth_dir"));
+
+        // 4. A file that is not there yet can keep a login, and asking makes none.
+        let (_dir, path) = nowhere();
+        can_keep(Some(&path), Provider::Gh).unwrap();
+        assert!(!path.exists(), "asking writes nothing");
     }
 }

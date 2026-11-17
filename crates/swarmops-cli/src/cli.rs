@@ -1481,9 +1481,22 @@ pub enum RemoteCommand {
 /// `auth`'s operations.
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
-    /// Keep a token for a provider in your login file.
+    /// Log in to a provider, and keep its token in your login file.
     ///
-    /// --gh is GitHub, at github.com. --with-token reads the token from stdin: at most 1024
+    /// --gh is GitHub, at github.com. Without --with-token it runs GitHub's device flow: it
+    /// prints a code and the page to enter it on (two lines on stderr), waits until you have
+    /// approved the code there, and keeps the token GitHub grants, with the scopes it names.
+    /// --scope names a scope to ask for and repeats; none asks for repo, which does not cover a
+    /// push that changes a workflow file (add --scope repo --scope workflow). The requests are
+    /// made by your curl (SWARMOPS_CURL by an absolute path, else the first on PATH), to
+    /// github.com alone, in the name of the OAuth app whose client ID SWARMOPS_GH_CLIENT_ID
+    /// holds: this build has none of its own, and without the variable the login is
+    /// E_INVALID_ARG (details.reason client_id_unset). E_AUTH when GitHub refuses
+    /// (details.reason access_denied, expired_token, device_flow_disabled, bad_client_id,
+    /// expiring_token for a token that comes with a refresh token, unexpected_answer), and
+    /// E_REMOTE_UNREACHABLE (details.phase login) when it does not answer; nothing is kept then.
+    ///
+    /// --with-token reads the token from stdin instead, and reaches no network: at most 1024
     /// visible ASCII characters, the white space around them dropped. No flag takes the token
     /// itself, which a process list would show. The token is not checked with the provider.
     ///
@@ -1496,17 +1509,17 @@ pub enum AuthCommand {
     ///
     /// clone, fetch, push, sync and remote add send the token to an https remote at that host
     /// which names no --token-env; a remote that names a variable goes with the variable alone.
-    #[command(
-        group(ArgGroup::new("provider").required(true).args(["gh"])),
-        group(ArgGroup::new("way").required(true).args(["with_token"]))
-    )]
+    #[command(group(ArgGroup::new("provider").required(true).args(["gh"])))]
     Login {
         /// Log in to GitHub (github.com).
         #[arg(long)]
         gh: bool,
-        /// Read the token from stdin.
+        /// Read the token from stdin, and ask the provider for none.
         #[arg(long)]
         with_token: bool,
+        /// A scope to ask the provider for (repeatable); repo when none is named.
+        #[arg(long, value_name = "SCOPE", conflicts_with = "with_token")]
+        scope: Vec<String>,
     },
     /// List the logins your login file holds, without their tokens.
     ///

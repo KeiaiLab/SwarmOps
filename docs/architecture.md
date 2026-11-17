@@ -690,6 +690,14 @@ fsck refuses, a pack whose checksum does not match, or one a fetched ref reaches
 lacks, is `bad_objects`. SwarmOps has no network crate and writes no pack: gix stays on the disk
 side.
 
+**The login's device flow.** One command besides the remotes' reaches the network: `auth login
+--gh` without `--with-token`, which asks GitHub for a device code and then, in turns, for the
+token. Each request is one run of the user's curl (`SWARMOPS_CURL`, else the first on `PATH`), in
+`swarmops-cli`, as each transfer is one run of the user's git: the arguments are `-q --config -`
+alone, the request is a configuration on curl's stdin, and the environment is cleared but for
+`PATH`, the proxy variables and the certificate variables. The two addresses are constants, and
+what GitHub answers is checked before a word of it reaches the terminal or the login file.
+
 **The mirror.** `git/mirror.git` is a cache that SwarmOps alone writes: fetched packs land in it,
 the import reads it (`GixSource`), and a push's export is written into it (`GixSink`). A remote's
 state is the mirror's `refs/remotes/<remote>/<branch>`, so the remotes need no new store ref and

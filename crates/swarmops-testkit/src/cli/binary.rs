@@ -59,7 +59,7 @@ const AUTH_FILE_ENV: &str = "SWARMOPS_AUTH_FILE";
 
 /// The variable that names the `curl` a login runs: every run of the binary sets it
 /// ([`isolate`]), so that no test reaches the network through the host's.
-const CURL_ENV: &str = "SWARMOPS_CURL";
+const CURL_ENV: &str = crate::curl::CURL_ENV;
 
 /// The directory, under the system's temp directory, of the login file and the `curl` every
 /// run is given: nothing makes it, so neither exists.

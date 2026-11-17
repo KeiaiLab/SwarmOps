@@ -5,6 +5,8 @@
 //! (`SWARMOPS_AUTH_FILE`, else the host's state directory), so `--repo` and `--as` are read and
 //! not used, and the envelope has no `meta.repo`. `auth login --with-token` reads the token from
 //! stdin, since an argument would show in the process list; no error quotes what stdin held.
+//! Without it, `auth login` asks the provider for one by its device flow (the `device_flow`
+//! module): the code to enter and its page go to stderr, and stdout stays the one envelope.
 //!
 //! `auth git-credential` is the one command that prints a token, and prints no envelope: git
 //! runs it as a credential helper and reads its stdout as `key=value` lines. It is a protocol
@@ -14,11 +16,14 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Read, Write};
+use std::thread;
+use std::time::Duration;
 
 use swarmops_api::{AuthLogin, AuthLogout, AuthStatus, ErrorCode, OpError};
 use swarmops_ops::auth::{self, Provider, Source};
 
 use super::Ctx;
+use super::device_flow::{self, Curl};
 use crate::cli::AuthCommand;
 use crate::output::Printed;
 
@@ -31,7 +36,16 @@ const MAX_TOKEN_INPUT: u64 = 4096;
 pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: &AuthCommand) -> Printed {
     let no_store = (None, BTreeMap::new(), None);
     match command {
-        AuthCommand::Login { .. } => ctx.finish(op, no_store, login(ctx, Provider::Gh)),
+        AuthCommand::Login {
+            with_token, scope, ..
+        } => {
+            let kept = if *with_token {
+                login(ctx, Provider::Gh)
+            } else {
+                device_login(ctx, scope)
+            };
+            ctx.finish(op, no_store, kept)
+        }
         AuthCommand::Status => ctx.finish(op, no_store, status(ctx)),
         AuthCommand::Logout { .. } => ctx.finish(op, no_store, logout(ctx, Provider::Gh)),
         AuthCommand::GitCredential { operation } => match git_credential(ctx, operation) {
@@ -50,6 +64,40 @@ fn login(ctx: &Ctx<'_>, provider: Provider) -> Result<AuthLogin, OpError> {
     let file = auth::file(ctx.env)?;
     let token = token_from(io::stdin().lock())?;
     auth::login(file.as_deref(), provider, Source::WithToken, None, &token)
+}
+
+/// `auth login --gh` without `--with-token`: a token GitHub grants by its device flow for the
+/// scopes `asked` (`repo` when there are none), kept as the login.
+///
+/// Everything that can be refused without GitHub is refused first, so that nobody approves a
+/// code for a login that could not be kept: the scopes, the client ID, the login file, and then
+/// the curl to run. The file is read again when the token is there, and written then alone.
+fn device_login(ctx: &Ctx<'_>, asked: &[String]) -> Result<AuthLogin, OpError> {
+    // 1. What the flow needs.
+    let scopes = device_flow::scopes(asked)?;
+    let client_id = device_flow::client_id(ctx.env)?;
+    let file = auth::file(ctx.env)?;
+    auth::can_keep(file.as_deref(), Provider::Gh)?;
+    let curl = Curl::find(ctx.env)?;
+
+    // 2. The flow: the code on stderr, then the wait for its approval.
+    let granted = device_flow::grant(
+        &client_id,
+        &scopes,
+        &mut |url, form| curl.post(url, form),
+        &mut |seconds| thread::sleep(Duration::from_secs(seconds)),
+        &mut io::stderr(),
+    )?;
+
+    // 3. The login, with the scopes GitHub says the token has.
+    let scopes = granted.scopes.as_deref();
+    auth::login(
+        file.as_deref(),
+        Provider::Gh,
+        Source::Device,
+        scopes,
+        &granted.token,
+    )
 }
 
 /// `auth status`: the logins the file holds.

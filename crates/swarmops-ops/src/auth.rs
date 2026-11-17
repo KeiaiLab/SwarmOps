@@ -7,6 +7,6 @@ mod file;
 mod helper;
 mod lookup;
 
-pub use file::{AUTH_FILE_ENV, Provider, Source, file, login, logout, status};
+pub use file::{AUTH_FILE_ENV, Provider, Source, can_keep, file, login, logout, status};
 pub use helper::{HelperAnswer, MAX_REQUEST_BYTES, git_credential};
 pub(crate) use lookup::{credential, process_env};

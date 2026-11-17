@@ -143,11 +143,17 @@ error_codes! {
     NothingToUndo => "E_NOTHING_TO_UNDO", EXIT_ERROR, false;
     /// The store has no operation with that id.
     OpNotFound => "E_OP_NOT_FOUND", EXIT_NOT_FOUND, false;
-    // `serve`'s (M14): the caller and the store's access file.
+    // `serve`'s (M14): the caller and the store's access file. `auth login`'s: a provider's
+    // refusal.
     /// The serving entry could not name the caller (`details.reason` `no_identity`, or under
     /// `--user-family` `no_remote_user` and `remote_user_invalid`), no grant of the store's
     /// access file names it (`unknown_identity`), or the store has no access file
-    /// (`no_access_file`).
+    /// (`no_access_file`). Or a provider refused a login by its device flow (`auth login`):
+    /// `details.reason` is `access_denied`, `expired_token`, `device_flow_disabled`,
+    /// `bad_client_id`, `expiring_token` (the token came with a refresh token, which SwarmOps
+    /// does not use) or `unexpected_answer`, with `details.provider`, `details.host`, the
+    /// provider's own word for the refusal when it gave one (`details.provider_error`) and the
+    /// HTTP status (`details.http_status`); no login was kept.
     Auth => "E_AUTH", EXIT_AUTH, false;
     /// The store's access file grants this identity no such action (`details.reason`
     /// `not_granted`, with `identity`, `action` and `ref`), or the file is not valid, so that it
@@ -252,7 +258,10 @@ error_codes! {
     RemoteRejected => "E_REMOTE_REJECTED", EXIT_AUTH, false;
     /// The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,
     /// `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,
-    /// `ssh`). Nothing changed in the store; running the command again can succeed.
+    /// `ssh`). Nothing changed in the store; running the command again can succeed. A login
+    /// whose provider did not answer (`auth login`) has `details.phase` `login`, with
+    /// `details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no
+    /// login was kept.
     RemoteUnreachable => "E_REMOTE_UNREACHABLE", EXIT_RETRYABLE, true;
     /// The store records no remote of that name (`details.remote`).
     RemoteNotFound => "E_REMOTE_NOT_FOUND", EXIT_NOT_FOUND, false;

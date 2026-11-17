@@ -21,6 +21,19 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Added
 
+- `auth login --gh` without `--with-token` logs in by GitHub's device flow: it prints a code and
+  the page to enter it on (two lines on stderr), waits until the code is approved, and keeps the
+  token GitHub grants with the scopes it names (`source` `device`). `--scope <SCOPE>` names a
+  scope to ask for and repeats; none asks for `repo`. The requests are runs of the host's `curl`
+  (`SWARMOPS_CURL` by an absolute path, else the first on `PATH`), to `github.com`'s two login
+  addresses alone, in the name of the OAuth app whose client ID `SWARMOPS_GH_CLIENT_ID` holds:
+  no client ID is built in yet, and without the variable the login is `E_INVALID_ARG`
+  (`details.reason` `client_id_unset`; `curl_missing` on a host without curl). `E_AUTH` now also
+  means a provider's refusal of a login (`details.reason` `access_denied`, `expired_token`,
+  `device_flow_disabled`, `bad_client_id`, `expiring_token`, `unexpected_answer`), and
+  `E_REMOTE_UNREACHABLE` has `details.phase` `login`, with `details.host` and no
+  `details.remote`, when GitHub does not answer. A login `--with-token` reaches no network, as
+  before. The flow is tested against a stand-in for curl and has not been run against GitHub.
 - `auth login --gh --with-token`, `auth status` and `auth logout --gh` (`so auth …`): a login
   keeps a token for `github.com`, read from stdin, in one file of the user's outside every store
   (`SWARMOPS_AUTH_FILE`, else `swarmops/auth.toml` in the state directory); `status` lists the
@@ -342,6 +355,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   and no error. It is sent only to an https remote whose host and port are the login's, as a
   header scoped to that remote's URL in git's environment, and is removed from what git prints
   ([SECURITY.md](SECURITY.md)).
+- `auth login --gh` by the device flow runs the host's `curl`, a second program SwarmOps trusts
+  beside git: without a shell, with the arguments `-q --config -` alone, the request on its stdin
+  and a cleared environment but for `PATH`, the proxy variables and the certificate variables;
+  https only, no redirect followed, to two constant addresses at `github.com`. The device code
+  and the token are in no argument, envelope or error and not on stderr; the code and page shown
+  are checked first, and an answer with a refresh token is refused.
 - `ws create` refuses a `.swarmws` that is a link (`E_WS_DIRTY`) before its volume probe writes or
   removes a file through it; the probe wrote `probe-a` and `probe-l` at the link's target.
 - A token given as the user of an `http://` or `https://` URL was stored in `remotes.toml` and

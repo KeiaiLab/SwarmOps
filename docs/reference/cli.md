@@ -155,7 +155,7 @@ Work in a directory of your own: a workspace holds a sparse copy of a changeset'
 
 Keep, list or remove your logins, or hand one to git: a token per host, in one file of your own.
 
-- [`swarmops auth login`](commands/auth-login.md): Keep a token for a provider in your login file.
+- [`swarmops auth login`](commands/auth-login.md): Log in to a provider, and keep its token in your login file.
 - [`swarmops auth status`](commands/auth-status.md): List the logins your login file holds, without their tokens.
 - [`swarmops auth logout`](commands/auth-logout.md): Remove a provider's login from your login file.
 - [`swarmops auth git-credential`](commands/auth-git-credential.md): Answer git's credential-helper protocol from your login file.

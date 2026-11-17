@@ -70,11 +70,70 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_INVALID_ARG",
-        "message": "the following required arguments were not provided: <--with-token>",
+        "message": "this build has no client ID for GitHub's device flow: name an OAuth app's with SWARMOPS_GH_CLIENT_ID",
         "retryable": false,
         "exit": 2,
-        "details": {},
-        "hint": "Usage: swarmops auth login <--gh> <--with-token>\nFor more information, try '--help'."
+        "details": {
+          "reason": "client_id_unset",
+          "variable": "SWARMOPS_GH_CLIENT_ID"
+        },
+        "hint": "or hand the login a token: swarmops auth login --gh --with-token"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth login --gh",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/auth.toml",
+      "SWARMOPS_GH_CLIENT_ID": "example-client-id"
+    },
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "auth_login",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the device flow runs curl, and there is none: SWARMOPS_CURL names no file by an absolute path, or no directory of PATH holds one",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "reason": "curl_missing"
+        },
+        "hint": "install curl, or name it with SWARMOPS_CURL; a login with --with-token needs none"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth login --gh --scope 'Not A Scope'",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/auth.toml",
+      "SWARMOPS_GH_CLIENT_ID": "example-client-id"
+    },
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "auth_login",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "--scope: \"Not A Scope\" is not 1 to 64 lower-case letters, underscores and colons",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "reason": "scope"
+        },
+        "hint": null
       },
       "meta": {
         "elapsed_ms": "[elapsed_ms]",
@@ -100,7 +159,7 @@ expression: s.transcript()
         "retryable": false,
         "exit": 2,
         "details": {},
-        "hint": "Usage: swarmops auth login <--gh> <--with-token>\nFor more information, try '--help'."
+        "hint": "Usage: swarmops auth login --with-token <--gh>\nFor more information, try '--help'."
       },
       "meta": {
         "elapsed_ms": "[elapsed_ms]",

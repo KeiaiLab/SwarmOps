@@ -3355,7 +3355,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_AUTH",
-          "description": "The serving entry could not name the caller (`details.reason` `no_identity`, or under\n`--user-family` `no_remote_user` and `remote_user_invalid`), no grant of the store's\naccess file names it (`unknown_identity`), or the store has no access file\n(`no_access_file`).",
+          "description": "The serving entry could not name the caller (`details.reason` `no_identity`, or under\n`--user-family` `no_remote_user` and `remote_user_invalid`), no grant of the store's\naccess file names it (`unknown_identity`), or the store has no access file\n(`no_access_file`). Or a provider refused a login by its device flow (`auth login`):\n`details.reason` is `access_denied`, `expired_token`, `device_flow_disabled`,\n`bad_client_id`, `expiring_token` (the token came with a refresh token, which SwarmOps\ndoes not use) or `unexpected_answer`, with `details.provider`, `details.host`, the\nprovider's own word for the refusal when it gave one (`details.provider_error`) and the\nHTTP status (`details.http_status`); no login was kept.",
           "type": "string"
         },
         {
@@ -3435,7 +3435,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_REMOTE_UNREACHABLE",
-          "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed.",
+          "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed. A login\nwhose provider did not answer (`auth login`) has `details.phase` `login`, with\n`details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no\nlogin was kept.",
           "type": "string"
         },
         {
@@ -11237,7 +11237,7 @@ expression: s.redact(&all)
             },
             {
               "const": "E_AUTH",
-              "description": "The serving entry could not name the caller (`details.reason` `no_identity`, or under\n`--user-family` `no_remote_user` and `remote_user_invalid`), no grant of the store's\naccess file names it (`unknown_identity`), or the store has no access file\n(`no_access_file`).",
+              "description": "The serving entry could not name the caller (`details.reason` `no_identity`, or under\n`--user-family` `no_remote_user` and `remote_user_invalid`), no grant of the store's\naccess file names it (`unknown_identity`), or the store has no access file\n(`no_access_file`). Or a provider refused a login by its device flow (`auth login`):\n`details.reason` is `access_denied`, `expired_token`, `device_flow_disabled`,\n`bad_client_id`, `expiring_token` (the token came with a refresh token, which SwarmOps\ndoes not use) or `unexpected_answer`, with `details.provider`, `details.host`, the\nprovider's own word for the refusal when it gave one (`details.provider_error`) and the\nHTTP status (`details.http_status`); no login was kept.",
               "type": "string"
             },
             {
@@ -11317,7 +11317,7 @@ expression: s.redact(&all)
             },
             {
               "const": "E_REMOTE_UNREACHABLE",
-              "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed.",
+              "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed. A login\nwhose provider did not answer (`auth login`) has `details.phase` `login`, with\n`details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no\nlogin was kept.",
               "type": "string"
             },
             {

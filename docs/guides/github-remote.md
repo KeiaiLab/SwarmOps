@@ -26,7 +26,9 @@ the commands one by one, and says what to do when they stop.
 ```
 
 *The store talks to the remote through a git mirror it keeps in its own directory. Your git, 2.39
-or later, moves the packs; SwarmOps has no network code of its own.*
+or later, moves the packs; SwarmOps has no network code of its own. Logging in with
+`so auth login --gh` is the one other thing that reaches GitHub: it runs your curl against
+GitHub's two login addresses.*
 
 > ### In short
 >
@@ -96,9 +98,12 @@ SwarmOps runs your git, so git's own ways to authenticate apply, as they do for 
   the variable's name, never its value; each command reads the variable and hands git the token as
   an HTTP header for that remote's URL alone (basic authentication, user name `x-access-token`),
   through the environment, never as an argument.
-- **HTTPS with a login**: `so auth login --gh --with-token` reads a token from stdin and keeps it
-  for `github.com` in your login file, a file of your own outside every store
-  ([`auth login`](../reference/commands/auth-login.md)). An https remote at that host that names no
+- **HTTPS with a login**: `so auth login --gh` keeps a token for `github.com` in your login file, a
+  file of your own outside every store ([`auth login`](../reference/commands/auth-login.md)). It
+  prints a code to approve at `https://github.com/login/device` and keeps the token GitHub then
+  grants; it needs `curl`, and the client ID of an OAuth app in `SWARMOPS_GH_CLIENT_ID`, since
+  SwarmOps has registered no app of its own yet. `so auth login --gh --with-token` reads a token
+  from stdin instead, and needs neither. An https remote at that host that names no
   `--token-env` then goes with it, handed to git as a variable's token is. `so auth status` lists
   the logins, without their tokens. A plain `git` can use the same login:
   `git -c credential.helper='!so auth git-credential' push`
@@ -111,7 +116,8 @@ the remote's host is used, if there is one: the host and port must be equal, so 
 git never prompts: SwarmOps sets `GIT_TERMINAL_PROMPT=0`, so a missing credential fails at once
 with `E_REMOTE_REJECTED` (`details.reason` `auth`, exit 5). A credential helper that opens a
 window of its own ignores that setting and can wait for a person; under an MCP server nobody is
-there to answer it. Give agents' hosts an ssh key, `--token-env` or a login instead.
+there to answer it. Give agents' hosts an ssh key, `--token-env` or a login instead
+(`so auth login --gh --with-token`, which waits for nobody).
 
 **Tokens in CI.** A GitHub Actions job passes its token in the variable it names:
 

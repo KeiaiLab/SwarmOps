@@ -842,6 +842,24 @@ left).
   the file alone. `auth logout` removes the token from the file; it stays valid at the provider
   until it is revoked there. *Documented ([`auth login`](reference/commands/auth-login.md)). Found:
   the login's design.*
+- **The device flow needs a client ID you supply, and curl.** `auth login --gh` without
+  `--with-token` asks GitHub in the name of an OAuth app, and SwarmOps has registered none: no
+  client ID is built in, and `SWARMOPS_GH_CLIENT_ID` must name one of an app with the device flow
+  turned on (`E_INVALID_ARG`, `details.reason` `client_id_unset`, without it). Its requests are
+  runs of the host's `curl` (`curl_missing` on a host without one). `--with-token` needs neither.
+  *Planned: an OAuth app of SwarmOps's own, its client ID built in. Documented
+  ([`auth login`](reference/commands/auth-login.md#asking-github-for-the-token)). Found: the
+  login's design.*
+- **The device flow has not been run against GitHub.** Its tests answer it from a stand-in for
+  curl, with the answers GitHub documents; what GitHub answers to an unknown client ID in
+  particular is taken as a 404 or `incorrect_client_credentials`, and anything else is reported
+  as `unexpected_answer`. *Planned: one run against GitHub with an app of the maintainers', before
+  a release ships it. Found: the login's design.*
+- **A token that expires is refused.** An answer of the device flow that carries a refresh token
+  (a GitHub App with expiring user tokens gives one) is `E_AUTH` (`details.reason`
+  `expiring_token`) and nothing is kept: SwarmOps renews no token, so such a login would stop
+  working within hours. Use an OAuth app, whose tokens do not expire, or `--with-token`.
+  *Unscheduled. Found: the login's design.*
 - **One login, for `github.com`.** `--gh` is the one provider, and its host is fixed: no flag
   names a GitHub Enterprise host, and a second login replaces the first. *Unscheduled. Found: the
   login's design.*

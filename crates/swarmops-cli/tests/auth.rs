@@ -2,7 +2,8 @@
 //! `sync` and `remote add` send the token of the login kept for the remote's host to a remote
 //! that names no `--token-env`, to that host alone, and never show it; and
 //! `auth git-credential` hands it to a git that asks as git asks a credential helper, on stdout
-//! and nowhere else.
+//! and nowhere else. And the login itself by GitHub's device flow, against a stand-in for the
+//! curl it runs ([`FakeCurl`]): no test reaches GitHub.
 //!
 //! The remote is the test kit's [`GitServer`] on `127.0.0.1`, behind HTTP basic authentication
 //! that takes one token. `auth login --gh` keeps a login for `github.com` only, so each test
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use serde_json::Value;
+use swarmops_testkit::curl::{CURL_ENV, FakeCurl};
 use swarmops_testkit::remote::{GitServer, HttpAuth, HttpServer};
 use tempfile::TempDir;
 
@@ -614,4 +616,269 @@ fn plain_git_uses_the_helper() {
         sent.iter().all(|seen| *seen == Site::header(TOKEN)),
         "{sent:?}"
     );
+}
+
+/// The client ID a login by the device flow is asked in the name of: no provider issued it.
+const CLIENT: &str = "example-client-id";
+
+/// The device code of the stand-in's answers, which nothing may show.
+const DEVICE: &str = "example-device-code-not-a-secret";
+
+/// The code a person would enter.
+const USER_CODE: &str = "ABCD-1234";
+
+/// What a login by the device flow runs with: a stand-in for curl, a client ID, and a login
+/// file of the test's own in an empty `HOME`.
+struct Flow {
+    /// The stand-in, with the answers the test queued.
+    curl: FakeCurl,
+    /// The login file's directory, removed when the flow is dropped.
+    home: TempDir,
+}
+
+impl Flow {
+    fn new() -> Flow {
+        Flow {
+            curl: FakeCurl::new(),
+            home: tempfile::tempdir().expect("a temp HOME"),
+        }
+    }
+
+    /// The login file's path: nothing is there until a login writes it.
+    fn file(&self) -> PathBuf {
+        self.home.path().join("logins").join("auth.toml")
+    }
+
+    /// Runs `auth <line>` with the flow's variables, then `more`, and nothing on stdin.
+    fn auth(&self, line: &[&str], more: &[(&str, &str)]) -> Run {
+        let (file, curl) = (path_text(&self.file()), path_text(&self.curl.path()));
+        let mut env = vec![
+            ("HOME", path_text(self.home.path())),
+            (AUTH_FILE, file),
+            (CURL_ENV, curl),
+            ("SWARMOPS_GH_CLIENT_ID", CLIENT.to_owned()),
+        ];
+        env.extend(
+            more.iter()
+                .map(|(name, value)| (*name, (*value).to_owned())),
+        );
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let mut args = vec!["auth"];
+        args.extend_from_slice(line);
+        run_bin(SO, &args, &env, "")
+    }
+
+    /// Runs `auth login --gh`.
+    fn login(&self) -> Run {
+        self.auth(&["login", "--gh"], &[])
+    }
+}
+
+/// The first answer of a flow that goes on: a code polled every second, the shortest wait
+/// there is, so a test with one poll takes about a second.
+fn device_code() -> String {
+    serde_json::json!({
+        "device_code": DEVICE, "user_code": USER_CODE,
+        "verification_uri": "https://github.com/login/device",
+        "expires_in": 900, "interval": 1,
+    })
+    .to_string()
+}
+
+/// A poll's answer that names `error`.
+fn poll_error(error: &str) -> String {
+    serde_json::json!({"error": error, "error_description": "example words"}).to_string()
+}
+
+/// Asserts that neither stream of `done` holds the device code, the token or GitHub's words.
+fn assert_no_secret(done: &Run) {
+    for text in [&done.stdout, &done.stderr] {
+        for secret in [DEVICE, TOKEN, "example words"] {
+            assert!(!text.contains(secret), "{secret}: {done}");
+        }
+    }
+}
+
+/// `auth login --gh` without `--with-token` runs the device flow through curl and keeps the
+/// token it ends with: the code and its page on stderr, one envelope on stdout, the request on
+/// curl's stdin and never in its arguments, curl's environment the allowed variables alone,
+/// and the device code and the token in neither stream. It takes about two seconds: a
+/// one-second wait before each of two polls.
+#[test]
+fn device_flow_logs_in() {
+    let flow = Flow::new();
+    let granted = serde_json::json!({"access_token": TOKEN, "token_type": "bearer",
+                                     "scope": "repo,workflow"});
+    flow.curl
+        .answer(200, &device_code())
+        .answer(200, &poll_error("authorization_pending"))
+        .answer(200, &granted.to_string());
+
+    // 1. The login: its result on stdout, what a person needs on stderr, no secret in either.
+    let planted = [
+        ("SO_TEST_PLANTED", "planted"),
+        ("HTTPS_PROXY", "http://127.0.0.1:9"),
+    ];
+    let line = ["login", "--gh", "--scope", "repo", "--scope", "workflow"];
+    let done = flow.auth(&line, &planted);
+    let file = flow.file();
+    let entry = serde_json::json!({"provider": "gh", "host": "github.com", "source": "device",
+                                   "scopes": ["repo", "workflow"]});
+    assert_eq!(
+        done.ok(),
+        serde_json::json!({"login": entry, "file": path_text(&file), "replaced": false})
+    );
+    assert_eq!(
+        done.stderr,
+        format!(
+            "Open https://github.com/login/device and enter the code {USER_CODE}\n\
+             Waiting for approval (the code expires in 15 minutes).\n"
+        )
+    );
+    assert_no_secret(&done);
+
+    // 2. The file: the user's alone, holding the token and where it came from.
+    let mode = fs::metadata(&file).expect("stat").permissions().mode() & 0o7777;
+    assert_eq!(mode, 0o600);
+    let kept = fs::read_to_string(&file).expect("read the login file");
+    assert!(kept.contains(&format!("token = \"{TOKEN}\"")), "{kept}");
+    assert!(kept.contains("source = \"device\""), "{kept}");
+    let listed = flow.auth(&["status"], &[]).ok();
+    assert_eq!(listed["logins"], serde_json::json!([entry]));
+
+    // 3. Three runs of curl: one for the code, two polls. The whole request is on stdin, to
+    //    GitHub's two addresses and no other, with no redirect followed.
+    let calls = flow.curl.calls();
+    assert_eq!(calls.len(), 3);
+    for call in &calls {
+        assert_eq!(call.args, ["-q", "--config", "-"]);
+        assert!(call.stdin.contains("proto = \"=https\"\n"), "{call:?}");
+        assert!(call.stdin.contains("max-redirs = 0\n"), "{call:?}");
+        assert!(!call.stdin.contains("location"), "{call:?}");
+    }
+    let ask = &calls[0].stdin;
+    assert!(
+        ask.starts_with("url = \"https://github.com/login/device/code\"\n"),
+        "{ask}"
+    );
+    let form = format!("data = \"client_id={CLIENT}&scope=repo%20workflow\"\n");
+    assert!(ask.contains(&form), "{ask}");
+    assert_eq!(calls[1].stdin, calls[2].stdin, "the same poll each time");
+    let poll = &calls[1].stdin;
+    assert!(
+        poll.starts_with("url = \"https://github.com/login/oauth/access_token\"\n"),
+        "{poll}"
+    );
+    let form = format!("data = \"client_id={CLIENT}&device_code={DEVICE}&grant_type=");
+    assert!(poll.contains(&form), "{poll}");
+
+    // 4. curl's environment: where programs are and the proxy, and nothing else of the
+    //    caller's, the login file's variable and the home directory included.
+    let env = &calls[0].env;
+    let has = |name: &str| env.iter().any(|kept| kept == name);
+    assert!(has("PATH") && has("HTTPS_PROXY"), "{env:?}");
+    for dropped in ["SO_TEST_PLANTED", "HOME", AUTH_FILE, CURL_ENV] {
+        assert!(!has(dropped), "{dropped}: {env:?}");
+    }
+    assert!(
+        !env.iter().any(|kept| kept.starts_with("SWARMOPS_")),
+        "{env:?}"
+    );
+}
+
+/// Each way the device flow ends without a token: the error's code, exit and
+/// `details.reason`, one envelope on stdout, no login file, and no device code, token or word
+/// of GitHub's in either stream. A refusal of the first answer shows nothing on stderr: the
+/// code is shown only once it has been checked. The four cases that poll take a second each.
+#[test]
+fn device_flow_refusals() {
+    let refresh = serde_json::json!({"access_token": TOKEN, "expires_in": 28800,
+                                     "refresh_token": "example-refresh-not-a-secret"});
+    let elsewhere = device_code().replace("github.com", "example.com");
+    let escape = device_code().replace(USER_CODE, "AB\\u001b[2JCD");
+    let polled = |answer: &str| vec![(200, device_code()), (200, answer.to_owned())];
+    let cases = [
+        ("access_denied", polled(&poll_error("access_denied"))),
+        ("expired_token", polled(&poll_error("expired_token"))),
+        ("expiring_token", polled(&refresh.to_string())),
+        ("unexpected_answer", polled("<html>Bad Gateway</html>")),
+        (
+            "device_flow_disabled",
+            vec![(200, poll_error("device_flow_disabled"))],
+        ),
+        ("bad_client_id", vec![(404, poll_error("Not Found"))]),
+        ("unexpected_answer", vec![(200, "<html>".to_owned())]),
+        ("unexpected_answer", vec![(200, elsewhere)]),
+        ("unexpected_answer", vec![(200, escape)]),
+    ];
+    for (reason, answers) in cases {
+        let flow = Flow::new();
+        for (status, body) in &answers {
+            flow.curl.answer(*status, body);
+        }
+        let refused = flow.login();
+        let error = refused.err("E_AUTH");
+        assert_eq!(error["exit"], 5, "{refused}");
+        assert_eq!(error["details"]["reason"], reason, "{refused}");
+        assert_eq!(error["details"]["provider"], "gh", "{refused}");
+        assert_eq!(error["details"]["host"], "github.com", "{refused}");
+        assert_no_secret(&refused);
+        assert!(!refused.stderr.contains('\u{1b}'), "{refused}");
+        assert!(!refused.stderr.contains("example.com"), "{refused}");
+        assert_eq!(answers.len() == 1, refused.stderr.is_empty(), "{refused}");
+        assert_eq!(flow.curl.calls().len(), answers.len(), "{refused}");
+        assert!(!flow.file().exists(), "{reason}: no login is kept");
+    }
+
+    // curl reached no answer: the network's failure, to run again, with curl's exit code.
+    let flow = Flow::new();
+    flow.curl.fail(6);
+    let refused = flow.login();
+    let error = refused.err("E_REMOTE_UNREACHABLE");
+    assert_eq!(
+        (&error["exit"], &error["retryable"]),
+        (&4.into(), &true.into())
+    );
+    let want = serde_json::json!({"phase": "login", "host": "github.com", "cause": "dns",
+                                  "curl_exit": 6});
+    assert_eq!(error["details"], want, "{refused}");
+    assert_eq!(refused.stderr, "", "{refused}");
+    assert!(!flow.file().exists(), "no login is kept");
+
+    // No curl at all: said before anything is asked.
+    let flow = Flow::new();
+    let gone = path_text(&flow.home.path().join("no-curl"));
+    let refused = flow.auth(&["login", "--gh"], &[(CURL_ENV, &gone)]);
+    let error = refused.err("E_INVALID_ARG");
+    assert_eq!(error["details"]["reason"], "curl_missing", "{refused}");
+    assert_eq!(flow.curl.calls().len(), 0, "{refused}");
+}
+
+/// A login that could not be kept asks GitHub for nothing: a login file that is refused, and a
+/// login at that host that is another provider's, fail before curl runs, so nobody approves a
+/// code in vain.
+#[test]
+fn a_login_that_could_not_be_kept_asks_for_no_code() {
+    for (mode, text, reason) in [
+        (0o644, "version = 1\n".to_owned(), "auth_file_mode"),
+        (
+            0o600,
+            "version = 1\n[[login]]\nprovider = \"so\"\nhost = \"github.com\"\n".to_owned(),
+            "provider_mismatch",
+        ),
+    ] {
+        let flow = Flow::new();
+        flow.curl.answer(200, &device_code());
+        let file = flow.file();
+        fs::create_dir_all(file.parent().expect("a directory")).expect("make the directory");
+        fs::write(&file, &text).expect("write the login file");
+        fs::set_permissions(&file, fs::Permissions::from_mode(mode)).expect("set the mode");
+
+        let refused = flow.login();
+        let error = refused.err("E_INVALID_ARG");
+        assert_eq!(error["details"]["reason"], reason, "{refused}");
+        assert_eq!(refused.stderr, "", "{refused}");
+        assert_eq!(flow.curl.calls().len(), 0, "{refused}");
+        assert_eq!(fs::read_to_string(&file).expect("read"), text, "left alone");
+    }
 }

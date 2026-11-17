@@ -463,7 +463,9 @@ trips; commits made in the store export to the same ids every time.
 **Authentication.** Over HTTPS, the token GitHub documents for git over HTTPS (a personal access
 token or a GitHub App installation token), taken from git's credential helpers when git is
 installed, as `git credential fill` gives it, or from an environment variable in CI; over ssh, the
-user's keys through `ssh`. The store writes no credential to disk.
+user's keys through `ssh`. The store writes no credential to disk. Since 0.12.0 a login
+(`auth login`) keeps a token outside every store, in one file of the user's, for an https remote
+that names no variable.
 
 **Identity mapping.** A commit fetched from GitHub keeps its author and committer; its changeset
 records no agent, as an import does today. A changeset made in the store exports with its agent as
@@ -489,7 +491,9 @@ departures, each a decision of its design:
   only the branch `main` follows is imported, and another branch when a push names it. Tags are
   never imported.
 - **Credentials** are git's (helpers, ssh keys), or a token in an environment variable the remote
-  names (`--token-env`); no `GH_TOKEN` or `GITHUB_TOKEN` is picked up unasked.
+  names (`--token-env`); no `GH_TOKEN` or `GITHUB_TOKEN` is picked up unasked. Since 0.12.0 a
+  token the user logged in with (`auth login`) is a third, asked for by logging in; its device
+  flow runs the user's curl, so SwarmOps still adds no network crate.
 - **`sync` moves `main` before it pushes**, so a refused push leaves `main` landed on the remote's
   head (`details.main_moved`; landing a change that reverts it takes it back); `sync --no-push`
   serves branches that take pull requests only. A change GitHub holds is recognised by any of

@@ -99,6 +99,14 @@ credential helper, with a failure's envelope on stderr. And a run that meets one
 aborts prints no envelope at all: the process aborts, saying why on stderr. A script should treat
 stdout that is not one JSON object as a failure of its own.
 
+`auth login --gh` without `--with-token` writes to stderr before it succeeds: the code a person
+enters at GitHub and its page. It then waits for them, and its envelope on stdout comes once the
+login is kept. A script logs in with `--with-token`, which waits for nobody. When the
+device flow fails, `E_AUTH` carries `details.reason` (`access_denied`, `expired_token`,
+`device_flow_disabled`, `bad_client_id`, `expiring_token`, `unexpected_answer`), and
+`E_REMOTE_UNREACHABLE` carries `details.phase` `login` with `details.host` and no
+`details.remote`.
+
 ## Output flags
 
 | Flag | Effect |

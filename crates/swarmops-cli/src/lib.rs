@@ -25,6 +25,9 @@
 //!   helper and reads its stdout, which carries a `username=` and a `password=` line or nothing.
 //!   The envelope of a failure, of a panic or of a command line it refuses goes to stderr, with
 //!   the same exit code.
+//! - `auth login` without `--with-token` prints its envelope on stdout as every command does,
+//!   and before it two lines on stderr for the person at the terminal: the code to enter and its
+//!   page, then that it waits. A script reads stdout alone, as for every command.
 //! - `derive --follow` prints one envelope a line for each run that derived something, and
 //!   nothing for a run that derived nothing (a follower that has caught up is silent), until it
 //!   is killed or a run fails, whose envelope is the last.

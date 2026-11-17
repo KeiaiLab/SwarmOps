@@ -169,7 +169,8 @@ const NOT_A_TOOL: &[(&str, &str)] = &[
     ),
     (
         "auth login",
-        "It reads a token from stdin, which a tool call's arguments would record",
+        "It is a person's act: the device flow waits for a code to be approved in a browser, \
+         and --with-token reads a token from stdin, which a tool call's arguments would record",
     ),
     (
         "auth status",
