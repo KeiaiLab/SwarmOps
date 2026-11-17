@@ -46,7 +46,11 @@ the macOS build waits, and nothing is published without it.
    The macOS build (job `build aarch64-apple-darwin`) is the same build for
    `aarch64-apple-darwin`, Apple silicon, natively on the maintainers' Mac and in no container:
    the pinned toolchain with that Mac's Xcode command line tools as linker and C compiler, into a
-   target directory of its own, emptied first. `MACOSX_DEPLOYMENT_TARGET=11.0` pins the oldest
+   target directory of its own, emptied first. Its cargo home is a directory of the run too,
+   emptied first, so the crates are downloaded afresh and nothing under `~/.cargo` is read; the
+   job fails when a `.cargo/config.toml` lies above the workspace or the runner's environment
+   sets `RUSTFLAGS`, `RUSTC_WRAPPER`, `RUSTUP_TOOLCHAIN` or a `CARGO_*` variable. The toolchain
+   itself is that Mac's rustup's, the pinned version. `MACOSX_DEPLOYMENT_TARGET=11.0` pins the oldest
    macOS the binaries start on. Each binary must be for arm64 alone, link against nothing outside
    `/usr/lib` and `/System/Library` (`otool -L`), name macOS 11.0 as its minimum
    (`otool -l`, `LC_BUILD_VERSION`), carry the linker's ad-hoc signature (`codesign --verify`),
@@ -169,6 +173,7 @@ installs the same tool versions as `ci.yml`'s: move them together.
      When this commit's release workflow has no `build aarch64-apple-darwin` job, this
      release holds none either: name this release there instead. After the first release that
      holds one, the pages name that release as the first with a macOS build.
+
 4. **Write the changelog.** Move the entries under **Unreleased** in
    [CHANGELOG.md](CHANGELOG.md) to a new `## [X.Y.Z] - YYYY-MM-DD` section, mark breaking
    changes, and leave an empty **Unreleased** section. The section's date is the UTC date of the

@@ -16,7 +16,9 @@
 # write grant, `contents: write`, is the publishing job's, and that job builds nothing: it checks
 # the archives the build jobs made and uploads them with `gh`. No job restores a cache, so what a
 # release ships is built from the tagged commit and Cargo.lock alone, never from a cache another
-# run could have written. No secret is used but each job's own token.
+# run could have written: the Linux builds in a container made for the run, the macOS build with
+# a cargo home of its own, emptied first (see its job for what of that Mac it does use). No
+# secret is used but each job's own token.
 #
 # Where jobs run: on the maintainers' own host, through the self-hosted runners labelled
 # `swarmops-local` that run CI. A tag push is a maintainer's, never a fork's. The release gate
@@ -29,7 +31,8 @@
 # moved by hand: Dependabot does not read them.
 #
 # The macOS build alone runs elsewhere: on the maintainers' own Mac, through a self-hosted runner
-# labelled `macos-local`, natively and in no container, with that Mac's Xcode command line tools.
+# labelled `macos-local`, natively and in no container, with that Mac's Xcode command line tools
+# and its rustup, which installs the toolchain rust-toolchain.toml pins or finds it installed.
 # Until that runner is registered and online its job waits, and with it `publish`, which needs it:
 # no release is published without the macOS archive.
 name: Release
@@ -123,7 +126,8 @@ jobs:
           )
           check = (
               "Check a download against `SHA256SUMS` with"
-              " `sha256sum --check --ignore-missing SHA256SUMS`. The archives carry no"
+              " `sha256sum --check --ignore-missing SHA256SUMS` (on macOS:"
+              " `shasum -a 256 --check --ignore-missing SHA256SUMS`). The archives carry no"
               f" build-provenance attestation yet ([RELEASE.md]({files}RELEASE.md))."
           )
           notes = f"{body}\n\n---\n\n{check}\n"
@@ -446,6 +450,15 @@ jobs:
       # The runner must be an Apple silicon Mac, as the binaries are run here, and have the
       # tools the steps run: jq ships with macOS 15 and newer, the others with the command line
       # tools.
+      # Nothing of the runner user's cargo is to reach the build, which no container keeps out
+      # here. CARGO_HOME is a directory of this run under the job's temporary directory, emptied
+      # first: cargo downloads the crates Cargo.lock names into it and reads no registry, no
+      # git checkout and no configuration from `~/.cargo`. Cargo also reads `.cargo/config.toml`
+      # of every directory above the workspace, the home directory's among them when the runner
+      # works below it, and a handful of variables (RUSTFLAGS, RUSTC_WRAPPER, RUSTUP_TOOLCHAIN,
+      # any CARGO_*): the step fails when it finds one of either, naming it. What the job does
+      # take from this Mac is rustup with its toolchains (the pinned version, installed here or
+      # found installed), the command line tools' linker and C compiler, and the system's SDK.
       - name: Install the toolchain rust-toolchain.toml pins, for the target
         run: |
           if [ "$(uname -sm)" != "Darwin arm64" ]; then
@@ -459,6 +472,32 @@ jobs:
             fi
           done
           sw_vers
+          foreign=$(env | sed -n -E \
+            's/^((CARGO_|RUSTC|RUSTFLAGS|RUSTDOCFLAGS|RUSTUP_TOOLCHAIN)[A-Za-z0-9_]*)=.*/\1/p' |
+            grep -v -x -e CARGO_TERM_COLOR || true)
+          if [ -n "$foreign" ]; then
+            echo "::error::this runner's environment sets ${foreign//$'\n'/ }, which the build" \
+              "would follow"
+            exit 1
+          fi
+          above=$(dirname "$GITHUB_WORKSPACE")
+          while :; do
+            for config in "$above/.cargo/config.toml" "$above/.cargo/config"; do
+              if [ -e "$config" ]; then
+                echo "::error::cargo would read $config, which is not the tagged commit's"
+                exit 1
+              fi
+            done
+            if [ "$above" = / ]; then
+              break
+            fi
+            above=$(dirname "$above")
+          done
+          cargo_home="$RUNNER_TEMP/release-cargo-home"
+          rm -rf -- "$cargo_home"
+          mkdir -p "$cargo_home"
+          export CARGO_HOME="$cargo_home"
+          echo "CARGO_HOME=$cargo_home" >>"$GITHUB_ENV"
           rustup toolchain install --no-self-update
           rustup target add "$TARGET_TRIPLE"
           target_dir="$RUNNER_TEMP/release-target"
@@ -617,12 +656,13 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 14
-      # A few hundred megabytes, and dist/ in the workspace, which the next run's checkout
-      # would otherwise find.
+      # A few hundred megabytes with the downloaded crates, and dist/ in the workspace, which
+      # the next run's checkout would otherwise find.
       - name: Delete the build
         if: ${{ always() }}
         run: |
-          rm -rf -- "$RUNNER_TEMP/release-target" "$RUNNER_TEMP/smoke" "$RUNNER_TEMP/unpacked" dist
+          rm -rf -- "$RUNNER_TEMP/release-target" "$RUNNER_TEMP/release-cargo-home" \
+            "$RUNNER_TEMP/smoke" "$RUNNER_TEMP/unpacked" dist
 
   # One target's .deb and .rpm, made by scripts/packages.py from that target's archive alone (its
   # binaries and files, byte for byte, dated at the tagged commit), then each installed with dpkg
