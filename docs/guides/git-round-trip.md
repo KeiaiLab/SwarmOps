@@ -11,7 +11,7 @@ and `git export` writes the result back to a git branch that `git push` sends on
 pipeline that watches the branch keeps running. This guide runs the round trip command by command,
 and lists what stops it.
 
-**Pre-1.0** · Linux today; macOS and Windows next · MIT licence
+**Pre-1.0** · Linux, and macOS on Apple silicon from 0.12.0; Windows next · MIT licence
 
 ## The round trip
 
@@ -55,7 +55,7 @@ happens otherwise.
 
 ## Before you start
 
-- **SwarmOps, installed** (Linux today; macOS and Windows next). The
+- **SwarmOps, installed** (Linux, or macOS on Apple silicon from 0.12.0; Windows next). The
   [Quick start](https://swarmops.cc/#start) builds `swarmops` and `so`, the same program under a
   shorter name. The examples use `so`.
 - **A store** on a native Linux filesystem. A path under `/mnt/` is refused with `E_UNSUPPORTED_FS`.

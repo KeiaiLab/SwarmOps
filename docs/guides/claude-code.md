@@ -15,7 +15,7 @@ two rules an agent needs (full ids for compare-and-swap, and small results), and
 `claude --worktree` sessions and `isolation: worktree` subagents a SwarmOps workspace through
 Claude Code's worktree hooks.
 
-**Pre-1.0** · Linux today; macOS and Windows next · MIT licence
+**Pre-1.0** · Linux, and macOS on Apple silicon from 0.12.0; Windows next · MIT licence
 
 ## Before you start
 

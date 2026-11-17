@@ -114,16 +114,16 @@ installs the same tool versions as `ci.yml`'s: move them together.
   archives with `actions/attest-build-provenance`, which needs `id-token: write` and
   `attestations: write` there too, and step 9 below gains
   `gh attestation verify <archive> --repo KeiaiLab/SwarmOps`.
-- **Linux (x86_64 and aarch64, glibc 2.34 or newer) and, from the first release after 0.11.0,
-  macOS on Apple silicon; Windows is the rest of milestone M12.** The aarch64 Linux binaries are
+- **Linux (x86_64 and aarch64, glibc 2.34 or newer) and, from 0.12.0 on, macOS on Apple
+  silicon; Windows is the rest of milestone M12.** The aarch64 Linux binaries are
   cross-compiled and only smoke-tested, under QEMU; the test suite runs on x86_64 Linux in CI
   ([docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md)). The macOS
   binaries are built and smoke-tested on the maintainers' Mac, where no workflow runs
   `just check` yet, and they are signed ad hoc by the linker, with no Developer ID and no
   notarization, which Gatekeeper asks of a file that carries its quarantine mark, as a
   browser's download does; a download by `curl`, the installer's, carries none. There is no
-  Intel Mac, Windows or static (musl) build. No release has run the macOS job yet: 0.11.0 and
-  older hold Linux archives only.
+  Intel Mac, Windows or static (musl) build. 0.12.0 is the first release whose run holds the
+  macOS job: 0.11.0 and older hold Linux archives only.
 - **Packages are files on the release, not a repository.** There is no apt or dnf repository to
   add, so `apt upgrade` and `dnf upgrade` do not see a new release: install the next release's
   package. The packages carry no signature of their own (`rpm --checksig` finds their digests,
@@ -183,19 +183,19 @@ installs the same tool versions as `ci.yml`'s: move them together.
      `just check`;
    - when a page was added since the last release, `web/addresses.txt` lists it: run
      `node scripts/check-site.mjs --write-addresses` in `web/` and commit the result;
-   - the macOS sentences name the right release. The installer's `MACOS_AFTER`
+   - the macOS sentences name the right releases: 0.11.0 is the last release without a macOS
+     archive and 0.12.0 the first with one. The installer's `MACOS_AFTER`
      (`scripts/install.sh` and its copy `web/public/install.sh`), the message
-     `scripts/test-install.py` expects, and the sentences beside "0.11.0" in
+     `scripts/test-install.py` expects, and the sentences beside "0.11.0" and "0.12.0" in
      `docs/guides/install.md`, `docs/guides/parallel-agents.md`,
      `docs/operate/install-and-upgrade.md`, `docs/policies/msrv-and-platforms.md`,
-     `docs/troubleshooting.md`, `docs/known-limitations.md`, CHANGELOG.md's macOS entry and
-     this file's "Not there yet" hold that 0.11.0 is the last release without a macOS archive.
-     When this commit's release workflow has no `build aarch64-apple-darwin` job, this
-     release holds none either: name this release there instead. After the first release that
-     holds one, the pages name that release as the first with a macOS build.
+     `docs/troubleshooting.md`, `docs/known-limitations.md`, CHANGELOG.md's macOS entries and
+     this file's "Not there yet" hold that. A release whose workflow has no
+     `build aarch64-apple-darwin` job holds no macOS archive: say so in them before it is
+     tagged.
    - the installer's `UPDATE_AFTER` (`scripts/install.sh` and its copy) names the last release
      without `so update`, 0.11.0, and `scripts/test-install.py`'s `NO_UPDATE` and `FIRST_UPDATE`
-     agree: when this release does not hold the command either, name this release there.
+     agree: 0.12.0 is the first release that holds the command.
    - what an installed build expects of a release did not change, or the changelog says so
      under a group that withholds the release ([step 4](#checklist)): `so update` in every
      release after 0.11.0 runs the installer that was built into it, not this release's. That
@@ -211,28 +211,25 @@ installs the same tool versions as `ci.yml`'s: move them together.
      ("How do I update?"), `docs/operate/install-and-upgrade.md` (the ways to install, and
      "Automatic update"), `docs/guides/parallel-agents.md`, `docs/guides/claude-code.md`,
      `docs/policies/versioning-and-stability.md` ("What automatic update crosses"),
-     `docs/troubleshooting.md`, SECURITY.md and `docs/known-limitations.md` ("No release
-     holds `update` yet", which goes with the release that holds it). When this release does
-     not hold the command, name this release in them.
+     `docs/troubleshooting.md`, SECURITY.md and `docs/known-limitations.md` ("Releases up to
+     0.11.0 hold no `update`").
 
-     Other sentences say the same without a version, and turn false with the first release
-     that holds a macOS archive. Change them when the sentences above come to name that
-     release:
-     - README.md: the status line's "no macOS or Windows build yet", "When not to use it"
-       ("an Apple silicon macOS build is set up for the next one") and the roadmap paragraph
-       ("the macOS build awaits its first release");
-     - `docs/guides/install.md`: "No release holds that build yet" and "from the next release
-       on", with the sample run that follows them;
-     - `docs/roadmap.md`: the M12 rows ("in no release yet") and its paragraph;
-     - `docs/known-limitations.md`: the Platforms entry on the macOS build ("until the next
-       release");
-     - `web/content/product/index.md` ("set up for the next release"),
-       `web/components/home/hero.tsx` ("no macOS or Windows build yet", and `PLATFORMS`),
-       `web/components/home/fit.tsx` ("Linux only, for now") and
-       `web/components/markdown-page.tsx` ("Runs on: Linux, …");
-     - `web/scripts/check-site.mjs`, rule S8: `TRIPLE` reads only the `-unknown-linux-`
-       targets of `install.sh`, and `UNSUPPORTED` requires Home to name macOS as without a
-       build. Until both change, the site's check holds Home to the old sentence.
+     Other sentences say which systems a release is built for, and which it is not, and
+     change with the systems the release workflow builds:
+     - README.md: the platform line under the status line ("macOS on Apple silicon from
+       0.12.0 on", "no Windows or Intel Mac build"), "When not to use it" and the roadmap
+       paragraph ("the macOS build ships from 0.12.0 on");
+     - `docs/guides/install.md`: "On a Mac" ("0.12.0 is the first release that holds that
+       build"), with the sample run of an older release that follows it;
+     - `docs/roadmap.md`: the M12 rows ("from v0.12.0 on") and its paragraph;
+     - `docs/known-limitations.md`: the Platforms entry on the macOS build;
+     - `web/content/product/index.md` ("Not on Windows or an Intel Mac"),
+       `web/components/home/hero.tsx` (`MACOS_SINCE`, the install facts' "no Windows build",
+       and `PLATFORMS` in `web/lib/site.ts`), `web/components/home/fit.tsx` ("Windows or an
+       Intel Mac") and `web/components/markdown-page.tsx` ("Runs on: Linux, …");
+     - `web/scripts/check-site.mjs`, rule S8: `TRIPLE` reads the Linux and macOS targets of
+       `install.sh`, Home must name each system and architecture they are for, and
+       `UNSUPPORTED` requires Home to name Windows and the Intel Mac as without a build.
 4. **Write the changelog.** Move the entries under **Unreleased** in
    [CHANGELOG.md](CHANGELOG.md) to a new `## [X.Y.Z] - YYYY-MM-DD` section, mark breaking
    changes, and leave an empty **Unreleased** section. The section's date is the UTC date of the

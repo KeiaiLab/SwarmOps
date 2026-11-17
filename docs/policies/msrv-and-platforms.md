@@ -32,8 +32,8 @@ aarch64 Linux (glibc 2.34 or newer); the aarch64 ones are only smoke-tested, und
 Windows are milestone M12, and its macOS part is under way: the workspace builds and its test suite
 passes on macOS (aarch64, APFS), where the store's sync is an `F_FULLFSYNC`; the installer takes an
 Apple silicon Mac; and the release workflow builds an `aarch64-apple-darwin` archive, for macOS 11
-or newer, from the first release after 0.11.0 on. No release holds one yet, CI does not run on
-macOS, and no macOS but 27 was tried. Still to come in M12: Windows's lock and fsync model, file
+or newer, from 0.12.0 on, the first release that holds one. CI does not run on macOS, and no macOS
+but 27 was tried. Still to come in M12: Windows's lock and fsync model, file
 modes and symlinks, and CI runners for both. Other systems (Windows, the BSDs, Intel Macs) are not
 tested and not supported.
 

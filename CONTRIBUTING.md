@@ -60,7 +60,8 @@ SwarmOps is pre-release. This page is how changes get made, for people and agent
 
 ## Setup
 
-Linux today (x86_64 and aarch64 release builds); macOS and Windows are the next milestone, M12
+Linux (x86_64 and aarch64 release builds) and, from 0.12.0 on, macOS on Apple silicon; the rest of
+macOS and all of Windows are the next milestone, M12
 ([docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md)).
 Install Rust with rustup; `rust-toolchain.toml` selects Rust 1.100.0 with rustfmt and clippy.
 Then the tools the gates use:

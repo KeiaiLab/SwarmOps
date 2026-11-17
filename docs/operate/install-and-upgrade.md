@@ -15,8 +15,8 @@ Commands and outputs here follow the
 - **Linux.** SwarmOps is built and tested on x86_64 Linux
   ([platforms](../policies/msrv-and-platforms.md)). The release builds run on x86_64 and aarch64
   Linux with glibc 2.34 or newer.
-- **Or macOS on Apple silicon**, macOS 11 or newer, from the first release after 0.11.0: no
-  release holds a macOS build yet, and until one does a Mac installs
+- **Or macOS on Apple silicon**, macOS 11 or newer, from 0.12.0 on, the first release that
+  holds a macOS build; an older release a Mac installs
   [from a clone](#install-from-a-clone). The installer and the archive are the ways there; the
   packages are Linux's, and there is no build for an Intel Mac
   ([Install, On a Mac](../guides/install.md#on-a-mac)).
@@ -217,7 +217,7 @@ From v0.1.0 on, each release on the
 target, `swarmops-<version>-x86_64-unknown-linux-gnu.tar.gz` and
 `swarmops-<version>-aarch64-unknown-linux-gnu.tar.gz` (`swarmops`, `so`, the license, the
 third-party licenses, the README and the changelog), and a `SHA256SUMS` file to check them
-against. From the first release after 0.11.0 on, the release workflow adds
+against. From 0.12.0 on, the release workflow adds
 `swarmops-<version>-aarch64-apple-darwin.tar.gz` for Apple silicon Macs
 ([checking it on a Mac](../guides/install.md#how-do-i-check-a-release-archive-by-hand)). The Linux
 binaries need glibc 2.34 or newer. On glibc 2.34-2.38 hosts (Ubuntu 22.04, Debian 12,

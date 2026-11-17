@@ -79,14 +79,15 @@ The script is POSIX sh, so `| sh` works as well as `| bash`, and macOS's own bas
 
 ### On a Mac
 
-**You need:** a Mac with Apple silicon (`uname -m` prints `arm64`), macOS 11 or newer, and a
-release after 0.11.0, which does not exist yet.
+**You need:** a Mac with Apple silicon (`uname -m` prints `arm64`), macOS 11 or newer, and
+SwarmOps 0.12.0 or newer.
 
-The same command installs the Apple silicon build, `aarch64-apple-darwin`. No release holds that
-build yet: 0.11.0 and every release before it hold Linux archives
-only, and the release workflow builds the macOS archive from the next release on
-([RELEASE.md](../../RELEASE.md#what-the-release-workflow-does)). Until that release, the installer
-stops before it downloads an archive (`/Users/me` stands for your home directory):
+The same command installs the Apple silicon build, `aarch64-apple-darwin`. 0.12.0 is the first
+release that holds that build: 0.11.0 and every release before it hold Linux archives only, and
+the release workflow builds the macOS archive from 0.12.0 on
+([RELEASE.md](../../RELEASE.md#what-the-release-workflow-does)). Asked for one of the older
+releases, as by `--version 0.11.0`, the installer stops before it downloads an archive
+(`/Users/me` stands for your home directory):
 
 ```text
 swarmops-install: Installing SwarmOps 0.11.0 (aarch64-apple-darwin) into /Users/me/.local/bin.
@@ -437,7 +438,7 @@ two binaries yourself. Each release holds:
 | --- | --- |
 | `swarmops-<version>-x86_64-unknown-linux-gnu.tar.gz` | The x86_64 build: `swarmops`, `so`, `LICENSE`, `THIRD-PARTY-LICENSES` (the licenses of the third-party crates compiled into the binaries), `README.md` and `CHANGELOG.md`, in a directory named after the archive. |
 | `swarmops-<version>-aarch64-unknown-linux-gnu.tar.gz` | The same for aarch64. |
-| `swarmops-<version>-aarch64-apple-darwin.tar.gz` | In no release yet; from the first one after 0.11.0 on, the same for Apple silicon Macs. |
+| `swarmops-<version>-aarch64-apple-darwin.tar.gz` | From 0.12.0 on: the same for Apple silicon Macs. |
 | `swarmops_<version>_amd64.deb`, `swarmops_<version>_arm64.deb` | From v0.8.0 on: the x86_64 and aarch64 binaries as Debian packages ([installing them](#how-do-i-install-the-deb-or-rpm-package)). |
 | `swarmops-<version>-1.x86_64.rpm`, `swarmops-<version>-1.aarch64.rpm` | The same as RPM packages. |
 | `SHA256SUMS` | The SHA-256 of each archive and package. |
@@ -521,15 +522,15 @@ A plain `cargo build --release` leaves both binaries in `target/release/` instea
 
 ## What does SwarmOps run on?
 
-Linux today; macOS on Apple silicon from the first release after 0.11.0; Windows next. The
+Linux, and from 0.12.0 on macOS on Apple silicon; Windows next. The
 releases hold builds for x86_64 and aarch64 Linux, and their binaries need glibc 2.34 or newer,
 which Ubuntu 22.04, Debian 12 and RHEL 9 have. The aarch64 Linux build is cross-compiled and
 smoke-tested under QEMU, not tested on aarch64 hardware.
 
 The macOS build is for Apple silicon (arm64) and macOS 11 or newer, the version it is built for.
 It is built and run on macOS 27 only, on the maintainers' Mac, where the workspace's test suite
-passes; CI does not run on macOS yet, and no older macOS was tried. There is no build for an Intel
-Mac, and no release holds the macOS build yet.
+passes; CI does not run on macOS yet, and no older macOS was tried. 0.12.0 is the first release
+that holds the macOS build, and there is no build for an Intel Mac.
 
 `ldd --version` names a host's glibc version at the end of its first line:
 
@@ -607,7 +608,7 @@ The CPU is neither x86_64 nor aarch64; nothing was installed.
 installer prints `SwarmOps runs on Linux and macOS; Windows is next.`, and no release build runs
 there yet; on musl or a glibc older than 2.34 it names the C library, and building from source is
 the way. On a Mac it prints `SwarmOps 0.11.0 has no macOS build (…)` for a release from before the
-macOS build, which is every release so far ([On a Mac](#on-a-mac)), and
+macOS build, which is 0.11.0 and every release before it ([On a Mac](#on-a-mac)), and
 `No release build runs on an Intel Mac (x86_64): …` on an Intel Mac.
 
 ### The checksum does not match
@@ -626,7 +627,7 @@ lists no such archive.
 | The installer prints | Why | What to do |
 | --- | --- | --- |
 | `SwarmOps runs on Linux and macOS; Windows is next.` then `This system is FreeBSD. …` | The host is neither Linux nor macOS. | No release build runs there yet. |
-| `SwarmOps 0.11.0 has no macOS build (its SHA256SUMS lists no swarmops-0.11.0-aarch64-apple-darwin.tar.gz): nothing was installed. Releases up to 0.11.0 hold Linux builds only. …` | A Mac, and a release whose `SHA256SUMS` has no line for the macOS archive: one from before the macOS build. | No release holds a macOS build yet; the first one after 0.11.0 is to. |
+| `SwarmOps 0.11.0 has no macOS build (its SHA256SUMS lists no swarmops-0.11.0-aarch64-apple-darwin.tar.gz): nothing was installed. Releases up to 0.11.0 hold Linux builds only. …` | A Mac, and a release whose `SHA256SUMS` has no line for the macOS archive: one from before the macOS build. | Install 0.12.0 or newer: it is the first release with a macOS build. |
 | `No release build runs on an Intel Mac (x86_64): the macOS build is for Apple silicon (arm64) only. …` | A Mac with an Intel CPU. | No release build runs there. |
 | `No release build runs on riscv64, only on x86_64 and aarch64. To build from source: …` | The CPU is neither x86_64 nor aarch64. | [Build from source](#how-do-i-build-from-source). |
 | `This system's C library is musl; the release binaries need glibc 2.34 or newer. …` | Alpine and other musl systems. | Build from source. |

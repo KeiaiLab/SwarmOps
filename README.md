@@ -19,8 +19,8 @@ that commit, land and sync with git. It is measured today at 50 agents landing o
 lands/s, nothing lost ([perf.md](docs/perf.md#d2-8-gated-runs--2026-11-09)). The
 [roadmap](docs/roadmap.md) says what comes next.
 
-Linux x86_64 (tested) and aarch64 (smoke-tested under emulation), glibc 2.34 or newer; no macOS or Windows build yet.
-The installer takes an Apple silicon Mac once a release holds the macOS build ([install guide](docs/guides/install.md#on-a-mac)).
+Linux x86_64 (tested) and aarch64 (smoke-tested under emulation), glibc 2.34 or newer; macOS on Apple silicon from 0.12.0 on.
+There is no Windows or Intel Mac build. The installer takes an Apple silicon Mac ([install guide](docs/guides/install.md#on-a-mac)).
 
 ## Install
 
@@ -115,8 +115,8 @@ Code's worktree hooks a workspace ([Build and test a change](docs/operate/build-
 
 ## When not to use it
 
-- You need macOS or Windows: the releases are Linux only today (an Apple silicon macOS build is
-  set up for the next one; Windows is planned).
+- You need Windows or an Intel Mac: the releases hold Linux builds and, from 0.12.0 on, a macOS
+  build for Apple silicon (Windows is planned).
 - You need git parity: hooks, signing, submodules and LFS are a non-goal.
 - Your hosts must not change under you: an installer's install updates itself unless it is
   pinned (`--version`) or told not to (`--no-auto-update`, `so update --auto off`).
@@ -153,7 +153,7 @@ Every page, by group: [docs/README.md](docs/README.md).
 ## Roadmap
 
 Each milestone's deliverable and exit criteria are in [docs/roadmap.md](docs/roadmap.md#milestones),
-under "Milestones"; the macOS build awaits its first release and Windows is planned (M12).
+under "Milestones"; the macOS build ships from 0.12.0 on, and Windows is planned (M12).
 [CHANGELOG.md](CHANGELOG.md) says what each release shipped, and
 [docs/known-limitations.md](docs/known-limitations.md) what is still open, with the milestone that
 takes each item.

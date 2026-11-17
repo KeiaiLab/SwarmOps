@@ -12,7 +12,7 @@ working tree, in git's locks and at merge time. This guide shows each failure wi
 git worktrees fix and what they leave open, how SwarmOps handles the same three changes, and where
 worktrees are still the better tool.
 
-**Pre-1.0** · Linux today; macOS and Windows next · MIT licence
+**Pre-1.0** · Linux, and macOS on Apple silicon from 0.12.0; Windows next · MIT licence
 
 > ## In short
 >
@@ -405,7 +405,7 @@ platform policy.
 | **Storage on disk** | Packs. | One file per object, zstd-compressed when that makes it smaller; no packs, no delta compression. |
 | **Review and the ecosystem** | Patch-review tools, with Gerrit and GitHub adding review on top; hooks, signing, submodules and LFS. | No user hooks, signing, submodules or LFS. Review, with change requests, approvals and a landing gate, is planned for M7. |
 | **Between hosts** | Clone, fetch and push over any transport, and bundles without one. | One host. Between hosts, a git remote carries the history, one writing host at a time. Offline-first sync is planned for M11. |
-| **Platforms** | Linux, macOS and Windows. | Linux today; macOS on Apple silicon from the first release after 0.11.0; Windows next. A store must live on a native Linux filesystem or, on macOS, an APFS or journaled HFS+ volume. |
+| **Platforms** | Linux, macOS and Windows. | Linux, and from 0.12.0 on macOS on Apple silicon; Windows next. A store must live on a native Linux filesystem or, on macOS, an APFS or journaled HFS+ volume. |
 | **Maturity** | Git has hosted itself since 2005. | Pre-1.0; the first commit is dated 2026-10-15. |
 
 ### Where SwarmOps is level or ahead, by design
@@ -430,7 +430,7 @@ measured against git, and no git baseline has been measured.
 Use git worktrees, or `claude --worktree`, when
 
 - a few agents work on long tasks that a person reviews and merges;
-- you need tags, many branches, review tools or hooks, or you work on macOS or Windows today.
+- you need tags, many branches, review tools or hooks, or you work on Windows or an Intel Mac.
 
 With worktrees, a few habits keep the integration step small:
 
@@ -447,8 +447,8 @@ With worktrees, a few habits keep the integration step small:
 Consider SwarmOps when
 
 - a large pool of agent processes commits to one trunk on one host
-  (Linux today; macOS and Windows next), and the time goes into git locks, overwritten work and
-  merge-and-retry loops;
+  (Linux, or macOS on Apple silicon; Windows next), and the time goes into git locks, overwritten
+  work and merge-and-retry loops;
 - you want conflicts and errors as data an agent can act on: an error code that does not change, a
   retryable flag, a hint and a conflict report;
 - agents must build and test their changes on disk before they land them: a workspace each, and

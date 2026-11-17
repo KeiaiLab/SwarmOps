@@ -1151,11 +1151,12 @@ left).
 
 ## Platforms
 
-- **macOS: Apple silicon only, in no release yet, and outside CI.** The workspace builds and its
+- **macOS: Apple silicon only, from 0.12.0 on, and outside CI.** The workspace builds and its
   test suite passes on macOS (aarch64, APFS), the installer takes an Apple silicon Mac, and the
-  release workflow builds, smoke-runs and packs `aarch64-apple-darwin` on the maintainers' Mac;
-  but 0.11.0 and older hold Linux archives only, so the installer has nothing to install there
-  until the next release, and that release waits on a self-hosted runner labelled `macos-local`.
+  release workflow builds, smoke-runs and packs `aarch64-apple-darwin` on the maintainers' Mac.
+  0.12.0 is the first release with that archive: 0.11.0 and older hold Linux archives only, so
+  the installer has nothing to install from them on a Mac. Every release now waits on that
+  Mac's self-hosted runner, labelled `macos-local`, and none is published without it.
   No workflow runs `just check` on macOS, which is M12's exit criterion. The binaries are built
   for macOS 11 or newer and were run on macOS 27 only. There is no build for an Intel Mac
   (`x86_64-apple-darwin`): the installer refuses one. The binaries carry the linker's ad-hoc
@@ -1238,11 +1239,12 @@ left).
   answer is still assumed: that a release takes a file of one line as a mark. *Planned: that
   one shows at the first `just release-marks X.Y.Z --upload`, which fails when the release does
   not list the file afterwards. Found: the update design's review.*
-- **No release holds `update` yet.** 0.11.0 and every release before it have no `update`
-  command, read no receipt and never update themselves: they are moved by the installer run
-  again, or by their package. An install of 0.11.0 gets automatic update with the first later
-  release the installer puts there, not before. *Documented
-  ([Install](guides/install.md#how-do-i-update)). Found: the update design.*
+- **Releases up to 0.11.0 hold no `update`.** 0.12.0 is the first release that holds the
+  command. 0.11.0 and every release before it have no `update` command, read no receipt and
+  never update themselves: they are moved by the installer run again, or by their package. An
+  install of 0.11.0 gets automatic update with the first later release the installer puts
+  there, not before. *Documented ([Install](guides/install.md#how-do-i-update)). Found: the
+  update design.*
 - **An update is not signed, and a freeze is not seen.** `update` trusts what the installer
   trusts: HTTPS to GitHub, and the release's own `SHA256SUMS`, which comes from the same place
   as the archive. It takes no older release, but a host that is shown no newer release at all,
