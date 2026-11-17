@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, Write as _};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
@@ -118,7 +118,7 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, args: ServeArgs) -> Printed {
             stdout: String::new(),
             exit: u8::try_from(served.exit).unwrap_or(u8::MAX),
         },
-        Err(error) => refuse(ctx, op, channel, error),
+        Err(error) => refuse(ctx, op, channel, &error),
     }
 }
 
@@ -361,18 +361,27 @@ fn reason(code: ErrorCode, why: &str, message: impl Into<String>) -> OpError {
 }
 
 /// The refusal of `error` before any protocol byte: on stdout what the client reads (an `ERR`
-/// pkt-line, or a CGI response), and the envelope, which the entry writes to stderr.
-fn refuse(ctx: &Ctx<'_>, op: &'static str, channel: Channel, error: OpError) -> Printed {
-    // 1. The client's text: a write that fails leaves the exit code and the envelope to say it.
+/// pkt-line, or a CGI response), and the envelope on stderr, written here and first: a git that
+/// reads the refusal ends the connection at once and signals what serves it, which on a host
+/// without sshd between them is this process, and the envelope must be out by then.
+fn refuse(ctx: &Ctx<'_>, op: &'static str, channel: Channel, error: &OpError) -> Printed {
+    // 1. The envelope: the exit code says the command failed even if this write reaches no one.
+    let Printed { stdout: text, exit } = failed(op, error.clone(), ctx.format, ctx.started);
+    let _ = io::stderr().write_all(text.as_bytes());
+
+    // 2. The client's text: a write that fails leaves the exit code and the envelope to say it.
     let mut stdout = io::stdout().lock();
     let _ = match channel {
-        Channel::Git => write_refusal(&mut stdout, &error),
-        Channel::Cgi => write_cgi(&mut stdout, &error),
+        Channel::Git => write_refusal(&mut stdout, error),
+        Channel::Cgi => write_cgi(&mut stdout, error),
         Channel::Pack => Ok(()),
     };
 
-    // 2. The envelope.
-    failed(op, error, ctx.format, ctx.started)
+    // 3. Nothing is left for the entry to print.
+    Printed {
+        stdout: String::new(),
+        exit,
+    }
 }
 
 /// Writes `error` as a CGI response: its status, then `<CODE>: <message>` as text.

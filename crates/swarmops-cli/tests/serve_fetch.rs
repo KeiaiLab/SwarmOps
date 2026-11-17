@@ -155,6 +155,44 @@ fn serve_ignores_agent_env() {
     assert_eq!(error["details"]["reason"], "no_identity", "{run}");
 }
 
+/// A refusal's envelope is whole on stderr before the client's text is on stdout, over git's
+/// protocol and as a CGI response: a git that reads `ERR` ends the connection at once and
+/// signals what serves it, so nothing may be left to write by then. Both streams are one open
+/// file here, which so holds the two writes in the order they were made.
+#[test]
+fn a_refusal_s_envelope_is_written_before_the_client_s_text() {
+    let root = TempDir::new().unwrap();
+    let line = ["serve", "--root", root.path().to_str().unwrap()];
+    let cgi = [&line[..], &["--cgi"]].concat();
+    // What the client's text starts with, past a pkt-line's four digits of length.
+    let cases = [
+        (&line[..], 4, "ERR E_AUTH: "),
+        (&cgi[..], 0, "Status: 403\r\n"),
+    ];
+    for (args, skip, starts) in cases {
+        // 1. A connection with no caller named, refused: stdout and stderr share a file.
+        let path = root.path().join("both");
+        let both = fs::File::create(&path).unwrap();
+        let status = support::swarmops(args, &[(SSH_ORIGINAL_COMMAND, UPLOAD_X)])
+            .stdin(std::process::Stdio::null())
+            .stdout(both.try_clone().unwrap())
+            .stderr(both)
+            .status()
+            .unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert_eq!(status.code(), Some(5), "{args:?}: {written:?}");
+
+        // 2. First the envelope's line, all of it; only then what the client reads.
+        let (envelope, text) = written
+            .split_once('\n')
+            .unwrap_or_else(|| panic!("{args:?}: a line and the client's text: {written:?}"));
+        let envelope: Value = serde_json::from_str(envelope)
+            .unwrap_or_else(|e| panic!("{args:?}: the envelope first ({e}): {written:?}"));
+        assert_eq!(envelope["error"]["code"], "E_AUTH", "{args:?}: {written:?}");
+        assert!(text[skip..].starts_with(starts), "{args:?}: {written:?}");
+    }
+}
+
 /// `serve` is no MCP tool, and the MCP server's documentation says so beside `derive`.
 #[test]
 fn serve_has_no_mcp_tool() {
