@@ -170,41 +170,72 @@ pub(crate) const GROUPS: [Group; 7] = [
     },
 ];
 
-/// A command line a screen shows: one that runs as written, in a directory that holds what it
-/// names, with `SWARMOPS_REPO` and `SWARMOPS_AGENT` set as the program's screen sets them.
+/// A line of a screen's examples, as a shell takes it. The lines of a screen run as written, in
+/// order, in an empty directory: what a line names, a line before it made, but for a file of
+/// the reader's own whose name says what it is (`logo.png`, `token.txt`).
+pub(crate) enum Step {
+    /// A line that is no run of the program: it sets a variable, or makes what a later line
+    /// names.
+    Shell(&'static str),
+    /// A run of the program.
+    Run(Example),
+}
+
+/// A run of the program a screen shows, with `SWARMOPS_REPO` and `SWARMOPS_AGENT` set as the
+/// program's screen sets them.
 pub(crate) struct Example {
     /// The line's words after the program's name.
     pub(crate) words: &'static [&'static str],
-    /// The file its stdin is read from (`< FILE`), if it reads one.
-    pub(crate) stdin: Option<&'static str>,
+    /// What its stdin reads.
+    pub(crate) stdin: Stdin,
 }
 
-/// An [`Example`] that reads no stdin.
-const fn example(words: &'static [&'static str]) -> Example {
-    Example { words, stdin: None }
+/// What an [`Example`]'s stdin reads.
+pub(crate) enum Stdin {
+    /// Nothing the line says.
+    Unsaid,
+    /// A file (`< FILE`).
+    File(&'static str),
+    /// What a command prints (`COMMAND |`).
+    Of(&'static str),
 }
 
-/// The line the program's examples start from, which is no run of the program: it names the
-/// store and the caller for the lines after it.
+/// A [`Step`] that runs the program with `words`, its stdin unsaid.
+const fn run(words: &'static [&'static str]) -> Step {
+    Step::Run(Example {
+        words,
+        stdin: Stdin::Unsaid,
+    })
+}
+
+/// The line the program's examples start from: it names the store and the caller for the lines
+/// after it.
 pub(crate) const SETTING: &str = r#"export SWARMOPS_REPO="$PWD/acme" SWARMOPS_AGENT=person/ada"#;
 
-/// The program's examples: a store, a first commit, a change made in a workspace and landed,
-/// and the history read back. Each runs after the one before it.
-pub(crate) const EXAMPLES: [Example; 6] = [
-    example(&["init", "acme"]),
-    example(&[
-        "commit",
-        "-m",
-        "first",
-        "--changes",
-        "changes.json",
-        "--advance",
-        "main",
-    ]),
-    example(&["ws", "create", "fix-1"]),
-    example(&["ws", "commit", "--ws", "fix-1", "-m", "Fix the typo"]),
-    example(&["ws", "land", "--ws", "fix-1"]),
-    example(&["--human", "log"]),
+/// The program's examples: a store, a root commit for main to name, a workspace, a file made
+/// there, committed and landed, and the history read back. Each line runs after the one before
+/// it, and nothing else is needed: the root commit reads its empty list of changes from `echo`.
+pub(crate) const EXAMPLES: [Step; 8] = [
+    Step::Shell(SETTING),
+    run(&["init", "acme"]),
+    Step::Run(Example {
+        words: &[
+            "commit",
+            "-m",
+            "root",
+            "--changes",
+            "-",
+            "--allow-empty",
+            "--advance",
+            "main",
+        ],
+        stdin: Stdin::Of("echo '[]'"),
+    }),
+    run(&["ws", "create", "fix-1"]),
+    Step::Shell("echo hello > fix-1/README.md"),
+    run(&["ws", "commit", "--ws", "fix-1", "-m", "Add a readme"]),
+    run(&["ws", "land", "--ws", "fix-1"]),
+    run(&["--human", "log"]),
 ];
 
 /// What a family's examples need set before they run.
@@ -222,8 +253,9 @@ pub(crate) struct Family {
     pub(crate) name: &'static str,
     /// Its subcommands, in the grammar's order.
     pub(crate) commands: &'static [Entry],
-    /// One or two lines that show it at work.
-    pub(crate) examples: &'static [Example],
+    /// One or two runs that show it at work, after the line that makes what they name, if
+    /// one does.
+    pub(crate) examples: &'static [Step],
     /// What those lines need set.
     pub(crate) needs: Needs,
     /// The guide that explains the family, an address of the site.
@@ -254,8 +286,8 @@ pub(crate) const FAMILIES: [Family; 7] = [
             entry("hook", "The agent hosts' hooks, on stdin and stdout"),
         ],
         examples: &[
-            example(&["ws", "create", "fix-1"]),
-            example(&["--human", "ws", "status", "--ws", "fix-1"]),
+            run(&["ws", "create", "fix-1"]),
+            run(&["--human", "ws", "status", "--ws", "fix-1"]),
         ],
         needs: Needs::Store,
         guide: "https://swarmops.cc/docs/guides/parallel-agents",
@@ -270,8 +302,8 @@ pub(crate) const FAMILIES: [Family; 7] = [
             entry("txn", "Move several refs as one operation: all or none"),
         ],
         examples: &[
-            example(&["--human", "ref", "list"]),
-            example(&["ref", "set", "release/1.0", "main", "--create"]),
+            run(&["--human", "ref", "list"]),
+            run(&["ref", "set", "release/1.0", "main", "--create"]),
         ],
         needs: Needs::Store,
         guide: "https://swarmops.cc/docs/guides/history-and-undo",
@@ -285,7 +317,7 @@ pub(crate) const FAMILIES: [Family; 7] = [
                 "Move every ref an operation moved back, all or none",
             ),
         ],
-        examples: &[example(&["--human", "op", "log"])],
+        examples: &[run(&["--human", "op", "log"])],
         needs: Needs::Store,
         guide: "https://swarmops.cc/docs/guides/history-and-undo",
     },
@@ -296,7 +328,7 @@ pub(crate) const FAMILIES: [Family; 7] = [
             entry("has", "Of the ids given, list those the store holds"),
             entry("get", "Print the blobs the ids name"),
         ],
-        examples: &[example(&["blob", "put", "logo.png"])],
+        examples: &[run(&["blob", "put", "logo.png"])],
         needs: Needs::Store,
         guide: "https://swarmops.cc/docs/guides/commit-and-land",
     },
@@ -307,10 +339,11 @@ pub(crate) const FAMILIES: [Family; 7] = [
             entry("export", "Send the store's history to a git repository"),
         ],
         examples: &[
-            example(&[
+            Step::Shell("git init --bare app.git"),
+            run(&[
                 "git", "export", "app.git", "--ref", "main", "--branch", "main",
             ]),
-            example(&[
+            run(&[
                 "git", "import", "app.git", "--ref", "main", "--into", "from-git",
             ]),
         ],
@@ -325,13 +358,13 @@ pub(crate) const FAMILIES: [Family; 7] = [
             entry("list", "List the store's git remotes"),
         ],
         examples: &[
-            example(&[
+            run(&[
                 "remote",
                 "add",
                 "origin",
                 "https://github.com/OWNER/REPO.git",
             ]),
-            example(&["--human", "remote", "list"]),
+            run(&["--human", "remote", "list"]),
         ],
         needs: Needs::Store,
         guide: "https://swarmops.cc/docs/guides/github-remote",
@@ -345,11 +378,11 @@ pub(crate) const FAMILIES: [Family; 7] = [
             entry("git-credential", "Answer git's credential-helper protocol"),
         ],
         examples: &[
-            Example {
+            Step::Run(Example {
                 words: &["auth", "login", "--gh", "--with-token"],
-                stdin: Some("token.txt"),
-            },
-            example(&["--human", "auth", "status"]),
+                stdin: Stdin::File("token.txt"),
+            }),
+            run(&["--human", "auth", "status"]),
         ],
         needs: Needs::Nothing,
         guide: "https://swarmops.cc/docs/guides/github-remote",
@@ -450,9 +483,8 @@ fn program_template(bin: &str, styles: &Styles, options: &str) -> String {
         entries(&mut out, styles, group.commands, name_width(&GROUPS));
     }
 
-    // 2. The examples, after the line that names the store and the caller.
+    // 2. The examples, from the line that names the store and the caller.
     heading(&mut out, styles, "Examples");
-    let _ = writeln!(out, "  $ {SETTING}");
     examples(&mut out, bin, &EXAMPLES);
 
     // 3. What a command prints, and where to read more.
@@ -533,17 +565,24 @@ fn entries(out: &mut String, styles: &Styles, entries: &[Entry], width: usize) {
     }
 }
 
-/// A line per example, as a shell takes it.
-fn examples(out: &mut String, bin: &str, examples: &[Example]) {
-    for example in examples {
-        let _ = writeln!(out, "  $ {}", shell_line(bin, example));
+/// A line per step, as a shell takes it.
+fn examples(out: &mut String, bin: &str, steps: &[Step]) {
+    for step in steps {
+        let line = match step {
+            Step::Shell(line) => (*line).to_owned(),
+            Step::Run(example) => shell_line(bin, example),
+        };
+        let _ = writeln!(out, "  $ {line}");
     }
 }
 
 /// `example` as a line to type: the program `bin`, its words, quoted where a shell would split
-/// them, and its stdin's file.
+/// them, after the command its stdin reads or before its stdin's file.
 fn shell_line(bin: &str, example: &Example) -> String {
-    let mut line = bin.to_owned();
+    let mut line = match example.stdin {
+        Stdin::Of(command) => format!("{command} | {bin}"),
+        Stdin::Unsaid | Stdin::File(_) => bin.to_owned(),
+    };
     for word in example.words {
         if word.contains(' ') {
             let _ = write!(line, " \"{word}\"");
@@ -551,7 +590,7 @@ fn shell_line(bin: &str, example: &Example) -> String {
             let _ = write!(line, " {word}");
         }
     }
-    if let Some(file) = example.stdin {
+    if let Stdin::File(file) = example.stdin {
         let _ = write!(line, " < {file}");
     }
     line
@@ -763,7 +802,7 @@ mod tests {
             let listed: Vec<&str> = family.commands.iter().map(|entry| entry.name).collect();
             assert_eq!(listed, subcommands(sub), "{}", family.name);
             assert!(
-                (1..=2).contains(&family.examples.len()),
+                (1..=2).contains(&runs(family.examples).len()),
                 "{}: an example or two",
                 family.name
             );
@@ -868,9 +907,25 @@ mod tests {
         }
     }
 
-    /// The grammar reads each example as a command to run.
-    fn check_examples(examples: &[Example]) {
-        for example in examples {
+    /// The runs of the program among `steps`.
+    fn runs(steps: &[Step]) -> Vec<&Example> {
+        let runs = steps.iter().filter_map(|step| match step {
+            Step::Run(example) => Some(example),
+            Step::Shell(_) => None,
+        });
+        runs.collect()
+    }
+
+    /// The grammar reads each run among `steps` as a command to run, and no other line of them
+    /// names the program.
+    fn check_examples(steps: &[Step]) {
+        for step in steps {
+            if let Step::Shell(line) = step {
+                let names_it = line.split(' ').any(|word| word == "so" || word == PROGRAM);
+                assert!(!names_it, "a run of the program: {line:?}");
+            }
+        }
+        for example in runs(steps) {
             let line: Vec<OsString> = std::iter::once("so")
                 .chain(example.words.iter().copied())
                 .map(OsString::from)
@@ -883,19 +938,29 @@ mod tests {
     #[test]
     fn the_examples_are_lines_the_grammar_reads() {
         check_examples(&EXAMPLES);
+        assert!(
+            (4..=6).contains(&runs(&EXAMPLES).len()),
+            "four to six runs of the program"
+        );
         for family in &FAMILIES {
             check_examples(family.examples);
-            for example in family.examples {
+            for example in runs(family.examples) {
                 assert!(example.words.contains(&family.name), "{}", family.name);
             }
         }
+
+        // A line's three forms: its stdin unsaid, a file's, a command's.
+        let mut out = String::new();
+        examples(&mut out, "so", &EXAMPLES[2..=5]);
+        examples(&mut out, "so", &FAMILIES[6].examples[..1]);
         assert_eq!(
-            shell_line("so", &FAMILIES[6].examples[0]),
-            "so auth login --gh --with-token < token.txt"
-        );
-        assert_eq!(
-            shell_line("so", &EXAMPLES[3]),
-            r#"so ws commit --ws fix-1 -m "Fix the typo""#
+            out,
+            r#"  $ echo '[]' | so commit -m root --changes - --allow-empty --advance main
+  $ so ws create fix-1
+  $ echo hello > fix-1/README.md
+  $ so ws commit --ws fix-1 -m "Add a readme"
+  $ so auth login --gh --with-token < token.txt
+"#
         );
     }
 

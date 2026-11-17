@@ -60,9 +60,10 @@ Agents and servers:
 Examples:
   $ export SWARMOPS_REPO="$PWD/acme" SWARMOPS_AGENT=person/ada
   $ so init acme
-  $ so commit -m first --changes changes.json --advance main
+  $ echo '[]' | so commit -m root --changes - --allow-empty --advance main
   $ so ws create fix-1
-  $ so ws commit --ws fix-1 -m "Fix the typo"
+  $ echo hello > fix-1/README.md
+  $ so ws commit --ws fix-1 -m "Add a readme"
   $ so ws land --ws fix-1
   $ so --human log
 

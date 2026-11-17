@@ -1,12 +1,12 @@
 //! The help screens the CLI lays out itself, through the binaries: the program's own, with its
 //! commands in groups, and each command family's. A snapshot pins each screen as a pipe reads
-//! it, plain text; the examples a screen shows are read back out of it and run, in order,
-//! against a store of the test's own.
+//! it, plain text; the examples a screen shows are read back out of it and run by `sh`, every
+//! line as printed and in order, in a directory of the test's own.
 
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
+use std::process::Command;
 
 use serde_json::Value;
 
@@ -14,9 +14,6 @@ use crate::support::{self, BIN, SO};
 
 /// The store's directory and the caller, as the screen's own first example line sets them.
 const SETTING: &str = r#"  $ export SWARMOPS_REPO="$PWD/acme" SWARMOPS_AGENT=person/ada"#;
-
-/// The change list the examples' commit reads.
-const CHANGES: &str = r#"[{"path": "README.md", "op": "put", "content": {"inline": "helo\n"}}]"#;
 
 /// The command families, in the order the program's screen lists them.
 const FAMILIES: [&str; 7] = ["ws", "blob", "ref", "op", "git", "remote", "auth"];
@@ -39,60 +36,51 @@ fn section<'a>(screen: &'a str, title: &str) -> Vec<&'a str> {
     lines.take_while(|line| !line.is_empty()).collect()
 }
 
-/// `line`, an example as a screen shows it, as the words after the program's name and the file
-/// its stdin reads: split at spaces, a double-quoted word kept whole.
-fn words(line: &str, bin: &str) -> (Vec<String>, Option<String>) {
-    let start = format!("  $ {bin} ");
-    let rest = line
-        .strip_prefix(&start)
-        .unwrap_or_else(|| panic!("an example of {bin}: {line:?}"));
-    let (rest, stdin) = match rest.split_once(" < ") {
-        Some((rest, file)) => (rest, Some(file.to_owned())),
-        None => (rest, None),
-    };
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut quoted = false;
-    for c in rest.chars() {
-        match c {
-            '"' => quoted = !quoted,
-            ' ' if !quoted => words.push(std::mem::take(&mut word)),
-            _ => word.push(c),
-        }
-    }
-    assert!(!quoted, "an open quote: {line:?}");
-    words.push(word);
-    (words, stdin)
+/// What `sh` printed for one line of a script, and the line's exit code.
+struct Ran {
+    line: String,
+    exit: String,
+    stdout: String,
 }
 
-/// A directory to run examples in: what they name is made here.
+/// A directory to run examples in, as a reader's shell would: `so` and `swarmops` are found on
+/// `PATH`, and what the lines name they make here, or [`Scratch::with_a_store`] does.
 struct Scratch {
     dir: tempfile::TempDir,
 }
 
 impl Scratch {
-    /// An empty directory holding the change list the examples commit.
+    /// An empty working directory, beside a directory that holds the two programs.
     fn new() -> Scratch {
         let dir = tempfile::tempdir().expect("a temp dir");
-        fs::write(dir.path().join("changes.json"), CHANGES).expect("write the change list");
-        Scratch { dir }
-    }
-
-    fn path(&self) -> &Path {
-        self.dir.path()
-    }
-
-    /// A store with a first commit on main, as the program's first two examples leave it, and
-    /// what the families' examples name: a file to store, an empty bare git repository, and a
-    /// file holding a token.
-    fn with_a_store() -> Scratch {
-        let scratch = Scratch::new();
-        for line in [
-            "init acme",
-            "commit -m first --changes changes.json --advance main",
-        ] {
-            scratch.example(SO, "so", &format!("  $ so {line}"));
+        let scratch = Scratch { dir };
+        fs::create_dir(scratch.path()).expect("make the working directory");
+        fs::create_dir(scratch.programs()).expect("make the programs' directory");
+        for (bin, name) in [(SO, "so"), (BIN, "swarmops")] {
+            std::os::unix::fs::symlink(bin, scratch.programs().join(name))
+                .unwrap_or_else(|e| panic!("link {name}: {e}"));
         }
+        scratch
+    }
+
+    /// The directory the lines run in.
+    fn path(&self) -> PathBuf {
+        self.dir.path().join("work")
+    }
+
+    /// The directory `PATH` starts with: the two programs, by their names.
+    fn programs(&self) -> PathBuf {
+        self.dir.path().join("bin")
+    }
+
+    /// A store with a root commit on main, as the program's examples make it, the variables
+    /// that name it, and the files of the reader's own the families' examples name: one to
+    /// store, and one holding a token.
+    fn with_a_store(top: &[&str]) -> (Scratch, String) {
+        let scratch = Scratch::new();
+        let made: Vec<&str> = top.iter().copied().take(3).collect();
+        assert!(made[2].contains(" commit "), "the root commit: {made:?}");
+        scratch.examples(&made);
         let here = scratch.path();
         fs::write(here.join("logo.png"), b"\x89PNG\r\n").expect("write a file to store");
         fs::write(
@@ -100,71 +88,81 @@ impl Scratch {
             "ghp_0123456789abcdefghijklmnopqrstuvwxyz\n",
         )
         .expect("write a token");
-        let empty = swarmops_testkit::git::empty_repository();
-        copy_dir(&empty.dir, &here.join("app.git"));
-        scratch
+        (scratch, made[0].to_owned())
     }
 
-    /// Runs `bin` here with `words`, the store and the caller set as [`SETTING`] sets them, a
-    /// login file of this directory's own, and `stdin` read from that file of this directory;
-    /// the run's exit code and what it printed.
-    fn run(&self, bin: &str, words: &[String], stdin: Option<&str>) -> (i32, String, String) {
-        let store = self.path().join("acme");
-        let logins = self.path().join("auth.toml");
-        let env = [
-            ("SWARMOPS_REPO", store.to_str().expect("a UTF-8 temp dir")),
-            ("SWARMOPS_AGENT", "person/ada"),
-            (
-                "SWARMOPS_AUTH_FILE",
-                logins.to_str().expect("a UTF-8 temp dir"),
-            ),
-        ];
-        let mut command = Command::new(bin);
+    /// Runs `lines`, examples as a screen shows them (`  $ ...`), as one script of `sh`, each
+    /// line as printed: with the two programs first on `PATH`, none of this process's
+    /// `SWARMOPS_*` variables, a login file of this directory's own and no curl. What each
+    /// line printed, in order.
+    fn sh(&self, lines: &[&str]) -> Vec<Ran> {
+        const MARK: &str = "#--- exit ";
+        let mut script = String::new();
+        for line in lines {
+            let line = line
+                .strip_prefix("  $ ")
+                .unwrap_or_else(|| panic!("an example: {line:?}"));
+            let _ = writeln!(script, "{line}\nprintf '\\n{MARK}%s\\n' $?");
+        }
+
+        let mut path = self.programs().into_os_string();
+        if let Some(rest) = std::env::var_os("PATH") {
+            path.push(":");
+            path.push(rest);
+        }
+        let mut command = Command::new("sh");
         for name in support::swarmops_vars() {
             command.env_remove(name);
         }
         support::isolate(&mut command);
-        let input = match stdin {
-            Some(file) => {
-                let file = fs::File::open(self.path().join(file));
-                Stdio::from(file.expect("the file an example reads"))
-            }
-            None => Stdio::null(),
-        };
         command
-            .args(words)
-            .envs(env)
+            .args(["-c", &script])
+            .env("PATH", path)
+            .env("SWARMOPS_AUTH_FILE", self.dir.path().join("auth.toml"))
             .current_dir(self.path())
-            .stdin(input);
-        let done = command.output().expect("run swarmops");
-        (
-            done.status.code().expect("swarmops exited"),
-            String::from_utf8_lossy(&done.stdout).into_owned(),
-            String::from_utf8_lossy(&done.stderr).into_owned(),
-        )
+            .stdin(std::process::Stdio::null());
+        let done = command.output().expect("run sh");
+        let stdout = String::from_utf8_lossy(&done.stdout);
+        let stderr = String::from_utf8_lossy(&done.stderr);
+
+        let mark = format!("\n{MARK}");
+        let mut parts = stdout.split(&mark);
+        let mut printed = parts.next().unwrap_or_default().to_owned();
+        let mut ran = Vec::new();
+        for (line, part) in lines.iter().zip(parts) {
+            let (exit, rest) = part.split_once('\n').unwrap_or((part, ""));
+            ran.push(Ran {
+                line: (*line).to_owned(),
+                exit: exit.to_owned(),
+                stdout: std::mem::replace(&mut printed, rest.to_owned()),
+            });
+        }
+        assert_eq!(ran.len(), lines.len(), "{script}\n{stdout}\n{stderr}");
+        ran
     }
 
-    /// Runs the example `line` of `bin`'s screen, which must succeed.
-    fn example(&self, bin: &str, name: &str, line: &str) -> String {
-        let (words, stdin) = words(line, name);
-        let (exit, stdout, stderr) = self.run(bin, &words, stdin.as_deref());
-        assert_eq!(exit, 0, "{line}\nstdout: {stdout}\nstderr: {stderr}");
-        stdout
+    /// Runs `lines` ([`Scratch::sh`]), each of which must succeed; what the last one printed.
+    fn examples(&self, lines: &[&str]) -> String {
+        let ran = self.sh(lines);
+        for Ran { line, exit, stdout } in &ran {
+            assert_eq!(exit, "0", "{line}\nstdout: {stdout}");
+        }
+        ran.last().map_or_default(|ran| ran.stdout.clone())
     }
 }
 
-/// Copies the directory `from`, with everything below it, to `to`, which does not exist.
-fn copy_dir(from: &Path, to: &Path) {
-    fs::create_dir(to).unwrap_or_else(|e| panic!("create {}: {e}", to.display()));
-    for entry in fs::read_dir(from).expect("read a directory") {
-        let entry = entry.expect("a directory entry");
-        let target = to.join(entry.file_name());
-        if entry.file_type().expect("an entry's type").is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), &target).expect("copy a file");
-        }
+/// The lines of `bin`'s examples that run the program, which every other line must not name.
+fn runs<'a>(lines: &[&'a str], name: &str) -> Vec<&'a str> {
+    let program = format!(" {name} ");
+    let first = format!("  $ {name} ");
+    let piped = format!(" | {name} ");
+    let (runs, others): (Vec<&str>, Vec<&str>) = lines
+        .iter()
+        .partition(|line| line.starts_with(&first) || line.contains(&piped));
+    for line in others {
+        assert!(!line.contains(&program), "a run of {name}: {line:?}");
     }
+    runs
 }
 
 /// The program's screen, as a pipe reads it: plain text, the same for `--help`, `-h` and the
@@ -182,6 +180,7 @@ fn top_level_help() {
     let renamed = screen
         .replace("Usage: so ", "Usage: swarmops ")
         .replace("  $ so ", "  $ swarmops ")
+        .replace(" | so ", " | swarmops ")
         .replace(
             "  so <command> --help   A",
             "  swarmops <command> --help  A",
@@ -207,32 +206,24 @@ fn top_level_help() {
     insta::assert_snapshot!(screen);
 }
 
-/// The screen's examples run as written, one after another, by either name: a store, a first
-/// commit, a workspace, an edit there committed and landed, and the log that shows both.
+/// The screen's examples run as printed, every line of them and nothing else, one after
+/// another in an empty directory, by either name: a store, a root commit, a workspace, a file
+/// made there, committed and landed, and the log that shows both.
 #[test]
 fn top_level_examples_run() {
     for (bin, name) in [(SO, "so"), (BIN, "swarmops")] {
         let screen = help(bin, &["--help"]);
         let lines = section(&screen, "Examples");
         assert_eq!(lines[0], SETTING, "{screen}");
-        let lines = &lines[1..];
-        assert!((4..=6).contains(&lines.len()), "four to six: {lines:?}");
+        let runs = runs(&lines, name);
+        assert!((4..=6).contains(&runs.len()), "four to six: {runs:?}");
 
-        let scratch = Scratch::new();
-        let mut log = String::new();
-        for line in lines {
-            // The change the workspace's commit records: the one thing no example line does.
-            if line.contains(" ws commit ") {
-                let file = scratch.path().join("fix-1/README.md");
-                fs::write(&file, "hello\n").unwrap_or_else(|e| panic!("edit {file:?}: {e}"));
-            }
-            log = scratch.example(bin, name, line);
-        }
+        let log = Scratch::new().examples(&lines);
         let subjects: Vec<&str> = log
             .lines()
             .filter_map(|line| line.split_once(' ').map(|(_, subject)| subject))
             .collect();
-        assert_eq!(subjects, ["Fix the typo", "first"], "{log}");
+        assert_eq!(subjects, ["Add a readme", "root"], "{log}");
     }
 }
 
@@ -273,43 +264,46 @@ fn family_help() {
     insta::assert_snapshot!(screens);
 }
 
-/// Every family's examples run as written on a store with a first commit, by either name, but
+/// Every family's examples run as printed on a store with a root commit, by either name, but
 /// for the one that asks a remote.
 #[test]
 fn family_examples_run() {
     let mut asked = 0;
     for (bin, name) in [(SO, "so"), (BIN, "swarmops")] {
-        let scratch = Scratch::with_a_store();
+        let top = help(bin, &["--help"]);
+        let (scratch, setting) = Scratch::with_a_store(&section(&top, "Examples"));
         for family in FAMILIES {
             let screen = help(bin, &[family, "--help"]);
             let lines = section(&screen, "Examples");
+            let runs = runs(&lines, name);
             assert!(
-                (1..=2).contains(&lines.len()),
-                "{family}: one or two: {lines:?}"
+                (1..=2).contains(&runs.len()),
+                "{family}: one or two: {runs:?}"
             );
+            for line in &runs {
+                assert!(line.contains(&format!(" {family} ")), "{family}: {line}");
+            }
+
+            // In a shell that has the variables the heading names.
+            let mut script = vec![setting.as_str()];
             for line in lines {
                 if line.replace("$ swarmops ", "$ so ") == ASKS_A_REMOTE {
                     asked += 1;
-                    continue;
+                } else {
+                    script.push(line);
                 }
-                assert!(line.contains(&format!(" {family} ")), "{family}: {line}");
-                scratch.example(bin, name, line);
             }
+            scratch.examples(&script);
         }
 
         // What they left: the workspace, the ref, the blob, the branch in git and the login.
-        let left = |words: &[&str]| {
-            let words: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
-            let (exit, stdout, stderr) = scratch.run(bin, &words, None);
-            assert_eq!(exit, 0, "{words:?}: {stdout}{stderr}");
-            stdout
-        };
-        assert!(left(&["--human", "ws", "list"]).contains(".name: fix-1\n"));
-        let refs = left(&["--human", "ref", "list"]);
+        let left = |words: &str| scratch.examples(&[&setting, &format!("  $ {name} {words}")]);
+        assert!(left("--human ws list").contains(".name: fix-1\n"));
+        let refs = left("--human ref list");
         for name in ["from-git", "main", "release/1.0"] {
             assert!(refs.contains(&format!(".name: {name}\n")), "{name}: {refs}");
         }
-        assert!(left(&["--human", "auth", "status"]).contains(".host: github.com\n"));
+        assert!(left("--human auth status").contains(".host: github.com\n"));
         assert!(scratch.path().join("app.git/refs/heads/main").is_file());
     }
     assert_eq!(asked, 2, "the example that asks a remote, by either name");

@@ -148,6 +148,7 @@ Commands:
   export  Send the store's history to a git repository
 
 Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you):
+  $ git init --bare app.git
   $ so git export app.git --ref main --branch main
   $ so git import app.git --ref main --into from-git
 
