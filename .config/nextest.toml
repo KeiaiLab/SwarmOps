@@ -13,6 +13,46 @@ contention = { max-threads = 1 }
 filter = 'test(/^contention::/)'
 test-group = 'contention'
 
+# macOS alone (`platform`): Linux, where CI runs, takes neither of the two overrides below, and its
+# runs are scheduled as they were.
+#
+# On APFS the suite's own tests starve one another. The volume takes one change of its namespace
+# (mkdir, create, link, unlink, rename) at a time, and a flush to stable storage there
+# (`F_FULLFSYNC`, which `sync_all` issues on macOS) holds every such call on the volume while it
+# runs, so past about 8 threads the calls queue: what the volume does in a second stays about the
+# same however many tests share it, and each test takes that many times longer. With 24 tests at
+# once (macOS 27, an M-series laptop of 24 CPUs) 31 tests reached the ci profile's 10-minute kill,
+# none of them hung: each passes alone. With 8 at once the run took 38.5 min and one still
+# reached it (`counted_work::status_of_an_untouched_workspace_reads_no_object`, 47 s alone), with
+# `ws_sigkill`'s three at 390 to 541 s.
+#
+# So the tests that are many threads at the volume count as that many of the run's threads
+# (`threads-required`), and the others run beside them as before:
+#
+# - The sweeps count as 8. Each runs 8 children or threads at once (the kits' `AT_ONCE`), each
+#   on a store of its own that it copies in and removes; they are taken by the words their names
+#   share, which also takes some quick tests beside them, at no cost that shows. The same 8 goes
+#   to the tests that make and remove tens of thousands of files each: the counted-work gates
+#   (a clone of the large store's 100,000 object files a test, removed at its end), `ws_sigkill`'s
+#   three (2,000 files committed a round, a flush each; 235 to 253 s with nothing but one another
+#   on the volume) and swarmops-git's histories of 10,000 changesets.
+# - `serve_lock`'s two run with nothing beside them. On a bench directory without their stores
+#   the first builds them, and the build's `serve --prepare` flushes each of 10,000 loose objects:
+#   the two took 222 s from nothing with the volume to themselves (23 to 28 s with the stores
+#   built), and 262 and 280 s with the stores built beside 7 other tests.
+#
+# With these the same run passed in 34 min, its longest test 269 s (`ws_sigkill`'s) and the next
+# 156 s. A test of a new name that turns out to be as heavy joins the filter it fits.
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "macos")'
+filter = 'test(/^serve_lock::/)'
+threads-required = 'num-test-threads'
+
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "macos")'
+filter = 'test(/power_loss|crash|sweep|killed|sigkill|at_any_|at_every_|recursion/) | test(/^faults::/) | (test(/^counted_work::/) & !test(/^counted_work::an_a1_twin/)) | test(/^export::mac_memos::an_/)'
+threads-required = 8
+
 # CI's profile: ci.yml sets `NEXTEST_PROFILE=ci` for `just check`, whose workspace run then uses
 # it (its one-test release run asks for the default profile). Every test runs even after one
 # fails, none is retried, and the run's JUnit report is target/nextest/ci/junit.xml. A test
