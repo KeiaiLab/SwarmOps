@@ -68,7 +68,7 @@ export function Sample() {
         Many agents commit into one store at once
       </h2>
       <p className={PARA + ' mt-4'}>
-        Here eight agent processes each commit a note and land it on <C>main</C>, all at once:
+        Eight agent processes, all at once:
       </p>
 
       {/* 1. The command and what it printed, one figure; the listing folds after its first 8 lines. */}

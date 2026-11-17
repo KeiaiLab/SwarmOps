@@ -46,8 +46,6 @@ export function FirstRun() {
         </SelectFigure>
       </div>
       <p className={PARA + ' mt-4'}>
-        That is Claude Code&apos;s <C>local</C> scope, private to you; <C>claude mcp remove swarmops -s local</C>{' '}
-        takes it out.{' '}
         <a className={LINK} href={MCP_GUIDE_URL}>
           MCP integration
         </a>{' '}
