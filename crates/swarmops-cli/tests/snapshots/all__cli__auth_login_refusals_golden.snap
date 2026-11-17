@@ -217,5 +217,30 @@ expression: s.transcript()
         "auth": "trust"
       }
     }
+  },
+  {
+    "args": "auth login --gh --with-token example-token-not-a-secret",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/auth.toml"
+    },
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "auth_login",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "auth login: the arguments are not as its usage has them; none is quoted here, since one may be a token (--with-token takes no value: the token is read from stdin)",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops auth login [OPTIONS] <--gh>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
   }
 ]

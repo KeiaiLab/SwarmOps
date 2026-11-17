@@ -4,7 +4,9 @@
 //! They open no store: the file is the user's, found from the environment
 //! (`SWARMOPS_AUTH_FILE`, else the host's state directory), so `--repo` and `--as` are read and
 //! not used, and the envelope has no `meta.repo`. `auth login --with-token` reads the token from
-//! stdin, since an argument would show in the process list; no error quotes what stdin held.
+//! stdin, since an argument would show in the process list; no error quotes what stdin held,
+//! and a usage error of `auth login` quotes nothing of the line but its flags' names
+//! (`commands::usage`), so a token typed as an argument is not repeated in an envelope.
 //! Without it, `auth login` asks the provider for one by its device flow (the `device_flow`
 //! module): the code to enter and its page go to stderr, and stdout stays the one envelope.
 //!

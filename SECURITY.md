@@ -142,7 +142,9 @@ these are vulnerabilities:
   `swarmops/auth.toml` in the user's state directory. The token is there in plain text, by design
   and with no keyring: the file is made with mode `0600` in a directory made with mode `0700`, and
   any process that runs as the same user can read it. The token is read from stdin, never from an
-  argument, or granted by the provider's device flow (below). A login file that is a symbolic link, or that its group or others can read or write,
+  argument, or granted by the provider's device flow (below); a usage error of `auth login`
+  quotes nothing of its line but its flags' names, so that a token typed as an argument is not
+  repeated in the envelope. A login file that is a symbolic link, or that its group or others can read or write,
   is refused, and its mode is never changed for the user. `clone`, `fetch`, `push`, `sync` and
   `remote add` send the token to a remote over https (or over http to a loopback address) that
   names no token variable and whose host and port are the login's, exactly; it reaches git as a

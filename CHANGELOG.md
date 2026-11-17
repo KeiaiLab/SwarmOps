@@ -357,7 +357,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   its group or others can read or write, is refused (`E_INVALID_ARG`, `details.reason`
   `auth_file_kind` or `auth_file_mode`), by the mode of the file as opened, and is never
   overwritten. The token is read from stdin, never from an argument, and appears in no envelope
-  and no error. It is sent only to an https remote whose host and port are the login's, as a
+  and no error: a usage error of `auth login` quotes nothing of its line but its flags' names, so a
+  token typed after `--with-token` is not repeated. It is sent only to an https remote whose host and port are the login's, as a
   header scoped to that remote's URL in git's environment, and is removed from what git prints
   ([SECURITY.md](SECURITY.md)).
 - A token was sent to another address when the remote redirected: git follows a redirect of its

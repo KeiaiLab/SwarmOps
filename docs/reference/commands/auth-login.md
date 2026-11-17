@@ -181,6 +181,13 @@ characters; anything else is `E_INVALID_ARG` (`details.reason` `token`), and the
 quotes what stdin held. The token is not checked with the provider: a token that is wrong or
 has expired is kept all the same.
 
+`--with-token` takes no value. A token typed after it, or anywhere else on the line, is a usage
+error (`E_INVALID_ARG`, exit 2) that keeps nothing, and its envelope quotes no word of the line:
+the message is a fixed one and the hint is the command's usage. A line that lacks `--gh`, or
+that has both `--with-token` and `--scope`, is answered in clap's words, which name flags alone.
+The token was still in an argument, where a process list and a shell's history show it: revoke
+such a token.
+
 ### The login file
 
 The file is the one `SWARMOPS_AUTH_FILE` names, by an absolute path. Without the variable it is

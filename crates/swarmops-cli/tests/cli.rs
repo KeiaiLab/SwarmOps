@@ -245,6 +245,11 @@ fn no_token_in(replies: &[Reply]) {
     }
 }
 
+/// What a usage error of `auth login` says when clap's own message would quote the line.
+const AUTH_LOGIN_USAGE: &str = "auth login: the arguments are not as its usage has them; none is \
+                                quoted here, since one may be a token (--with-token takes no \
+                                value: the token is read from stdin)";
+
 #[test]
 fn auth_login_refusals_golden() {
     let mut s = Session::new();
@@ -303,6 +308,48 @@ fn auth_login_refusals_golden() {
     replies.push(bare);
     let flag = ["auth", "login", "--gh", "--token", LOGIN_TOKEN];
     assert_eq!(Session::run_raw(&env, &flag, None).exit, 2, "no --token");
+
+    // 5. A token typed as an argument is refused and never repeated: the usage error quotes no
+    //    word of the line, wherever in it the token stands.
+    let typed = ["auth", "login", "--gh", "--with-token", LOGIN_TOKEN];
+    let quoted = s.run_env(&env, &typed);
+    assert_eq!((quoted.exit, quoted.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(quoted["op"], "auth_login");
+    assert_eq!(quoted["error"]["message"], AUTH_LOGIN_USAGE);
+    replies.push(quoted);
+    let joined = format!("--with-token={LOGIN_TOKEN}");
+    let short = format!("-{LOGIN_TOKEN}");
+    let lines: [&[&str]; 9] = [
+        &["auth", "login", "--gh", &joined],
+        &["auth", "login", LOGIN_TOKEN, "--gh"],
+        &["auth", "login", "--gh", "--with-token", "--", LOGIN_TOKEN],
+        &["auth", "login", "--with-token", LOGIN_TOKEN],
+        &["auth", "login", "--gh", "--with-token", &short],
+        &[
+            "auth",
+            "login",
+            "--gh",
+            "--with-token",
+            "--scope",
+            LOGIN_TOKEN,
+        ],
+        &["auth", "login", "--gh", "--scope", "repo", LOGIN_TOKEN],
+        &[
+            "--human",
+            "auth",
+            "login",
+            "--gh",
+            "--with-token",
+            LOGIN_TOKEN,
+        ],
+        &["auth", "--human", "login", "--gh", LOGIN_TOKEN, "--frob"],
+    ];
+    for line in lines {
+        let refused = Session::run_raw(&env, line, None);
+        assert_eq!(refused.exit, 2, "{line:?}");
+        let printed = format!("{}{}", refused.stdout, refused.stderr);
+        assert!(!printed.contains(LOGIN_TOKEN), "{line:?}: {printed}");
+    }
 
     // Nothing was refused into a file.
     assert!(!Path::new(&file).exists());

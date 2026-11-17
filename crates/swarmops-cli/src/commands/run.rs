@@ -1055,11 +1055,33 @@ pub fn panicked(payload: &(dyn Any + Send)) -> OpError {
     )
 }
 
+/// The message of a usage error of `auth login` whose own message would quote the line.
+const AUTH_LOGIN_USAGE: &str = "auth login: the arguments are not as its usage has them; none is \
+                                quoted here, since one may be a token (--with-token takes no \
+                                value: the token is read from stdin)";
+
+/// Whether the envelope of the usage `error` on the subcommand `path` must quote no word of the
+/// line: a line of `auth login`, where a token typed after --with-token is the likely mistake,
+/// and an envelope is what scripts and agents log. clap's messages for a missing argument and
+/// for two that conflict name the grammar's own arguments, and stay; every other kind may
+/// repeat a word of the line, in its message or in a tip.
+fn may_quote_a_token(error: &clap::Error, path: &[String]) -> bool {
+    let named = matches!(
+        error.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument | clap::error::ErrorKind::ArgumentConflict
+    );
+    cli::op_name(path) == Some("auth_login") && !named
+}
+
 /// The envelope of a command line clap refused: `E_INVALID_ARG` (exit 2) with clap's message
 /// in one line as `message`, and its tips and the usage of the subcommand `path` names as
 /// `hint`, a line each, after `git_line` when given (a refused git verb's). The usage names the
 /// program `bin`, as the line invoked it, whether it is clap's or, where clap gives none, the
 /// CLI's. Control characters (from the line itself) are escaped in both.
+///
+/// A line of `auth login` that clap's text may quote ([`may_quote_a_token`]) gets
+/// [`AUTH_LOGIN_USAGE`] as its message and the command's usage as its hint: nothing of clap's
+/// text, and no `git_line`.
 pub fn usage(
     error: &clap::Error,
     bin: Option<&str>,
@@ -1068,6 +1090,13 @@ pub fn usage(
     format: Format,
     started: Instant,
 ) -> Printed {
+    let op = cli::op_name(path).unwrap_or(cli::NO_OP);
+    if may_quote_a_token(error, path) {
+        let usage = output::printable(&cli::usage(bin, path));
+        let hint = format!("{usage}\nFor more information, try '--help'.");
+        let error = OpError::new(ErrorCode::InvalidArg, AUTH_LOGIN_USAGE).with_hint(hint);
+        return failed(op, error, format, started);
+    }
     let rendered = error.render().to_string();
     let mut paragraphs = rendered
         .split("\n\n")
@@ -1094,12 +1123,7 @@ pub fn usage(
     }
     let message = output::printable(&message.join(" "));
     let error = OpError::new(ErrorCode::InvalidArg, message).with_hint(hint.join("\n"));
-    failed(
-        cli::op_name(path).unwrap_or(cli::NO_OP),
-        error,
-        format,
-        started,
-    )
+    failed(op, error, format, started)
 }
 
 /// `op`'s envelope for `result`, its `meta` from `used` (`repo`, `resolved` and `recovered`)
