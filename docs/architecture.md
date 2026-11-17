@@ -678,7 +678,9 @@ the environment (`GIT_CONFIG_COUNT`: `core.fsync=all`, an empty hooks directory,
 variables that point git at another repository, git's tracing and the locale, and gains `GIT_DIR`
 (the mirror), `LC_ALL=C`, `GIT_TERMINAL_PROMPT=0` and `GIT_ALLOW_PROTOCOL` (the remote URL's scheme
 alone); credential helpers, `SSH_AUTH_SOCK`, `GIT_SSH_COMMAND` and proxy variables pass through. A
-remote's token reaches git as an HTTP header scoped to the remote's URL, and is redacted, with
+remote's token reaches git as an HTTP header keyed by the remote's URL, with
+`http.followRedirects=false` beside it (git would add the header to what it sends a redirect's
+target), and is redacted, with
 its base64 form, from whatever git prints before it enters an error. The token is the one in the
 variable the remote names (`token_env`), and that alone when one is named; else the one of the
 login kept for the URL's host, which `swarmops-ops` looks up in the user's login file by the

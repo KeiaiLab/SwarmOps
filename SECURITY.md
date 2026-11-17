@@ -121,8 +121,11 @@ these are vulnerabilities:
 - **The git remotes (M13): credentials and the child's environment.** No store holds a
   credential: `remotes.toml` holds a token's variable name (`token_env`), never its value, and a URL
   with a password in it is refused. The variable's token reaches git only through the child's
-  environment, as an HTTP header scoped to the remote's URL, never as an argument or in a file, and
-  is removed, with its base64 forms, from whatever git prints before it enters an error. The child runs
+  environment, as an HTTP header keyed by the remote's URL, never as an argument or in a file, and
+  is removed, with its base64 forms, from whatever git prints before it enters an error. git keeps
+  that header for its whole run, and would add it to what it sends an address the remote
+  redirected its first request to; a call that carries a token, a variable's or a login's,
+  therefore follows no redirect (`http.followRedirects=false`) and fails at one. The child runs
   without a shell, its arguments after `--end-of-options`, with `GIT_TERMINAL_PROMPT=0`,
   `GIT_ALLOW_PROTOCOL` set to the remote URL's scheme alone (`file://`, `ext::` and local paths are
   refused as remotes), an empty hooks directory, and the variables that point git at another
@@ -148,7 +151,7 @@ these are vulnerabilities:
   alone and only for a request whose protocol, host and port are the login's by the same rule. A
   token that reaches any other file, an argument, an envelope, an error, stderr, what
   `auth status` prints or the stdout of any other command; a token sent to a remote at another
-  host or port, or to one that names a variable; a helper's answer to a request for another host
+  host or port, a redirect's target among them, or to one that names a variable; a helper's answer to a request for another host
   or port; a login file made with a wider mode; or a login file read through a link, is a
   vulnerability. No store, remote or request can
   name the login file: only the user's environment does.

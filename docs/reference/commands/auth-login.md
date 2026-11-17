@@ -239,6 +239,13 @@ token goes with the first request, before git asks any credential helper, so a t
 expired can fail a remote that a helper would open: log in again, or log out
 ([`auth logout`](../commands/auth-logout.md)) to leave the remote to git's credentials.
 
+A command that sends a token, the login's or a variable's, follows no HTTP redirect: git would
+add the token itself to what it sends the address a redirect names. A remote that answers its
+first request with a redirect (a repository that was renamed or moved) therefore ends
+`E_REMOTE_REJECTED` (`details.reason` `unclassified`, the status in `details.stderr_tail`);
+record the new URL with [`remote add`](../commands/remote-add.md). A command that sends no
+token follows a redirect as git does.
+
 A login file that is refused (below) fails these commands before git runs. The MCP server's
 `fetch`, `push` and `sync` tools use the login file of the user the server runs as.
 

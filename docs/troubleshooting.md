@@ -1297,7 +1297,7 @@ check:
 | `not_found` | The remote says the repository is not there. | Check the URL: a host such as GitHub answers so for a private repository the credential cannot see; `swarmops auth status` lists the logins. |
 | `declined` | A hook or a rule of the remote's refused. | `details.refs` and `details.remote_messages` give the remote's reason. |
 | `bad_objects` | A fetch received an object git's fsck refuses, a pack whose checksum does not match, or one its refs reach is missing; no tracking ref moved. | Fix the remote's history. |
-| `unclassified` | A failure git's messages do not explain; never retried. | `details.stderr_tail` gives what git said. |
+| `unclassified` | A failure git's messages do not explain; never retried. | `details.stderr_tail` gives what git said. `The requested URL returned error: 301` (or 302, 307, 308) is a redirect: a command that sends a token follows none, so give the remote its new URL. |
 
 `details` also names the `remote` and what git said (`refs`, `remote_messages`, `git_exit`,
 `stderr_tail`, the token removed), and `token_env_unset` when the variable `--token-env` names is

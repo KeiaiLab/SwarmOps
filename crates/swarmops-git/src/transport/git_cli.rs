@@ -157,8 +157,11 @@ impl GitCli {
         let allowed = call.remote.map_or("", |(url, _)| url.protocol.as_str());
         command.env("GIT_ALLOW_PROTOCOL", allowed);
 
-        // 3. The remote's token, the variable's or the stored one, as a header scoped to its URL
-        //    (a redirect elsewhere drops it). Its three forms are redacted whichever it is.
+        // 3. The remote's token, the variable's or the stored one, as a header keyed by its URL.
+        //    git keeps that header for the whole command: after it follows a redirect of its
+        //    first request, it adds the header itself to what it sends the new address. A call
+        //    with a token therefore follows no redirect, and fails at one. The token's three
+        //    forms are redacted whichever it is.
         let remote_token = call
             .remote
             .and_then(|(url, cred)| Some((url, self.token(url, cred)?)));
@@ -168,6 +171,7 @@ impl GitCli {
             let header = format!("Authorization: Basic {encoded}");
             let key = format!("http.{}.extraHeader", url.as_str());
             config.push((key, header.clone().into()));
+            config.push((FOLLOW_REDIRECTS.to_owned(), "false".into()));
             secrets.add(header);
             secrets.add(encoded);
             secrets.add(token);
@@ -1152,6 +1156,10 @@ const CONFIG: [(&str, &str); 9] = [
     ("transfer.fsckObjects", "true"),
     ("fetch.writeCommitGraph", "true"),
 ];
+
+/// The key of git's rule for an HTTP redirect (`initial` by default: the first request's is
+/// followed). A call that carries a token sets it to `false`.
+const FOLLOW_REDIRECTS: &str = "http.followRedirects";
 
 /// `git fetch`'s fixed options, up to the URL.
 const FETCH_FLAGS: [&str; 8] = [

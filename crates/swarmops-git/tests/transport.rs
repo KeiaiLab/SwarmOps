@@ -10,9 +10,12 @@
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::{Read as _, Write as _};
+use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
 
 use swarmops_git::oid::GitOid;
 use swarmops_git::transport::{
@@ -1078,6 +1081,70 @@ fn token_header_is_scoped_to_the_remote_url() {
     }
     run(plain.args(["ls-remote", &other_http.url(REPO)]));
     assert_eq!(other_http.authorizations(), Vec::<String>::new());
+}
+
+/// A login's host that answers with a redirect gets no further: git would follow the first
+/// answer's redirect and then add the header itself to what it sends the new address, so a call
+/// that carries a token follows none. One without a token follows it as git does.
+#[test]
+fn a_redirect_never_carries_the_token_to_another_address() {
+    let setup = Setup::new();
+    let target = setup.server.http(HttpAuth::Anonymous);
+    let front = redirecting_to(&target.host());
+    let through = format!("http://{front}/{REPO}.git");
+    let url = RemoteUrl::parse(&through).expect("a URL");
+    let cli = setup.cli(&[(TOKEN_VAR, TOKEN)]);
+
+    // 1. The stand-in's self-check: without a token git follows the redirect and is served.
+    setup
+        .fetch(&cli, &through, &Credential::default())
+        .expect("a fetch through the redirect");
+    let served = target.requests().len();
+    assert!(served > 0, "the redirect reached the other server");
+
+    // 2. With a token, the login's or a variable's, the call ends at the redirect: the other
+    //    address gets no request at all, so no header.
+    for cred in [stored_cred(STORED), token_cred()] {
+        let (reason, error) = rejected(cli.ls_remote_head(&url, &cred));
+        assert_eq!(reason, RejectReason::Unclassified, "{error:?}");
+        assert!(format!("{error:?}").contains("302"), "{error:?}");
+        let (reason, error) = rejected(setup.fetch(&cli, &through, &cred));
+        assert_eq!(reason, RejectReason::Unclassified, "{error:?}");
+    }
+    assert_eq!(
+        target.requests().len(),
+        served,
+        "a request after a redirect"
+    );
+    assert_eq!(target.authorizations(), Vec::<String>::new());
+}
+
+/// Listens on loopback and answers every request with a 302 to the same path at `host`
+/// (`127.0.0.1:<port>`), for as long as the test process runs. Returns its own `host:port`.
+fn redirecting_to(host: &str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listen on loopback");
+    let addr = listener.local_addr().expect("the listener's address");
+    let host = host.to_owned();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+
+            // The request's head, to its blank line; its first line names the path.
+            let mut head = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && matches!(stream.read(&mut byte), Ok(1)) {
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&head);
+            let path = head.split(' ').nth(1).unwrap_or("/");
+            let answer = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{host}{path}\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(answer.as_bytes());
+        }
+    });
+    addr.to_string()
 }
 
 #[test]

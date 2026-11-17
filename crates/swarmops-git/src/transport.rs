@@ -15,8 +15,9 @@
 //! (`SWARMOPS_GIT`, else `git` on `PATH`, 2.39 or later), an environment cleaned of the variables
 //! that point git at another repository, configuration passed in the environment and never in the
 //! arguments (`core.fsync=all` among it), `--end-of-options` before every URL and refspec, no
-//! shell, and a push that never forces. A remote's token reaches git as a header scoped to the
-//! remote's URL, and is redacted from everything git prints before it enters an error: the token
+//! shell, and a push that never forces. A remote's token reaches git as a header keyed by the
+//! remote's URL, in a call that follows no HTTP redirect (git would add the header to what it
+//! sends the redirect's target), and is redacted from everything git prints before it enters an error: the token
 //! in the variable the remote names, and that one alone when a variable is named; else the token
 //! a login keeps for the remote's host, which the caller looks up by the URL's
 //! [`RemoteUrl::credential_host`] ([`host_key`]: keys match when equal, so no subdomain and no

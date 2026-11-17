@@ -828,6 +828,13 @@ left).
   works; what git does with a helper after such a refusal is not tested. Log in again, or log out.
   *Documented ([`auth login`](reference/commands/auth-login.md#where-the-login-is-used)). Found:
   the login's design.*
+- **A remote that redirects fails when a token is sent.** A command that sends a token, a
+  login's or the one `--token-env` names, follows no HTTP redirect, since git would add the
+  token to what it sends the redirect's target. A repository that was renamed or moved, which
+  git alone would follow, ends `E_REMOTE_REJECTED` (`details.reason` `unclassified`, the status
+  in `details.stderr_tail`) until the remote's URL is the new one. *Documented
+  ([`auth login`](reference/commands/auth-login.md#where-the-login-is-used)). Found: a review of
+  the login.*
 - **A login is for one host and port, exactly.** A login for `github.com` is not sent to
   `gist.github.com` or to another port, and a remote that names a token variable never uses a
   login, the variable set or not. *Documented

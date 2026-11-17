@@ -342,6 +342,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
   landing `SyncTimer` times FORMAT 2 and 3 journal and ref-file syncs (`journal2.*`, `refs2/`).
 - Tests: a herd's waves are cut by the mark each land was due at, so a land late under host load no
   longer splits the herd case into a third wave.
+- A remote command that sends a token, the one `--token-env` names or a login's, follows no HTTP
+  redirect (`http.followRedirects=false` in git's environment): a remote that answers its first
+  request with one, such as a repository that was renamed or moved, now ends `E_REMOTE_REJECTED`
+  (`details.reason` `unclassified`) instead of being followed. A command that sends no token
+  follows it as before.
 - The gate's doc runs write to a fresh directory of their own below the target directory instead of
   removing the shared doc directory, so two gates sharing a target directory no longer race.
 
@@ -355,6 +360,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   and no error. It is sent only to an https remote whose host and port are the login's, as a
   header scoped to that remote's URL in git's environment, and is removed from what git prints
   ([SECURITY.md](SECURITY.md)).
+- A token was sent to another address when the remote redirected: git follows a redirect of its
+  first request and then adds the configured header itself to what it sends the new address, so
+  the host a `--token-env` remote names, or a login's host, could pass the token on to any host
+  and port. A command that sends a token now follows no redirect.
 - `auth login --gh` by the device flow runs the host's `curl`, a second program SwarmOps trusts
   beside git: without a shell, with the arguments `-q --config -` alone, the request on its stdin
   and a cleared environment but for `PATH`, the proxy variables and the certificate variables;

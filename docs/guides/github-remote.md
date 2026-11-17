@@ -97,7 +97,9 @@ SwarmOps runs your git, so git's own ways to authenticate apply, as they do for 
   (`so clone … --token-env GH_TOKEN`, or `so remote add … --token-env GH_TOKEN`). The store records
   the variable's name, never its value; each command reads the variable and hands git the token as
   an HTTP header for that remote's URL alone (basic authentication, user name `x-access-token`),
-  through the environment, never as an argument.
+  through the environment, never as an argument. A command that sends a token follows no HTTP
+  redirect, so the token goes to no other address: a remote that answers with one (a repository
+  that was renamed or moved) fails until its URL is the new one.
 - **HTTPS with a login**: `so auth login --gh` keeps a token for `github.com` in your login file, a
   file of your own outside every store ([`auth login`](../reference/commands/auth-login.md)). It
   prints a code to approve at `https://github.com/login/device` and keeps the token GitHub then
