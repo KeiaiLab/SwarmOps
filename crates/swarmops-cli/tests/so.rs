@@ -25,6 +25,32 @@ const REFUSED: [(&[&str], &str); 6] = [
     (&["log", "-n", "many"], "log [OPTIONS] [REV]"),
 ];
 
+/// `SWARMOPS_TEST_VERSION`, the seam the tests of `update` give a build an older version by: a
+/// build with the test hooks prints the variable's version by either name, on the one line of
+/// the usual form, and its own for a value that is no version. (`test_hooks.rs` has the other
+/// half: a build without the feature prints its own whatever the variable says.)
+#[cfg(feature = "test-hooks")]
+#[test]
+fn the_version_hook_gives_both_names_its_version() {
+    for bin in [SO, BIN] {
+        for (value, line) in [
+            ("0.0.1", "swarmops 0.0.1\n".to_owned()),
+            ("9.9.9-rc.1", "swarmops 9.9.9-rc.1\n".to_owned()),
+            ("", version_line()),
+            ("latest", version_line()),
+            ("0.0.1\nswarmops 9.9.9", version_line()),
+        ] {
+            let env = [("SWARMOPS_TEST_VERSION", value)];
+            let run = run_bin(bin, &["--version"], &env, "");
+            assert_eq!(
+                (run.exit(), run.stdout.as_str(), run.stderr.as_str()),
+                (0, line.as_str(), ""),
+                "{bin} with {value:?}"
+            );
+        }
+    }
+}
+
 /// `so` is `swarmops` by another name: the same version; the same envelopes for `init`, `info`
 /// and the CLI's own usage errors; the same for the command lines clap refuses, `mcp`'s on
 /// stderr included, but for clap's text naming the program as it was invoked; and the same

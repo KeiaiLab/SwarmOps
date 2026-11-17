@@ -10,7 +10,9 @@
 //! or `=no-reach-check`, which bounds `serve`'s pack cache or skips its reachability check, and
 //! `SWARMOPS_TEST_LEAD_WAIT=<n>`, which makes a writer that leads the write queue wait for n other
 //! requests (and panics on a value that is no number), and `SWARMOPS_TEST_PHASE_LOG=<file>`, which
-//! makes a sync and a push append their phases' times to the file (an import appends none).
+//! makes a sync and a push append their phases' times to the file (an import appends none),
+//! `SWARMOPS_TEST_VERSION=<version>`, which makes it print that version for its own, and
+//! `SWARMOPS_TEST_UPDATE_RELEASE=1`, which makes it count as a release's build.
 //!
 //! The test exists only in a build without the feature, as `cargo build --release` is. `just
 //! check` and `scripts/check.sh` run it in a release build and require it to run
@@ -32,7 +34,7 @@ mod support;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use support::{BIN, SO, Store, agent, run_bin};
+use support::{BIN, SO, Store, agent, run_bin, version_line};
 use swarmops_ops::NOW_ENV;
 use swarmops_store::{CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, LEAD_WAIT_ENV};
 
@@ -83,6 +85,26 @@ fn a_build_without_the_feature_ignores_the_test_hooks() {
             "{bin}: signed at the clock's time, not SWARMOPS_TEST_NOW's: {secs} < {before}"
         );
         store.assert_clean(&format!("{bin}: after the commit"));
+    }
+}
+
+/// `SWARMOPS_TEST_VERSION` and `SWARMOPS_TEST_UPDATE_RELEASE`, the seams of `update`'s tests: a
+/// build with the test hooks prints the first's version for its own
+/// (`so::the_version_hook_gives_both_names_its_version`); this build prints its own, with both
+/// set.
+#[test]
+fn a_build_without_the_feature_prints_its_own_version() {
+    let env = [
+        ("SWARMOPS_TEST_VERSION", "0.0.1"),
+        ("SWARMOPS_TEST_UPDATE_RELEASE", "1"),
+    ];
+    for bin in [BIN, SO] {
+        let run = run_bin(bin, &["--version"], &env, "");
+        assert_eq!(
+            (run.exit(), run.stdout.as_str(), run.stderr.as_str()),
+            (0, version_line().as_str(), ""),
+            "{bin}: the version hook is ignored"
+        );
     }
 }
 

@@ -157,6 +157,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
   Mac (a self-hosted runner labelled `macos-local`, which the release now needs), for macOS 11 or
   newer, smoke-runs them and publishes `swarmops-<version>-aarch64-apple-darwin.tar.gz` with the
   Linux archives, in `SHA256SUMS`. `THIRD-PARTY-LICENSES` gains `errno`, compiled for macOS only.
+- The release workflow builds the binaries of all three targets with
+  `SWARMOPS_BUILD_CHANNEL=release`, a variable read at compile time that marks a build as a
+  release's; a build from a clone leaves it unset. Any other value fails the build, as does the
+  variable together with `SWARMOPS_BUILD_COMMIT`. It changes nothing `--version` prints, and
+  nothing reads the mark yet. The workflow's smoke runs set `SWARMOPS_AUTO_UPDATE=off`, and ask
+  for the version with the new test hook `SWARMOPS_TEST_VERSION` set, which a release build
+  ignores.
 
 ### Changed
 

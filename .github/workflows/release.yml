@@ -291,14 +291,23 @@ jobs:
           "$gcc_ld/ld.lld" --version
           flags="-C link-arg=-fuse-ld=lld -C link-arg=-B$gcc_ld"
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=$flags" >>"$GITHUB_ENV"
+      # SWARMOPS_BUILD_CHANNEL=release, read at compile time, is what makes a binary a release's:
+      # only these builds, of this workflow, set it (the `build-macos` job's too), and `so update`
+      # and automatic update act on no other build. It changes nothing `--version` prints.
       - name: Build swarmops and so
+        env:
+          SWARMOPS_BUILD_CHANNEL: release
         run: cargo build --release --locked -p swarmops-cli --bins --target "$TARGET_TRIPLE"
       # Each binary prints the tag's version and needs no glibc newer than GLIBC_FLOOR; then a
       # store is made, committed to, read and deep-verified, with every SWARMOPS_TEST_* hook set,
       # which a release build ignores (SECURITY.md). Honoured, the first would abort `init` at
       # its first filesystem call, the second fail the commit's, the third write the file it
-      # names, and the fourth sign the changeset in 2001.
+      # names, and the fourth sign the changeset in 2001; and SWARMOPS_TEST_VERSION, set where
+      # the version is asked for, would make a binary print 0.0.1. Automatic update is off for
+      # every run: a binary under test looks for no release.
       - name: Smoke-test the binaries
+        env:
+          SWARMOPS_AUTO_UPDATE: "off"
         run: |
           read -ra run_with <<<"$RUN_WITH"
           bin="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release"
@@ -326,7 +335,7 @@ jobs:
               echo "::error::$name needs glibc $glibc, newer than the $GLIBC_FLOOR README promises"
               exit 1
             fi
-            printed=$("${run_with[@]}" "$bin/$name" --version)
+            printed=$(SWARMOPS_TEST_VERSION=0.0.1 "${run_with[@]}" "$bin/$name" --version)
             if [ "$printed" != "swarmops $VERSION" ]; then
               echo "::error::$name --version printed '$printed', not 'swarmops $VERSION'"
               exit 1
@@ -503,14 +512,20 @@ jobs:
           target_dir="$RUNNER_TEMP/release-target"
           rm -rf -- "$target_dir"
           echo "CARGO_TARGET_DIR=$target_dir" >>"$GITHUB_ENV"
+      # With SWARMOPS_BUILD_CHANNEL=release, as the `build` job builds.
       - name: Build swarmops and so
+        env:
+          SWARMOPS_BUILD_CHANNEL: release
         run: cargo build --release --locked -p swarmops-cli --bins --target "$TARGET_TRIPLE"
       # Each binary is for arm64 alone, links against nothing but the system's own libraries
       # (/usr/lib and /System/Library, which every Mac has), starts on macOS from
       # MACOSX_DEPLOYMENT_TARGET on (its LC_BUILD_VERSION's `minos`), carries the linker's ad-hoc
       # signature, without which no arm64 Mac starts it, and prints the tag's version. Then the
-      # `build` job's store test, command for command: move them together.
+      # `build` job's store test, command for command, with its SWARMOPS_TEST_VERSION and with
+      # automatic update off as there: move them together.
       - name: Smoke-test the binaries
+        env:
+          SWARMOPS_AUTO_UPDATE: "off"
         run: |
           bin="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release"
           file "$bin/swarmops" "$bin/so"
@@ -536,7 +551,7 @@ jobs:
               exit 1
             fi
             codesign --verify --strict --verbose=2 "$bin/$name"
-            printed=$("$bin/$name" --version)
+            printed=$(SWARMOPS_TEST_VERSION=0.0.1 "$bin/$name" --version)
             if [ "$printed" != "swarmops $VERSION" ]; then
               echo "::error::$name --version printed '$printed', not 'swarmops $VERSION'"
               exit 1

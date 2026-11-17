@@ -1,8 +1,16 @@
-//! The text `--version` prints after the program's name: the package version, and the build's
-//! commit when `SWARMOPS_BUILD_COMMIT` was set at compile time (umbrella spec §4).
+//! What a build says of itself. The text `--version` prints after the program's name: the
+//! package version, and the build's commit when `SWARMOPS_BUILD_COMMIT` was set at compile time
+//! (umbrella spec §4). And whether the build is a release's ([`is_release`]): one compiled with
+//! `SWARMOPS_BUILD_CHANNEL=release`, which the project's release workflow sets and nothing else
+//! does.
 //!
-//! `option_env!` puts the variable in the crate's dep-info, so cargo rebuilds the crate when
-//! it changes. Release builds leave it unset.
+//! `option_env!` puts each variable in the crate's dep-info, so cargo rebuilds the crate when
+//! one changes. A release's build sets the channel and leaves the commit unset; a build from a
+//! clone sets the commit or neither. The channel changes nothing `--version` prints.
+//!
+//! A build with the `test-hooks` feature reads two variables more, at run time, for the tests of
+//! `update`: `SWARMOPS_TEST_VERSION` and `SWARMOPS_TEST_UPDATE_RELEASE`. A build without the
+//! feature ignores both.
 
 use std::sync::OnceLock;
 
@@ -21,6 +29,35 @@ const _: () = assert!(
     commit_ok(BUILD_COMMIT),
     "SWARMOPS_BUILD_COMMIT must be 7 to 40 lowercase hex digits, such as `git rev-parse HEAD`"
 );
+
+/// The build's channel, from `SWARMOPS_BUILD_CHANNEL` at compile time.
+const BUILD_CHANNEL: Option<&str> = option_env!("SWARMOPS_BUILD_CHANNEL");
+
+/// The one channel there is: a release's binaries, built by the project's release workflow.
+const RELEASE_CHANNEL: &str = "release";
+
+// Any other value fails the build: a word this build does not know must not pass for no channel.
+const _: () = assert!(
+    channel_ok(BUILD_CHANNEL),
+    "SWARMOPS_BUILD_CHANNEL must be `release`, or unset"
+);
+
+// A release is named by its version alone, and a build that names its commit is from a clone.
+const _: () = assert!(
+    BUILD_CHANNEL.is_none() || BUILD_COMMIT.is_none(),
+    "SWARMOPS_BUILD_CHANNEL and SWARMOPS_BUILD_COMMIT cannot both be set"
+);
+
+/// The variable that gives [`version`] its text, in a build with the `test-hooks` feature: a
+/// version (`0.0.1`, `1.2.3-rc.1`), so that a test has a build older than the one it was built
+/// as. Any other value is ignored.
+#[cfg(feature = "test-hooks")]
+pub(crate) const TEST_VERSION_ENV: &str = "SWARMOPS_TEST_VERSION";
+
+/// The variable that makes a build with the `test-hooks` feature a release's ([`is_release`])
+/// when it is `1`: no test builds with the channel set.
+#[cfg(feature = "test-hooks")]
+pub(crate) const TEST_UPDATE_RELEASE_ENV: &str = "SWARMOPS_TEST_UPDATE_RELEASE";
 
 /// Whether `commit` may stamp the version: absent, or 7 to 40 lowercase hex digits.
 const fn commit_ok(commit: Option<&str>) -> bool {
@@ -43,6 +80,27 @@ const fn commit_ok(commit: Option<&str>) -> bool {
     true
 }
 
+/// Whether `channel` may stamp the build: absent, or [`RELEASE_CHANNEL`].
+const fn channel_ok(channel: Option<&str>) -> bool {
+    let Some(channel) = channel else {
+        return true;
+    };
+    let (given, known) = (channel.as_bytes(), RELEASE_CHANNEL.as_bytes());
+    if given.len() != known.len() {
+        return false;
+    }
+
+    // `const fn` compares no strings: walk the bytes by index.
+    let mut i = 0;
+    while i < given.len() {
+        if given[i] != known[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// `version`, with `commit` as semver build metadata (`0.7.0+<commit>`) when there is one.
 fn version_text(version: &str, commit: Option<&str>) -> String {
     let Some(commit) = commit else {
@@ -51,10 +109,72 @@ fn version_text(version: &str, commit: Option<&str>) -> String {
     format!("{version}+{commit}")
 }
 
-/// This build's version text, which `--version` prints after `swarmops `.
+/// This build's version text, which `--version` prints after `swarmops `. In a build with the
+/// `test-hooks` feature, `SWARMOPS_TEST_VERSION`'s version instead, when it names one.
 pub(crate) fn version() -> &'static str {
     static TEXT: OnceLock<String> = OnceLock::new();
-    TEXT.get_or_init(|| version_text(env!("CARGO_PKG_VERSION"), BUILD_COMMIT))
+    TEXT.get_or_init(|| {
+        test_version().unwrap_or_else(|| version_text(env!("CARGO_PKG_VERSION"), BUILD_COMMIT))
+    })
+}
+
+/// Whether this build is a release's: compiled with `SWARMOPS_BUILD_CHANNEL=release`. A build
+/// from a clone is none, whatever version it prints. In a build with the `test-hooks` feature,
+/// also when `SWARMOPS_TEST_UPDATE_RELEASE` is `1`.
+#[allow(
+    dead_code,
+    reason = "`update` and automatic update, which come next, read it"
+)]
+pub(crate) fn is_release() -> bool {
+    BUILD_CHANNEL.is_some() || test_release()
+}
+
+/// [`TEST_VERSION_ENV`]'s version, if the variable holds one.
+#[cfg(feature = "test-hooks")]
+fn test_version() -> Option<String> {
+    hooked_version(std::env::var_os(TEST_VERSION_ENV))
+}
+
+/// In a build without the `test-hooks` feature, [`version`] is the build's own.
+#[cfg(not(feature = "test-hooks"))]
+fn test_version() -> Option<String> {
+    None
+}
+
+/// Whether [`TEST_UPDATE_RELEASE_ENV`] says this build is a release's.
+#[cfg(feature = "test-hooks")]
+fn test_release() -> bool {
+    hooked_release(std::env::var_os(TEST_UPDATE_RELEASE_ENV))
+}
+
+/// In a build without the `test-hooks` feature, only the channel makes a release's build.
+#[cfg(not(feature = "test-hooks"))]
+fn test_release() -> bool {
+    false
+}
+
+/// The version `value` holds, as [`TEST_VERSION_ENV`]'s: three numbers between dots, and after a
+/// hyphen a pre-release of letters, digits, dots and hyphens, the installer's rule for
+/// `--version`. `None` for anything else.
+#[cfg(feature = "test-hooks")]
+fn hooked_version(value: Option<std::ffi::OsString>) -> Option<String> {
+    let value = value?.into_string().ok()?;
+    let (triple, pre) = match value.split_once('-') {
+        Some((triple, pre)) => (triple, Some(pre)),
+        None => (value.as_str(), None),
+    };
+    let number = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    let label = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-');
+    let shaped = triple.split('.').count() == 3
+        && triple.split('.').all(number)
+        && pre.is_none_or(|pre| !pre.is_empty() && pre.bytes().all(label));
+    shaped.then_some(value)
+}
+
+/// Whether `value`, as [`TEST_UPDATE_RELEASE_ENV`]'s, makes the build a release's: `1` alone.
+#[cfg(feature = "test-hooks")]
+fn hooked_release(value: Option<std::ffi::OsString>) -> bool {
+    value.is_some_and(|value| value == "1")
 }
 
 #[cfg(test)]
@@ -89,6 +209,75 @@ mod tests {
         }
     }
 
+    /// No variable, or `release`; any other word fails the build, a release's in another case
+    /// or with a space among them.
+    #[test]
+    fn a_channel_is_release_or_none() {
+        assert!(channel_ok(None));
+        assert!(channel_ok(Some(RELEASE_CHANNEL)));
+        assert!(channel_ok(Some("release")));
+        for channel in [
+            "", "Release", "release ", "releas", "releases", "nightly", "1",
+        ] {
+            assert!(!channel_ok(Some(channel)), "{channel:?}");
+        }
+    }
+
+    /// This build is a release's exactly when it was compiled with the channel, which the test
+    /// reads itself (scripts/check-stamped.py builds it both ways); no gate's build sets the
+    /// hook, which would make it one too.
+    #[test]
+    fn this_build_knows_its_channel() {
+        let channel = option_env!("SWARMOPS_BUILD_CHANNEL");
+        assert_eq!(BUILD_CHANNEL, channel);
+        if channel.is_some() {
+            assert!(is_release(), "built with the channel");
+            assert_eq!(option_env!("SWARMOPS_BUILD_COMMIT"), None, "and no commit");
+        } else if !test_release() {
+            assert!(!is_release(), "built without the channel");
+        }
+    }
+
+    /// The version hook takes a version and nothing else, so that `--version` stays one line
+    /// of the form the installer reads.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn the_version_hook_takes_a_version_alone() {
+        let hooked = |value: &str| hooked_version(Some(value.into()));
+        for version in ["0.0.1", "10.20.30", "1.2.3-rc.1", "1.2.3-a-b.7"] {
+            assert_eq!(hooked(version).as_deref(), Some(version));
+        }
+        for other in [
+            "",
+            "1",
+            "1.2",
+            "1.2.3.4",
+            "v1.2.3",
+            "1.2.x",
+            "1..3",
+            "1.2.3-",
+            "1.2.3+abc",
+            "1.2.3 ",
+            "1.2.3\n",
+            "1.2.3-rc 1",
+            "1.2.3-\u{e9}",
+        ] {
+            assert_eq!(hooked(other), None, "{other:?}");
+        }
+        assert_eq!(hooked_version(None), None);
+    }
+
+    /// The release hook is `1`, and no other value.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn the_release_hook_is_1_alone() {
+        assert!(hooked_release(Some("1".into())));
+        for other in ["", "0", "true", "on", "11", " 1"] {
+            assert!(!hooked_release(Some(other.into())), "{other:?}");
+        }
+        assert!(!hooked_release(None));
+    }
+
     /// The commit is semver build metadata after a `+`; without one, the version alone.
     #[test]
     fn the_text_appends_the_commit() {
@@ -97,13 +286,14 @@ mod tests {
     }
 
     /// This build's text: the package version, and the commit if one was set. The test reads
-    /// the variable itself, so a module that stops reading it fails in a stamped build.
+    /// the variable itself, so a module that stops reading it fails in a stamped build. (Where
+    /// the version hook is set, the text is the hook's: no gate's build sets it.)
     #[test]
     fn this_build_has_its_text() {
         let pkg = env!("CARGO_PKG_VERSION");
         let commit = option_env!("SWARMOPS_BUILD_COMMIT");
         let expected = commit.map_or_else(|| pkg.to_owned(), |c| format!("{pkg}+{c}"));
-        assert_eq!(version(), expected);
+        assert_eq!(version(), test_version().unwrap_or(expected));
     }
 
     /// clap prints this text, not the package version it takes by default: the same string,

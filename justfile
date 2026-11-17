@@ -83,11 +83,12 @@ default: check
 # CI (.github/workflows/ci.yml) runs this recipe with `NEXTEST_PROFILE=ci`; the release run
 # keeps the default profile, so that its one-test report does not replace the JUnit report of
 # the workspace run in target/nextest/ci/.
-# scripts/check-stamped.py builds swarmops-cli with `SWARMOPS_BUILD_COMMIT` set, which no other
-# step does: the `version` tests and each `--version` pin with a fixed commit, every filter
-# required to match a test, then a malformed one, whose build must fail; last it links
-# target/debug's `swarmops` and `so` again without the fixed commit. Each value rebuilds that
-# crate alone, incrementally.
+# scripts/check-stamped.py builds swarmops-cli with `SWARMOPS_BUILD_COMMIT` set, and again with
+# `SWARMOPS_BUILD_CHANNEL=release`, which no other step does: the `version` tests and each
+# `--version` pin with a fixed commit and as a release's build, every filter required to match a
+# test, then a malformed commit, a channel that is none and the two together, whose builds must
+# fail; last it links target/debug's `swarmops` and `so` again without either. Each value
+# rebuilds that crate alone, incrementally.
 # Then scripts/test-install.py runs the one-line installer against a fake release on 127.0.0.1,
 # offline, and checks that web/public/install.sh is the same file; scripts/test-packages.py packs
 # fake release archives with scripts/packages.py and reads the .deb and .rpm back, offline.

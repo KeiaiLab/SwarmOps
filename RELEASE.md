@@ -29,11 +29,12 @@ the macOS build waits, and nothing is published without it.
    and versions of CI's `check` job but without its cache or the runner's target directory, so
    that it builds from clean.
 3. **Builds the binaries** (job `build <target>`, one per Linux target): `swarmops` and `so` with
-   `cargo build --release --locked` on the pinned toolchain, without the `test-hooks` feature, for
-   `x86_64-unknown-linux-gnu`, natively, and `aarch64-unknown-linux-gnu`, cross-compiled with
-   Ubuntu's aarch64 GCC, each inside an `ubuntu:24.04` container pinned by digest (glibc 2.39),
-   which installs the compilers, QEMU and the pinned toolchain and builds into its own
-   filesystem. Each binary is smoke-run, the aarch64 ones under QEMU's user-mode
+   `cargo build --release --locked` on the pinned toolchain, without the `test-hooks` feature and
+   with `SWARMOPS_BUILD_CHANNEL=release`, which marks a binary as a release's and which no other
+   build sets, for `x86_64-unknown-linux-gnu`, natively, and `aarch64-unknown-linux-gnu`,
+   cross-compiled with Ubuntu's aarch64 GCC, each inside an `ubuntu:24.04` container pinned by
+   digest (glibc 2.39), which installs the compilers, QEMU and the pinned toolchain and builds
+   into its own filesystem. Each binary is smoke-run, the aarch64 ones under QEMU's user-mode
    emulator: it must print the tag's version, need no glibc newer than 2.34, and `init`,
    `commit`, `show`, `cat` and `verify --deep` a store with every `SWARMOPS_TEST_*` hook set,
    which a release build ignores. Each target is packed into `swarmops-X.Y.Z-<target>.tar.gz`

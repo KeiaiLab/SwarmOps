@@ -103,10 +103,12 @@ A change is done when `just check` passes on it. It runs, in order:
 4. the `test_hooks` test in a release build without the feature, which proves that such a build
    ignores the test hooks (`--no-tests=fail`: it fails if the test does not run);
 5. `scripts/check-stamped.py`: the `version` unit tests and the two `--version` pins in a build
-   stamped with a fixed commit (`SWARMOPS_BUILD_COMMIT`, which no other step sets), each filter
-   required to match a test, then a build with a malformed commit, which must fail with the
-   compile-time guard's message; last, `swarmops` and `so` in `target/debug` are linked again
-   without the fixed commit;
+   stamped with a fixed commit (`SWARMOPS_BUILD_COMMIT`, which no other step sets) and again in
+   one built as a release's (`SWARMOPS_BUILD_CHANNEL=release`, which only the release workflow
+   sets), each filter required to match a test, then builds with a malformed commit, with a
+   channel that is none and with a commit and the channel together, each of which must fail
+   with its compile-time guard's message; last, `swarmops` and `so` in `target/debug` are linked
+   again without either;
 6. `cargo doc` with `RUSTDOCFLAGS="-D warnings"` and `--document-private-items`, which documents
    private items too, so that the CLI's internal docs (its modules are private to its library)
    stay link-checked, run twice: as it stands, and with `--all-features`, which also renders and
@@ -179,7 +181,7 @@ and binary code, and the page lists what review reads for and the recorded devia
 - **Test-only code stays out of release builds.** Test doubles live in test code or behind the
   `test-hooks` cargo feature (the store's `CrashAtFs`, `FailAtFs` and `OrderCheckFs`, which no
   build without the feature can name), and a release build honours no test hook. The hooks are
-  ten environment variables named `SWARMOPS_TEST_*` (`SWARMOPS_TEST_CRASH_AT=<k>`, which
+  twelve environment variables named `SWARMOPS_TEST_*` (`SWARMOPS_TEST_CRASH_AT=<k>`, which
   aborts the process at its k-th store filesystem call, `SWARMOPS_TEST_FS_CALLS=<file>`, which
   makes it write how many calls it made,
   `SWARMOPS_TEST_FAIL_AT=<k>[:once|persistent[:eio|enospc]]`, which fails its k-th call with an
@@ -191,8 +193,11 @@ and binary code, and the page lists what review reads for and the recorded devia
   `serve`'s pack cache or skips its reachability check, `SWARMOPS_TEST_LEAD_WAIT`, which makes a
   writer that leads the write queue wait for other requests and plan them,
   `SWARMOPS_TEST_PHASE_LOG`, which makes a sync and a push append each phase's time to a file,
-  and `SWARMOPS_TEST_RAW_OBJECTS=1`, which makes a store write object files without zstd, so
-  that a large fixture builds faster), read only under `#[cfg(feature = "test-hooks")]`. The
+  `SWARMOPS_TEST_RAW_OBJECTS=1`, which makes a store write object files without zstd, so
+  that a large fixture builds faster, `SWARMOPS_TEST_VERSION=<version>`, which makes the binary
+  print that version for its own, and `SWARMOPS_TEST_UPDATE_RELEASE=1`, which makes it count as
+  a release's build, as only one compiled with `SWARMOPS_BUILD_CHANNEL=release` is), read only
+  under `#[cfg(feature = "test-hooks")]`. The
   feature exists on `swarmops-store`, `swarmops-repo`, `swarmops-git`, `swarmops-ws`,
   `swarmops-ops`, `swarmops-cli` and `swarmops-testkit`; `swarmops-cli/test-hooks` turns on all
   of them. A test that needs them is marked
