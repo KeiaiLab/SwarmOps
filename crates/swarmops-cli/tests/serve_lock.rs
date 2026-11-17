@@ -407,17 +407,17 @@ fn commit_on_main(store: &Path, work: &Path, file: &str) {
     }
 }
 
-/// The wrapper's command that takes the lock file its one argument names at once and lets it
-/// go, or fails: `flock(1)` on Linux.
+/// The wrapper's command that takes `serve.lock` (beside `GIT_DIR`) at once and lets it go, or
+/// fails: `flock(1)` on Linux, the wrapper's text there what it was before another system ran it.
 #[cfg(target_os = "linux")]
-const TAKE_AT_ONCE: &str = "flock -n \"$1\" true";
+const TAKE_AT_ONCE: &str = "flock -n \"$GIT_DIR/../serve.lock\" true";
 
 /// Elsewhere, where no `flock(1)` is, perl's `flock`, which is the `flock(2)` the lock is
 /// taken with: the file made if missing and 66 for one that cannot be opened, as `flock(1)`.
 #[cfg(not(target_os = "linux"))]
 const TAKE_AT_ONCE: &str = "perl -e 'use Fcntl qw(:DEFAULT :flock); \
     sysopen(my $f, $ARGV[0], O_RDONLY | O_CREAT) or exit 66; \
-    exit(flock($f, LOCK_EX | LOCK_NB) ? 0 : 1)' \"$1\"";
+    exit(flock($f, LOCK_EX | LOCK_NB) ? 0 : 1)' \"$GIT_DIR/../serve.lock\"";
 
 /// A `git` that appends `gc held` or `gc free` to `gc.log` beside it at each `gc`, whether
 /// `serve.lock` (beside `GIT_DIR`) could be taken at once, then runs the real one.
@@ -426,9 +426,8 @@ fn write_wrapper(dir: &Path) -> PathBuf {
     let log = dir.join("gc.log");
     let script = format!(
         "#!/bin/sh\n\
-         take_at_once() {{ {TAKE_AT_ONCE}; }}\n\
          case \" $* \" in *\" gc \"*)\n\
-         \x20 if take_at_once \"$GIT_DIR/../serve.lock\"; then echo 'gc free' >> '{log}'; \
+         \x20 if {TAKE_AT_ONCE}; then echo 'gc free' >> '{log}'; \
          else echo '{GC_HELD}' >> '{log}'; fi;;\n\
          esac\n\
          exec '{real}' \"$@\"\n",
