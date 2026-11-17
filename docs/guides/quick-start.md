@@ -30,7 +30,7 @@ swarmops --version
 swarmops 0.11.0
 ```
 
-If the shell says `command not found`, [Install SwarmOps on Linux](install.md) installs it with one
+If the shell says `command not found`, [Install SwarmOps on Linux and macOS](install.md) installs it with one
 command, checked against the release's `SHA256SUMS`. `so` is the short form of `swarmops`; every
 command runs the same by either name.
 

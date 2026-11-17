@@ -1,10 +1,11 @@
-# Install SwarmOps on Linux
+# Install SwarmOps on Linux and macOS
 
-After this page, `swarmops` and `so`, one program with two names, run on your Linux host, and you
-can pin, update, uninstall or build them from source.
+After this page, `swarmops` and `so`, one program with two names, run on your Linux host or Mac,
+and you can pin, update, uninstall or build them.
 
 **You need:** SwarmOps 0.2.0 or newer for the installer, 0.8.0 for the packages; Linux x86_64 or
-aarch64, glibc 2.34 or newer (`ldd --version`); `curl` or `wget` (`command -v curl wget`).
+aarch64, glibc 2.34 or newer (`ldd --version`), or [a Mac](#on-a-mac); `curl` or `wget`
+(`command -v curl wget`).
 
 ## How do I install SwarmOps?
 
@@ -48,21 +49,76 @@ directory is on `PATH` already, the report has no hint at all.
 
 What the installer does, in order:
 
-1. Refuses a host the release builds do not run on, before it downloads anything: not Linux, not
-   x86_64 or aarch64, musl, or glibc older than 2.34.
+1. Refuses a host the release builds do not run on, before it downloads anything: neither Linux
+   nor macOS; on Linux, not x86_64 or aarch64, musl, or glibc older than 2.34; on macOS, an Intel
+   Mac.
 2. Finds the latest release from the redirect of `releases/latest`, so no GitHub API call or rate
    limit is involved.
 3. Downloads the archive and `SHA256SUMS` over HTTPS into a temporary directory, which it removes
-   however it ends.
+   however it ends. On macOS it reads `SHA256SUMS` first, and stops there when the release lists
+   no macOS archive.
 4. Checks the archive against its line in `SHA256SUMS`. On a mismatch, or with no line, nothing is
    installed.
 5. Copies each binary under a temporary name into the directory, then renames it into place: an
    interrupted run leaves the old binary, never half a new one.
 6. Runs `swarmops --version` from the directory and prints the report.
 
-It needs `curl` or `wget`, `tar`, and `sha256sum` or `shasum`. It sends no telemetry and writes only
-the install directory and its temporary directory. The script is POSIX sh, so `| sh` works as well
-as `| bash`. `bash install.sh --help` lists every option.
+It needs `curl` or `wget`, `tar`, and `sha256sum` or `shasum`; macOS comes with `curl`, `tar` and
+`shasum`. It sends no telemetry and writes only the install directory and its temporary directory.
+The script is POSIX sh, so `| sh` works as well as `| bash`, and macOS's own bash 3.2 runs it.
+`bash install.sh --help` lists every option.
+
+### On a Mac
+
+**You need:** a Mac with Apple silicon (`uname -m` prints `arm64`), macOS 11 or newer, and a
+release after 0.11.0, which does not exist yet.
+
+The same command installs the Apple silicon build, `aarch64-apple-darwin`. No release holds that
+build yet: 0.11.0 and every release before it hold Linux archives
+only, and the release workflow builds the macOS archive from the next release on
+([RELEASE.md](../../RELEASE.md#what-the-release-workflow-does)). Until that release, the installer
+stops before it downloads an archive (`/Users/me` stands for your home directory):
+
+```text
+swarmops-install: Installing SwarmOps 0.11.0 (aarch64-apple-darwin) into /Users/me/.local/bin.
+swarmops-install: SwarmOps 0.11.0 has no macOS build: the releases up to 0.11.0 hold Linux builds only, and nothing was installed. The releases: https://github.com/KeiaiLab/SwarmOps/releases
+```
+
+Against a release that holds the build, a first run prints this. It is the installer's output on
+macOS 27 for an archive the release workflow's steps packed from this repository, with `X.Y.Z` put
+for its version and GitHub's address for the test server's:
+
+```text
+swarmops-install: Installing SwarmOps X.Y.Z (aarch64-apple-darwin) into /Users/me/.local/bin.
+swarmops-install: Downloading https://github.com/KeiaiLab/SwarmOps/releases/download/vX.Y.Z/swarmops-X.Y.Z-aarch64-apple-darwin.tar.gz
+swarmops-install: swarmops-X.Y.Z-aarch64-apple-darwin.tar.gz matches SHA256SUMS.
+swarmops X.Y.Z
+Installed swarmops and so (its short form) in /Users/me/.local/bin.
+/Users/me/.local/bin is not on PATH. Add this line to your shell startup file (~/.zshrc, or ~/.bash_profile under bash):
+  export PATH="/Users/me/.local/bin:$PATH"
+Quick start: https://github.com/KeiaiLab/SwarmOps#quick-start
+Website: https://swarmops.cc
+```
+
+What differs from Linux:
+
+- **The directory** is the same, `~/.local/bin`, or `/usr/local/bin` as root. macOS does not put
+  `~/.local/bin` on `PATH`, so the first run prints the hint.
+- **The hint's files** are `~/.zshrc`, for zsh, the default shell, and `~/.bash_profile` for bash:
+  Terminal starts login shells, and a login bash does not read `~/.bashrc`. The fish hint is the
+  same as on Linux.
+- **An Intel Mac is refused.** Nothing is built or tested for `x86_64-apple-darwin`. In a shell
+  that Rosetta translates on an Apple silicon Mac, where `uname -m` prints `x86_64`, the installer
+  takes the arm64 build.
+- **No C library check.** The binaries link against macOS's own libraries only.
+- **The signature.** The binaries carry the linker's ad-hoc signature, without which no Apple
+  silicon Mac starts a program; they have no Developer ID signature and are not notarized.
+  `curl`, the installer's downloader, sets no quarantine mark on a download, so the installed
+  binaries start. A browser sets one, and Gatekeeper may then refuse a copy unpacked from that
+  download.
+- **No package.** The `.deb` and `.rpm` are Linux's.
+
+`--version`, `--dir`, an update and `--uninstall` work as on Linux.
 
 ## How do I pin a version?
 
@@ -98,6 +154,9 @@ mktemp: failed to create file via template '/usr/local/bin/.swarmops.XXXXXX': Pe
 swarmops-install: Cannot write in /usr/local/bin.
 ```
 
+On macOS the first line is `mktemp`'s own there, such as
+`mktemp: mkstemp failed on /usr/local/bin/.swarmops.hyTvcd: Permission denied`.
+
 ## How do I install on many hosts?
 
 Pin the version, so every host runs the same release, and keep a reviewed copy of the script with
@@ -115,7 +174,8 @@ download against the release's `SHA256SUMS`.
 
 ## How do I install the .deb or .rpm package?
 
-From v0.8.0 on, each release also carries a `.deb` and an `.rpm` for each architecture. They hold
+From v0.8.0 on, each release also carries a `.deb` and an `.rpm` for each Linux architecture; a
+Mac uses the installer or the archive. They hold
 the same `swarmops` and `so` as the release's archives, byte for byte, installed into `/usr/bin`,
 with `LICENSE`, `THIRD-PARTY-LICENSES`, `README.md` and `CHANGELOG.md` in `/usr/share/doc/swarmops`.
 Download the one for your host and `SHA256SUMS`, and check it:
@@ -236,6 +296,7 @@ two binaries yourself. Each release holds:
 | --- | --- |
 | `swarmops-<version>-x86_64-unknown-linux-gnu.tar.gz` | The x86_64 build: `swarmops`, `so`, `LICENSE`, `THIRD-PARTY-LICENSES` (the licenses of the third-party crates compiled into the binaries), `README.md` and `CHANGELOG.md`, in a directory named after the archive. |
 | `swarmops-<version>-aarch64-unknown-linux-gnu.tar.gz` | The same for aarch64. |
+| `swarmops-<version>-aarch64-apple-darwin.tar.gz` | In no release yet; from the first one after 0.11.0 on, the same for Apple silicon Macs. |
 | `swarmops_<version>_amd64.deb`, `swarmops_<version>_arm64.deb` | From v0.8.0 on: the x86_64 and aarch64 binaries as Debian packages ([installing them](#how-do-i-install-the-deb-or-rpm-package)). |
 | `swarmops-<version>-1.x86_64.rpm`, `swarmops-<version>-1.aarch64.rpm` | The same as RPM packages. |
 | `SHA256SUMS` | The SHA-256 of each archive and package. |
@@ -256,7 +317,19 @@ swarmops-0.11.0-x86_64-unknown-linux-gnu.tar.gz: OK
 swarmops 0.11.0
 ```
 
-`--ignore-missing` skips the archive you did not download. With `gh`, the download step is:
+`--ignore-missing` skips the archive you did not download. On a Mac the target is
+`t=aarch64-apple-darwin`, the check is `shasum`'s, and macOS's `install` has neither `-D` nor
+`-t`, so the last four lines become:
+
+```sh
+shasum -a 256 --check --ignore-missing SHA256SUMS
+tar -xzf "swarmops-$v-$t.tar.gz"
+mkdir -p ~/.local/bin
+install -m 0755 "swarmops-$v-$t/swarmops" "swarmops-$v-$t/so" ~/.local/bin/
+~/.local/bin/swarmops --version
+```
+
+With `gh`, the download step is:
 
 ```sh
 gh release download "v$v" --repo KeiaiLab/SwarmOps \
@@ -290,7 +363,9 @@ Its last lines, the build's cut (`…`):
 ```
 
 The zstd and BLAKE3 crates compile C, so the host also needs a C compiler. Add `--bin swarmops` to
-install the long name alone, if the name `so` is taken.
+install the long name alone, if the name `so` is taken. On macOS, v0.11.0 and older tags do not
+hold the macOS work: build from a clone, below, with the Xcode command line tools as the C compiler
+(`xcode-select --install`).
 
 From a clone, `rust-toolchain.toml` pins Rust 1.100.0, which rustup installs on the first build;
 rustup may warn that the toolchain file overrides your default toolchain, which is the pin at work:
@@ -305,9 +380,15 @@ A plain `cargo build --release` leaves both binaries in `target/release/` instea
 
 ## What does SwarmOps run on?
 
-Linux today; macOS and Windows next. The releases hold builds for x86_64 and aarch64 Linux, and
-their binaries need glibc 2.34 or newer, which Ubuntu 22.04, Debian 12 and RHEL 9 have. The aarch64
-build is cross-compiled and smoke-tested under QEMU, not tested on aarch64 hardware.
+Linux today; macOS on Apple silicon from the first release after 0.11.0; Windows next. The
+releases hold builds for x86_64 and aarch64 Linux, and their binaries need glibc 2.34 or newer,
+which Ubuntu 22.04, Debian 12 and RHEL 9 have. The aarch64 Linux build is cross-compiled and
+smoke-tested under QEMU, not tested on aarch64 hardware.
+
+The macOS build is for Apple silicon (arm64) and macOS 11 or newer, the version it is built for.
+It is built and run on macOS 27 only, on the maintainers' Mac, where the workspace's test suite
+passes; CI does not run on macOS yet, and no older macOS was tried. There is no build for an Intel
+Mac, and no release holds the macOS build yet.
 
 `ldd --version` names a host's glibc version at the end of its first line:
 
@@ -328,7 +409,8 @@ what the store needs from Linux.
 On a native Linux filesystem: ext4 with its journal, which SwarmOps is tested and measured on, XFS
 or btrfs. A store under `/mnt/` (where WSL mounts Windows drives) is refused with
 `E_UNSUPPORTED_FS`; NFS, SMB and FUSE mounts, Docker Desktop's and virtiofs bind mounts among them,
-are not detected yet, and not supported.
+are not detected yet, and not supported. On macOS: an APFS or journaled HFS+ volume; any other is
+refused with `E_UNSUPPORTED_FS`.
 
 Under WSL2, keep the store on its Linux filesystem, the ext4 virtual disk. No location is the
 default: every command finds the store by `--repo` or `SWARMOPS_REPO`, and
@@ -383,7 +465,9 @@ The CPU is neither x86_64 nor aarch64; nothing was installed.
 [Build from source](#how-do-i-build-from-source). On a host that is neither Linux nor macOS the
 installer prints `SwarmOps runs on Linux and macOS; Windows is next.`, and no release build runs
 there yet; on musl or a glibc older than 2.34 it names the C library, and building from source is
-the way.
+the way. On a Mac it prints `SwarmOps 0.11.0 has no macOS build: …` for a release from before the
+macOS build, which is every release so far ([On a Mac](#on-a-mac)), and
+`No release build runs on an Intel Mac (x86_64): …` on an Intel Mac.
 
 ### The checksum does not match
 

@@ -65,7 +65,8 @@ and a way back to git so that existing CI and deployments keep running.
   hosts, git carries the history, one writing host at a time; offline-first sync is M11.
 - **Not a review tool yet.** SwarmOps does not hold a landing for a person's approval; review stays
   in git until M7.
-- **Linux only.** macOS and Windows are M12.
+- **Linux only, in every release so far.** An Apple silicon macOS build is set up for the next
+  release; Windows is M12.
 - **Not faster than git at raw throughput.** Writers take turns: each commit holds one store-wide
   lock across two journal syncs.
 

@@ -27,11 +27,15 @@ the changelog notes it.
 
 ## Linux today, macOS and Windows next
 
-SwarmOps is built and tested on x86_64 Linux. Its release builds cover x86_64 and aarch64
-(glibc 2.34 or newer); the aarch64 ones are only smoke-tested, under QEMU. macOS and Windows are the
-next milestone, M12: macOS durability through `F_FULLFSYNC`, Windows's lock and fsync model, file
-modes and symlinks, and CI runners for both. Until M12 lands, other systems (macOS, Windows, the
-BSDs) are not tested and not supported.
+SwarmOps is built and tested on x86_64 Linux, where CI runs. Its release builds cover x86_64 and
+aarch64 Linux (glibc 2.34 or newer); the aarch64 ones are only smoke-tested, under QEMU. macOS and
+Windows are milestone M12, and its macOS part is under way: the workspace builds and its test suite
+passes on macOS (aarch64, APFS), where the store's sync is an `F_FULLFSYNC`; the installer takes an
+Apple silicon Mac; and the release workflow builds an `aarch64-apple-darwin` archive, for macOS 11
+or newer, from the first release after 0.11.0 on. No release holds one yet, CI does not run on
+macOS, and no macOS but 27 was tried. Still to come in M12: Windows's lock and fsync model, file
+modes and symlinks, and CI runners for both. Other systems (Windows, the BSDs, Intel Macs) are not
+tested and not supported.
 
 The store relies on what a native Linux filesystem gives:
 

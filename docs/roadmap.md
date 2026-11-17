@@ -190,7 +190,7 @@ Deferred past usable, with what stands in until then:
 | M7, blame and review | No condition needs it, and its annotations need `FORMAT 3` (M20) | Review in GitHub pull requests (topology 2); `so log` and `so diff`; `git blame` on the export |
 | M9's simulator | No condition needs it; only the benchmark gate is pulled forward, into v0.6.0; it needs M20 | M6's literal `SIGKILL` test, power-loss images, crash sweeps and fuzz targets |
 | M11, native sync (topology 3) | No condition needs it, and it needs M14, M9 and M24 first | Sync through a git remote, one writing host at a time ([Topology 3 today](#topology-3-today-local-swarmops-remote-swarmops)) |
-| M12, macOS and Windows | The pilot and CI run on Linux | The Linux releases; M12 is developed separately |
+| M12, macOS and Windows | The pilot and CI run on Linux | The Linux releases; M12 is developed separately, and its macOS part builds, passes its tests and is packed by the release workflow, in no release yet |
 | M20, `FORMAT 3` | One layout decision serves M7's records, the queue, withdrawal, lineage and the manifest that takes compaction out of the write; its design comes first | `FORMAT 2`; compaction inside the write |
 | M21, health, drift and housekeeping | It reads the records M17 adds | `info`'s exit status; the envelope counts of [Monitoring](operate/monitoring.md#summarise-the-envelopes) |
 | M22, the landing queue | Its checks are the gate M7 builds, on `FORMAT 3` | `ws land --check` in each process; the lock's own queue |
@@ -678,7 +678,7 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
 | Milestone | Topology | Deliverable | Depends on | Exit criteria |
 | --- | --- | --- | --- | --- |
 | ✅ M0–M4, M8 | all | The core, diff and history, git import, landing, git export; v0.1.0 | | Delivered ([CHANGELOG](../CHANGELOG.md)) |
-| 📋 M12 | all | macOS and Windows builds, tests and releases | | Each platform passes `just check` in CI and ships in a release |
+| 📋 M12 | all | macOS and Windows builds, tests and releases; so far macOS on Apple silicon: the build, its tests, the installer and the release workflow's archive | | Each platform passes `just check` in CI and ships in a release |
 | ✅ M13 | 2 | The user's git as the transport; the store's git mirror; `so clone`, `so remote`, `so fetch`, `so push`, `so sync`, `so sync status`, their MCP tools; `authors.toml`; v0.2.0 | M3, M4, M8 | Topology 2's acceptance criteria 1 to 6 pass (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | ✅ M5 | — | Workspaces, with an adapter for Claude Code's worktree hooks; `rebase`, `land --expect-target`, `blob get`; eleven MCP workspace tools; v0.3.0 | M4 | As the README states it (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | ✅ M6 | 1, 3 | Verify, crash safety, fuzzing, gc, and FORMAT 2 with the ref names M11 and M14 need (remote-tracking refs, branches, tags); gc keeps what the mirror's refs reach; v0.4.0 | | As the README states it, plus a FORMAT 2 store holding a free-form branch and a tag (delivered: [CHANGELOG](../CHANGELOG.md)) |
@@ -724,8 +724,10 @@ sorted views under the writer lock (50 ms at 100,000 records, 173 ms at 1M; M3's
 the stall reaches 100 ms at 100,000 records, else a `FORMAT 3`'s manifest). No test reads a real repository yet (M3's and M8's tests of
 this host's repositories).
 
-**M12.** No item; SwarmOps is Linux only, and the release binaries print an `ld.so` line on glibc
-2.34 to 2.38 (unscheduled).
+**M12.** macOS on Apple silicon builds and passes its tests, the installer takes it and the
+release workflow packs it; open: a release that holds the archive, `just check` on macOS in CI, a
+build for Intel Macs, notarization, and all of Windows. The Linux release binaries print an
+`ld.so` line on glibc 2.34 to 2.38 (unscheduled).
 
 **M13 and M14 (delivered).** Without the memo key, an export and an import onto a native head
 read the whole history below it; the first sync after a clone still grows with the history, past

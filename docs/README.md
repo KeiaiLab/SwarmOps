@@ -9,8 +9,8 @@ It is measured today at 50 agents landing on one host: 25.0 lands/s, nothing los
 
 ## Start here
 
-- **Install it:** [Install SwarmOps on Linux](guides/install.md): one command, a package, or a
-  build from source.
+- **Install it:** [Install SwarmOps on Linux and macOS](guides/install.md): one command, a package
+  or the source.
 - **Make a first commit:** [Quick start](guides/quick-start.md): a store, a commit, a
   [land](concepts.md#land) and an undo.
 - **Run a swarm:** [Parallel agents](guides/parallel-agents.md): many agents on one repository,
