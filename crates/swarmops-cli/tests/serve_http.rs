@@ -745,6 +745,14 @@ impl Program for Vanishing {
 }
 
 impl Vanishing {
+    /// The stand-in's command that prints the program process `$run` runs, once it runs one:
+    /// its link. Linux reads `/proc`; elsewhere `ps` says it, as the path the run was started
+    /// by.
+    #[cfg(target_os = "linux")]
+    const RUN_EXE: &'static str = "readlink \"/proc/$run/exe\"";
+    #[cfg(not(target_os = "linux"))]
+    const RUN_EXE: &'static str = "ps -o comm= -p \"$run\"";
+
     /// Writes the stand-in, whole: it runs the binary, and while [`VANISH`]'s file is there
     /// runs it from a link of its own that it removes once the run has started, so that the
     /// run names its hooks a program that is gone. The run reads its request only once the
@@ -764,7 +772,7 @@ impl Vanishing {
              {{ until [ -e \"$gone\" ]; do sleep 0.01; done; cat <&3; }} | \"$link\" \"$@\" 3<&- &\n\
              run=$!\n\
              exec 3<&-\n\
-             until [ \"$(readlink \"/proc/$run/exe\" 2>/dev/null)\" = \"$link\" ]; do\n\
+             until [ \"$({exe} 2>/dev/null)\" = \"$link\" ]; do\n\
              \x20 kill -0 \"$run\" 2>/dev/null || break\n\
              \x20 sleep 0.01\n\
              done\n\
@@ -775,6 +783,7 @@ impl Vanishing {
              rm -f \"$gone\"\n\
              exit \"$status\"\n",
             bin = support::BIN,
+            exe = Vanishing::RUN_EXE,
         );
         let temp = format!("{}.{}", Vanishing::BIN, std::process::id());
         fs::write(&temp, script).unwrap();
@@ -792,7 +801,8 @@ fn http_hook_program_gone_is_masked() {
     // 1. A site whose binary vanishes while the switch is there, and a clone behind the store.
     Vanishing::install();
     let switch_dir = TempDir::new().unwrap();
-    // Canonical, so that the stand-in's `/proc/<pid>/exe` matches its link and opens its gate.
+    // Canonical, so that the stand-in's reading of its run's program (`/proc/<pid>/exe`)
+    // matches its link and opens its gate.
     let switch_root = fs::canonicalize(switch_dir.path()).unwrap();
     let switch = switch_root.join("vanish");
     let served = ServeSite::new::<Vanishing>().with_env(&[(VANISH, switch.to_str().unwrap())]);

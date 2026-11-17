@@ -995,6 +995,16 @@ fn push_lands_each_change_once_with_its_key() {
     );
 }
 
+/// The filter that passes the upstream's lines on until its answer to a landing, and ends
+/// without printing that: GNU sed's `Q`.
+#[cfg(target_os = "linux")]
+const UNTIL_THE_ANSWER: &str = "sed -u '/\"op\":\"wire_land\"/Q'";
+
+/// Elsewhere, where sed has no `Q`, `-n` with `q;p`, which any sed takes: each line before the
+/// answer printed, the answer not.
+#[cfg(not(target_os = "linux"))]
+const UNTIL_THE_ANSWER: &str = "sed -n -u '/\"op\":\"wire_land\"/q;p'";
+
 /// A land whose answer never reached the host (U5) is not landed again: the next sync finds
 /// it by its key and moves `main` to the upstream's head.
 #[test]
@@ -1005,7 +1015,9 @@ fn a_push_whose_answer_was_lost_replays() {
     let mine = ref_in(host.path(), "main").expect("main");
 
     // 1. The upstream lands; its answer is dropped on the way, and the connection with it.
-    let losing = site.ssh_through("{ LC_ALL=C sed -u '/\"op\":\"wire_land\"/Q'; kill -KILL $$; }");
+    let losing = site.ssh_through(&format!(
+        "{{ LC_ALL=C {UNTIL_THE_ANSWER}; kill -KILL $$; }}"
+    ));
     let cut = site.sync(host.path(), &losing, &[]);
     let error = cut.err("E_REMOTE_UNREACHABLE");
     assert_eq!(error["retryable"], true, "{cut}");
