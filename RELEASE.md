@@ -134,11 +134,11 @@ installs the same tool versions as `ci.yml`'s: move them together.
   version and MSRV policy.
 - **Before the first release that promises store compatibility**, add a test that opens a store
   written by the previous release (from 1.0 on, the versioning policy asks for one).
-- **`so update`'s requests have not met GitHub.** They are tested against stand-ins on the
-  testing host. Before the first release that holds the command is tagged, ask GitHub by hand
-  what the command will ask, and record the answers in
-  [docs/known-limitations.md](docs/known-limitations.md#updating-the-program), which says they
-  are assumed:
+- **`so update` itself has not met GitHub.** It is tested against stand-ins on the testing
+  host. Before 0.12.0, the first release that holds the command, GitHub was asked by hand what
+  the command asks, on 2026-11-18, and
+  [docs/known-limitations.md](docs/known-limitations.md#updating-the-program) records the
+  answers. Ask again when the command's requests change:
 
   ```sh
   r=https://github.com/KeiaiLab/SwarmOps/releases
@@ -148,9 +148,11 @@ installs the same tool versions as `ci.yml`'s: move them together.
   ```
 
   The command needs `…/releases/tag/v0.11.0 302` (or `301`), then `302` for a file the release
-  holds and `404` for one it does not. Whether a release takes a file of one line as a mark
-  shows at the first `just release-marks X.Y.Z --upload`, which fails when the release does
-  not list the file afterwards.
+  holds and `404` for one it does not, and GitHub answered
+  `https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.11.0 302`, `302` and `404`. Not known
+  yet: whether a release takes a file of one line as a mark. That shows at the first
+  `just release-marks X.Y.Z --upload`, which fails when the release does not list the file
+  afterwards.
 
 ## Checklist
 

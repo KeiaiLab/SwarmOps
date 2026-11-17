@@ -1228,13 +1228,16 @@ left).
   that relied on what it changed meets the change at its next run; the line an update prints
   links the release's notes. *Documented ([RELEASE.md](../RELEASE.md#checklist), step 4). Found:
   the update design's review.*
-- **`update`'s requests have not been run against GitHub.** Its tests answer them from
-  stand-ins on the testing host. Three answers are assumed: that a HEAD request for
-  `releases/latest` is answered with a redirect whose address curl reports
-  (`%{redirect_url}`), that a release's file is answered 302 and a missing one 404, and that a
-  release takes a file of one line as a mark. *Planned: asked by hand before the first release
-  that holds the command ([RELEASE.md](../RELEASE.md#not-there-yet)). Found: the update
-  design's review.*
+- **`update` itself has not been run against GitHub.** Its tests answer its requests from
+  stand-ins on the testing host. GitHub was asked by hand what the command asks, on 2026-11-18,
+  with the three `curl -sI` lines of [RELEASE.md](../RELEASE.md#not-there-yet), and answered as
+  the command needs: a HEAD request for `releases/latest` got a 302 whose address curl reports
+  (`%{redirect_url}`) as `https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.11.0`; the
+  file `releases/download/v0.11.0/SHA256SUMS`, which that release holds, got 302; and
+  `releases/download/v0.11.0/auto-update-from-0.11`, which it does not hold, got 404. One
+  answer is still assumed: that a release takes a file of one line as a mark. *Planned: that
+  one shows at the first `just release-marks X.Y.Z --upload`, which fails when the release does
+  not list the file afterwards. Found: the update design's review.*
 - **No release holds `update` yet.** 0.11.0 and every release before it have no `update`
   command, read no receipt and never update themselves: they are moved by the installer run
   again, or by their package. An install of 0.11.0 gets automatic update with the first later
