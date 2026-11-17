@@ -174,6 +174,24 @@ installs the same tool versions as `ci.yml`'s: move them together.
      release holds none either: name this release there instead. After the first release that
      holds one, the pages name that release as the first with a macOS build.
 
+     Other sentences say the same without a version, and turn false with the first release
+     that holds a macOS archive. Change them when the sentences above come to name that
+     release:
+     - README.md: the status line's "no macOS or Windows build yet", "When not to use it"
+       ("an Apple silicon macOS build is set up for the next one") and the roadmap paragraph
+       ("the macOS build awaits its first release");
+     - `docs/guides/install.md`: "No release holds that build yet" and "from the next release
+       on", with the sample run that follows them;
+     - `docs/roadmap.md`: the M12 rows ("in no release yet") and its paragraph;
+     - `docs/known-limitations.md`: the Platforms entry on the macOS build ("until the next
+       release");
+     - `web/content/product/index.md` ("set up for the next release"),
+       `web/components/home/hero.tsx` ("no macOS or Windows build yet", and `PLATFORMS`),
+       `web/components/home/fit.tsx` ("Linux only, for now") and
+       `web/components/markdown-page.tsx` ("Runs on: Linux, …");
+     - `web/scripts/check-site.mjs`, rule S8: `TRIPLE` reads only the `-unknown-linux-`
+       targets of `install.sh`, and `UNSUPPORTED` requires Home to name macOS as without a
+       build. Until both change, the site's check holds Home to the old sentence.
 4. **Write the changelog.** Move the entries under **Unreleased** in
    [CHANGELOG.md](CHANGELOG.md) to a new `## [X.Y.Z] - YYYY-MM-DD` section, mark breaking
    changes, and leave an empty **Unreleased** section. The section's date is the UTC date of the

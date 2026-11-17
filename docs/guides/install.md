@@ -319,7 +319,7 @@ swarmops 0.11.0
 
 `--ignore-missing` skips the archive you did not download. On a Mac the target is
 `t=aarch64-apple-darwin`, the check is `shasum`'s, and macOS's `install` has neither `-D` nor
-`-t`, so the last four lines become:
+`-t`, so the lines after the download become:
 
 ```sh
 shasum -a 256 --check --ignore-missing SHA256SUMS
