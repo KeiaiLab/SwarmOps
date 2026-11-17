@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use swarmops_git::oid::GitOid;
 use swarmops_git::transport::{
     Cause, Credential, GitCli, PushOutcome, PushUpdate, RefSpec, RejectReason, RemoteUrl,
-    Transport, TransportError, UrlRefused,
+    StoredToken, Transport, TransportError, UrlRefused,
 };
 use swarmops_testkit::remote::{GitServer, HttpAuth, SshMode};
 use tempfile::TempDir;
@@ -30,6 +30,9 @@ const TOKEN_VAR: &str = "SWARMOPS_TEST_REMOTE_TOKEN";
 
 /// The token the tests' server asks for.
 const TOKEN: &str = "ghs_transportTestToken0123456789";
+
+/// The token a login keeps in these tests: a placeholder in no token's shape.
+const STORED: &str = "stored-token-not-a-secret";
 
 /// The user name a token goes with (GitHub's, for an installation token).
 const TOKEN_USER: &str = "x-access-token";
@@ -341,6 +344,29 @@ fn token_auth() -> HttpAuth {
         user: TOKEN_USER.to_owned(),
         token: TOKEN.to_owned(),
     }
+}
+
+/// The credential that carries the login's token `token` and names no variable.
+fn stored_cred(token: &str) -> Credential {
+    let mut cred = Credential::default();
+    cred.stored = Some(StoredToken::new(token.to_owned()));
+    cred
+}
+
+/// The server's Basic authentication with [`STORED`].
+fn stored_auth() -> HttpAuth {
+    HttpAuth::Basic {
+        user: TOKEN_USER.to_owned(),
+        token: STORED.to_owned(),
+    }
+}
+
+/// The `.extraHeader` entries of the configuration `dump` got.
+fn extra_headers(dump: &Dump) -> Vec<(String, String)> {
+    dump.config()
+        .into_iter()
+        .filter(|(key, _)| key.to_ascii_lowercase().ends_with(".extraheader"))
+        .collect()
 }
 
 /// The reason of a refusal, or a panic naming what came instead.
@@ -788,6 +814,195 @@ fn token_is_never_in_arguments_or_output() {
     assert!(!text.contains(TOKEN), "{text}");
     assert!(!text.contains(&encoded), "{text}");
     assert!(text.contains("<redacted>"), "{text}");
+}
+
+/// A login's token reaches the server as the header a variable's token does: one entry of the
+/// configuration, keyed by the remote's URL, for `ls-remote`, fetch and push alike.
+#[test]
+fn stored_token_is_sent_as_the_same_header() {
+    let setup = Setup::new();
+    let http = setup.server.http(stored_auth());
+    let url = RemoteUrl::parse(&http.url(REPO)).expect("a URL");
+    let cred = stored_cred(STORED);
+
+    // 1. Each call that names the remote is served, with no variable in the environment.
+    let cli = setup.recorded(&[]);
+    assert_eq!(cli.ls_remote_head(&url, &cred), Ok(Some("main".to_owned())));
+    setup.fetch(&cli, &http.url(REPO), &cred).expect("a fetch");
+    let next = setup.commit(Some(setup.first), "next", &[("c.txt", b"c\n")]);
+    let update = PushUpdate::new(next, "main".to_owned(), Some(setup.first));
+    assert_eq!(
+        cli.push(&setup.mirror(), &url, &cred, &update),
+        Ok(PushOutcome::Sent)
+    );
+    assert!(
+        http.authorizations().contains(&basic(STORED)),
+        "{:?}",
+        http.authorizations()
+    );
+
+    // 2. Each of them got exactly one header, scoped to the remote's URL; the mirror's own
+    //    commands got none.
+    let scoped = (
+        format!("http.{}.extraHeader", http.url(REPO)),
+        format!("Authorization: {}", basic(STORED)),
+    );
+    let dumps = setup.dumps();
+    for subcommand in ["ls-remote", "fetch", "push"] {
+        let dump = dumps
+            .iter()
+            .find(|dump| dump.subcommand() == subcommand)
+            .unwrap_or_else(|| panic!("no {subcommand} ran"));
+        assert_eq!(extra_headers(dump), vec![scoped.clone()], "{subcommand}");
+    }
+    cli.gc_auto(&setup.mirror()).expect("gc");
+    let dumps = setup.dumps();
+    let gc = dumps
+        .iter()
+        .find(|dump| dump.subcommand() == "gc")
+        .expect("a gc");
+    assert_eq!(extra_headers(gc), Vec::new());
+}
+
+/// A remote that names a variable sends that variable's token and never the login's: set, it
+/// wins; unset, no header is sent at all, and the refusal says the variable is unset and not
+/// that the login was used.
+#[test]
+fn a_named_variable_excludes_the_stored_token() {
+    let setup = Setup::new();
+    let both = {
+        let mut cred = token_cred();
+        cred.stored = Some(StoredToken::new(STORED.to_owned()));
+        cred
+    };
+
+    // 1. The variable set: a server that takes the variable's token serves the fetch, and
+    //    never sees the login's.
+    let http = setup.server.http(token_auth());
+    let set = setup.recorded(&[(TOKEN_VAR, TOKEN)]);
+    setup
+        .fetch(&set, &http.url(REPO), &both)
+        .expect("the variable's token");
+    assert!(
+        !http.authorizations().contains(&basic(STORED)),
+        "{:?}",
+        http.authorizations()
+    );
+
+    // 2. The variable unset: a server that would take the login's token refuses, because
+    //    nothing was sent.
+    let login = setup.server.http(stored_auth());
+    let unset = setup.recorded(&[]);
+    let (reason, error) = rejected(setup.fetch(&unset, &login.url(REPO), &both));
+    assert_eq!(reason, RejectReason::Auth);
+    assert!(
+        matches!(
+            error,
+            TransportError::Rejected {
+                token_env_unset: true,
+                login_used: false,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(login.authorizations(), Vec::<String>::new());
+
+    // 3. No child of either transport got the login's token in any form.
+    let encoded = basic(STORED).trim_start_matches("Basic ").to_owned();
+    for dump in setup.dumps() {
+        let given = format!("{}\n{}", dump.argv.join("\n"), dump.env.join("\n"));
+        assert!(!given.contains(STORED), "{:?}", dump.argv);
+        assert!(!given.contains(&encoded), "{:?}", dump.argv);
+    }
+}
+
+/// A login's token is in no child's arguments, in no error and in no `Debug` text; a refusal
+/// of a call that sent it says the login was used, and one that sent none does not.
+#[test]
+fn stored_token_is_never_in_arguments_or_output() {
+    let setup = Setup::new();
+    let http = setup.server.http(stored_auth());
+    let header = basic(STORED);
+    let encoded = header.trim_start_matches("Basic ").to_owned();
+    let cred = stored_cred(STORED);
+
+    // 1. An authenticated fetch: no child's arguments hold the token, in any form.
+    let cli = setup.recorded(&[]);
+    setup.fetch(&cli, &http.url(REPO), &cred).expect("fetch");
+    let dumps = setup.dumps();
+    assert!(dumps.iter().any(|dump| dump.subcommand() == "fetch"));
+    for dump in &dumps {
+        let argv = dump.argv.join("\n");
+        assert!(!argv.contains(STORED), "{argv}");
+        assert!(!argv.contains(&encoded), "{argv}");
+    }
+
+    // 2. A git that prints everything it was given: the error holds none of it, and says the
+    //    login was used.
+    let leaky = setup.failing(
+        "leaky",
+        &format!("env >&2\necho \"$@\" >&2\necho 'Authorization: {header}' >&2\nexit 1"),
+        &[],
+    );
+    let error = setup
+        .fetch(&leaky, &http.url(REPO), &cred)
+        .expect_err("the stand-in fails");
+    let text = format!("{error:?}");
+    assert!(!text.contains(STORED), "{text}");
+    assert!(!text.contains(&encoded), "{text}");
+    assert!(text.contains("<redacted>"), "{text}");
+    assert!(
+        matches!(
+            error,
+            TransportError::Rejected {
+                login_used: true,
+                token_env_unset: false,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+
+    // 3. A stale login: the real git's refusal is `auth`, says the login was used, and holds
+    //    no form of the token it sent.
+    let stale = "stale-token-not-a-secret";
+    let stale_cred = stored_cred(stale);
+    let real = setup.cli(&[]);
+    let (reason, error) = rejected(setup.fetch(&real, &http.url(REPO), &stale_cred));
+    assert_eq!(reason, RejectReason::Auth);
+    assert!(
+        matches!(
+            error,
+            TransportError::Rejected {
+                login_used: true,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let text = format!("{error:?}");
+    let stale_encoded = basic(stale).trim_start_matches("Basic ").to_owned();
+    assert!(!text.contains(stale), "{text}");
+    assert!(!text.contains(&stale_encoded), "{text}");
+
+    // 4. A call with no login: its refusal does not name one.
+    let (_, error) = rejected(setup.fetch(&real, &http.url(REPO), &Credential::default()));
+    assert!(
+        matches!(
+            error,
+            TransportError::Rejected {
+                login_used: false,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+
+    // 5. The credential, printed, shows that it holds a token and nothing of it.
+    let shown = format!("{cred:?}");
+    assert!(!shown.contains(STORED), "{shown}");
+    assert!(shown.contains("<redacted>"), "{shown}");
 }
 
 #[test]

@@ -1340,6 +1340,7 @@ pub(crate) fn transport_error(e: TransportError, remote: &str, phase: Phase) -> 
             git_exit,
             stderr_tail,
             token_env_unset,
+            login_used,
         } => {
             let said = Said {
                 refs,
@@ -1347,6 +1348,7 @@ pub(crate) fn transport_error(e: TransportError, remote: &str, phase: Phase) -> 
                 git_exit,
                 stderr_tail,
                 token_env_unset,
+                login_used,
             };
             rejected(reason, said, remote)
         }
@@ -1380,13 +1382,15 @@ pub(crate) fn transport_error(e: TransportError, remote: &str, phase: Phase) -> 
 }
 
 /// What git said of a refusal: the refs the remote refused and its reasons, the remote's own
-/// lines, git's exit status and the end of its stderr, and whether the token variable was unset.
+/// lines, git's exit status and the end of its stderr, whether the token variable was unset, and
+/// whether the call sent a login's stored token.
 struct Said {
     refs: Vec<(String, String)>,
     remote_messages: Vec<String>,
     git_exit: Option<i32>,
     stderr_tail: String,
     token_env_unset: bool,
+    login_used: bool,
 }
 
 /// `E_REMOTE_REJECTED` (exit 5): `remote` refused for `reason`, `said` as the details.
@@ -1413,6 +1417,9 @@ fn rejected(reason: RejectReason, said: Said, remote: &str) -> OpError {
     put_text(&mut found, "stderr_tail", said.stderr_tail);
     if said.token_env_unset {
         found.insert("token_env_unset".to_owned(), true.into());
+    }
+    if said.login_used {
+        found.insert("login_used".to_owned(), true.into());
     }
 
     // 2. The next step the reason calls for.
@@ -3168,6 +3175,7 @@ mod tests {
             git_exit: None,
             stderr_tail: String::new(),
             token_env_unset: false,
+            login_used: false,
         };
         let refused = transport_error(refused, "origin", Phase::Fetch);
         assert_eq!(
@@ -3245,6 +3253,7 @@ mod tests {
             git_exit: Some(1),
             stderr_tail: String::new(),
             token_env_unset: true,
+            login_used: false,
         };
         let declined = transport_error(declined, "origin", Phase::Push);
         let refs = json!([{"ref": "refs/heads/main", "message": "pre-receive hook declined"}]);
@@ -3265,11 +3274,26 @@ mod tests {
                 git_exit: None,
                 stderr_tail: String::new(),
                 token_env_unset: false,
+                login_used: false,
             };
             let refused = transport_error(refused, "origin", Phase::Fetch);
             let want = json!({"remote": "origin", "reason": reason.as_str()});
             is(&refused, ErrorCode::RemoteRejected, &want);
             assert!(!refused.retryable && refused.hint.is_some());
+
+            // The same refusal of a call that sent a login's token says so, whatever the reason.
+            let refused = TransportError::Rejected {
+                reason,
+                refs: Vec::new(),
+                remote_messages: Vec::new(),
+                git_exit: None,
+                stderr_tail: String::new(),
+                token_env_unset: false,
+                login_used: true,
+            };
+            let refused = transport_error(refused, "origin", Phase::Fetch);
+            let want = json!({"remote": "origin", "reason": reason.as_str(), "login_used": true});
+            is(&refused, ErrorCode::RemoteRejected, &want);
         }
 
         // 4. A remote that moved: exit 3, with the fetch or the sync to run.

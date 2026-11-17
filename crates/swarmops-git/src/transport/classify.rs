@@ -149,8 +149,8 @@ const ROWS: [(&[&str], Verdict); 10] = [
 /// Read for that command only: ssh's "could not read from remote repository" is no object's.
 const TRAVERSAL: [&str; 3] = ["unable to read", "could not read", "is corrupt"];
 
-/// What git said: its exit, its stderr (redacted), and whether the remote's token variable is
-/// unset.
+/// What git said: its exit, its stderr (redacted), whether the remote's token variable is
+/// unset, and whether a login's stored token was sent.
 pub(super) struct Said<'a> {
     /// The exit status; `None` when a signal ended it.
     pub(super) exit: Option<i32>,
@@ -158,6 +158,8 @@ pub(super) struct Said<'a> {
     pub(super) stderr: &'a str,
     /// Whether the remote names a token variable that holds no token.
     pub(super) token_env_unset: bool,
+    /// Whether the call sent a login's stored token.
+    pub(super) login_used: bool,
 }
 
 /// What a failed command's `said` means, by the first row of [`ROWS`] that matches.
@@ -317,6 +319,7 @@ fn rejected(reason: RejectReason, refs: Vec<(String, String)>, said: &Said<'_>) 
         git_exit: said.exit,
         stderr_tail: tail(said.stderr),
         token_env_unset: said.token_env_unset,
+        login_used: said.login_used,
     }
 }
 
@@ -351,6 +354,7 @@ mod tests {
             exit: Some(128),
             stderr,
             token_env_unset: false,
+            login_used: false,
         }
     }
 
@@ -548,6 +552,7 @@ fatal: Could not read from remote repository.";
             exit: Some(0),
             stderr: "",
             token_env_unset: false,
+            login_used: false,
         };
         let dst = "refs/heads/main";
         let line =
@@ -597,6 +602,7 @@ fatal: Could not read from remote repository.";
             exit: Some(1),
             stderr,
             token_env_unset: false,
+            login_used: false,
         };
         pushed(&porcelain, DST, MAIN, &said)
     }

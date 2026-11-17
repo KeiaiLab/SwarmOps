@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{Read, Write as _};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Mutex, PoisonError};
@@ -85,6 +85,7 @@ pub trait Transport {
             git_exit: None,
             stderr_tail: String::new(),
             token_env_unset: false,
+            login_used: false,
         })
     }
 }
@@ -108,6 +109,7 @@ impl GitCli {
 
     /// [`GitCli::find`] in the environment `env` instead of the process's: the binary is
     /// looked up in it, the children inherit it, and a remote's token variable is read from it.
+    /// A stored token is never read from it: [`Credential::stored`] carries that one.
     pub fn find_with_env<I>(env: I) -> Result<GitCli, TransportError>
     where
         I: IntoIterator<Item = (OsString, OsString)>,
@@ -155,10 +157,11 @@ impl GitCli {
         let allowed = call.remote.map_or("", |(url, _)| url.protocol.as_str());
         command.env("GIT_ALLOW_PROTOCOL", allowed);
 
-        // 3. The remote's token, as a header scoped to its URL (a redirect elsewhere drops it).
+        // 3. The remote's token, the variable's or the stored one, as a header scoped to its URL
+        //    (a redirect elsewhere drops it). Its three forms are redacted whichever it is.
         let remote_token = call
             .remote
-            .and_then(|(url, cred)| Some((url, self.token(cred)?)));
+            .and_then(|(url, cred)| Some((url, self.token(url, cred)?)));
         if let Some((url, token)) = remote_token {
             let encoded =
                 base64::engine::general_purpose::STANDARD.encode(format!("{TOKEN_USER}:{token}"));
@@ -316,8 +319,19 @@ impl GitCli {
         Ok(())
     }
 
-    /// The token `cred` names, when its variable is set, not empty and UTF-8.
-    fn token(&self, cred: &Credential) -> Option<String> {
+    /// The token a call on `url` sends for `cred`. A variable `cred` names decides alone: its
+    /// token, or none when it holds none (the stored token is not a fallback, so that a remote
+    /// that names a variable never sends another credential). With no variable named, the
+    /// stored token, by [`stored`]'s rule. `None` leaves the credential to git's own helpers.
+    fn token(&self, url: &RemoteUrl, cred: &Credential) -> Option<String> {
+        if cred.token_env.is_some() {
+            return self.env_token(cred);
+        }
+        stored(url, cred).map(str::to_owned)
+    }
+
+    /// The token in the variable `cred` names, when it is set, not empty and UTF-8.
+    fn env_token(&self, cred: &Credential) -> Option<String> {
         let name = cred.token_env.as_deref()?;
         let value = self.var(name)?.to_str()?;
         (!value.is_empty()).then(|| value.to_owned())
@@ -325,7 +339,7 @@ impl GitCli {
 
     /// Whether `cred` names a token variable that holds no token.
     fn token_env_unset(&self, cred: &Credential) -> bool {
-        cred.token_env.is_some() && self.token(cred).is_none()
+        cred.token_env.is_some() && self.env_token(cred).is_none()
     }
 
     /// Refuses a git older than [`MIN_GIT`], by `git version`, read once per process for each
@@ -420,6 +434,9 @@ impl GitCli {
             token_env_unset: call
                 .remote
                 .is_some_and(|(_, cred)| self.token_env_unset(cred)),
+            login_used: call
+                .remote
+                .is_some_and(|(url, cred)| stored(url, cred).is_some()),
         }
     }
 }
@@ -699,6 +716,90 @@ impl RemoteUrl {
     pub fn as_str(&self) -> &str {
         &self.url
     }
+
+    /// The host a stored login is looked up by: the [`host_key`] of the URL's authority, which
+    /// is what git names to a credential helper as `host=`, lower-cased and without the
+    /// scheme's own port. `None` for an ssh URL (`ssh://` or the scp form), which takes no
+    /// token, and for an authority [`host_key`] refuses: such a remote gets no stored token.
+    pub fn credential_host(&self) -> Option<String> {
+        let https = match self.protocol {
+            Protocol::Https => true,
+            Protocol::Http => false,
+            Protocol::Ssh => return None,
+        };
+
+        // The authority again, from the URL: `host` has lost the port.
+        let (_scheme, rest) = self.url.split_once("://")?;
+        host_key(rest.split('/').next().unwrap_or_default(), https)
+    }
+}
+
+/// The key a login is stored and looked up by, for the authority `authority` of an `https://`
+/// URL (`https` true) or an `http://` one: `host` or `host:port`, lower-cased, without the
+/// scheme's own port (443 for https, 80 for http), so that `https://host` and `https://host:443`
+/// share a key and `http://host:443` does not share theirs.
+///
+/// `None` for anything but a name of 1 to 253 of `a-z`, `0-9`, `.` and `-`, or a bracketed IPv6
+/// address, each with an optional port: 1 to 5 digits, no leading zero, 1 to 65535. A user part,
+/// a `?`, a `#`, a `%`, an empty port or a space is refused, never cut off: two keys are the
+/// same host only when they are equal, and what has no key gets no stored token.
+pub fn host_key(authority: &str, https: bool) -> Option<String> {
+    let authority = authority.to_ascii_lowercase();
+
+    // 1. The host, and the port's text when a `:` follows the host.
+    let (host, port) = if authority.starts_with('[') {
+        let (host, rest) = authority.split_at(authority.find(']')? + 1);
+        host.trim_matches(['[', ']']).parse::<Ipv6Addr>().ok()?;
+        let port = match rest {
+            "" => None,
+            rest => Some(rest.strip_prefix(':')?),
+        };
+        (host, port)
+    } else {
+        let (host, port) = match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority.as_str(), None),
+        };
+        let named = (1..=HOST_MAX).contains(&host.len())
+            && host.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-".contains(&byte)
+            });
+        if !named {
+            return None;
+        }
+        (host, port)
+    };
+
+    // 2. The port: a number as one writes it, left out when it is the scheme's own.
+    let Some(port) = port else {
+        return Some(host.to_owned());
+    };
+    let written = (1..=5).contains(&port.len())
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && !port.starts_with('0');
+    if !written {
+        return None;
+    }
+    let port: u16 = port.parse().ok()?;
+    let own: u16 = if https { 443 } else { 80 };
+    Some(if port == own {
+        host.to_owned()
+    } else {
+        format!("{host}:{port}")
+    })
+}
+
+/// The stored token a call on `url` sends for `cred`: the one `cred` carries, when it names no
+/// token variable, the token is not empty, and `url` has a [`RemoteUrl::credential_host`]. Whose
+/// host the token is for is the caller's rule: it sets [`Credential::stored`] only from the login
+/// whose host equals that key.
+fn stored<'a>(url: &RemoteUrl, cred: &'a Credential) -> Option<&'a str> {
+    if cred.token_env.is_some() {
+        return None;
+    }
+    url.credential_host()?;
+    let token = cred.stored.as_ref()?.0.as_str();
+    (!token.is_empty()).then_some(token)
 }
 
 /// Why a URL is refused (`E_INVALID_ARG`, `details.reason`).
@@ -716,13 +817,37 @@ pub enum UrlRefused {
     OptionLike,
 }
 
-/// How git authenticates to a remote: by git's own credentials, and by the token in the
-/// variable `token_env` names when it is set.
+/// How git authenticates to a remote. A variable `token_env` names decides alone: its token is
+/// sent, or none when it holds none. With no variable named, the `stored` token is sent, to an
+/// `https://` or loopback `http://` remote only. With neither, git's own credentials apply (its
+/// helpers), as they do when a token is refused.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Credential {
     /// The environment variable that holds a token, by its name; never the token.
     pub token_env: Option<String>,
+    /// The token of the login kept for the remote's host ([`RemoteUrl::credential_host`]). The
+    /// caller sets it from that host's login alone; it is not used when `token_env` is named.
+    pub stored: Option<StoredToken>,
+}
+
+/// A token a login keeps, on its way to the one place a token becomes a header. It has no
+/// `Display` and no serde form, and its `Debug` shows no part of it, so that a [`Credential`]
+/// can be printed.
+#[derive(Clone, PartialEq, Eq)]
+pub struct StoredToken(String);
+
+impl StoredToken {
+    /// `token`, as the login keeps it.
+    pub fn new(token: String) -> StoredToken {
+        StoredToken(token)
+    }
+}
+
+impl fmt::Debug for StoredToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("StoredToken(<redacted>)")
+    }
 }
 
 /// A fetch refspec: the remote's refs that `src` matches, stored in the mirror as `dst`. The
@@ -820,6 +945,9 @@ pub enum TransportError {
         stderr_tail: String,
         /// Whether the remote names a token variable that is not set.
         token_env_unset: bool,
+        /// Whether the call sent the stored token of a login ([`Credential::stored`]): the
+        /// credential the remote saw came from it, and git's helpers were not asked first.
+        login_used: bool,
     },
     /// The push's lease failed: the branch moved since the last fetch (`E_REMOTE_DIVERGED`,
     /// `remote_moved`).
@@ -944,6 +1072,9 @@ const HEADS: &str = "refs/heads/";
 /// The user name a token goes with over HTTPS (GitHub's for an installation token; a personal
 /// token takes any).
 const TOKEN_USER: &str = "x-access-token";
+
+/// The longest host name a login is keyed by, in bytes (the DNS limit).
+const HOST_MAX: usize = 253;
 
 /// A repository's object directory, in its git directory.
 const OBJECTS: &str = "objects";
@@ -1362,7 +1493,7 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
 
-    use super::{GitCli, TransportError};
+    use super::{Call, Credential, GitCli, RemoteUrl, StoredToken, TransportError, host_key};
 
     /// A serving child gets `GIT_DIR` and the configuration `serve` gives it, never the caller's
     /// variables that point git at another repository or configuration.
@@ -1449,5 +1580,161 @@ mod tests {
             refused.not_started().as_deref(),
             Some("git 2.38.5 is older than 2.39")
         );
+    }
+
+    /// The key of a login's host is strict: lower-cased, the scheme's own port left out and
+    /// every other one kept, and no key for an authority that is not a host and a port as one
+    /// writes them. An ssh remote has none.
+    #[test]
+    fn host_key_is_strict() {
+        // 1. Accepted: the case folded, and only the scheme's own port stripped.
+        for (authority, https, key) in [
+            ("github.com", true, "github.com"),
+            ("GitHub.COM", true, "github.com"),
+            ("github.com:443", true, "github.com"),
+            ("github.com:443", false, "github.com:443"),
+            ("127.0.0.1:80", false, "127.0.0.1"),
+            ("127.0.0.1:80", true, "127.0.0.1:80"),
+            ("127.0.0.1:8080", false, "127.0.0.1:8080"),
+            ("git.example.com:8443", true, "git.example.com:8443"),
+            ("host.example:65535", true, "host.example:65535"),
+            ("[::1]", false, "[::1]"),
+            ("[::1]:9418", false, "[::1]:9418"),
+            ("[2001:DB8::1]:443", true, "[2001:db8::1]"),
+            // A trailing dot is another key than the bare name's: equal keys alone match.
+            ("github.com.", true, "github.com."),
+        ] {
+            assert_eq!(
+                host_key(authority, https).as_deref(),
+                Some(key),
+                "{authority}"
+            );
+        }
+
+        // 2. Refused: nothing is cut off to make a key.
+        let long = "a".repeat(254);
+        for authority in [
+            "",
+            ":443",
+            "github.com?x",
+            "github.com#x",
+            "github.com:",
+            "github.com:0443",
+            "github.com:0",
+            "github.com:70000",
+            "github.com:123456",
+            "github.com:44a",
+            "github.com:443:443",
+            "a%2eb",
+            "user@github.com",
+            "github.com ",
+            "git_hub.com",
+            "gith\u{fc}b.com",
+            "[::1",
+            "[::1]x",
+            "[::1]:",
+            "[github.com]",
+            "[::1%25en0]",
+            "::1",
+            long.as_str(),
+        ] {
+            for https in [true, false] {
+                assert_eq!(host_key(authority, https), None, "{authority:?}");
+            }
+        }
+
+        // 3. A URL's key is its authority's; ssh, in either form, has none.
+        for (url, key) in [
+            ("https://github.com/a/b.git", Some("github.com")),
+            ("https://GitHub.com:443/a/b.git", Some("github.com")),
+            ("https://github.com", Some("github.com")),
+            ("https://github.com:8443/a/b.git", Some("github.com:8443")),
+            ("http://127.0.0.1:8080/a.git", Some("127.0.0.1:8080")),
+            ("http://127.0.0.1:80/a.git", Some("127.0.0.1")),
+            ("http://[::1]:9418/a.git", Some("[::1]:9418")),
+            ("https://github.com?x", None),
+            ("https://github.com:0443/a/b.git", None),
+            ("https://github.com:/a/b.git", None),
+            ("ssh://git@github.com/a/b.git", None),
+            ("ssh://git@ssh.github.com:443/a/b.git", None),
+            ("git@github.com:a/b.git", None),
+        ] {
+            let url = RemoteUrl::parse(url).unwrap_or_else(|why| panic!("{url}: {why:?}"));
+            assert_eq!(url.credential_host().as_deref(), key, "{url:?}");
+        }
+    }
+
+    /// A stored token becomes a header only for a remote that has a host key: an ssh remote and
+    /// a URL whose authority has none get no header, and a failure there is not said to have
+    /// used the login. The token is in no `Debug` text of the credential.
+    #[test]
+    fn a_stored_token_goes_only_to_a_url_with_a_host_key() {
+        const STORED: &str = "stored-token-not-a-secret";
+        let path = std::env::var_os("PATH").expect("PATH is set");
+        let git = GitCli::find_with_env([("PATH".into(), path)]).expect("git on PATH");
+        let cred = Credential {
+            token_env: None,
+            stored: Some(StoredToken::new(STORED.to_owned())),
+        };
+        let shown = format!("{cred:?}");
+        assert!(!shown.contains(STORED), "{shown}");
+        assert!(shown.contains("StoredToken(<redacted>)"), "{shown}");
+
+        // The header's keys in the environment of a child for `url`, and whether a failure of
+        // that call would name the login.
+        let sent = |url: &str, cred: &Credential| {
+            let url = RemoteUrl::parse(url).unwrap_or_else(|why| panic!("{url}: {why:?}"));
+            let call = Call {
+                mirror: None,
+                remote: Some((&url, cred)),
+            };
+            let child = git.command(&call, &[]).expect("a git new enough");
+            let headers: Vec<String> = child
+                .command
+                .get_envs()
+                .filter_map(|(_, value)| value?.to_str().map(str::to_owned))
+                .filter(|value| value.to_ascii_lowercase().ends_with(".extraheader"))
+                .collect();
+            let leaked = child
+                .command
+                .get_envs()
+                .filter_map(|(_, value)| value?.to_str())
+                .any(|value| value.contains(STORED));
+            assert!(
+                !leaked,
+                "the token itself is in the environment for {url:?}"
+            );
+            let named = super::stored(&url, cred).is_some();
+            (headers, named)
+        };
+
+        // 1. An https remote: one header, for its URL.
+        let https = "https://git.example.com/a/b.git";
+        assert_eq!(
+            sent(https, &cred),
+            (vec![format!("http.{https}.extraHeader")], true)
+        );
+
+        // 2. ssh, and an authority with no key: none.
+        for url in [
+            "ssh://git@git.example.com/a/b.git",
+            "git@git.example.com:a/b.git",
+            "https://git.example.com:0443/a/b.git",
+            "https://git.example.com?x",
+        ] {
+            assert_eq!(sent(url, &cred), (Vec::new(), false), "{url}");
+        }
+
+        // 3. A named variable, set or not, and an empty stored token: none of the login.
+        let named = Credential {
+            token_env: Some("SWARMOPS_TEST_NO_SUCH_TOKEN".to_owned()),
+            stored: cred.stored.clone(),
+        };
+        assert_eq!(sent(https, &named), (Vec::new(), false));
+        let empty = Credential {
+            token_env: None,
+            stored: Some(StoredToken::new(String::new())),
+        };
+        assert_eq!(sent(https, &empty), (Vec::new(), false));
     }
 }
