@@ -7,7 +7,7 @@
 //!   the small pair (just check)            the A1 pair (a1_*, SWARMOPS_SCALE=1)
 //!   built(1,000) ──┐                       bulk::build_small ─┐
 //!   built(50,000) ─┴─▶ clone_of ─▶ prepare ─▶ Counts::since ◀─┴─ bulk::open(Large)
-//!                      (hard links)  (unmeasured)  around the one operation
+//!                      (links/clones) (unmeasured) around the one operation
 //! ```
 //!
 //! Each gate prepares both stores the same way, unmeasured, then counts one operation on each and
@@ -15,12 +15,13 @@
 //! timeouts. The times (`*_us`) are not compared.
 //!
 //! The small pair is built once under `SWARMOPS_BENCH_DIR` and each test works on a clone whose
-//! object files are hard links. `bulk`'s shape rewrites a 1,000-entry directory per changeset,
-//! about 41 KB a changeset, too much for `just check` at 50,000; here the history alternates one
-//! small file over a fixed tree, so 50,000 changesets cost two root trees. The tree,
-//! `data/dNNN/fNNN.txt`, is three levels deep like `bulk`'s `gNNN/dNNN/fNNN.txt`. The newest
-//! operations of both stores record one changeset each, more than a page of the op log, so that
-//! an operation that reads a page (`ws create` does) sees the same page on both.
+//! object files are hard links, or on macOS clones ([`link_objects`]). `bulk`'s shape rewrites a
+//! 1,000-entry directory per changeset, about 41 KB a changeset, too much for `just check` at
+//! 50,000; here the history alternates one small file over a fixed tree, so 50,000 changesets cost
+//! two root trees. The tree, `data/dNNN/fNNN.txt`, is three levels deep like `bulk`'s
+//! `gNNN/dNNN/fNNN.txt`. The newest operations of both stores record one changeset each, more than
+//! a page of the op log, so that an operation that reads a page (`ws create` does) sees the same
+//! page on both.
 //!
 //! The A1 twins (`a1_*`) run the same gates on `bulk`'s two stores, each cloned, only with
 //! `SWARMOPS_SCALE=1` ([`bulk::gate`]); without it each prints `scale-perf: <case> not run`, and
@@ -414,19 +415,19 @@ fn same_on_a1_pair(case: &str, work: Work) -> Option<(Counts, Counts)> {
 }
 
 #[test]
-#[ignore = "slow, ~48 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links"]
+#[ignore = "slow, ~48 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links, on macOS by a clone"]
 fn a1_one_file_commit_counts_the_same() {
     same_on_a1_pair(A1_CASES[0], Work::Commit);
 }
 
 #[test]
-#[ignore = "slow, ~24 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links"]
+#[ignore = "slow, ~24 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links, on macOS by a clone"]
 fn a1_one_land_attempt_counts_the_same() {
     same_on_a1_pair(A1_CASES[1], Work::Land);
 }
 
 #[test]
-#[ignore = "slow, ~28 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links"]
+#[ignore = "slow, ~28 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links, on macOS by a clone"]
 fn a1_sparse_create_of_100_files_counts_the_same() {
     same_on_a1_pair(A1_CASES[2], Work::Sparse);
 }
@@ -442,13 +443,13 @@ fn a1_status_of_an_untouched_workspace_reads_no_object() {
 }
 
 #[test]
-#[ignore = "slow, ~30 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links"]
+#[ignore = "slow, ~30 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links, on macOS by a clone"]
 fn a1_rebase_onto_other_paths_reads_no_blob() {
     same_on_a1_pair(A1_CASES[4], Work::Rebase);
 }
 
 #[test]
-#[ignore = "slow, ~28 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links"]
+#[ignore = "slow, ~28 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links, on macOS by a clone"]
 fn a1_read_grant_check_counts_the_same() {
     same_on_a1_pair(A1_CASES[5], Work::Grant);
 }
@@ -608,7 +609,8 @@ fn generate(root: &Utf8Path, changesets: usize) {
 }
 
 /// A copy of the store at `from` in a directory of its own beside it, its tree's deep directory
-/// `deep`: the object files hard-linked (a store never writes into one), the rest copied.
+/// `deep`: the object files hard-linked, or on macOS cloned ([`link_objects`]; a store never
+/// writes into one), the rest copied.
 fn clone_of(from: &Utf8Path, deep: &'static str) -> Store {
     let parent = from
         .parent()
@@ -638,7 +640,7 @@ enum Link {
 }
 
 /// Copies the directory `from` to `to`; `link` says how its files are made, and everything
-/// under `objects/` is hard-linked.
+/// under `objects/` is hard-linked, or on macOS cloned ([`link_objects`]).
 fn copy_tree(from: &Path, to: &Path, link: Link) {
     fs::create_dir_all(to).expect("create a directory of the copy");
     for entry in fs::read_dir(from).expect("read a directory of the store") {
@@ -646,14 +648,13 @@ fn copy_tree(from: &Path, to: &Path, link: Link) {
         let target = to.join(entry.file_name());
         let kind = entry.file_type().expect("an entry's type");
 
-        // A directory: its files hard-linked from `objects/` down.
+        // A directory: its files hard-linked or cloned from `objects/` down.
         if kind.is_dir() {
-            let below = if entry.file_name() == "objects" {
-                Link::Hard
+            if entry.file_name() == "objects" {
+                link_objects(&entry.path(), &target);
             } else {
-                link
-            };
-            copy_tree(&entry.path(), &target, below);
+                copy_tree(&entry.path(), &target, link);
+            }
             continue;
         }
 
@@ -664,6 +665,36 @@ fn copy_tree(from: &Path, to: &Path, link: Link) {
                 fs::copy(entry.path(), &target).expect("copy a file of the store");
             }
         }
+    }
+}
+
+/// Makes at `to` the copy of the `objects/` directory `from`: every file a hard link.
+#[cfg(not(target_os = "macos"))]
+fn link_objects(from: &Path, to: &Path) {
+    copy_tree(from, to, Link::Hard);
+}
+
+/// Makes at `to` the copy of the `objects/` directory `from`: one `fclonefileat(2)` of the whole
+/// directory, each file a clone that shares its blocks, where every other system gets hard
+/// links. A hard link on APFS took 0.3 to 1.7 ms with the volume's load, half a minute to three
+/// minutes for the large store's 100,000 object files, and the clone of them all about 2.5 s (an
+/// M-series laptop, the volume otherwise quiet). A filesystem without clones (`ENOTSUP`) gets
+/// the hard links.
+///
+/// `clonefile(2)` says that cloning a directory hierarchy with these calls "is strongly
+/// discouraged" and names `copyfile(3)` for it. It is taken here all the same, for a test's
+/// fixture: the source is a store built whole that nothing writes, the target a directory of the
+/// test's own that goes with it, and a clone that fails fails the test. On macOS these tests
+/// therefore do not run the hard-link path every other system takes.
+#[cfg(target_os = "macos")]
+fn link_objects(from: &Path, to: &Path) {
+    use rustix::fs::{CWD, CloneFlags, fclonefileat};
+
+    let objects = fs::File::open(from).expect("open the store's objects directory");
+    match fclonefileat(&objects, CWD, to, CloneFlags::empty()) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::NOTSUP) => copy_tree(from, to, Link::Hard),
+        Err(e) => panic!("clone {}: {e}", from.display()),
     }
 }
 

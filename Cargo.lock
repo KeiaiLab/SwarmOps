@@ -2159,6 +2159,7 @@ dependencies = [
  "getrandom",
  "insta",
  "rayon",
+ "rustix",
  "serde",
  "serde_json",
  "swarmops-api",
