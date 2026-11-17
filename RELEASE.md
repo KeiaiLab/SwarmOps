@@ -244,7 +244,9 @@ installs the same tool versions as `ci.yml`'s: move them together.
    one line. A release that an installed build must not take unasked says so in a group's
    heading, with the words `no automatic update` in its parentheses, such as
    `### Changed (breaking, no automatic update)`: `just release-marks` reads the headings
-   ([step 9](#checklist)). Two things call for it, and nothing else does: the release changes
+   ([step 9](#checklist)). It takes the words wherever a `###` heading has them, however they
+   are spaced, cased and punctuated, and stops at a heading of another depth that says them,
+   so a heading written to withhold a release never gives it a mark. Two things call for it, and nothing else does: the release changes
    what stores older builds can open (`init`, or a writer by default, starts to make a store
    that an older release refuses), or it needs a step by hand before or after the binaries are
    replaced. A group that says `(breaking)` alone does not withhold a release: its changes are

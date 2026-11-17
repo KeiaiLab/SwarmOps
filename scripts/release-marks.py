@@ -20,12 +20,19 @@ not installed. This script computes the files a release gets from CHANGELOG.md's
      X.Y.Z, of the same major version, and newer than the installer's UPDATE_AFTER
      (scripts/install.sh): the releases up to that one hold no `so update` and ask for no mark.
   2. A mark is withheld from a line when any release after the line's first (`A.B.0`), up to
-     and including X.Y.Z, has a `###` group whose parentheses say `no automatic update`, such
-     as `### Changed (breaking, no automatic update)`. A build of that line would cross that
+     and including X.Y.Z, has a `###` group whose heading says `no automatic update`, such as
+     `### Changed (breaking, no automatic update)`. A build of that line would cross that
      release's change on its way. RELEASE.md, step 4, says when a release gets that group: it
      changes what stores older builds can open, or it needs a step by hand.
-  3. A group that says `(breaking)` alone withholds nothing; the line is printed with it.
-  4. A pre-release gets no mark: GitHub's `latest` never names one.
+  3. The words are read wherever the group's heading has them, in any case, and with any
+     spacing or punctuation between and around them: `(breaking; no automatic update)`,
+     `- no-automatic-update` and `(no automatic updates):` withhold too. A heading of another
+     depth that says them, such as `#### Detail (no automatic update)`, is a finding when the
+     release is on a line's way: it is no group, and a mark given against a heading someone
+     wrote to withhold it would be installed unasked.
+  4. A group that says `breaking` and not those words withholds nothing; the line is printed
+     with it.
+  5. A pre-release gets no mark: GitHub's `latest` never names one.
 
 Every line is printed, marked or withheld, with the reason. Only `--upload` and `--withdraw` run
 `gh` (the first on PATH), against the release `vX.Y.Z` of KeiaiLab/SwarmOps: `--upload` puts the
@@ -37,6 +44,7 @@ A finding prints as `rule: message`:
 
   version     X.Y.Z is not three numbers with an optional pre-release.
   no-section  CHANGELOG.md has no `## [X.Y.Z]` section.
+  heading     A heading that is no `###` group says `no automatic update`.
   installer   scripts/install.sh names no UPDATE_AFTER this script can read.
   gh          gh is missing, failed, or left the release with other marks than asked.
 
@@ -45,6 +53,8 @@ network without `--upload` or `--withdraw`; `selftest` runs a stand-in for gh, n
 """
 
 import argparse
+import contextlib
+import io
 import os
 import re
 import shutil
@@ -58,6 +68,7 @@ from pathlib import Path
 NAME = "release-marks"
 DONE = 0
 FOUND = 1
+USAGE = 2
 
 # The repository whose releases hold the marks, and how a mark's name starts: the product's
 # own constants (RELEASES_URL and MARK_PREFIX in crates/swarmops-ops/src/update.rs), which the
@@ -70,16 +81,17 @@ PRODUCT_SOURCE = "crates/swarmops-ops/src/update.rs"
 INSTALLER = "scripts/install.sh"
 UPDATE_AFTER = re.compile(r"^UPDATE_AFTER=(\S+)$", re.MULTILINE)
 
-# The words in a group heading's parentheses that withhold a release from automatic update,
-# and the word that only flags it.
+# The words in a group's heading that withhold a release from automatic update, and the word
+# that only flags it: both as `words` gives a heading's.
 WITHHOLD = "no automatic update"
 BREAKING = "breaking"
 
 # A version as the installer and `so update` read one, a release's section heading, and a
-# group heading with words in parentheses at its end.
+# heading of any depth: its marks and its text. A group's has three marks.
 VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?$")
 SECTION = re.compile(r"^## \[([^\]]+)\]")
-GROUP = re.compile(r"^### (.*\(([^()]*)\))\s*$")
+HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)\s*$")
+GROUP_DEPTH = 3
 FENCE = "```"
 
 # How long one run of gh may take.
@@ -131,14 +143,32 @@ def show(version: tuple[int, int, int]) -> str:
     return ".".join(str(n) for n in version)
 
 
-def sections(changelog: str) -> dict[tuple[int, int, int], list[tuple[str, set[str]]]]:
-    """Each release's groups that carry words in parentheses: the heading and its words.
+@dataclass(frozen=True)
+class Heading:
+    """A heading of a release's section: its text, whether it is a `###` group's, its words."""
+
+    text: str
+    group: bool
+    said: str
+
+
+def words(text: str) -> str:
+    """The words of a heading, in lower case with one space between them and nothing else.
+
+    `(Breaking;  no-automatic-update):` gives `breaking no automatic update`, so that the
+    words that withhold a release are found however they were spaced and punctuated.
+    """
+    return " ".join(re.sub(r"[^0-9a-z]+", " ", text.lower()).split())
+
+
+def sections(changelog: str) -> dict[tuple[int, int, int], list[Heading]]:
+    """Each release's group headings, and its other headings that say the withholding words.
 
     A section is a `## [X.Y.Z]` heading and what follows it, up to the next `## ` heading;
     `Unreleased` and a pre-release's section are no release's. Lines inside a code fence are
     not headings.
     """
-    found: dict[tuple[int, int, int], list[tuple[str, set[str]]]] = {}
+    found: dict[tuple[int, int, int], list[Heading]] = {}
     current = None
     fenced = False
     for line in changelog.splitlines():
@@ -153,10 +183,13 @@ def sections(changelog: str) -> dict[tuple[int, int, int], list[tuple[str, set[s
             if current is not None:
                 found.setdefault(current, [])
             continue
-        group = GROUP.match(line)
-        if group and current is not None:
-            words = {word.strip().lower() for word in group.group(2).split(",")}
-            found[current].append((group.group(1).strip(), words))
+        heading = HEADING.match(line)
+        if heading is None or current is None:
+            continue
+        group = len(heading.group(1)) == GROUP_DEPTH
+        said = words(heading.group(2))
+        if group or WITHHOLD in said:
+            found[current].append(Heading(line.strip(), group, said))
     return found
 
 
@@ -204,13 +237,18 @@ def plan(version: str, changelog: str, installer: str) -> Plan:
     # 3. A line that asks gets its mark unless a release on its way withholds it.
     for line in asking:
         crossed = sorted(v for v in releases if (*line, 0) < v <= release)
-        withholding = [
-            f'{show(v)} has the group "{heading}"'
-            for v in crossed
-            for heading, words in releases[v]
-            if WITHHOLD in words
+        said = [(v, h) for v in crossed for h in releases[v] if WITHHOLD in h.said]
+        for v, heading in said:
+            if not heading.group:
+                raise Finding(
+                    f"heading: {show(v)} has the heading `{heading.text}`, which says "
+                    f"`{WITHHOLD}` and is no `###` group: say it in a group's heading, such as "
+                    f"`### Changed ({WITHHOLD})`, or take the words out"
+                )
+        withholding = [f'{show(v)} has the group "{heading.text[4:]}"' for v, heading in said]
+        breaking = [
+            show(v) for v in crossed if any(BREAKING in heading.said for heading in releases[v])
         ]
-        breaking = [show(v) for v in crossed if any(BREAKING in w for _, w in releases[v])]
         name = f"{line[0]}.{line[1]}"
         if withholding:
             answer.lines.append(Line(name, False, "; ".join(withholding)))
@@ -489,11 +527,21 @@ def selftest_plans(failures: list[str]) -> None:
     if "0.13.0" not in answer.lines[0].why:
         failures.append(f"breaking: the line does not name the release: {answer.lines}")
 
-    # 3. The group withholds the release, in any case and beside other words.
+    # 3. The group withholds the release, in any case, beside other words, and however the
+    # words are spaced and punctuated: a heading written to withhold never gives a mark.
     for heading in (
         "### Changed (breaking, no automatic update)",
         "### Changed (No Automatic Update)",
         "### Security (no automatic update, breaking)",
+        "### Changed (breaking) (no automatic update)",
+        "### Changed (breaking; no automatic update)",
+        "### Changed (breaking and no automatic update)",
+        "### Changed (no automatic updates)",
+        "### Changed (breaking, no automatic update):",
+        "### Changed - no automatic update",
+        "### Changed (breaking, no  automatic\tupdate)",
+        "### Changed (breaking, no-automatic-update)",
+        "###   Changed (no automatic update) ###",
     ):
         answer = of("0.13.0", g13=heading)
         expect(heading, answer, [], ["0.12"])
@@ -502,14 +550,39 @@ def selftest_plans(failures: list[str]) -> None:
         if not any("so update" in note for note in answer.notes):
             failures.append(f"{heading}: nothing says what a withheld build does")
 
-    # 4. The words outside a group heading withhold nothing: body text, a fence, a deeper heading.
+    # 4. The words outside a heading withhold nothing: body text, a fence, a line that is no
+    # heading. Nor does a group that says other words.
     for body in (
         "### Changed\n\n- Says (no automatic update) in a line.",
         "### Changed\n\n```text\n### Changed (no automatic update)\n```",
-        "### Changed\n\n#### Detail (no automatic update)",
-        "### Changed (no automatic updates)",
+        "### Changed\n\n###Changed (no automatic update)",
+        "### Changed\n\n    ### Changed (no automatic update)",
+        "### Changed (automatic update)",
     ):
         expect(f"not a group: {body!r}", of("0.13.0", g13=body), ["0.12"], [])
+
+    # A heading of another depth that says them is no group, and stops the release with its
+    # line: on a line's way only, so a release no build crosses is not read for it.
+    for body in (
+        "### Changed\n\n#### Detail (no automatic update)",
+        "### Changed\n\n##### Stores: No automatic update",
+        "# Changed (no automatic update)",
+    ):
+        try:
+            of("0.13.0", g13=body)
+            failures.append(f"a heading that is no group: {body!r}: no finding")
+        except Finding as finding:
+            if not str(finding).startswith("heading: 0.13.0 ") or body.splitlines()[-1] not in str(
+                finding
+            ):
+                failures.append(f"a heading that is no group: {body!r}: {finding}")
+    deeper = "### Changed\n\n#### Detail (no automatic update)"
+    try:
+        of("0.14.0", g13=deeper)
+        failures.append("a heading that is no group, crossed: no finding")
+    except Finding:
+        pass
+    expect("a heading that is no group, not crossed", of("0.12.1", g13=deeper), ["0.12"], [])
 
     # 5. A later release is withheld from the line that would cross the change, not from the
     # line after it; the first release's own group and a pre-release's count for nothing.
@@ -683,10 +756,27 @@ def selftest_sources(failures: list[str]) -> None:
         failures.append(f"the repository's own files: {error}")
 
 
+def selftest_arguments(failures: list[str]) -> None:
+    """A flag is taken whole or not at all: nothing short of `--upload` runs gh."""
+    parser = arguments()
+    whole = parser.parse_args(["marks", "0.13.0", "--upload"])
+    if not whole.upload or whole.withdraw:
+        failures.append(f"--upload: read as {whole}")
+    for flag in ("--up", "--with", "--w"):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                parser.parse_args(["marks", "0.13.0", flag])
+            failures.append(f"{flag}: taken for a whole flag")
+        except SystemExit as stopped:
+            if stopped.code != USAGE:
+                failures.append(f"{flag}: exit {stopped.code}")
+
+
 def selftest() -> int:
     """Every rule on crafted changelogs, gh's part against a stand-in, and the constants."""
     failures: list[str] = []
     selftest_plans(failures)
+    selftest_arguments(failures)
     with tempfile.TemporaryDirectory() as tmp:
         selftest_gh(failures, Path(tmp))
     selftest_sources(failures)
@@ -699,16 +789,25 @@ def selftest() -> int:
     return DONE
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(prog="release-marks.py", description=__doc__.splitlines()[0])
+def arguments() -> argparse.ArgumentParser:
+    """The command line. No flag may be shortened: `--up` is not `--upload`."""
+    parser = argparse.ArgumentParser(
+        prog="release-marks.py", description=__doc__.splitlines()[0], allow_abbrev=False
+    )
     commands = parser.add_subparsers(dest="command", required=True)
-    marks = commands.add_parser("marks", help="print a release's marks; upload or withdraw them")
+    marks = commands.add_parser(
+        "marks", help="print a release's marks; upload or withdraw them", allow_abbrev=False
+    )
     marks.add_argument("version", help="the release, X.Y.Z, without a leading v")
     action = marks.add_mutually_exclusive_group()
     action.add_argument("--upload", action="store_true", help="upload the marks with gh")
     action.add_argument("--withdraw", action="store_true", help="remove every mark with gh")
-    commands.add_parser("selftest", help="prove every rule, offline")
-    args = parser.parse_args()
+    commands.add_parser("selftest", help="prove every rule, offline", allow_abbrev=False)
+    return parser
+
+
+def main() -> int:
+    args = arguments().parse_args()
 
     if args.command == "marks":
         return run_marks(args.version, args.upload, args.withdraw)
