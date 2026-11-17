@@ -18,7 +18,7 @@
 //!       └─▶ the topmost entries off the prefixes no ignore file names ──▶ outside
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -61,6 +61,13 @@ type Strays = Arc<Mutex<Vec<String>>>;
 
 /// An untracked file a walk found, with its stat.
 type Found = (String, HostMeta);
+
+/// The names in one directory, as the host lists them; none for a directory that is not there.
+type Names = Option<Arc<BTreeSet<String>>>;
+
+/// The names in each directory a spelling check read ([`Pass::spelled`]), by the directory's
+/// repository path (the root's is empty).
+type Listings = Mutex<BTreeMap<String, Names>>;
 
 /// What a scan looks at.
 #[derive(Debug, Clone, Default)]
@@ -604,10 +611,70 @@ impl Pass<'_> {
         self.want.paths.is_empty() || materialize::covered(path, &self.want.paths)
     }
 
-    /// The stat of the `at`-th row.
-    fn look_at(&self, at: usize) -> Result<Look, OpError> {
+    /// The stat of the `at`-th row, which the walk did not meet. On a volume that folds case a
+    /// stat answers for any spelling of the row's path, so a file there counts only when its
+    /// directories list the row's own spelling (`listings`): a file renamed by case alone is
+    /// gone under its old name, and the walk found it under its new one.
+    fn look_at(&self, at: usize, listings: &Listings) -> Result<Look, OpError> {
         let row = &self.index.rows[at];
-        look(self.host, self.ws, row, at, self.stale_ns, self.want)
+        let look = look(self.host, self.ws, row, at, self.stale_ns, self.want)?;
+        if look.file.is_none()
+            || !self.ws.file.volume.case_insensitive
+            || self.spelled(&row.path, listings)?
+        {
+            return Ok(look);
+        }
+        Ok(Look {
+            at,
+            file: None,
+            same_kind: false,
+            hash: false,
+        })
+    }
+
+    /// Whether the host spells repository path `path` so: each directory above it lists the
+    /// path's next component by this very name, byte for byte. Each directory is read once
+    /// (`listings`), whole, its ignored entries too: one listing for each distinct directory
+    /// above the rows asked about, the workspace's root among them. Two threads that ask for
+    /// one directory at once may each read it, to the same names.
+    fn spelled(&self, path: &str, listings: &Listings) -> Result<bool, OpError> {
+        let mut end = 0;
+        for component in path.split('/') {
+            // 1. The directory this component is in, and its names: kept, or read now.
+            let dir = path[..end].trim_end_matches('/');
+            let kept = (listings.lock().expect("no scan thread panicked"))
+                .get(dir)
+                .cloned();
+            let names = if let Some(names) = kept {
+                names
+            } else {
+                let names = self.names_in(dir)?;
+                (listings.lock().expect("no scan thread panicked"))
+                    .insert(dir.to_owned(), names.clone());
+                names
+            };
+
+            // 2. Another spelling, or nothing there since the stat: not this path.
+            if !names.is_some_and(|names| names.contains(component)) {
+                return Ok(false);
+            }
+            end += component.len() + 1;
+        }
+        Ok(true)
+    }
+
+    /// The names the host lists in the directory at repository path `dir`; none when no
+    /// directory is there.
+    fn names_in(&self, dir: &str) -> Result<Names, OpError> {
+        match self.host.read_dir(&self.ws.dir.join(dir)) {
+            Ok(names) => Ok(Some(Arc::new(names.into_iter().collect()))),
+            Err(e)
+                if [io::ErrorKind::NotFound, io::ErrorKind::NotADirectory].contains(&e.kind()) =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(materialize::host_failed(dir, &e)),
+        }
     }
 
     /// [`Pass::walk_once`], walked again while a path changes kind under it, up to
@@ -761,9 +828,10 @@ impl Pass<'_> {
                     format!("the scan's {threads} threads did not start: {e}"),
                 )
             })?;
+        let listings = Listings::default();
         pool.install(|| {
             (apart.par_iter())
-                .map(|&at| self.look_at(at))
+                .map(|&at| self.look_at(at, &listings))
                 .collect::<Result<_, _>>()
         })
     }
@@ -951,6 +1019,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
+    use camino::Utf8PathBuf;
+
     use super::*;
     use crate::hostfs::RealHost;
 
@@ -1002,6 +1072,169 @@ mod tests {
         }
         fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()> {
             RealHost.set_mode(root, rel, mode)
+        }
+    }
+
+    /// The real host as a volume that folds case shows it: a stat of a path nothing is spelled
+    /// as finds the file another ASCII case of it names. A directory lists its names as they
+    /// are.
+    struct FoldingStat;
+
+    impl FoldingStat {
+        /// The path on the real host that `path` names under any ASCII case, if there is one.
+        fn spelling(path: &Utf8Path) -> io::Result<Option<Utf8PathBuf>> {
+            // 1. Spelled so, or the root, which is spelled in one way only.
+            if RealHost.symlink_metadata(path)?.is_some() {
+                return Ok(Some(path.to_owned()));
+            }
+            let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+                return Ok(None);
+            };
+
+            // 2. Else its directory, found the same way, lists another case of its name.
+            let Some(parent) = FoldingStat::spelling(parent)? else {
+                return Ok(None);
+            };
+            let names = match RealHost.read_dir(&parent) {
+                Ok(names) => names,
+                Err(e) if e.kind() == io::ErrorKind::NotADirectory => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            let other = names.iter().find(|other| other.eq_ignore_ascii_case(name));
+            Ok(other.map(|other| parent.join(other)))
+        }
+    }
+
+    impl HostFs for FoldingStat {
+        fn write_file(&self, root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+            RealHost.write_file(root, rel, bytes)
+        }
+        fn symlink(&self, root: &Utf8Path, rel: &str, target: &str) -> io::Result<()> {
+            RealHost.symlink(root, rel, target)
+        }
+        fn symlink_metadata(&self, path: &Utf8Path) -> io::Result<Option<HostMeta>> {
+            match FoldingStat::spelling(path)? {
+                Some(spelled) => RealHost.symlink_metadata(&spelled),
+                None => Ok(None),
+            }
+        }
+        fn read_file(&self, path: &Utf8Path) -> io::Result<Vec<u8>> {
+            RealHost.read_file(path)
+        }
+        fn read_dir(&self, path: &Utf8Path) -> io::Result<Vec<String>> {
+            RealHost.read_dir(path)
+        }
+        fn remove_file(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+            RealHost.remove_file(root, rel)
+        }
+        fn remove_dir_if_empty(&self, root: &Utf8Path, rel: &str) -> io::Result<bool> {
+            RealHost.remove_dir_if_empty(root, rel)
+        }
+        fn create_dir_all(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+            RealHost.create_dir_all(root, rel)
+        }
+        fn rename(&self, root: &Utf8Path, from: &str, to: &str) -> io::Result<()> {
+            RealHost.rename(root, from, to)
+        }
+        fn read_link(&self, path: &Utf8Path) -> io::Result<String> {
+            RealHost.read_link(path)
+        }
+        fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()> {
+            RealHost.set_mode(root, rel, mode)
+        }
+    }
+
+    /// On a volume that folds case, a row whose stat finds a file under another spelling is
+    /// gone: a file renamed by case alone, one whose directory was, and an ignored one, which
+    /// the walk meets under neither name. A row under its own spelling is still there. The
+    /// folding is the stand-in's, so this is the same test on a host that keeps case apart.
+    #[test]
+    fn a_row_the_host_spells_otherwise_is_gone() {
+        use swarmops_api::{
+            ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, StatusAfter, WsCreateReq,
+        };
+        use swarmops_ops::LocalOps;
+
+        use crate::workspace::Locate;
+        use crate::{RealFs, create};
+
+        // 1. A workspace of five files, two of them ignored, made on the host as it is.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap().join("store");
+        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let who = Identity::parse("agent/tester").unwrap();
+        let files = [
+            (".gitignore", "*.gen\n"),
+            ("docs/readme", "r\n"),
+            ("out/Old.gen", "old\n"),
+            ("src/Lib/a.rs", "x\n"),
+            ("src/a.gen", "generated\n"),
+        ];
+        let puts = (files.iter())
+            .map(|(path, text)| {
+                let mut put = ChangeInput::new((*path).to_owned(), ChangeOp::Put);
+                put.content = Some(ContentInput::Inline((*text).to_owned()));
+                put
+            })
+            .collect();
+        let base = ops.commit(&who, CommitReq::new(puts, "seed")).unwrap();
+        let ctx_on = |host: Arc<dyn HostFs>| {
+            let fs = Arc::new(RealFs::new());
+            Ctx::new(&ops, root.clone(), Some(who.clone()), fs, host)
+        };
+        let real = ctx_on(Arc::new(RealHost));
+        let dir = root.parent().unwrap().join("w");
+        let mut req = WsCreateReq::new("w".to_owned());
+        req.path = Some(dir.to_string());
+        req.base = base.changeset.as_str().into();
+        req.status_after = StatusAfter::None;
+        create(&real, req).unwrap();
+
+        // 2. Scanned through a stat that folds case, as on a volume recorded as folding it.
+        let folding = ctx_on(Arc::new(FoldingStat));
+        let mut ws = Workspace::open(&real, Locate::Name("w".to_owned())).unwrap();
+        ws.file.volume.case_insensitive = true;
+        let found = |want: &Want, threads: usize| -> Vec<(String, WsChangeKind)> {
+            let scanned = scan_on(&folding, &ws, want, threads).unwrap();
+            (scanned.changes.iter())
+                .map(|change| (change.path.clone(), change.kind))
+                .collect()
+        };
+        let full = Want {
+            paths: Vec::new(),
+            full: true,
+        };
+        assert_eq!(found(&Want::default(), SCAN_THREADS), []);
+
+        // 3. Renamed by case alone: a file, an ignored file, and a directory with its file.
+        //    The stat of each old name finds the file; no directory lists the old name.
+        std::fs::rename(dir.join("docs/readme"), dir.join("docs/README")).unwrap();
+        std::fs::rename(dir.join("out/Old.gen"), dir.join("out/old.gen")).unwrap();
+        std::fs::rename(dir.join("src/Lib"), dir.join("src/lib")).unwrap();
+        for old in ["docs/readme", "out/Old.gen", "src/Lib/a.rs"] {
+            assert!(
+                FoldingStat
+                    .symlink_metadata(&dir.join(old))
+                    .unwrap()
+                    .is_some(),
+                "{old}"
+            );
+        }
+
+        // 4. Each old name is deleted and each new one the walk meets is added; the ignored
+        //    file under its own spelling is neither. On one thread and on the scan's, by the
+        //    index and by hashing.
+        let expected = [
+            ("docs/README".to_owned(), WsChangeKind::Added),
+            ("docs/readme".to_owned(), WsChangeKind::Deleted),
+            ("out/Old.gen".to_owned(), WsChangeKind::Deleted),
+            ("src/Lib/a.rs".to_owned(), WsChangeKind::Deleted),
+            ("src/lib/a.rs".to_owned(), WsChangeKind::Added),
+        ];
+        for want in [Want::default(), full] {
+            for threads in [1, SCAN_THREADS] {
+                assert_eq!(found(&want, threads), expected, "{want:?} on {threads}");
+            }
         }
     }
 

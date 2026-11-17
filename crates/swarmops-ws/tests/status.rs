@@ -398,6 +398,53 @@ fn status_honours_gitignore_and_swarmignore_and_skips_nested_git() {
     assert_eq!(changes(&ctx, "w", true), expected);
 }
 
+/// A tracked file renamed by case alone is deleted under its old name and added under its new
+/// one, also where the volume folds case and a stat of the old name finds the file under the
+/// new: the file alone, or with its directory. A tracked file an ignore file names, which the
+/// walk does not meet either, is still there under its own spelling.
+#[test]
+fn a_case_only_rename_is_a_delete_and_an_add() {
+    for folds in [false, true] {
+        // 1. A workspace, recorded as on a volume that folds case or as the host's is.
+        let f = Fixture::new();
+        let base = f.commit(
+            None,
+            &[
+                Put::File(".gitignore", "*.gen\n"),
+                Put::File("docs/readme", "r\n"),
+                Put::File("src/Lib/a.rs", "x\n"),
+                Put::File("src/a.gen", "generated\n"),
+            ],
+        );
+        f.create("w", &base, &[]);
+        if folds {
+            let mut volume = state::read(&RealFs::new(), &f.beside("w")).unwrap().volume;
+            volume.case_insensitive = true;
+            f.simulate("w", volume);
+        }
+        let ctx = f.ctx();
+        let dir = f.beside("w");
+        assert_eq!(changes(&ctx, "w", false), [], "folds={folds}");
+
+        // 2. The file renamed, and the directory with its file.
+        remove(&dir, "docs/readme");
+        write(&dir, "docs/README", "r\n");
+        remove(&dir, "src/Lib/a.rs");
+        std::fs::remove_dir(dir.join("src/Lib")).unwrap();
+        write(&dir, "src/lib/a.rs", "x\n");
+
+        // 3. Each a delete and an add, by the index and by hashing alike.
+        let expected = [
+            change("docs/README", Added),
+            change("docs/readme", Deleted),
+            change("src/Lib/a.rs", Deleted),
+            change("src/lib/a.rs", Added),
+        ];
+        assert_eq!(changes(&ctx, "w", false), expected, "folds={folds}");
+        assert_eq!(changes(&ctx, "w", true), expected, "folds={folds}");
+    }
+}
+
 /// A tracked file is never ignored: a `.gitignore` that matches it leaves it clean, and an edit
 /// of it is found, by the index and by hashing alike.
 #[test]
