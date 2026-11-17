@@ -10,7 +10,7 @@ Log in to a provider, and keep its token in your login file.
 
 The login file is the one SWARMOPS\_AUTH\_FILE names by an absolute path, else swarmops/auth.toml in your state directory ($XDG\_STATE\_HOME or \~/.local/state; on macOS \~/Library/Application Support). It is made with mode 0600, in a directory made with mode 0700, and holds the token in plain text. A login for a host replaces the one the file held for it (replaced). The result names the file and never holds the token. It uses no store and needs no identity.
 
-clone, fetch, push, sync and remote add send the token to an https remote at that host which names no --token-env; a remote that names a variable goes with the variable alone.
+clone, fetch, push, sync and remote add send the token to an https remote at that host (or an http one, at a loopback address) which names no --token-env; a remote that names a variable goes with the variable alone.
 
 ```yaml
 title: "swarmops auth login"
@@ -212,8 +212,10 @@ token = "<the token>"
   you can read it. The file is made with mode 0600 in a directory made with mode 0700.
 - **One login per host.** `--gh` is `github.com`. A second login replaces the first, and the
   result says so (`replaced`).
-- **What this build does not know is kept.** A rewrite keeps every key, and every login of
-  another provider, as it read them. Comments are not kept.
+- **What this build does not know is kept.** A rewrite keeps every top-level key and table,
+  and every login it does not replace, another provider's among them, as it read them. The
+  login it replaces is written anew, with this build's keys alone: a key of the old entry that
+  this build does not know went with the old token. Comments are not kept.
 - **No lock.** Of two logins at the same moment, the later one's file stands.
 
 ### Where the login is used

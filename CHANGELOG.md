@@ -142,9 +142,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
 ### Changed
 
 - `clone`, `fetch`, `push`, `sync` and `remote add` send the token of the login kept for a
-  remote's host (`auth login`) to an https remote that names no `--token-env`. A remote that names
-  a variable goes with the variable alone, set or not, and git's own credentials apply when there
-  is no login. The host matches when it is equal, port included: no subdomain and no other port.
+  remote's host (`auth login`) to an https remote (or an http one at a loopback address) that
+  names no `--token-env`. A remote that names a variable goes with the variable alone, set or
+  not, and git's own credentials apply when there is no login. The host matches when it is
+  equal, port included: no subdomain and no other port.
   A login file that is refused fails these commands before git runs (`E_INVALID_ARG`,
   `details.auth_file`). `E_REMOTE_REJECTED` carries `details.login_used` when the call sent a
   login's token; its `auth` and `not_found` hints, the `credential_in_url` hint and `clone`'s help
@@ -359,8 +360,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   file the path named and not one a link put there meanwhile leads to, and is never overwritten.
   The token is read from stdin, never from an argument, and appears in no envelope and no error:
   a usage error of `auth login` quotes nothing of its line but its flags' names, so a token typed
-  after `--with-token` is not repeated. It is sent only to an https remote whose host and port
-  are the login's, as a header keyed by that remote's URL in git's environment, and is removed
+  after `--with-token` is not repeated. It is sent only to an https remote (or an http one at a
+  loopback address) whose host and port are the login's, as a header keyed by that remote's URL in git's environment, and is removed
   from what git prints
   ([SECURITY.md](SECURITY.md)).
 - A token was sent to another address when the remote redirected: git follows a redirect of its

@@ -40,8 +40,9 @@
 //! moment later. The open follows a link, so the open file must also be the one the path named
 //! when it was looked at without following one, by its device and inode: a link put there in
 //! between is not read through. A file replaced in between (a login written at that moment) is
-//! looked at again, a few times. Nothing loosens or tightens a file's mode for the user: a loose file is refused
-//! with the `chmod` that fixes it. A file that is refused is never overwritten.
+//! looked at again, a few times. A read never changes a file's mode: a loose file is refused
+//! with the `chmod` that fixes it, and a file that is refused is never overwritten. A write
+//! replaces the file with a new one of mode 0600, so a file the user made 0400 comes back 0600.
 //!
 //! A file this build does not read is `E_INVALID_ARG`, with the file in `details.auth_file` and
 //! the reason in `details.reason`:

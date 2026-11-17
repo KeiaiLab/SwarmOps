@@ -347,7 +347,8 @@ envelope's `op` is, in `tools/list`'s order. Its arguments are the CLI command's
 | `ws_info` | `swarmops ws info` | `WsInfoReq` | no |
 
 `init`, `whoami`, `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`, `clone`,
-`remote add|remove`, `derive`, `mcp` and `serve` have no tool: an operator or a script runs them as
+`remote add|remove`, `derive`, `auth login|status|logout|git-credential`, `mcp` and `serve` have
+no tool: an operator or a script runs them as
 commands. A workspace tool names its workspace by its name in the store's registry, and works on
 that directory on the server's host. A `verify` that finds problems is `E_STORE_CORRUPT`, as
 `swarmops verify` is.

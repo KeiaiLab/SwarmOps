@@ -1508,7 +1508,8 @@ pub enum AuthCommand {
     /// store and needs no identity.
     ///
     /// clone, fetch, push, sync and remote add send the token to an https remote at that host
-    /// which names no --token-env; a remote that names a variable goes with the variable alone.
+    /// (or an http one, at a loopback address) which names no --token-env; a remote that names a
+    /// variable goes with the variable alone.
     #[command(group(ArgGroup::new("provider").required(true).args(["gh"])))]
     Login {
         /// Log in to GitHub (github.com).

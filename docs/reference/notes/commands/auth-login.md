@@ -116,8 +116,10 @@ token = "<the token>"
   you can read it. The file is made with mode 0600 in a directory made with mode 0700.
 - **One login per host.** `--gh` is `github.com`. A second login replaces the first, and the
   result says so (`replaced`).
-- **What this build does not know is kept.** A rewrite keeps every key, and every login of
-  another provider, as it read them. Comments are not kept.
+- **What this build does not know is kept.** A rewrite keeps every top-level key and table,
+  and every login it does not replace, another provider's among them, as it read them. The
+  login it replaces is written anew, with this build's keys alone: a key of the old entry that
+  this build does not know went with the old token. Comments are not kept.
 - **No lock.** Of two logins at the same moment, the later one's file stands.
 
 ### Where the login is used
