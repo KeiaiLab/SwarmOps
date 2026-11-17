@@ -102,13 +102,25 @@ is a terminal and neither `--json` nor `SWARMOPS_FORMAT=json` is given
 aborts prints no envelope at all: the process aborts, saying why on stderr. A script should treat
 stdout that is not one JSON object as a failure of its own.
 
-`auth login --gh` without `--with-token` writes to stderr before it succeeds: the code a person
-enters at GitHub and its page. It then waits for them, and its envelope on stdout comes once the
-login is kept. A script logs in with `--with-token`, which waits for nobody. When the
-device flow fails, `E_AUTH` carries `details.reason` (`access_denied`, `expired_token`,
+stderr carries nothing by default, with two exceptions, both for a person at a terminal. The
+first is automatic update: where an install updates itself
+([Install](../guides/install.md#how-do-i-update)), the command after an update prints one line
+on stderr, after its envelope, only when its stderr is a terminal. A script, a pipe, `2>&1` into
+a file and an agent's harness are never shown it, and stdout and the exit code are the same
+either way. A script that wants to know reads `pending` of `so update --status`, which is
+contract; the line's wording is not. A job that must run one release from its first command to
+its last sets `SWARMOPS_AUTO_UPDATE=off`, or installs with a named `--version`: otherwise a
+long loop of commands can meet a new release between two of them. In CI nothing needs setting:
+a `CI` variable that is set (to anything but the empty string, `0` or `false`) turns automatic
+update off, as a container does, and `SWARMOPS_AUTO_UPDATE=on` is the way to have it there all
+the same.
+
+The second: `auth login --gh` without `--with-token` writes to stderr before it succeeds: the code a
+person enters at GitHub and its page. It then waits for them, and its envelope on stdout comes once
+the login is kept. A script logs in with `--with-token`, which waits for nobody. When the device
+flow fails, `E_AUTH` carries `details.reason` (`access_denied`, `expired_token`,
 `device_flow_disabled`, `bad_client_id`, `expiring_token`, `unexpected_answer`), and
-`E_REMOTE_UNREACHABLE` carries `details.phase` `login` with `details.host` and no
-`details.remote`.
+`E_REMOTE_UNREACHABLE` carries `details.phase` `login` with `details.host` and no `details.remote`.
 
 ## Output flags
 
@@ -322,6 +334,14 @@ depends on the code:
 | `E_IO_TRANSIENT` | A journal append failed and was cut back (`details.committed: false`). Nothing was committed. | Run the same command again. |
 | `E_CAS_RETRY_EXHAUSTED` | The land's target moved before every one of its `--max-attempts` (8 by default, at most 32) could publish. Nothing was recorded. | Run the same land again, with the same `--key`. |
 | `E_CAS_MISMATCH` | A ref no longer holds what you expected; `details.actual` holds what it does (`null` when the ref does not exist). A `commit --advance` that fails so records nothing (`details.committed: false`). | Do **not** run it again as it is. Land your change instead (`land` merges it onto the ref's head), or re-apply your edits to the files at `details.actual` and commit on that. Re-sending your old whole-file puts on top of `actual` would revert the winner's edits to shared files. |
+
+`so update` uses three of the store's codes for the program's own replacement, told apart by
+`op` `update` and by `details`: `E_BUSY` with `details.reason` `update_running` (another update
+of the install runs; run it again later), `E_REMOTE_UNREACHABLE` with `details.phase` `update`
+(GitHub did not answer, or answered with no release's page; nothing was replaced), and `E_IO`
+with `details.step` (`install`, `verify`, `swap`, `lock` or `receipt`) in place of
+`details.fs_op`. No store is involved in any of them
+([`update`, What can fail](../reference/commands/update.md#what-can-fail)).
 
 Everything else is not retryable as it is. In particular:
 

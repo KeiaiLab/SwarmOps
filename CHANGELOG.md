@@ -223,6 +223,18 @@ collects the changes on `stable` that no release holds yet, until the next relea
   `SWARMOPS_AUTO_UPDATE=off`, or at install time with the installer's `--no-auto-update` or a
   named `--version`. `update --background` now waits up to half a second for the lock, which a
   command's claim holds for an instant.
+- The policies say what the program's own update means. SECURITY.md lists it as the third thing
+  that reaches the network and the one that does so unasked, with what is trusted (HTTPS to
+  GitHub and the release's own `SHA256SUMS`, no signature), what is constant, what is checked,
+  what GitHub learns (the minor line installed is in the mark's address), what counts as a
+  vulnerability, and that a freeze, a host shown no newer release, is not seen. The versioning
+  policy's new section "What automatic update crosses" makes contract of what a released build
+  relies on to update itself: the mark's name, the release addresses, the archive's name and
+  layout, the installer's `--version` and `--dir`, the receipt's name and keys, the names of
+  the files beside the binaries, and `SWARMOPS_AUTO_UPDATE` with its values;
+  `SWARMOPS_BUILD_CHANNEL` is listed as set by the release workflow alone. The install guides
+  lead with how updates happen and how to turn them off, and the known limitations have a
+  section "Updating the program".
 - `swarmops --help` (and `-h`, and `swarmops help`) is a screen of its own instead of clap's flat
   list: the commands in seven named groups, in the order a newcomer needs them, each with a
   summary of at most 60 characters, then examples, what a command prints, where to read more,

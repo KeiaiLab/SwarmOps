@@ -68,6 +68,12 @@ What the installer does, in order:
 
 It needs `curl` or `wget`, `tar`, and `sha256sum` or `shasum`; macOS comes with `curl`, `tar` and
 `shasum`. It sends no telemetry and writes only the install directory and its temporary directory.
+For a release after 0.11.0 the report has one line more, which says whether the binaries update
+themselves ([How do I update?](#how-do-i-update)):
+
+```text
+Automatic update is on. To turn it off: so update --auto off
+```
 The script is POSIX sh, so `| sh` works as well as `| bash`, and macOS's own bash 3.2 runs it.
 `bash install.sh --help` lists every option.
 
@@ -134,6 +140,15 @@ curl -fsSL https://get.swarmops.cc/install.sh | bash -s -- --version 0.11.0
 A leading `v` is dropped, so `v0.11.0` works too. `SWARMOPS_VERSION=0.11.0` does the same when no
 `--version` is given. A version that has no release fails at the download, and installs nothing.
 
+A pin stays: an install with a named version has automatic update off (its receipt says
+`auto_update = false`), and the report says so for a release that reads the receipt:
+
+```text
+Automatic update is off, because a version was named. To turn it on: so update --auto on
+```
+
+Nothing moves such an install but the installer, run again, or `so update`, run by you.
+
 ## How do I choose the directory?
 
 `--dir` names the directory, and creates it if it is missing:
@@ -175,6 +190,19 @@ The script is the repository's `scripts/install.sh`. get.swarmops.cc serves its 
 `web/public/install.sh`, and `just check` fails when the two differ. Each host still checks its
 download against the release's `SHA256SUMS`.
 
+The pin also keeps the hosts the same afterwards: a named version turns automatic update off on
+each of them, so no host moves to a newer release on its own
+([How do I update?](#how-do-i-update)). To install the latest release on every host and still
+keep them from updating themselves, pass `--no-auto-update` instead of a version:
+
+```sh
+sh install.sh --no-auto-update             # the latest release; it stays until you replace it
+```
+
+When you build a container image, pin the version there too. A container is not updated
+unasked in any case (`update --status` says `off_container` where `/.dockerenv` or
+`/run/.containerenv` exists), since what it installed would be gone with the container.
+
 ## How do I install the .deb or .rpm package?
 
 From v0.8.0 on, each release also carries a `.deb` and an `.rpm` for each Linux architecture; a
@@ -204,7 +232,9 @@ On RHEL 9, its rebuilds such as AlmaLinux and Rocky Linux, and Fedora, the packa
 package needs, glibc 2.34 or newer and libgcc, which every supported host has.
 
 The packages come from no repository, so `apt upgrade` and `dnf upgrade` do not update them:
-install the next release's package the same way, and it replaces the old one. They carry no
+install the next release's package the same way, and it replaces the old one. A package's
+binaries never update themselves and `so update` refuses there (`details.reason` `no_receipt`):
+the package manager owns the files. They carry no
 signature of their own: `SHA256SUMS` from the release page is what checks them. The release
 workflow installs every package in a Debian 12 and an AlmaLinux 9 container, runs both binaries
 and removes it again before it publishes anything
@@ -212,7 +242,103 @@ and removes it again before it publishes anything
 
 ## How do I update?
 
-Run the same command again. It replaces both binaries in place and names the version it replaced:
+**You need:** a release after 0.11.0 for everything here but the installer run again: 0.11.0
+and older have no `update` command and never update themselves.
+
+How the binaries got there decides how they are updated:
+
+| Installed by | Updates itself? | To update by hand |
+| --- | --- | --- |
+| The installer | Yes, unless turned off (below) | `so update`, or the installer again |
+| The installer with `--version`, `SWARMOPS_VERSION` or `--no-auto-update`, or as root | No | `so update`, or the installer again |
+| A `.deb` or `.rpm`, or a server image | Never | Install the next release's package |
+| A release archive unpacked by hand | Never | Unpack the next one; or run the installer once with `--dir`, which leaves a receipt |
+| A clone (`cargo install`, `cargo build`) | Never | Build the newer source |
+
+### Automatically
+
+An install the installer made looks for a newer release by itself. After a command that went
+well, at most once in 24 hours, it starts a second process that asks GitHub for the latest
+release and, when the maintainers have marked that release for the installed minor line,
+downloads it, checks it against the release's `SHA256SUMS`, runs the new binaries once and puts
+them in place of the old ones. The command that started it does not wait: what it prints, its
+exit code and its timing are the same with or without it.
+
+The next command you run at a terminal then prints one line on stderr, after its output, once:
+
+```text
+swarmops: updated from 0.12.0 to 0.13.0. Notes: https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.13.0. Running mcp servers keep 0.12.0 until restarted.
+```
+
+A release the maintainers did not mark for your line is not installed, and the line says that
+instead, once; one that could not be installed says why. A script or an agent's harness, whose
+stderr is no terminal, is never shown a line: `so update --status` gives it the same as
+`pending`. [`update`](../reference/commands/update.md) has every rule.
+
+What an automatic update does not do for you:
+
+- **It does not read the changelog.** A release with breaking changes is installed like any
+  other; only a release that changes what stores older builds can open, or that needs a step by
+  hand, is left for you to install
+  ([What automatic update crosses](../policies/versioning-and-stability.md#what-automatic-update-crosses)).
+  The printed line links the release's notes.
+- **It does not check your stores.** Run `so verify --deep` when you want that check
+  ([below](#by-hand)).
+- **It does not restart anything.** A process that runs keeps the program it started with: a
+  `swarmops mcp` server answers with the old version until its session ends.
+- **It never touches a store** and never runs `upgrade`: a store stays in its format until you
+  upgrade it ([Install and upgrade](../operate/install-and-upgrade.md#upgrade)).
+- **It does not run everywhere.** Nothing looks for a release after `mcp`, `serve`,
+  `auth git-credential` or `ws hook`, after a command that failed, where `CI` is set, in a
+  container, for root, or in a directory that belongs to another user. A host that uses
+  SwarmOps only through its MCP server never updates itself.
+
+What it sends: one request a day of use to
+`https://github.com/KeiaiLab/SwarmOps/releases/latest`, by your `curl`, with no token; when a
+release is newer, one more whose address names the minor line you run
+(`…/auto-update-from-0.12`); and, to install, the installer's own downloads. GitHub sees your
+address and those paths. Nothing goes to swarmops.cc or to any host of the project's.
+
+### How do I turn automatic update off?
+
+```sh
+so update --auto off
+so update --status
+```
+
+```text
+{"ok":true,"op":"update","api":1,"result":{"current":"0.12.0","updated":false,"auto_update":"off","dir":"/home/me/.local/bin"},…}
+```
+
+`--auto off` writes `auto_update = false` into the receipt beside the binaries,
+`.swarmops-receipt`, so it holds for every user and process of that install until
+`so update --auto on`. The other ways:
+
+| To turn it off | Do this |
+| --- | --- |
+| for one install, from now on | `so update --auto off` |
+| at install time | the installer's `--no-auto-update`, or a named `--version` |
+| for one shell, script or service | `SWARMOPS_AUTO_UPDATE=off` in its environment |
+| in CI | nothing: a set `CI` variable turns it off |
+| in a container | nothing: it is off there |
+
+`so update --status` reaches no network and says which of these decided: `on`, or `off` (the
+receipt), `off_env`, `off_ci`, `off_container`, `off_owner` (root, or another user's directory),
+`off_no_receipt` (a package or an archive) or `off_source_build` (a clone).
+`SWARMOPS_AUTO_UPDATE=on` turns it on again where `CI` or a container turned it off, and nowhere
+else. None of them stops `so update` when you run it yourself.
+
+### By hand
+
+```sh
+so update --check      # what the latest release is; installs nothing
+so update              # install it, when it is newer
+```
+
+`so update` installs the latest release whether or not it is marked, and never an older one or a
+pre-release. It works on an install the installer made; elsewhere it says how the binaries are
+updated instead. The installer run again does the same on any install of its own, and names the
+version it replaced:
 
 ```text
 swarmops 0.11.0
@@ -220,8 +346,12 @@ Replaced swarmops 0.11.0.
 Installed swarmops and so (its short form) in /home/me/.local/bin.
 ```
 
-Before you update, read the new version's section of [CHANGELOG.md](../../CHANGELOG.md), which is
-also the release's notes on the releases page. After it, check each [store](../concepts.md#store):
+To go back to an older release, or to stay on one, run the installer with `--version`
+([How do I pin a version?](#how-do-i-pin-a-version)).
+
+Before you update by hand, read the new version's section of
+[CHANGELOG.md](../../CHANGELOG.md), which is also the release's notes on the releases page.
+After it, check each [store](../concepts.md#store):
 
 ```sh
 so verify --deep
@@ -240,20 +370,26 @@ says what a version bump may break before 1.0:
 > bump (0.1.0 to 0.1.1) breaks none.
 
 Every breaking change is called out under its version in [CHANGELOG.md](../../CHANGELOG.md), with
-what to do about it. Every store today is `FORMAT 1`:
+what to do about it. An automatic update installs such a release too, unless the release changes
+what stores older builds can open or needs a step by hand
+([What automatic update crosses](../policies/versioning-and-stability.md#what-automatic-update-crosses)).
+
+A store's layout is named by its `FORMAT` file, here that of a store made by 0.4.0 to 0.11.0:
 
 ```sh
 cat "$SWARMOPS_REPO/FORMAT"
 ```
 
 ```text
-swarmops-store 1
+swarmops-store 2
 ```
 
-A new `FORMAT` comes with the release that needs it. A binary refuses a store whose `FORMAT` it
-does not know, as `E_NOT_A_REPO` (exit 6), and before 1.0 there is no migration tool: a store may
-have to be created again, through git ([operations guide](../operations.md#upgrades)). The hash
-contract never changes: a changeset's id is the same under every `FORMAT`.
+A new `FORMAT` comes with the release that needs it. A newer binary reads and writes a store of
+an older format as before, and changes its format only when you run `swarmops upgrade`, which no
+older release can read afterwards; no update of the program runs it. A binary refuses a store
+whose `FORMAT` it does not know, as `E_NOT_A_REPO` (exit 6) or `E_STORE_TOO_NEW`
+([Install and upgrade](../operate/install-and-upgrade.md#upgrade)). The hash contract never
+changes: a changeset's id is the same under every `FORMAT`.
 
 ## How do I uninstall?
 
@@ -269,8 +405,10 @@ Removed swarmops so from /home/me/.local/bin. Stores are left as they are.
 
 It removes `swarmops` and `so` only if they are SwarmOps' own, and leaves another program by either
 name alone. The installer's receipt goes with them, and what an update left beside them. A build from source is removed with `cargo uninstall swarmops-cli`, and a package with
-`sudo apt remove swarmops` or `sudo dnf remove swarmops`. SwarmOps keeps no
-configuration file and runs no daemon, so nothing else of it is installed.
+`sudo apt remove swarmops` or `sudo dnf remove swarmops`. SwarmOps runs no daemon and keeps
+no configuration file but that receipt, so nothing else of it is installed. A login you made
+with `so auth login` is in a file of yours outside the install directory; `so auth logout --gh`
+removes the login ([GitHub as a remote](github-remote.md)).
 
 Your stores stay. A store is one directory, and no command removes one: delete it yourself
 (`rm -r <store>`) once nothing needs its history, which goes with it. To keep the history of a

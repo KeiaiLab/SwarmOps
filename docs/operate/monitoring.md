@@ -53,12 +53,13 @@ second counts the failures by code; the third lists the three slowest calls by `
 
 ### Errors by code
 
-Expected now and then, and handled by the agent: `E_CONFLICT` (exit 3),
-`E_CAS_MISMATCH` (re-read, then land). A rising count of `E_BUSY` or `E_CAS_RETRY_EXHAUSTED`
-(exit 4) means more contention than the lock serves: too many writers, a slow disk, or something
-holding the lock (a backup). Act at once on `E_IO`, `E_IO_TRANSIENT` (their `details` name the
-file operation and the store file), `E_STORE_CORRUPT` and `E_INTERNAL`, and on an MCP server
-that exits.
+Expected now and then, and handled by the agent: `E_CONFLICT` (exit 3), `E_CAS_MISMATCH` (re-read,
+then land). A rising count of `E_BUSY` or `E_CAS_RETRY_EXHAUSTED` (exit 4) means more contention
+than the lock serves: too many writers, a slow disk, or something holding the lock (a backup). An
+`E_BUSY` whose `op` is `update` (`details.reason` `update_running`) is none of that: two updates of
+the program met, and no store was involved. Act at once on `E_IO`, `E_IO_TRANSIENT` (their `details`
+name the file operation and the store file), `E_STORE_CORRUPT` and `E_INTERNAL`, and on an MCP
+server that exits.
 
 ### `meta.recovered`
 

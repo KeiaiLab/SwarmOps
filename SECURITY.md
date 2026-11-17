@@ -15,7 +15,10 @@ advisory needs evidence that SwarmOps reaches the affected code.
 ## Which versions get fixes?
 
 Fixes land on `stable`, the main line, and ship in the next release. No earlier release gets a
-fix. [CHANGELOG.md](CHANGELOG.md) notes each fix under **Security**.
+fix. [CHANGELOG.md](CHANGELOG.md) notes each fix under **Security**. An install the installer
+made, of a release after 0.11.0, takes the next release by itself unless that is turned off
+(`so update --status` says which); every other install is updated by whoever runs it
+([Install, How do I update?](docs/guides/install.md#how-do-i-update)).
 
 ## What answer should I expect?
 
@@ -26,20 +29,27 @@ publish the advisory once the fix has landed.
 
 A flaw that breaks the local trust model below: a crafted store file, request or git repository
 that makes SwarmOps panic, write outside its bounds or allocate without bound; a credential that
-leaks; a test hook a release build honours; a supply-chain weakness. A local user with write
+leaks; a test hook a release build honours; an update of the program that takes anything but
+a newer release from the project's releases; a supply-chain weakness. A local user with write
 access to the store, and lost data after a crash, are not vulnerabilities. The details follow.
 
 ## What is in scope
 
 The trust model is M1's: SwarmOps runs on one host, as a library linked into each `swarmops`
-process, with no daemon and no network service. Since M13, `clone`, `fetch`, `push` and `sync`
-reach a git remote, through the user's own git as a child process, and `auth login` without
-`--with-token` reaches the provider's login addresses, through the user's own curl as a child
-process: SwarmOps opens no connection itself. Every agent and person that runs `swarmops`
-against a store is a trusted local user acting for the same owner, and the store directory's
-filesystem permissions are the access boundary. A login (`swarmops auth login`) keeps a token in
-one file of the user's, outside every store, whose own mode is its boundary. Within that model,
-these are vulnerabilities:
+process, with no daemon and no network service. Three things reach the network, each through a
+program of the user's run as a child process: SwarmOps opens no connection itself. Since M13,
+`clone`, `fetch`, `push` and `sync` reach a git remote, through the user's own git. `auth login`
+without `--with-token` reaches the provider's login addresses, through the user's own curl. And the
+program's own update reaches `github.com`'s release addresses for this repository, through the
+user's curl and the installer built into the program. The first two happen when a command that is
+named for them is run. The third also happens unasked: an install the installer made looks for a
+newer release after a command, at most once a day, in a detached process that ends when it has
+looked or installed, and installs a release the maintainers marked for it ("The program's own
+update", below, says what is trusted and how it is turned off). Every agent and person that runs
+`swarmops` against a store is a trusted local user acting for the same owner, and the store
+directory's filesystem permissions are the access boundary. A login (`swarmops auth login`) keeps a
+token in one file of the user's, outside every store, whose own mode is its boundary. Within that
+model, these are vulnerabilities:
 
 - **Crafted or damaged store files.** SwarmOps reads files it did not necessarily write: a
   store copied or restored from elsewhere, a damaged disk, a file someone placed there. Reading
@@ -95,8 +105,9 @@ these are vulnerabilities:
   long list of short strings or a map of small entries takes up to about 15 times its text, near
   1 GiB for a line at the 64 MiB cap.
 - **Test hooks in a release build.** The `SWARMOPS_TEST_*` variables make a process crash or
-  fail at a chosen filesystem call, count its calls, pin its clock, or hold the writer lock
-  while it waits for other writers' requests. A build without the
+  fail at a chosen filesystem call, count its calls, pin its clock, hold the writer lock
+  while it waits for other writers' requests, print another version for its own, or count as a
+  release's build for `update`. A build without the
   `test-hooks` feature, as `cargo build --release` is, must ignore them; one that honours them
   is a vulnerability.
 - **The git import (M3).** Importing a git repository brings in content and paths that
@@ -173,6 +184,62 @@ these are vulnerabilities:
   to send these requests elsewhere; a device code or a token in an argument, an envelope, an
   error or on stderr; or an answer that reaches the terminal unchecked, is a vulnerability. A
   proxy the user's environment names, and the certificates it trusts, are the user's.
+- **The program's own update (`update`, and automatic
+  update).** `so update` replaces `swarmops` and `so` with the latest release, and an install
+  the installer made does the same unasked, after a command, for a release that is marked for
+  its minor line. This makes the releases page a supply chain at run time: whoever can publish
+  a release of this repository, and upload a mark to it, changes the program on every install
+  that updates itself within a day of its use.
+  - *What is trusted.* HTTPS to `github.com`, with the certificates the user's curl trusts, and
+    the release's own `SHA256SUMS`, which comes from the same place as the archive: it shows a
+    damaged or a wrong download, not a release that was replaced at GitHub. No signature is
+    checked, as none is by the installer; the releases carry none
+    ([RELEASE.md](RELEASE.md#not-there-yet)). The programs run are the user's, trusted as the
+    user's git is: curl (`SWARMOPS_CURL`, else the first on `PATH`) for the two requests of the
+    program's own, and for the download `/bin/sh` with the installer's tools from `PATH` (curl
+    or wget, tar, sha256sum or shasum, awk and the like). Whoever can write the directory the
+    binaries are in could replace them already; the receipt, the lock and the note beside them
+    give that party nothing more.
+  - *What is constant.* The addresses: `https://github.com/KeiaiLab/SwarmOps/releases/latest`,
+    and `…/releases/download/v<version>/` for the mark and the archive. No flag, variable,
+    store, remote, workspace file, MCP request or answer changes them, and no MCP tool runs an
+    update. The two requests of the program's own are HEAD requests that follow no redirect,
+    over https with TLS 1.2 or later, with a cleared environment but for `PATH`, the proxy
+    variables and the certificate variables, the header `User-Agent: swarmops-update` and no
+    token. The installer follows GitHub's redirects to where the files are, as it does when a
+    person runs it, and gets `PATH`, `HOME`, `TMPDIR`, the proxy variables and the certificate
+    variables alone.
+  - *What is checked.* The answer for the latest release must be a redirect to exactly
+    `https://github.com/KeiaiLab/SwarmOps/releases/tag/v<X.Y.Z>`, three plain numbers. Only a
+    release strictly newer than what is installed is taken, so an older release cannot be put
+    back. The archive is checked against its line in `SHA256SUMS`, unpacked beside the
+    binaries, and each new binary is run once and must print the release's version before
+    either replaces anything. Unasked, a release is installed only where it holds the mark for
+    the installed minor line; it is announced otherwise.
+  - *What GitHub learns.* The caller's address, this repository's path, the header above and,
+    in the mark's address, the minor line installed (`auto-update-from-0.12`); from the
+    installer's download, the release and the target, with its downloader's own headers.
+    Nothing goes to a host of the project's own, and nothing is sent that names a store, a user
+    or a login.
+  - *What is not prevented.* A freeze: someone who can answer for GitHub, or keep the request
+    from arriving, can show an install no newer release, and without signed metadata that
+    carries a date the install cannot tell. It then stays as it is, and says nothing. A
+    release published by whoever holds the repository's release permission is installed as
+    the maintainers' own.
+  - *The switch.* `so update --auto off` (the receipt beside the binaries), the variable
+    `SWARMOPS_AUTO_UPDATE=off`, and the installer's `--no-auto-update` or a named `--version`
+    turn automatic update off; `CI`, a container, root and a directory of another user's do
+    too. Only the user's environment, the receipt and the installer set it: no store, remote,
+    workspace file or MCP request reads or changes it. A build from a clone and a package's
+    install never update themselves.
+
+  An update from another address or to an older or equal version; an install of a download
+  whose checksum does not match or whose binaries were not run first; a write outside the
+  directory of the binaries and the installer's temporary directory; a check or an install
+  that a store, a remote, a workspace file or an MCP request started, moved or turned on; one
+  that runs after `mcp`, `serve`, `auth git-credential` or `ws hook`, or that changes what a
+  command prints on stdout or its exit code; a token or a login sent with these requests; or
+  a line of GitHub's answer that reaches the terminal unchecked, is a vulnerability.
 - **The SwarmOps supply chain.** A dependency or a CI workflow that could change what we build
   or run. `cargo deny check` (advisories, licenses, bans, sources) runs over every lockfile the
   project builds: the workspace's and the fuzz crate's in every `just check`, and
@@ -180,7 +247,8 @@ these are vulnerabilities:
   (`just bench-compare` and the weekly scheduled run). The lockfiles are committed and builds use
   `--locked`, and the GitHub Actions workflows pin every action by commit, start from
   `permissions: {}`, keep no credentials after checkout and are checked with zizmor. A known
-  advisory in a dependency that is already public can go to a normal issue.
+  advisory in a dependency that is already public can go to a normal issue. What a published
+  release then does to the installs that update themselves is the bullet above.
 
 ## What is not a vulnerability under M1's model
 
@@ -199,6 +267,9 @@ these are vulnerabilities:
   server runs as its caller and reads it the same way. A server that takes requests from another
   host, M11's `swarmops serve --stdio` over ssh first, must refuse such content, and will
   (operations spec §7).
+- **Anything a local user with write access to the binaries' directory can do directly**:
+  replace `swarmops` and `so`, or write the receipt that turns automatic update on. The
+  directory's permissions are the boundary, as a store's are.
 - **Durability failures.** Data lost after a crash, a power loss or a disk error is a serious
   bug, not a vulnerability: report it as an issue. [docs/architecture.md](docs/architecture.md)
   describes the durability model and its tests.

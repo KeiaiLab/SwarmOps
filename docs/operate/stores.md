@@ -71,8 +71,10 @@ swarmops init "$SWARMOPS_REPO" --name acme
 
 The directory holds `FORMAT` (`swarmops-store 2`, the layout's version; `init --format 1` makes one that 0.3.0 and earlier open), `REPO` (the repository's
 id and name), `objects/` and `meta/`; [the architecture](../architecture.md#the-store-on-disk) and
-[architecture.md](../architecture.md) describe them. Nothing runs in the background: there is no
-daemon, and each command or MCP call opens the store, does its work and closes it.
+[architecture.md](../architecture.md) describe them. Nothing runs in the background on a store:
+there is no daemon, and each command or MCP call opens the store, does its work and closes it.
+(The one process that outlives a command, an install's own update, opens no store:
+[Automatic update](install-and-upgrade.md#automatic-update).)
 
 To check the new store, run `swarmops verify` ([Verify and repair](verify-and-repair.md)).
 

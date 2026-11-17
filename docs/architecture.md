@@ -24,7 +24,9 @@ hosts, do not carry over. SwarmOps is an independent project, not affiliated wit
 Anthropic, and contains no Scion code, which is not public. It is not meant as a
 general-purpose git replacement. Its main users are LLM agents, so every operation is a library
 function and the command line is a thin shell that prints JSON. It is fully embedded: one
-program, no external database, no daemon.
+program, no external database, no daemon. (An install that updates itself starts one short
+process a day that outlives its command:
+[`update`, After a command](reference/commands/update.md#after-a-command).)
 
 M0 (bootstrap), M1 (the single-agent core), M1.5 (hardening and opening), M1.6 (the
 code-review follow-ups), M2 (diff, history and the derived-data engine), M3 (git import), M4
@@ -189,6 +191,21 @@ the user's state directory (`$XDG_STATE_HOME`, else `~/.local/state`; on macOS
   memo-keys/<repo_id>.key    a store's memo key, 32 bytes (below); SWARMOPS_MEMO_KEY_DIR names another directory
   auth.toml                  the logins: a token per host, in plain text, mode 0600; SWARMOPS_AUTH_FILE names another file
 ```
+
+One thing more is kept outside every store, and outside the state directory too: what the
+program's own update keeps is beside the binaries, in the directory they are installed in, so
+that it belongs to one install and to no user.
+
+```text
+<install directory>/
+  swarmops, so               the program, under its two names
+  .swarmops-receipt          the installer's receipt, TOML: receipt = 1, auto_update = true | false
+  .swarmops-update.lock      the lock one update holds; its lines are what a background run remembers, its time the last check
+  .swarmops-update.note      one line: what the next command at a terminal says, once
+  .swarmops-update.d/        where a new release is unpacked and tried, while an update runs
+```
+
+No variable names another place for them, and no store, remote or request names them at all.
 
 The login file is the only place SwarmOps keeps a credential. `auth login` writes it whole (a temp
 file of mode 0600, renamed over it), `auth status` and `auth logout` read it, and each refuses a
@@ -692,13 +709,73 @@ fsck refuses, a pack whose checksum does not match, or one a fetched ref reaches
 lacks, is `bad_objects`. SwarmOps has no network crate and writes no pack: gix stays on the disk
 side.
 
-**The login's device flow.** One command besides the remotes' reaches the network: `auth login
---gh` without `--with-token`, which asks GitHub for a device code and then, in turns, for the
-token. Each request is one run of the user's curl (`SWARMOPS_CURL`, else the first on `PATH`), in
-`swarmops-cli`, as each transfer is one run of the user's git: the arguments are `-q --config -`
-alone, the request is a configuration on curl's stdin, and the environment is cleared but for
-`PATH`, the proxy variables and the certificate variables. The two addresses are constants, and
-what GitHub answers is checked before a word of it reaches the terminal or the login file.
+**The login's device flow.** Two things besides the remotes' commands reach the network. One is
+`auth login --gh` without `--with-token`, which asks GitHub for a device code and then, in turns,
+for the token. Each request is one run of the user's curl (`SWARMOPS_CURL`, else the first on
+`PATH`), in `swarmops-cli`, as each transfer is one run of the user's git: the arguments are `-q
+--config -` alone, the request is a configuration on curl's stdin, and the environment is cleared
+but for `PATH`, the proxy variables and the certificate variables. The two addresses are constants,
+and what GitHub answers is checked before a word of it reaches the terminal or the login file.
+
+**The program's own update.** The other is `update`, which replaces `swarmops` and `so` with the
+latest release, and which an install the installer made also runs unasked
+([`update`](reference/commands/update.md) has every rule). It is three steps, none of them
+SwarmOps' own network code:
+
+```text
+  update ── HEAD …/releases/latest ─────────────────────────► github.com   (the user's curl)
+     │    ◄── 302, Location: …/releases/tag/vX.Y.Z ──────────
+     │    newer than <dir>/swarmops --version and <dir>/so --version?
+     ├── only in the background:
+     │    HEAD …/releases/download/vX.Y.Z/auto-update-from-<major>.<minor>
+     │    ◄── 302: install it │ 404: announce it │ anything else: nothing
+     ├── /bin/sh, the built-in installer: --version X.Y.Z --dir <dir>/.swarmops-update.d
+     │    (its downloader fetches the archive and SHA256SUMS, checks one against the other)
+     ├── each staged binary --version must print "swarmops X.Y.Z"
+     └── rename swarmops, then so, over the installed ones; flush the directory
+```
+
+- **The two requests** are runs of the curl the device flow runs, with the same fixed
+  configuration (https only, TLS 1.2 or later, no redirect followed, 10 s to connect and 30 s
+  in all) and another shape: a HEAD whose answer is read from curl's `write-out`
+  (`%{redirect_url}` and `%{http_code}`, the body to `/dev/null`), with the header
+  `User-Agent: swarmops-update`, curl's own `Accept: */*`, and no `max-filesize`: curl holds
+  that bound against the length a HEAD's answer names, and the page of a file that is not
+  there would read as a failure. The address a redirect names is taken only as exactly a
+  release's page, three plain numbers. `swarmops-ops` holds the addresses, the version order,
+  the receipt's grammar and every decision as pure functions (`update.rs`); `swarmops-cli`
+  reads the files, runs the children and holds the lock.
+- **The installer** is `scripts/install.sh`, compiled into the program (`include_str!`) and fed to
+  `/bin/sh` on its stdin, so the steps that put a release on a host are the ones its own tests run
+  (`scripts/test-install.py`). It gets a cleared environment but for `PATH`, `HOME`, `TMPDIR`, the
+  proxy variables and the certificate variables, runs in a process group of its own, and is stopped
+  after ten minutes (three in the background): SIGTERM to the group, SIGKILL five seconds later.
+  Because it installs into a staging directory, nothing is replaced before the new binaries have
+  run.
+- **One update at a time** for an install: `File::try_lock` on the lock file, held from before
+  the first request until the renames. A second `update` is `E_BUSY`; a background run that
+  finds the lock held does nothing.
+- **Whether an install updates itself** is one pure decision (`auto_update`), the same for
+  `update --status` and for the gate after a command: a release's build
+  (`SWARMOPS_BUILD_CHANNEL=release` at compile time), the installer's receipt saying
+  `auto_update = true`, no `SWARMOPS_AUTO_UPDATE=off`, no `CI`, no container marker
+  (`/.dockerenv`, `/run/.containerenv`), not root, and a directory the caller owns.
+- **After a command.** `entry::finish` writes the envelope, then runs what the command left to
+  follow it: the prepare step, the view step, and last the update, for a command that went
+  well and is none of `mcp`, `serve`, `serve --prepare`, `auth git-credential`, `ws hook` and
+  `update`. It uses `std::fs` alone, never the store's `FsOps`, and no error of it reaches
+  anyone. If a note is waiting and stderr is a terminal, the command prints it and removes it.
+  If the lock file's time is more than 24 hours old, the command claims the check (it locks the
+  file without waiting, looks again, sets the time) and starts `update --background` through
+  `/bin/sh -c 'exec "$0" update --background 3>&- … 9>&-'`: a process group of its own, null
+  stdio, `/` for its directory, without the caller's descriptors 3 to 9, never waited for.
+  `unsafe` is forbidden, so the shell closes them. That run waits up to half a second for the
+  lock, which a command's claim holds for an instant.
+- **What a background run leaves** is the note, one line (`updated <from> <to>`,
+  `available <to>`, `failed <to> <why>`), and in the lock file a line each for the release
+  last `seen` unmarked, `announced` and `failed`: a release without a mark is announced at its
+  second sighting, since every release is the latest before its marks are uploaded, and one
+  that failed to install is not tried again until an `update` someone runs goes well.
 
 **The mirror.** `git/mirror.git` is a cache that SwarmOps alone writes: fetched packs land in it,
 the import reads it (`GixSource`), and a push's export is written into it (`GixSink`). A remote's
@@ -898,7 +975,9 @@ found) and whether retrying can help. `hint` is often the next command to run.
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what
-it repaired, in offsets and counts; it is no warning (operations §0).
+it repaired, in offsets and counts; it is no warning (operations §0). stderr carries nothing by
+default but what is meant for a person: the device flow's two lines, and, only where stderr is
+a terminal, one line after the envelope of the command that follows an automatic update.
 
 An I/O failure (`E_IO`, `E_IO_TRANSIENT`, and the `E_STORE_CORRUPT` of a metadata file that does
 not parse) names the file operation that failed and the store file it was on (`details.fs_op`,

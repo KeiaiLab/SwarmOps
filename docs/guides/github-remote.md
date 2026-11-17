@@ -26,9 +26,11 @@ the commands one by one, and says what to do when they stop.
 ```
 
 *The store talks to the remote through a git mirror it keeps in its own directory. Your git, 2.39
-or later, moves the packs; SwarmOps has no network code of its own. Logging in with
-`so auth login --gh` is the one other thing that reaches GitHub: it runs your curl against
-GitHub's two login addresses.*
+or later, moves the packs; SwarmOps has no network code of its own. Two other things reach
+GitHub: logging in with `so auth login --gh`, which runs your curl against GitHub's two login
+addresses, and the program's own update, which asks this project's releases page for the
+latest release ([Install](install.md#how-do-i-update)). Neither touches the store or the
+remote.*
 
 > ### In short
 >

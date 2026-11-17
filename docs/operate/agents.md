@@ -69,11 +69,10 @@ arguments and returning the envelope the CLI prints for it:
 | `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `merge_base`, `op_log`, `ref_list`, `ref_log`, `land_check`, `blob_has`, `verify`, `remote_list`, `sync_status` | `commit`, `land`, `revert`, `land_group`, `rebase`, `blob_put`, `ref_set`, `ref_delete`, `ref_txn`, `undo`, `fetch`, `push`, `sync`, `gc`, `repair`, `upgrade` | `ws_create`, `ws_status`, `ws_diff`, `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize`, `ws_discard`, `ws_snapshot`, `ws_list`, `ws_info` |
 
 `init`, `whoami`, `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`,
-`derive`, `clone`, `remote add|remove` and `auth login|status|logout|git-credential` are commands
-only: you run them, not the agents. The git remote tools take a remote by its name only, and run
-git with the server's environment: its ssh agent and token variables, and the login file of the
-user it runs as
-([GitHub as a remote](../guides/github-remote.md#through-mcp)).
+`derive`, `clone`, `remote add|remove`, `auth login|status|logout|git-credential` and `update` are
+commands only: you run them, not the agents. The git remote tools take a remote by its name only,
+and run git with the server's environment: its ssh agent and token variables, and the login file of
+the user it runs as ([GitHub as a remote](../guides/github-remote.md#through-mcp)).
 
 - The store and the identity are the server's: `--repo` (else `SWARMOPS_REPO`) and `--as` (else
   `SWARMOPS_AGENT`). No call can name others, and without an identity every write fails with
@@ -84,6 +83,14 @@ user it runs as
   file access keeps from it ([SECURITY.md](../../SECURITY.md)).
 - Claude Code starts one server for a session, and the session's subagents share it and its
   identity. An agent that needs an identity of its own runs as its own Claude Code process.
+- A server keeps the program it started with. Where the install updates itself
+  ([Automatic update](install-and-upgrade.md#automatic-update)), the server of a running
+  session answers with the old release until the session ends, while a hook or a command
+  started meanwhile runs the new one. The server itself never looks for a release and never
+  installs one, and no tool does: a host that agents use only through `swarmops mcp` stays on
+  its release until someone runs `so update` or another command there. For a swarm whose
+  agents must all run one release, turn automatic update off (`so update --auto off`) and move
+  the host yourself, between sessions.
 - The server opens the store for each call, so it sees what other agents commit meanwhile. It
   exits on any of the store's four documented aborts (storage spec §2;
   [The server exits](../develop/mcp.md#the-server-exits) lists them), such as a failed journal

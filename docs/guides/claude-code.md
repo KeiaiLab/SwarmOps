@@ -505,6 +505,12 @@ is `read_file`, `ls` is `read_tree` and `info` is `repo_info`.
   retries by itself when the ref moves.
 - **Pre-1.0.** A minor version, 0.2 to 0.3 say, may break a public surface other than the hash contract.
   The MCP tools' names, input schemas and results are such a surface.
+- **The program may update itself between sessions.** An install the installer made, of a
+  release after 0.11.0, takes a newer release by itself after a command you run, unless you
+  turn that off with `so update --auto off` ([Install](install.md#how-do-i-update)). The MCP
+  server never starts an update and no tool does; a server that runs keeps the release it
+  started with until its session ends, so the worktree hooks of a session can run a newer
+  release than its server. Nothing about it is printed to an agent.
 - **What a client may rely on.** A new tool, optional argument or error code is not a breaking
   change, so a client should allow for them. The wording of `error.message` and of a `hint` is not
   part of the contract: the `code`, `exit`, `retryable` and the keys of `details` are.

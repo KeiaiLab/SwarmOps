@@ -204,6 +204,15 @@ installs the same tool versions as `ci.yml`'s: move them together.
      moves any of these is one those builds fail to install, each once
      ([known limitations](docs/known-limitations.md#updating-the-program)).
 
+     The pages on updating say "a release after 0.11.0" and "from the first release after
+     0.11.0 on" for the same reason: README.md's install section, `docs/guides/install.md`
+     ("How do I update?"), `docs/operate/install-and-upgrade.md` (the ways to install, and
+     "Automatic update"), `docs/guides/parallel-agents.md`, `docs/guides/claude-code.md`,
+     `docs/policies/versioning-and-stability.md` ("What automatic update crosses"),
+     `docs/troubleshooting.md`, SECURITY.md and `docs/known-limitations.md` ("No release
+     holds `update` yet", which goes with the release that holds it). When this release does
+     not hold the command, name this release in them.
+
      Other sentences say the same without a version, and turn false with the first release
      that holds a macOS archive. Change them when the sentences above come to name that
      release:

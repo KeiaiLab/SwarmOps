@@ -203,7 +203,11 @@ environment there”. Each agent's worktree needs its own setup.
 
 SwarmOps is version control for swarms of coding agents. It is designed for large pools of Claude
 Code or LangGraph processes committing to one repository at once, and it is written in Rust and
-fully embedded: one program, no external database, no daemon. It is measured today at 50 agents
+fully embedded: one program, no external database, no daemon. (From the first release after
+0.11.0 on, a copy the installer put there updates itself once a day unless it is told not to,
+`so update --auto off`; agents are never shown a line about it, and a swarm that must stay on
+one release for a run turns it off:
+[Install, How do I update?](install.md#how-do-i-update).) It is measured today at 50 agents
 landing on one host: 25.0 lands/s, nothing lost
 ([perf.md, "D2-8 gated runs — 2026-11-09"](../perf.md#d2-8-gated-runs--2026-11-09)). Agents do not check files out of it.
 They read a path at a revision, `so cat main:src/lib.rs`, and write a commit from a JSON list of

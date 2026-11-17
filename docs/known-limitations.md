@@ -1235,6 +1235,81 @@ left).
   release takes a file of one line as a mark. *Planned: asked by hand before the first release
   that holds the command ([RELEASE.md](../RELEASE.md#not-there-yet)). Found: the update
   design's review.*
+- **No release holds `update` yet.** 0.11.0 and every release before it have no `update`
+  command, read no receipt and never update themselves: they are moved by the installer run
+  again, or by their package. An install of 0.11.0 gets automatic update with the first later
+  release the installer puts there, not before. *Documented
+  ([Install](guides/install.md#how-do-i-update)). Found: the update design.*
+- **An update is not signed, and a freeze is not seen.** `update` trusts what the installer
+  trusts: HTTPS to GitHub, and the release's own `SHA256SUMS`, which comes from the same place
+  as the archive. It takes no older release, but a host that is shown no newer release at all,
+  by a proxy or by whoever answers for GitHub, cannot tell, and stays as it is in silence.
+  *Unscheduled: signed releases need a key the maintainers hold. Documented
+  ([SECURITY.md](../SECURITY.md)). Found: the update design.*
+- **Only installs of the installer update, and not everywhere.** A `.deb` or `.rpm`, a server
+  image, an archive unpacked by hand and a build from a clone never update themselves, and
+  `update` refuses there (`no_receipt`, `not_a_release_build`). An installer's install does
+  not either for root, in a directory another user owns, where `CI` is set, or in a container,
+  which is known only by `/.dockerenv` and `/run/.containerenv`: another container runtime is
+  not recognised, and an image whose install updates itself there downloads the release again
+  in each new container, so pin the version in an image
+  ([Install](guides/install.md#how-do-i-install-on-many-hosts)). *Documented
+  ([`update`](reference/commands/update.md#automatic-updates-switch)). Found: the update
+  design's review.*
+- **A host that uses SwarmOps through `swarmops mcp` alone never updates itself.** Nothing
+  looks for a release after `mcp`, `serve`, `auth git-credential` or `ws hook`, and none of
+  them prints a note. Such a host is updated by `so update`, or by any other command run there
+  once a day. *Documented ([`update`](reference/commands/update.md#after-a-command)). Found: the
+  update design's review.*
+- **One host runs two releases for a while after an update.** A process that runs keeps the
+  program it started with, so a `swarmops mcp` server answers with the old release until its
+  session ends, while the commands and hooks started after the update run the new one. The
+  entries on older binaries under [Workspaces](#workspaces) say what an older build does to a
+  newer one's records. On Linux, a process that outlives the replacement of its own file can
+  no longer start itself again (the system names its file as deleted): on a store served to
+  git, a `swarmops mcp` server from before the update no longer starts the run that makes
+  `serve.git` current after a ref move, and the next git connection refreshes it instead, as
+  it did before that run existed. Any replacement did this, the installer's too; with automatic
+  update it happens without anyone having run one. *Unscheduled: starting the child from
+  `/proc/self/exe`. Found: the update design's review.*
+- **The note is for a terminal, and can be lost.** What a background run did is printed by the
+  next command whose stderr is a terminal, where automatic update is on for that command;
+  after `so update --auto off`, or under `SWARMOPS_AUTO_UPDATE=off`, a note that was waiting
+  stays in its file and only `so update --status` shows it. A command that reads the note and
+  removes it while a background run writes a newer one prints the old note and removes the
+  new. A failed install's reason, the installer's last line, is in the printed line and in the
+  note file, not in `pending`. *Unscheduled. Found: the automatic update's implementation.*
+- **The background run keeps descriptors 10 and above open.** It is started through `/bin/sh`,
+  which closes the descriptors 3 to 9 that the command inherited, so that a `flock 9` of a
+  script or a pipe a harness reads to its end is not held for the length of a download.
+  `unsafe` code is forbidden here, so nothing closes the rest: a descriptor numbered 10 or
+  more that the caller passed down without close-on-exec stays open in that run, for up to
+  three minutes when it installs. A script that locks through such a descriptor sets
+  `SWARMOPS_AUTO_UPDATE=off`. *Unscheduled. Found: the update design's review.*
+- **The installer takes no lock.** `update` holds `.swarmops-update.lock` while it replaces the
+  binaries; the installer run by hand does not look at it. An installer run into a directory
+  while an update runs there can leave `swarmops` and `so` of two releases, which the next
+  `so update` or installer run puts right. A stopped `update --auto` or background run can
+  leave a file `.swarmops-receipt.<pid>` or `.swarmops-update.note.<pid>` beside the binaries,
+  which nothing removes. *Unscheduled. Found: the update design's review.*
+- **`update` needs curl where the installer takes wget.** The request for the latest release is
+  a run of curl; a host with wget alone is `E_INVALID_ARG` (`details.reason` `curl_missing`),
+  though the installer, run by hand, installs there. In the background such a host does
+  nothing and says nothing. *Unscheduled. Documented
+  ([`update`](reference/commands/update.md#what-it-runs-and-what-that-sends)). Found: the update
+  design's review.*
+- **A release the built-in installer cannot install fails once, and then waits.** An update
+  runs the installer of the build that is installed, not the new release's. A release that
+  needs a newer glibc than that installer knows of, that holds no archive for the host, or
+  that changed the archive's layout fails there: the background run notes the failure, does
+  not try that release again, and the host waits for `so update`, which fails the same way, or
+  for the installer from get.swarmops.cc. *Documented
+  ([the versioning policy](policies/versioning-and-stability.md#what-automatic-update-crosses)
+  lists what a release must keep). Found: the update design's review.*
+- **The update's tests have run on macOS only.** The tests of `update` and of automatic update
+  ran on the maintainers' Mac. Their Linux run is CI's: the pseudo-terminal test there uses
+  util-linux's `script`, with other arguments than macOS's, and has not run yet. *Target: the
+  first CI run of the branch. Found: the automatic update's implementation.*
 
 ## Performance
 

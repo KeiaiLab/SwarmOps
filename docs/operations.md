@@ -144,7 +144,9 @@ keeps its heading here, so that links to it still arrive, and points to where it
 
 ## Upgrades
 
-[Upgrade](operate/install-and-upgrade.md#upgrade).
+[Upgrade](operate/install-and-upgrade.md#upgrade). An installer's install moves to a new release by
+itself unless that is turned off: [Automatic
+update](operate/install-and-upgrade.md#automatic-update).
 
 ## Limits
 

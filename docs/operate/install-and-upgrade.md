@@ -27,14 +27,15 @@ Commands and outputs here follow the
 - For a package: a Debian-family host with dpkg and apt, or a RHEL-family one with rpm and dnf.
 - For a build from a clone: rustup and a C compiler.
 
-Pick one of the four ways to install:
+Pick one of the four ways to install. Only the first gives binaries that update themselves
+([Automatic update](#automatic-update)):
 
-| Way | When |
-| --- | --- |
-| [The installer](#install-with-the-installer) | one command, the latest or a pinned release |
-| [From a .deb or .rpm package](#install-from-a-deb-or-rpm-package) | the host's package manager owns the files (v0.8.0 on) |
-| [From a clone](#install-from-a-clone) | a commit that is not a release |
-| [From a release archive](#install-from-a-release-archive) | you download and check the archive yourself |
+| Way | When | Updates itself? |
+| --- | --- | --- |
+| [The installer](#install-with-the-installer) | one command, the latest or a pinned release | yes, from the first release after 0.11.0 on; not when pinned, with `--no-auto-update`, or as root |
+| [From a .deb or .rpm package](#install-from-a-deb-or-rpm-package) | the host's package manager owns the files (v0.8.0 on) | never |
+| [From a clone](#install-from-a-clone) | a commit that is not a release | never |
+| [From a release archive](#install-from-a-release-archive) | you download and check the archive yourself | never, until the installer is run once into that directory |
 
 ## Install with the installer
 
@@ -55,14 +56,68 @@ half a new one.
 | --- | --- |
 | install a given release | `… \| bash -s -- --version 0.1.0` |
 | install elsewhere | `… \| bash -s -- --dir /opt/swarmops/bin` (or `SWARMOPS_INSTALL_DIR`) |
-| update | the same command again: it says which version it replaced |
-| uninstall | `… \| bash -s -- --uninstall`: removes the two binaries, if they are SwarmOps', with the installer's receipt, and no store |
+| install the latest release and keep it | `… \| bash -s -- --no-auto-update` |
+| update | `so update` (a release after 0.11.0), or the same command again: it says which version it replaced |
+| uninstall | `… \| bash -s -- --uninstall`: removes the two binaries, if they are SwarmOps', with the installer's receipt and what an update left beside them, and no store |
 
 For a fleet, pin `--version` (or `SWARMOPS_VERSION`) so that every host runs the same release,
 and keep a reviewed copy of the script with your provisioning rather than piping it from the
-network each time. It needs curl or wget, tar, and sha256sum or shasum; it sends no telemetry
+network each time. A pinned install stays pinned: the installer turns automatic update off for
+it. It needs curl or wget, tar, and sha256sum or shasum; it sends no telemetry
 and edits no shell startup file, so it prints the `PATH` line to add when the directory is not
 on `PATH`.
+
+The installer leaves a receipt beside the binaries, `.swarmops-receipt`: two lines that say the
+installer put them there and whether they may update themselves. `so update` works only where
+that file is, and for a release after 0.11.0 one line of the installer's report says what the
+receipt holds.
+
+### Automatic update
+
+From the first release after 0.11.0 on, an install the installer made as a normal user, with no
+version named, updates itself: after a command that went well, at most once in 24 hours, it
+starts a detached process that asks GitHub for the latest release and installs it when the
+maintainers marked it for the installed minor line
+([`update`](../reference/commands/update.md#after-a-command)). For a host you operate, that
+means:
+
+- **The host changes version without you.** Within a day of a release being marked, the
+  one-shot commands on the host run the new release. Processes that were running keep the old
+  one until they end: a `swarmops mcp` server for its session, so one host runs two releases
+  for a while ([Agents](agents.md#the-tools-agents-get)).
+- **It crosses breaking changes of the command line**, which before 1.0 a minor release may
+  hold. It does not cross a release that changes what stores older builds can open, or one that
+  needs a step by hand: those are announced and wait for `so update`
+  ([What automatic update crosses](../policies/versioning-and-stability.md#what-automatic-update-crosses)).
+- **It never touches a store.** It runs no `upgrade`, no `verify` and no `gc`, and holds no
+  store's lock.
+- **It reaches GitHub**, by the host's curl and the installer's downloader: one request a day
+  of use, one more whose address names the installed minor line when a release is newer, then
+  the downloads. A host without a route there stays as it is, silently, and asks again a day
+  later; no command waits for it or fails over it.
+- **It is told at a terminal only.** The command after an update prints one line on stderr when
+  its stderr is a terminal. An agent's harness or a script sees nothing; `so update --status`
+  gives what happened as `pending`.
+
+To decide for a host instead:
+
+| You want | Do this |
+| --- | --- |
+| every host on one release, moved by your provisioning | install with `--version` (or `SWARMOPS_VERSION`); automatic update is then off |
+| the latest release at install time, then no change | install with `--no-auto-update` |
+| an existing install to stop updating itself | `so update --auto off` on it, once: it is written beside the binaries and holds for every user of that install |
+| one service or job to stay out of it | `SWARMOPS_AUTO_UPDATE=off` in its environment |
+| to see what a host does | `so update --status`: `auto_update` is `on`, or names what turned it off |
+| to move a host yourself | `so update`, or the installer with the new `--version` |
+
+It is off without any of these where `CI` is set, in a container (`/.dockerenv` or
+`/run/.containerenv`), for root, in a directory another user owns, for a package's or an
+archive's install, and for a build from a clone. A `/usr/local/bin` install by root is therefore
+never updated unasked, whoever runs it: update it with `so update` run as root, or with the
+installer.
+`SWARMOPS_AUTO_UPDATE=on` cancels the `CI` and container rules alone. Do not run the installer
+into a directory while an update runs there: the installer takes no lock
+([known limitations](../known-limitations.md#updating-the-program)).
 
 ## Install from a .deb or .rpm package
 
@@ -221,11 +276,13 @@ A binary opens only a store whose `FORMAT` it knows, and refuses any other as `E
 
 1. Install the new binary over the old one, the way you installed it
    ([installer](#install-with-the-installer), [package](#install-from-a-deb-or-rpm-package),
-   [clone](#install-from-a-clone) or [archive](#install-from-a-release-archive)).
+   [clone](#install-from-a-clone) or [archive](#install-from-a-release-archive)); on an
+   installer's install, `so update` does it, and where [automatic update](#automatic-update) is
+   on, this step has happened by itself. `so --version` says which release the host runs now.
 2. Running MCP servers keep the binary they started with until their sessions end: end the
-   sessions to move them to the new one.
+   sessions to move them to the new one. An automatic update does not do this for you.
 3. Check the store with `verify --deep` after the upgrade
-   ([Verify and repair](verify-and-repair.md)).
+   ([Verify and repair](verify-and-repair.md)). An automatic update does not do this either.
 
 ### Upgrade to a release with a new FORMAT
 
@@ -235,7 +292,11 @@ frame, a checksum to every `journal.off` entry, and ref names beyond `main` and
 `release/<name>`. `FORMAT 3` (M20) keeps FORMAT 2's journal and adds a nonce to every frame,
 sorted views built outside the writer lock, and a column of facts. An older binary refuses the new
 store rather than misread it. A store stays in its format under the new binary, which reads and
-writes it as before, until it is upgraded:
+writes it as before, until it is upgraded. No update of the program upgrades a store: `update`
+and `upgrade` are two commands, and only you run the second. A release whose `init` starts to
+make a format that older releases refuse is not installed unasked from an older line, so that
+the hosts of a fleet do not start making stores the others cannot open; `so update` installs
+it. Then:
 
 1. Install the new binary, and end the sessions that run the old one, as for the same `FORMAT`.
 2. Run `verify --deep` ([Verify and repair](verify-and-repair.md)), then upgrade:

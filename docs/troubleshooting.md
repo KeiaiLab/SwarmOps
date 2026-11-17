@@ -211,6 +211,38 @@ removes `swarmops` and `so` from DIR when they are SwarmOps' own, and leaves eve
 Removed swarmops so from inst. Stores are left as they are.
 ```
 
+### The program changed version by itself
+
+An install the installer made, of a release after 0.11.0, updates itself
+([Install, How do I update?](guides/install.md#how-do-i-update)). `so update --status` says
+whether this one does (`auto_update`), and `so update --auto off` stops it. The command after an
+update prints one line on stderr at a terminal, once; a script sees none, and reads `pending` of
+`so update --status`.
+
+| You see | Why | What to do |
+| --- | --- | --- |
+| `so --version` names a newer release than you installed | Automatic update is on, and a marked release arrived. | Nothing; or `so update --auto off`, then the installer with `--version` to go back. |
+| An MCP server answers with the old version | A process keeps the program it started with. | End the session; the next one starts the new release. |
+| `swarmops: X.Y.Z is released and was not installed automatically.` | The release is not marked for your minor line: it changes what stores older builds can open, needs a step by hand, or its marks are not uploaded yet. | Read the notes the line links, then `so update`. |
+| `swarmops: X.Y.Z could not be installed automatically: …` | The installer built into your release failed; the line ends with its last message. That release is not tried again unasked. | `so update` for the full error; else the installer from get.swarmops.cc. |
+| It never updates, and `auto_update` is `on` | The check runs after a command that went well, once in 24 hours, and installs only a marked release. No route to `github.com`, or no `curl`, is silent. | `so update --check` asks now and says what fails. |
+| It never updates, and `auto_update` is `off_…` | `off` is the receipt (`--auto off`, a pinned or `--no-auto-update` install); `off_env` the variable `SWARMOPS_AUTO_UPDATE`; `off_ci` a set `CI`; `off_container` a container; `off_owner` root or another user's directory; `off_no_receipt` a package or an archive; `off_source_build` a clone. | [`update`](reference/commands/update.md#automatic-updates-switch) has each. `so update --auto on` for the receipt; a package or a clone is updated the way it was installed. |
+| I turned it off and the version still changed | The switch is per install and per environment: `--auto off` is written beside the binaries of the `so` that ran it, and `SWARMOPS_AUTO_UPDATE=off` holds for the processes that have it. Another install on `PATH`, or a service without the variable, is not covered. | `so update --status` in the environment of the process in question; its `dir` names the install. |
+
+### `so update` fails
+
+| Error | `details` | Means | What to do |
+| --- | --- | --- | --- |
+| `E_INVALID_ARG` | `reason` `no_receipt`, `dir` | The binaries did not come from the installer: a package, or an archive unpacked by hand. | Install the next release's package; or run the installer once with `--dir` naming `details.dir`. |
+| `E_INVALID_ARG` | `reason` `not_a_release_build` | The build is from a clone. | Build the newer source. |
+| `E_INVALID_ARG` | `reason` `receipt`, `path` | The file by the receipt's name is none this build reads. It is not written over. | Look at the file; the installer run again writes a new one. |
+| `E_INVALID_ARG` | `reason` `curl_missing` | No `curl` on `PATH`, and `SWARMOPS_CURL` names none by an absolute path. | Install curl, or run the installer, which also takes wget. |
+| `E_BUSY` | `reason` `update_running` | Another update of this install runs. No store is involved. | Run it again when that one has ended. |
+| `E_REMOTE_UNREACHABLE` | `phase` `update`, `host`, `curl_exit` and `cause`, or `http_status` | GitHub did not answer, or the answer was no redirect to a release's page (a proxy's page, say). | Run it again; look at `HTTPS_PROXY` and the certificates curl trusts. |
+| `E_IO` | `step` `install`, `installer` | The installer failed: `details.installer` is its last line, as in [The installer stops](#the-installer-stops). Nothing was replaced. | What that line says; a release without a build for the host, or a glibc too old, cannot be installed. |
+| `E_IO` | `step` `verify`, `expected`, `found` | A downloaded binary did not print the release's version. Nothing was replaced. | Run it again; if it repeats, report it ([SECURITY.md](../SECURITY.md)). |
+| `E_IO` | `step` `swap`, `lock` or `receipt`, `path` | A file beside the binaries could not be written: the directory is not yours to write. | Run it as the directory's owner. After a failed `swap`, run `so update` again. |
+
 ## The MCP server
 
 `swarmops mcp` is started by the client (Claude Code), not by you, so its failures show in the
@@ -417,7 +449,8 @@ not damaged:
 ```
 
 `details.format` is the format the store names and `details.features` the features it has that
-this build lacks (none for a later format). Install the release that reads it; do not run `repair`.
+this build lacks (none for a later format). Install the release that reads it (`so update` on
+an installer's install); do not run `repair`.
 
 ### `E_EXISTS`
 
@@ -1320,7 +1353,9 @@ commands keep working meanwhile ([When sync stops](guides/github-remote.md#when-
 
 A login that GitHub did not answer has `details.phase` `login`, with `details.host` and no
 `details.remote`, and curl's exit code in `details.curl_exit`: no login was kept, and the command
-can be run again ([A login that fails](#a-login-that-fails)).
+can be run again ([A login that fails](#a-login-that-fails)). An `update` that GitHub did not
+answer has `details.phase` `update` the same way: nothing was replaced
+([`so update` fails](#so-update-fails)).
 
 ### A login that fails
 

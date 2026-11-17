@@ -349,7 +349,12 @@ envelope's `op` is, in `tools/list`'s order. Its arguments are the CLI command's
 `init`, `whoami`, `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`, `clone`,
 `remote add|remove`, `derive`, `auth login|status|logout|git-credential`, `update`, `mcp` and
 `serve` have no tool: an operator or a script runs them as
-commands. A workspace tool names its workspace by its name in the store's registry, and works on
+commands. `update` has none because a call would replace the program the server runs from, and
+the server never looks for a newer release itself: it serves with the release it started with
+until it exits, also after the install was updated under it
+([`update`](../reference/commands/update.md#after-a-command)), so a client that kept
+`tools/list` for its hour gets the same tools from that server. A workspace tool names its
+workspace by its name in the store's registry, and works on
 that directory on the server's host. A `verify` that finds problems is `E_STORE_CORRUPT`, as
 `swarmops verify` is.
 

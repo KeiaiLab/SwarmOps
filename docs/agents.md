@@ -29,6 +29,10 @@ things in a failed envelope:
 - the exit code, the same as `error.exit`;
 - `error.retryable`, which says whether running it again can succeed.
 
+It reads stdout and the exit code, and nothing on stderr: where an install updates itself, the
+one line about it is printed at a terminal only, and `so update --status` gives a program the
+same as `pending` ([Install](guides/install.md#how-do-i-update)).
+
 It never tests `error.message` or the wording of `hint`: they are text for a person, and their
 wording may change in any release. The [versioning policy](policies/versioning-and-stability.md#internal-surfaces)
 says so, and lists what stays compatible. A new code, tool or optional argument is not a breaking

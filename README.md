@@ -32,7 +32,11 @@ curl -fsSL https://get.swarmops.cc/install.sh | bash
 
 It installs `swarmops` and `so` into `~/.local/bin` from the latest
 [release](https://github.com/KeiaiLab/SwarmOps/releases), checked against its `SHA256SUMS`, and
-running it again updates.
+running it again updates. From the first release after 0.11.0 on, such an install also updates
+itself: after a command, at most once a day, it asks GitHub's releases page for a newer release
+and installs one the maintainers marked for it. `so update --auto off` turns that off, as does
+installing with `--no-auto-update` or a named `--version`; `so update` updates by hand
+([how updates happen](docs/guides/install.md#how-do-i-update)).
 
 - `.deb` and `.rpm` packages: [install guide](docs/guides/install.md#how-do-i-install-the-deb-or-rpm-package).
 - Pinning a version: [install guide](docs/guides/install.md#how-do-i-pin-a-version).
@@ -114,6 +118,8 @@ Code's worktree hooks a workspace ([Build and test a change](docs/operate/build-
 - You need macOS or Windows: the releases are Linux only today (an Apple silicon macOS build is
   set up for the next one; Windows is planned).
 - You need git parity: hooks, signing, submodules and LFS are a non-goal.
+- Your hosts must not change under you: an installer's install updates itself unless it is
+  pinned (`--version`) or told not to (`--no-auto-update`, `so update --auto off`).
 - Several hosts must write into one store at once: today one host writes and the others sync
   through a git remote (several writers are planned).
 - The store would sit under `/mnt/`, which is refused with `E_UNSUPPORTED_FS`, or on NFS, SMB or
