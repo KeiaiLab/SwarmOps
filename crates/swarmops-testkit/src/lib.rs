@@ -26,6 +26,8 @@
 //!   error sweeps' template ([`cli::sweep`]).
 //! - [`curl`]: a stand-in for the `curl` a login's device flow runs, which answers what a test
 //!   queued and records each run.
+//! - [`release`]: an install in a temp directory and a release to update it to, served to the
+//!   binary's built-in installer by a stand-in for the curl it runs, for the tests of `update`.
 //! - [`measure`]: what the store's benches and measurement tests share.
 //! - [`openmetrics`]: a reader of the OpenMetrics text format, for the text `health` prints.
 //! - [`git`]: the git fixtures: repositories real git made from the scripts in
@@ -89,6 +91,7 @@ pub mod openmetrics;
 #[cfg(feature = "repo")]
 pub mod pool;
 pub mod power;
+pub mod release;
 pub mod remote;
 #[cfg(feature = "repo")]
 pub mod repo;
