@@ -9,7 +9,8 @@
 //!                                             [rejected] (non-fast-forward | fetch first)
 //!                                                                                  → NotFastForward
 //!                                             [remote rejected] (stale: … fetch first), or
-//!                                               (failed to update ref) with this ref's lost lock
+//!                                               (failed to update ref | incorrect old value
+//!                                               provided) with this ref's lost lock
 //!                                                                                  → Stale
 //!                                             [remote rejected] (unpacker error)  → stderr's row,
 //!                                               but not Disconnected when our pack-objects died
@@ -250,7 +251,7 @@ fn refused(summary: &str, dst: &str, branch: &str, said: &Said<'_>) -> Transport
     // 1. The remote lost a race for the ref: serve's hook saw it move, or receive-pack lost
     //    the ref's lock to another push. The lease reads it as stale.
     let serve_stale = reason.starts_with(SERVE_STALE) && reason.ends_with(FETCH_FIRST);
-    let lock_lost = reason == LOCK_FAILED && lost_lock(said.stderr, dst);
+    let lock_lost = LOCK_FAILED.contains(&reason) && lost_lock(said.stderr, dst);
     if serve_stale || lock_lost {
         return TransportError::Stale {
             branch: branch.to_owned(),
@@ -274,8 +275,9 @@ fn refused(summary: &str, dst: &str, branch: &str, said: &Said<'_>) -> Transport
 const SERVE_STALE: &str = "stale: ";
 const FETCH_FIRST: &str = "fetch first";
 
-/// receive-pack's reason for a ref it could not move; its stderr says why.
-const LOCK_FAILED: &str = "failed to update ref";
+/// receive-pack's reasons for a ref it could not move; its stderr says why. A git that updates a
+/// push's refs in one batch (2.54 does) gives the second for a ref whose lock another push took.
+const LOCK_FAILED: [&str; 2] = ["failed to update ref", "incorrect old value provided"];
 
 /// receive-pack's reason for a pack it could not unpack.
 const UNPACKER_ERROR: &str = "unpacker error";
@@ -636,7 +638,11 @@ fatal: Could not read from remote repository.";
         );
         assert_eq!(refused_with(summary, &sha256), stale());
 
-        // 3. Another ref's race is not this ref's.
+        // 3. The same race as a git that updates the refs in one batch words it (2.54).
+        let batched = "[remote rejected] (incorrect old value provided)";
+        assert_eq!(refused_with(batched, sha1), stale());
+
+        // 4. Another ref's race is not this ref's.
         let other = sha1.replace("refs/heads/main", "refs/heads/other");
         assert_eq!(
             declined_refs(summary, &other).0,
