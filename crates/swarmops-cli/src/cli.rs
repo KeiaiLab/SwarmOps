@@ -1900,7 +1900,7 @@ pub fn usage(bin: Option<&str>, path: &[String]) -> String {
 
 /// The grammar of [`Cli`], with a missing subcommand a usage error rather than a help screen,
 /// so that it too gets an envelope.
-fn command() -> clap::Command {
+pub(crate) fn command() -> clap::Command {
     Cli::command()
         .arg_required_else_help(false)
         .mut_subcommand("ref", |cmd| cmd.arg_required_else_help(false))

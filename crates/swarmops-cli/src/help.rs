@@ -1,25 +1,26 @@
-//! The help screen the CLI lays out itself: the program's own (`swarmops --help`), with its
-//! commands in named groups. [`shaped`] gives the grammar's root a help template; every other
-//! command keeps clap's screen.
+//! The help screens the CLI lays out itself: the program's own (`swarmops --help`), with its
+//! commands in named groups, and each command family's (`swarmops ws --help`). Both come from
+//! one mechanism, [`shaped`], which gives those commands of the grammar a help template; every
+//! other command keeps clap's screen.
 //!
 //! ```text
 //! <what it is>
 //!
 //! Usage: so [OPTIONS] <COMMAND>
 //!
-//! <group>:
+//! <group>:            (a family: Commands:)
 //!   <name>  <summary>
 //!
 //! Examples:
-//! Output:
+//! Output:             (the program's screen only)
 //! Learn more:
 //! Options:
 //! ```
 //!
 //! A screen is plain text at most [`WIDTH`] columns wide. Its headings and command names carry
 //! the styles clap gives its own (bold, underlined), which clap writes to a terminal only. The
-//! summaries are this module's ([`GROUPS`]): a line each, shorter than the commands' own help,
-//! which their own screens and the reference pages keep.
+//! summaries are this module's ([`GROUPS`], [`FAMILIES`]): a line each, shorter than the
+//! commands' own help, which their own screens and the reference pages keep.
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
@@ -166,11 +167,13 @@ pub(crate) const GROUPS: [Group; 7] = [
 pub(crate) struct Example {
     /// The line's words after the program's name.
     pub(crate) words: &'static [&'static str],
+    /// The file its stdin is read from (`< FILE`), if it reads one.
+    pub(crate) stdin: Option<&'static str>,
 }
 
-/// An [`Example`].
+/// An [`Example`] that reads no stdin.
 const fn example(words: &'static [&'static str]) -> Example {
-    Example { words }
+    Example { words, stdin: None }
 }
 
 /// The line the program's examples start from, which is no run of the program: it names the
@@ -196,6 +199,155 @@ pub(crate) const EXAMPLES: [Example; 6] = [
     example(&["--human", "log"]),
 ];
 
+/// What a family's examples need set before they run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Needs {
+    /// A store named by `SWARMOPS_REPO` and a caller by `SWARMOPS_AGENT`.
+    Store,
+    /// Nothing: the family uses no store.
+    Nothing,
+}
+
+/// A command family: a command that only groups subcommands.
+pub(crate) struct Family {
+    /// The family's name, a top-level command.
+    pub(crate) name: &'static str,
+    /// Its subcommands, in the grammar's order.
+    pub(crate) commands: &'static [Entry],
+    /// One or two lines that show it at work.
+    pub(crate) examples: &'static [Example],
+    /// What those lines need set.
+    pub(crate) needs: Needs,
+    /// The guide that explains the family, an address of the site.
+    pub(crate) guide: &'static str,
+}
+
+/// Every command family, with a summary of each of its subcommands.
+pub(crate) const FAMILIES: [Family; 7] = [
+    Family {
+        name: "ws",
+        commands: &[
+            entry("create", "Make a workspace in a directory of its own"),
+            entry(
+                "status",
+                "What changed in a workspace, and how far its target moved",
+            ),
+            entry("diff", "A workspace's edits against its head"),
+            entry("commit", "Record a workspace's edits as one changeset"),
+            entry("rebase", "Move a workspace's chain onto its target's head"),
+            entry("resolve", "Mark conflicting paths of a rebase resolved"),
+            entry("land", "Land a workspace's chain on its target"),
+            entry("materialize", "Write out more of a workspace's tree"),
+            entry("discard", "Restore paths from the head: the edits are lost"),
+            entry("snapshot", "Record the edits as a changeset, moving no ref"),
+            entry("list", "List the store's workspaces"),
+            entry("info", "Describe one workspace"),
+            entry("delete", "Remove a workspace's directory, then its entry"),
+            entry("hook", "The agent hosts' hooks, on stdin and stdout"),
+        ],
+        examples: &[
+            example(&["ws", "create", "fix-1"]),
+            example(&["--human", "ws", "status", "--ws", "fix-1"]),
+        ],
+        needs: Needs::Store,
+        guide: "https://swarmops.cc/docs/guides/parallel-agents",
+    },
+    Family {
+        name: "ref",
+        commands: &[
+            entry("list", "List refs, each with its kind"),
+            entry("set", "Point a ref at a revision, by compare-and-swap"),
+            entry("delete", "Delete a ref"),
+            entry("log", "List a ref's moves, newest first"),
+            entry("txn", "Move several refs as one operation: all or none"),
+        ],
+        examples: &[
+            example(&["--human", "ref", "list"]),
+            example(&["ref", "set", "release/1.0", "main", "--create"]),
+        ],
+        needs: Needs::Store,
+        guide: "https://swarmops.cc/docs/guides/history-and-undo",
+    },
+    Family {
+        name: "op",
+        commands: &[
+            entry("log", "List the store's operations, newest first"),
+            entry(
+                "undo",
+                "Move every ref an operation moved back, all or none",
+            ),
+        ],
+        examples: &[example(&["--human", "op", "log"])],
+        needs: Needs::Store,
+        guide: "https://swarmops.cc/docs/guides/history-and-undo",
+    },
+    Family {
+        name: "blob",
+        commands: &[
+            entry("put", "Store a file's content as a blob, and print its id"),
+            entry("has", "Of the ids given, list those the store holds"),
+            entry("get", "Print the blobs the ids name"),
+        ],
+        examples: &[example(&["blob", "put", "logo.png"])],
+        needs: Needs::Store,
+        guide: "https://swarmops.cc/docs/guides/commit-and-land",
+    },
+    Family {
+        name: "git",
+        commands: &[
+            entry("import", "Bring a git repository's history in"),
+            entry("export", "Send the store's history to a git repository"),
+        ],
+        examples: &[
+            example(&[
+                "git", "export", "app.git", "--ref", "main", "--branch", "main",
+            ]),
+            example(&[
+                "git", "import", "app.git", "--ref", "main", "--into", "from-git",
+            ]),
+        ],
+        needs: Needs::Store,
+        guide: "https://swarmops.cc/docs/guides/git-round-trip",
+    },
+    Family {
+        name: "remote",
+        commands: &[
+            entry("add", "Record a git remote in the store"),
+            entry("remove", "Forget a git remote, and the mirror's refs of it"),
+            entry("list", "List the store's git remotes"),
+        ],
+        examples: &[
+            example(&[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/OWNER/REPO.git",
+            ]),
+            example(&["--human", "remote", "list"]),
+        ],
+        needs: Needs::Store,
+        guide: "https://swarmops.cc/docs/guides/github-remote",
+    },
+    Family {
+        name: "auth",
+        commands: &[
+            entry("login", "Log in to a provider, and keep its token"),
+            entry("status", "List your logins, without their tokens"),
+            entry("logout", "Remove a provider's login"),
+            entry("git-credential", "Answer git's credential-helper protocol"),
+        ],
+        examples: &[
+            Example {
+                words: &["auth", "login", "--gh", "--with-token"],
+                stdin: Some("token.txt"),
+            },
+            example(&["--human", "auth", "status"]),
+        ],
+        needs: Needs::Nothing,
+        guide: "https://swarmops.cc/docs/guides/github-remote",
+    },
+];
+
 /// What the program's screen says of its output.
 const OUTPUT: &str = "Every command prints one JSON envelope on stdout, or with --human a short \
 text, and exits 0 or with its error's code. mcp, serve, derive --follow and auth \
@@ -215,6 +367,9 @@ const PAGES: [(&str, &str); 4] = [
     ("Error codes", "https://swarmops.cc/docs/reference/errors"),
 ];
 
+/// The page every family's screen names beside its guide.
+const REFERENCE: &str = "https://swarmops.cc/docs/reference/cli";
+
 /// The name the line `first` starts invokes the program by, as clap's usage lines give it: its
 /// file name, or `swarmops` when it has none that is UTF-8.
 pub(crate) fn invoked(first: Option<&OsStr>) -> &str {
@@ -223,15 +378,46 @@ pub(crate) fn invoked(first: Option<&OsStr>) -> &str {
         .unwrap_or(PROGRAM)
 }
 
-/// `grammar`, the program's, with the screen of this module as its own help. The examples name
-/// the program `bin`. The grammar reads every line as before: only the help text changes.
+/// `grammar`, the program's, with the screens of this module: its own help in groups, and each
+/// family's in the same shape. The examples name the program `bin`. The grammar reads every
+/// line as before: only the help text changes, and the subcommands keep their order, which
+/// clap's messages list them in.
 pub(crate) fn shaped(grammar: Command, bin: &str) -> Command {
     let styles = grammar.get_styles().clone();
     let options = options(&grammar, &styles);
 
-    // Its long help is its short one: the screen says the rest.
+    // 1. The program's own screen. Its long help is its short one: the screen says the rest.
     let template = program_template(bin, &styles, &options);
-    grammar.long_about(None).help_template(template)
+    let mut grammar = grammar.long_about(None).help_template(template);
+
+    // 2. The families, in the order the grammar has them: `mut_subcommand` moves each to the
+    //    end.
+    let order: Vec<&Family> = grammar
+        .get_subcommands()
+        .filter_map(|sub| FAMILIES.iter().find(|family| family.name == sub.get_name()))
+        .collect();
+    for family in order {
+        let template = family_template(family, bin, &styles, &options);
+        grammar = grammar.mut_subcommand(family.name, |cmd| refilled(cmd).help_template(template));
+    }
+    grammar
+}
+
+/// `cmd` with its help's first lines, short and long, wrapped at [`WIDTH`] columns: clap
+/// writes them as they are.
+fn refilled(cmd: Command) -> Command {
+    let about = cmd.get_about().map(|about| wrapped(&about.to_string(), 0));
+    let long = cmd
+        .get_long_about()
+        .map(|about| wrapped(&about.to_string(), 0));
+    let cmd = match about {
+        Some(about) => cmd.about(about),
+        None => cmd,
+    };
+    match long {
+        Some(long) => cmd.long_about(long),
+        None => cmd,
+    }
 }
 
 /// The program's help template: clap fills in the about and the usage, the rest is text.
@@ -267,6 +453,41 @@ fn program_template(bin: &str, styles: &Styles, options: &str) -> String {
     out
 }
 
+/// A family's help template, in the program's shape.
+fn family_template(family: &Family, bin: &str, styles: &Styles, options: &str) -> String {
+    let mut out = String::from("{about}\n\n{usage-heading} {usage}\n");
+
+    // 1. The subcommands.
+    heading(&mut out, styles, "Commands");
+    let width = family.commands.iter().map(|entry| entry.name.len()).max();
+    entries(&mut out, styles, family.commands, width.unwrap_or(0));
+
+    // 2. The examples.
+    let title = match family.needs {
+        Needs::Store => "Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you)",
+        Needs::Nothing => "Examples",
+    };
+    heading(&mut out, styles, title);
+    examples(&mut out, bin, family.examples);
+
+    // 3. Where to read more.
+    heading(&mut out, styles, "Learn more");
+    let name = family.name;
+    let _ = writeln!(out, "  {bin} {name} <command> --help  {COMMAND_HELP}");
+    let pages = [("Guide", family.guide), ("Reference", REFERENCE)];
+    table(
+        &mut out,
+        &pages.map(|(label, page)| (label.to_owned(), page)),
+    );
+
+    // 4. The options, last. `--version` is the program's alone.
+    heading(&mut out, styles, "Options");
+    for line in options.lines().filter(|line| !line.contains("--version")) {
+        let _ = writeln!(out, "{line}");
+    }
+    out
+}
+
 /// The longest command name of `groups`.
 fn name_width(groups: &[Group]) -> usize {
     let names = groups.iter().flat_map(|group| group.commands);
@@ -299,8 +520,8 @@ fn examples(out: &mut String, bin: &str, examples: &[Example]) {
     }
 }
 
-/// `example` as a line to type: the program `bin`, then its words, quoted where a shell would
-/// split them.
+/// `example` as a line to type: the program `bin`, its words, quoted where a shell would split
+/// them, and its stdin's file.
 fn shell_line(bin: &str, example: &Example) -> String {
     let mut line = bin.to_owned();
     for word in example.words {
@@ -309,6 +530,9 @@ fn shell_line(bin: &str, example: &Example) -> String {
         } else {
             let _ = write!(line, " {word}");
         }
+    }
+    if let Some(file) = example.stdin {
+        let _ = write!(line, " < {file}");
     }
     line
 }
@@ -493,6 +717,99 @@ mod tests {
         for group in &GROUPS {
             check_summaries(group.title, group.commands);
         }
+        for family in &FAMILIES {
+            check_summaries(family.name, family.commands);
+        }
+    }
+
+    /// The families are the grammar's commands that only group subcommands, and each lists
+    /// its subcommands in the grammar's order: a new family, or a new subcommand of one, fails
+    /// here until it has its summary.
+    #[test]
+    fn every_family_lists_its_subcommands() {
+        let grammar = Cli::command();
+        let groups: BTreeSet<&str> = grammar
+            .get_subcommands()
+            .filter(|sub| sub.has_subcommands() && cli::op_name(&[sub.get_name()]).is_none())
+            .map(Command::get_name)
+            .filter(|name| *name != "help")
+            .collect();
+        let families: BTreeSet<&str> = FAMILIES.iter().map(|family| family.name).collect();
+        assert_eq!(families, groups, "the families and the grammar's differ");
+        assert_eq!(families.len(), FAMILIES.len(), "a family listed twice");
+
+        for family in &FAMILIES {
+            let sub = grammar.find_subcommand(family.name).expect("a command");
+            let listed: Vec<&str> = family.commands.iter().map(|entry| entry.name).collect();
+            assert_eq!(listed, subcommands(sub), "{}", family.name);
+            assert!(
+                (1..=2).contains(&family.examples.len()),
+                "{}: an example or two",
+                family.name
+            );
+        }
+    }
+
+    /// A family's screen, short (`-h`) or long (`--help`), with the program named `bin`.
+    fn family_screen(bin: &str, family: &str, long: bool) -> String {
+        let mut grammar = shaped(Cli::command(), bin);
+        grammar.set_bin_name(bin);
+        grammar.build();
+        let mut sub = grammar.find_subcommand(family).expect("a command").clone();
+        let screen = if long {
+            sub.render_long_help()
+        } else {
+            sub.render_help()
+        };
+        screen.to_string()
+    }
+
+    #[test]
+    fn the_families_screens_fit_80_columns_by_either_name() {
+        for family in &FAMILIES {
+            let name = family.name;
+            for bin in ["so", "swarmops"] {
+                for long in [false, true] {
+                    let screen = family_screen(bin, name, long);
+                    check_screen(&format!("{bin} {name} (long: {long})"), &screen);
+
+                    // The shape of the program's screen: usage, commands, examples, more, options.
+                    let usage =
+                        format!("\n\nUsage: {bin} {name} [OPTIONS] <COMMAND>\n\nCommands:\n");
+                    let mut at = screen.find(&usage).unwrap_or_else(|| panic!("{screen}"));
+                    for title in ["\n\nExamples", "\n\nLearn more:\n", "\n\nOptions:\n"] {
+                        let found = screen[at..].find(title);
+                        at += found.unwrap_or_else(|| panic!("{title:?}: {screen}"));
+                    }
+                    assert!(
+                        screen.ends_with("  -h, --help             Print help\n"),
+                        "{screen}"
+                    );
+                    let more = format!("  {bin} {name} <command> --help  ");
+                    assert!(screen.contains(&more), "{screen}");
+                }
+            }
+        }
+    }
+
+    /// The first lines of a family's screen are its command's own help, word for word: only
+    /// the line breaks are this module's.
+    #[test]
+    fn a_family_keeps_its_own_first_lines() {
+        let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let plain = Cli::command();
+        for family in &FAMILIES {
+            let sub = plain.find_subcommand(family.name).expect("a command");
+            let about = sub.get_about().expect("an about").to_string();
+            let short = family_screen("so", family.name, false);
+            let (first, _) = short.split_once("\n\nUsage: ").expect("a usage line");
+            assert_eq!(words(first), words(&about), "{}", family.name);
+
+            let long_about = sub.get_long_about().map_or(about, ToString::to_string);
+            let long = family_screen("so", family.name, true);
+            let (first, _) = long.split_once("\n\nUsage: ").expect("a usage line");
+            assert_eq!(words(first), words(&long_about), "{}", family.name);
+        }
     }
 
     /// Every line of the screen fits [`WIDTH`] columns by either name, with no tag left
@@ -546,6 +863,16 @@ mod tests {
     #[test]
     fn the_examples_are_lines_the_grammar_reads() {
         check_examples(&EXAMPLES);
+        for family in &FAMILIES {
+            check_examples(family.examples);
+            for example in family.examples {
+                assert!(example.words.contains(&family.name), "{}", family.name);
+            }
+        }
+        assert_eq!(
+            shell_line("so", &FAMILIES[6].examples[0]),
+            "so auth login --gh --with-token < token.txt"
+        );
         assert_eq!(
             shell_line("so", &EXAMPLES[3]),
             r#"so ws commit --ws fix-1 -m "Fix the typo""#
@@ -571,14 +898,18 @@ mod tests {
     fn the_pages_named_are_the_site_s() {
         let pages: Vec<&str> = PAGES.iter().map(|(_, page)| *page).collect();
         check_addresses(&pages);
+        let guides: Vec<&str> = FAMILIES.iter().map(|family| family.guide).collect();
+        check_addresses(&guides);
+        check_addresses(&[REFERENCE]);
     }
 
     /// Shaping changes the help text alone: the commands and their order, which clap's
-    /// message for a missing subcommand lists, stay the grammar's.
+    /// message for a missing subcommand lists, stay those of the grammar the CLI reads a line
+    /// with (`cli::command`).
     #[test]
     fn shaping_keeps_the_commands_and_their_order() {
-        let plain = Cli::command();
-        let shaped = shaped(Cli::command(), "so");
+        let plain = cli::command();
+        let shaped = shaped(cli::command(), "so");
         assert_eq!(subcommands(&shaped), subcommands(&plain));
         for (shaped, plain) in shaped.get_subcommands().zip(plain.get_subcommands()) {
             assert_eq!(

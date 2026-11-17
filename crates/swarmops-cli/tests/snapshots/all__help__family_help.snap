@@ -1,0 +1,230 @@
+---
+source: crates/swarmops-cli/tests/help.rs
+expression: screens
+---
+$ so ws --help
+Work in a directory of your own: a workspace holds a sparse copy of a
+changeset's tree.
+
+Edit its files with any tool, build and test there, then commit, rebase and land
+with one command each. A command inside a workspace finds it and its store; --ws
+NAME or --ws-path DIR names another.
+
+Usage: so ws [OPTIONS] <COMMAND>
+
+Commands:
+  create       Make a workspace in a directory of its own
+  status       What changed in a workspace, and how far its target moved
+  diff         A workspace's edits against its head
+  commit       Record a workspace's edits as one changeset
+  rebase       Move a workspace's chain onto its target's head
+  resolve      Mark conflicting paths of a rebase resolved
+  land         Land a workspace's chain on its target
+  materialize  Write out more of a workspace's tree
+  discard      Restore paths from the head: the edits are lost
+  snapshot     Record the edits as a changeset, moving no ref
+  list         List the store's workspaces
+  info         Describe one workspace
+  delete       Remove a workspace's directory, then its entry
+  hook         The agent hosts' hooks, on stdin and stdout
+
+Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you):
+  $ so ws create fix-1
+  $ so --human ws status --ws fix-1
+
+Learn more:
+  so ws <command> --help  A command's arguments, options and long help
+  Guide      https://swarmops.cc/docs/guides/parallel-agents
+  Reference  https://swarmops.cc/docs/reference/cli
+
+Options:
+      --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
+      --as <AGENT>       The agent to act as, <family>/<instance> (default:
+                         $SWARMOPS_AGENT)
+      --json             Print the JSON envelope: the default, unless
+                         $SWARMOPS_FORMAT is human
+      --human            Print a short text rendering instead of JSON
+      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
+                         terminal)
+  -h, --help             Print help
+
+$ so blob --help
+Store content as a blob for a commit to name by its id, or ask which blobs the
+store holds
+
+Usage: so blob [OPTIONS] <COMMAND>
+
+Commands:
+  put  Store a file's content as a blob, and print its id
+  has  Of the ids given, list those the store holds
+  get  Print the blobs the ids name
+
+Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you):
+  $ so blob put logo.png
+
+Learn more:
+  so blob <command> --help  A command's arguments, options and long help
+  Guide      https://swarmops.cc/docs/guides/commit-and-land
+  Reference  https://swarmops.cc/docs/reference/cli
+
+Options:
+      --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
+      --as <AGENT>       The agent to act as, <family>/<instance> (default:
+                         $SWARMOPS_AGENT)
+      --json             Print the JSON envelope: the default, unless
+                         $SWARMOPS_FORMAT is human
+      --human            Print a short text rendering instead of JSON
+      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
+                         terminal)
+  -h, --help             Print help
+
+$ so ref --help
+List refs, or move one by compare-and-swap
+
+Usage: so ref [OPTIONS] <COMMAND>
+
+Commands:
+  list    List refs, each with its kind
+  set     Point a ref at a revision, by compare-and-swap
+  delete  Delete a ref
+  log     List a ref's moves, newest first
+  txn     Move several refs as one operation: all or none
+
+Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you):
+  $ so --human ref list
+  $ so ref set release/1.0 main --create
+
+Learn more:
+  so ref <command> --help  A command's arguments, options and long help
+  Guide      https://swarmops.cc/docs/guides/history-and-undo
+  Reference  https://swarmops.cc/docs/reference/cli
+
+Options:
+      --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
+      --as <AGENT>       The agent to act as, <family>/<instance> (default:
+                         $SWARMOPS_AGENT)
+      --json             Print the JSON envelope: the default, unless
+                         $SWARMOPS_FORMAT is human
+      --human            Print a short text rendering instead of JSON
+      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
+                         terminal)
+  -h, --help             Print help
+
+$ so op --help
+List the store's operations, or undo one
+
+Usage: so op [OPTIONS] <COMMAND>
+
+Commands:
+  log   List the store's operations, newest first
+  undo  Move every ref an operation moved back, all or none
+
+Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you):
+  $ so --human op log
+
+Learn more:
+  so op <command> --help  A command's arguments, options and long help
+  Guide      https://swarmops.cc/docs/guides/history-and-undo
+  Reference  https://swarmops.cc/docs/reference/cli
+
+Options:
+      --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
+      --as <AGENT>       The agent to act as, <family>/<instance> (default:
+                         $SWARMOPS_AGENT)
+      --json             Print the JSON envelope: the default, unless
+                         $SWARMOPS_FORMAT is human
+      --human            Print a short text rendering instead of JSON
+      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
+                         terminal)
+  -h, --help             Print help
+
+$ so git --help
+Bring history in from git, or send it back
+
+Usage: so git [OPTIONS] <COMMAND>
+
+Commands:
+  import  Bring a git repository's history in
+  export  Send the store's history to a git repository
+
+Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you):
+  $ so git export app.git --ref main --branch main
+  $ so git import app.git --ref main --into from-git
+
+Learn more:
+  so git <command> --help  A command's arguments, options and long help
+  Guide      https://swarmops.cc/docs/guides/git-round-trip
+  Reference  https://swarmops.cc/docs/reference/cli
+
+Options:
+      --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
+      --as <AGENT>       The agent to act as, <family>/<instance> (default:
+                         $SWARMOPS_AGENT)
+      --json             Print the JSON envelope: the default, unless
+                         $SWARMOPS_FORMAT is human
+      --human            Print a short text rendering instead of JSON
+      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
+                         terminal)
+  -h, --help             Print help
+
+$ so remote --help
+Add, remove or list the store's git remotes
+
+Usage: so remote [OPTIONS] <COMMAND>
+
+Commands:
+  add     Record a git remote in the store
+  remove  Forget a git remote, and the mirror's refs of it
+  list    List the store's git remotes
+
+Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you):
+  $ so remote add origin https://github.com/OWNER/REPO.git
+  $ so --human remote list
+
+Learn more:
+  so remote <command> --help  A command's arguments, options and long help
+  Guide      https://swarmops.cc/docs/guides/github-remote
+  Reference  https://swarmops.cc/docs/reference/cli
+
+Options:
+      --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
+      --as <AGENT>       The agent to act as, <family>/<instance> (default:
+                         $SWARMOPS_AGENT)
+      --json             Print the JSON envelope: the default, unless
+                         $SWARMOPS_FORMAT is human
+      --human            Print a short text rendering instead of JSON
+      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
+                         terminal)
+  -h, --help             Print help
+
+$ so auth --help
+Keep, list or remove your logins, or hand one to git: a token per host, in one
+file of your own
+
+Usage: so auth [OPTIONS] <COMMAND>
+
+Commands:
+  login           Log in to a provider, and keep its token
+  status          List your logins, without their tokens
+  logout          Remove a provider's login
+  git-credential  Answer git's credential-helper protocol
+
+Examples:
+  $ so auth login --gh --with-token < token.txt
+  $ so --human auth status
+
+Learn more:
+  so auth <command> --help  A command's arguments, options and long help
+  Guide      https://swarmops.cc/docs/guides/github-remote
+  Reference  https://swarmops.cc/docs/reference/cli
+
+Options:
+      --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
+      --as <AGENT>       The agent to act as, <family>/<instance> (default:
+                         $SWARMOPS_AGENT)
+      --json             Print the JSON envelope: the default, unless
+                         $SWARMOPS_FORMAT is human
+      --human            Print a short text rendering instead of JSON
+      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
+                         terminal)
+  -h, --help             Print help
