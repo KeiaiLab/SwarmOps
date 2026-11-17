@@ -56,7 +56,7 @@ half a new one.
 | install a given release | `… \| bash -s -- --version 0.1.0` |
 | install elsewhere | `… \| bash -s -- --dir /opt/swarmops/bin` (or `SWARMOPS_INSTALL_DIR`) |
 | update | the same command again: it says which version it replaced |
-| uninstall | `… \| bash -s -- --uninstall`: removes the two binaries, if they are SwarmOps', and no store |
+| uninstall | `… \| bash -s -- --uninstall`: removes the two binaries, if they are SwarmOps', with the installer's receipt, and no store |
 
 For a fleet, pin `--version` (or `SWARMOPS_VERSION`) so that every host runs the same release,
 and keep a reviewed copy of the script with your provisioning rather than piping it from the

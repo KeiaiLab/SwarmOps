@@ -59,9 +59,12 @@ What the installer does, in order:
    no macOS archive.
 4. Checks the archive against its line in `SHA256SUMS`. On a mismatch, or with no line, nothing is
    installed.
-5. Copies each binary under a temporary name into the directory, then renames it into place: an
+5. Writes its receipt, `.swarmops-receipt`, into the directory: two lines that say the installer
+   put the binaries there, and whether they may update themselves (not with `--no-auto-update`,
+   a named version, or root).
+6. Copies each binary under a temporary name into the directory, then renames it into place: an
    interrupted run leaves the old binary, never half a new one.
-6. Runs `swarmops --version` from the directory and prints the report.
+7. Runs `swarmops --version` from the directory and prints the report.
 
 It needs `curl` or `wget`, `tar`, and `sha256sum` or `shasum`; macOS comes with `curl`, `tar` and
 `shasum`. It sends no telemetry and writes only the install directory and its temporary directory.
@@ -265,7 +268,7 @@ Removed swarmops so from /home/me/.local/bin. Stores are left as they are.
 ```
 
 It removes `swarmops` and `so` only if they are SwarmOps' own, and leaves another program by either
-name alone. A build from source is removed with `cargo uninstall swarmops-cli`, and a package with
+name alone. The installer's receipt goes with them, and what an update left beside them. A build from source is removed with `cargo uninstall swarmops-cli`, and a package with
 `sudo apt remove swarmops` or `sudo dnf remove swarmops`. SwarmOps keeps no
 configuration file and runs no daemon, so nothing else of it is installed.
 

@@ -1,7 +1,9 @@
 #!/bin/sh
 # Installs SwarmOps: `swarmops` and `so` from a GitHub release, checked against the release's
-# SHA256SUMS, into ~/.local/bin (/usr/local/bin as root) or the directory --dir names. Run it
-# again to update; --uninstall removes the two binaries and nothing else.
+# SHA256SUMS, into ~/.local/bin (/usr/local/bin as root) or the directory --dir names. Beside
+# them it leaves a receipt, .swarmops-receipt, which says that this installer put them there and
+# whether they may update themselves. Run it again to update; --uninstall removes the two
+# binaries, the receipt and what an update left beside them, and nothing else.
 #
 #   curl -fsSL https://get.swarmops.cc/install.sh | bash
 #   curl -fsSL https://get.swarmops.cc/install.sh | bash -s -- --version 0.1.0 --dir /opt/swarmops/bin
@@ -40,9 +42,20 @@ MACOS_AFTER=0.11.0
 # A release version, as the tags name it without their `v`: 0.1.0, 0.2.0-rc.1.
 VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
 
+# The last release without `so update`: it and every release before it read no receipt and
+# never update themselves, so the report says nothing about automatic update for them.
+UPDATE_AFTER=0.11.0
+
 # What an archive installs, and how each line the installer prints on stderr starts.
 BINARIES='swarmops so'
 PREFIX='swarmops-install:'
+
+# The receipt, beside the binaries: two lines of TOML, `receipt = 1` and `auto_update = true` or
+# `false`. `so update` works only on an install that has one, and automatic update only where it
+# says true. UPDATE_FILES are what an update leaves beside the binaries: its lock, the note for
+# the next command, and the directory a new release is unpacked in.
+RECEIPT=.swarmops-receipt
+UPDATE_FILES='.swarmops-update.lock .swarmops-update.note .swarmops-update.d'
 
 NEWLINE='
 '
@@ -78,7 +91,10 @@ Options:
   --version X.Y.Z  The release to install. Default: SWARMOPS_VERSION, else the latest.
   --dir DIR        Where to put swarmops and so. Default: SWARMOPS_INSTALL_DIR, else
                    /usr/local/bin as root, else \$HOME/.local/bin.
-  --uninstall      Remove swarmops and so from DIR. Stores are never touched.
+  --no-auto-update Leave automatic update off: the binaries stay as installed until
+                   \`so update\` or this installer replaces them.
+  --uninstall      Remove swarmops and so from DIR, with the receipt and what an update
+                   left beside them. Stores are never touched.
   -h, --help       Print this help.
 
 Environment:
@@ -92,6 +108,12 @@ Environment:
 
 Run it again to update: it replaces both binaries in place.
 
+Beside the binaries it leaves a receipt, DIR/$RECEIPT, which says that this installer
+put them there and whether they may update themselves. They may, unless --no-auto-update
+is given, a version is named (--version or SWARMOPS_VERSION: a pin stays), or root
+installs. A receipt that already says no is left as it is: \`so update --auto on\` turns
+automatic update on again. Releases up to $UPDATE_AFTER do not read the receipt.
+
 Linux: x86_64 or aarch64, with glibc $GLIBC_MIN or newer. macOS: Apple silicon (arm64), from
 the first release after $MACOS_AFTER on; there is no build for an Intel Mac. Needs curl or wget,
 tar, and sha256sum or shasum. It writes only DIR and a temporary directory, and edits no shell
@@ -103,6 +125,7 @@ EOF
 parse_args() {
   opt_version=
   opt_dir=
+  opt_no_auto_update=
   opt_uninstall=
   while [ "$#" -gt 0 ]; do
     case $1 in
@@ -122,6 +145,10 @@ parse_args() {
         ;;
       --dir=*)
         opt_dir=${1#*=}
+        shift
+        ;;
+      --no-auto-update)
+        opt_no_auto_update=1
         shift
         ;;
       --uninstall)
@@ -323,7 +350,9 @@ fetch() {
 # dropped (v0.1.0 is 0.1.0).
 pick_version() {
   version=${opt_version:-${SWARMOPS_VERSION:-}}
-  if [ -z "$version" ]; then
+  if [ -n "$version" ]; then
+    pinned=1
+  else
     latest_version
   fi
   version=${version#v}
@@ -423,7 +452,7 @@ mac_build_listed() {
 }
 
 # Removes what the installer leaves behind, however it ends: its temporary directory, and a
-# binary copied into DIR but not yet renamed into place.
+# binary or a receipt written in DIR but not yet renamed into place.
 cleanup() {
   if [ -n "$staged" ]; then
     rm -f -- "$staged"
@@ -475,9 +504,9 @@ extract() {
   done
 }
 
-# 9. The install: each binary copied to a temporary name in DIR, made executable, then renamed
-# over its own name, so that DIR never holds half a binary. The version it replaces, if any, is
-# kept for the report.
+# 9. The install: the receipt, then each binary copied to a temporary name in DIR, made
+# executable, then renamed over its own name, so that DIR never holds half a binary. The
+# version it replaces, if any, is kept for the report.
 install_bins() {
   mkdir -p -- "$dir" || die "Cannot create $dir."
   dir=$(CDPATH='' cd -- "$dir" && pwd) || die "Cannot enter $dir."
@@ -487,6 +516,7 @@ install_bins() {
     fi
   done
   previous=$(installed_version "$dir/swarmops")
+  leave_receipt
 
   for name in $BINARIES; do
     staged=$(mktemp "$dir/.$name.XXXXXX") || die "Cannot write in $dir."
@@ -497,8 +527,45 @@ install_bins() {
   done
 }
 
-# 10. The report, on stdout: the version now installed, the line that puts DIR on PATH if it
-# is not there, and where to start.
+# The receipt, written before the binaries, so that a run stopped between the two leaves no new
+# binary beside a receipt that lets it update itself against this run's wish. Automatic update
+# is off (`auto_off` says why) for --no-auto-update, for a named version, which is a pin, and
+# for root, whose installs are a host's and not a user's. A receipt that says false already is
+# not written again, whatever this run would say: only `so update --auto on` turns it on.
+leave_receipt() {
+  auto_off=
+  if [ -n "$opt_no_auto_update" ]; then
+    auto_off=flag
+  elif [ -n "$pinned" ]; then
+    auto_off=pinned
+  elif [ "$(id -u)" -eq 0 ]; then
+    auto_off=root
+  fi
+  if receipt_says_off "$dir/$RECEIPT"; then
+    auto_off=${auto_off:-before}
+    return 0
+  fi
+
+  staged=$(mktemp "$dir/$RECEIPT.XXXXXX") || die "Cannot write in $dir."
+  if [ -n "$auto_off" ]; then
+    printf 'receipt = 1\nauto_update = false\n' >"$staged" || die "Cannot write $staged."
+  else
+    printf 'receipt = 1\nauto_update = true\n' >"$staged" || die "Cannot write $staged."
+  fi
+  chmod 0644 "$staged" || die "Cannot make $staged readable."
+  mv -f "$staged" "$dir/$RECEIPT" || die "Cannot replace $dir/$RECEIPT."
+  staged=
+}
+
+# Succeeds when receipt $1 is a file with a line `auto_update = false`.
+receipt_says_off() {
+  [ -f "$1" ] &&
+    grep -Eq '^[[:space:]]*auto_update[[:space:]]*=[[:space:]]*false[[:space:]]*(#.*)?$' "$1" \
+      2>/dev/null
+}
+
+# 10. The report, on stdout: the version now installed, whether it updates itself, the line
+# that puts DIR on PATH if it is not there, and where to start.
 report() {
   printed=$("$dir/swarmops" --version) ||
     die "Installed, but '$dir/swarmops --version' failed."
@@ -507,9 +574,52 @@ report() {
     printf 'Replaced %s.\n' "$previous"
   fi
   printf 'Installed swarmops and so (its short form) in %s.\n' "$dir"
+  auto_update_line
   path_hint
   printf 'Quick start: %s\n' "$QUICK_START_URL"
   printf 'Website: %s\n' "$WEBSITE_URL"
+}
+
+# Whether this install updates itself, why not, and the command that changes it: for a release
+# after UPDATE_AFTER, the first to read the receipt. Root's install stays off whatever the
+# receipt says, so its line names the command that updates it.
+auto_update_line() {
+  if ! after "$version" "$UPDATE_AFTER"; then
+    return 0
+  fi
+  case $auto_off in
+    '')
+      printf 'Automatic update is on. To turn it off: so update --auto off\n'
+      ;;
+    flag)
+      printf 'Automatic update is off (--no-auto-update). To turn it on: so update --auto on\n'
+      ;;
+    pinned)
+      printf 'Automatic update is off, because a version was named.'
+      printf ' To turn it on: so update --auto on\n'
+      ;;
+    root)
+      printf 'Automatic update is off, as for every install by root. To update: so update\n'
+      ;;
+    before)
+      printf 'Automatic update stays off, as it was. To turn it on: so update --auto on\n'
+      ;;
+  esac
+}
+
+# Succeeds when release $1 (X.Y.Z or X.Y.Z-pre) is of a later X.Y.Z than release $2 (X.Y.Z).
+after() {
+  release=${1%%-*}
+  than=$2
+  for _ in 1 2 3; do
+    if [ "${release%%.*}" -ne "${than%%.*}" ]; then
+      [ "${release%%.*}" -gt "${than%%.*}" ]
+      return
+    fi
+    release=${release#*.}
+    than=${than#*.}
+  done
+  return 1
 }
 
 # The line that puts DIR on PATH, unless PATH has it: for fish, or for sh and its kin. On
@@ -568,7 +678,8 @@ installed_version() {
 }
 
 # --uninstall: removes swarmops and so from DIR when they are SwarmOps' own; another program
-# by either name is left alone. Stores, and everything else, stay.
+# by either name is left alone. The receipt and what an update left beside the binaries go
+# too, also where no binary is left to remove. Stores, and everything else, stay.
 uninstall() {
   removed=
   for name in $BINARIES; do
@@ -578,8 +689,19 @@ uninstall() {
     rm -f -- "$dir/$name" || die "Cannot remove $dir/$name."
     removed="$removed $name"
   done
-  if [ -z "$removed" ]; then
+  cleared=
+  for name in $RECEIPT $UPDATE_FILES; do
+    if [ ! -e "$dir/$name" ] && [ ! -L "$dir/$name" ]; then
+      continue
+    fi
+    rm -rf -- "$dir/$name" || die "Cannot remove $dir/$name."
+    cleared=1
+  done
+  if [ -z "$removed" ] && [ -z "$cleared" ]; then
     die "$dir holds no SwarmOps binary: nothing was removed."
+  fi
+  if [ -z "$removed" ]; then
+    removed=" an install's receipt"
   fi
   printf 'Removed%s from %s. Stores are left as they are.\n' "$removed" "$dir"
 }
@@ -588,6 +710,8 @@ main() {
   work=
   staged=
   previous=
+  pinned=
+  auto_off=
   parse_args "$@"
   pick_dir
   if [ -n "$opt_uninstall" ]; then

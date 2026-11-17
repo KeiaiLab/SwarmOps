@@ -15,7 +15,9 @@ the tools the installer runs, so that a case can leave curl or sha256sum out: a 
 the macOS cases and a Mac the Linux ones, each with its own tools (GNU or BSD). Nothing reaches
 the network:
 the installer is given the server's URLs, and every proxy variable names that server, which
-refuses whatever is not its own. Also checks that web/public/install.sh, the copy
+refuses whatever is not its own. Each install is checked for its receipt too: the file the
+installer leaves beside the binaries, which says whether they may update themselves. Also checks
+that web/public/install.sh, the copy
 get.swarmops.cc serves, is scripts/install.sh byte for byte. Prints a summary; exit 1 on a failure.
 """
 
@@ -46,17 +48,29 @@ SITE_COPY = ROOT / "web" / "public" / "install.sh"
 # The fake release's versions: a good one; one whose SHA256SUMS lines for x86_64 Linux and for
 # macOS are wrong; one whose SHA256SUMS has no line for x86_64 Linux; one with the Linux
 # archives only, as every release up to 0.11.0 is; one with every archive and an empty
-# SHA256SUMS; and one whose download the server holds until the installer has been interrupted.
+# SHA256SUMS; one whose download the server holds until the installer has been interrupted; the
+# last release without `so update`, which the installer's report says nothing of automatic
+# update for; and a pre-release of the release after it, the first it speaks of.
 GOOD = "9.9.9"
 MISMATCH = "9.9.9-mismatch"
 NO_LINE = "9.9.9-noline"
 LINUX_ONLY = "9.9.8"
 EMPTY_SUMS = "9.9.9-emptysums"
 HELD = "9.9.9-held"
+NO_UPDATE = "0.11.0"
+FIRST_UPDATE = "0.12.0-rc.1"
 X86 = "x86_64-unknown-linux-gnu"
 ARM = "aarch64-unknown-linux-gnu"
 MAC = "aarch64-apple-darwin"
 BINARIES = ("swarmops", "so")
+# The receipt the installer leaves beside the binaries, and what an update leaves there: its
+# lock, its note for the next command, and the directory a new release is unpacked in.
+RECEIPT = ".swarmops-receipt"
+RECEIPT_ON = "receipt = 1\nauto_update = true\n"
+RECEIPT_OFF = "receipt = 1\nauto_update = false\n"
+UPDATE_FILES = (".swarmops-update.lock", ".swarmops-update.note", ".swarmops-update.d/swarmops")
+# A receipt that says no, with a key the installer does not know: `so update --auto` keeps one.
+RECEIPT_KEPT = '# kept\nreceipt = 1\nauto_update = false  # by hand\nlater = "kept"\n'
 DOCS = ("CHANGELOG.md", "LICENSE", "README.md", "THIRD-PARTY-LICENSES")
 MTIME = 1_760_000_000
 
@@ -82,6 +96,28 @@ SH_PATH_LINE = 'export PATH="{dest}:$PATH"'
 LINUX_PATH_FILES = "(~/.profile, ~/.bashrc or ~/.zshrc):"
 MAC_PATH_FILES = "(~/.zshrc, or ~/.bash_profile under bash):"
 FISH_PATH_LINE = 'fish_add_path "{dest}"'
+# Why an install does or does not update itself, by the installer's reason: what its receipt
+# then says, and the line of its report.
+AUTO_UPDATE = {
+    "on": (RECEIPT_ON, "Automatic update is on. To turn it off: so update --auto off\n"),
+    "flag": (
+        RECEIPT_OFF,
+        "Automatic update is off (--no-auto-update). To turn it on: so update --auto on\n",
+    ),
+    "pinned": (
+        RECEIPT_OFF,
+        "Automatic update is off, because a version was named. To turn it on: so update --auto on\n",
+    ),
+    "root": (
+        RECEIPT_OFF,
+        "Automatic update is off, as for every install by root. To update: so update\n",
+    ),
+    "before": (
+        RECEIPT_OFF,
+        "Automatic update stays off, as it was. To turn it on: so update --auto on\n",
+    ),
+}
+AUTO_UPDATE_WORDS = "Automatic update"
 ENVIRONMENT = (
     "SWARMOPS_VERSION",
     "SWARMOPS_INSTALL_DIR",
@@ -228,7 +264,9 @@ Check = Callable[[Run], list[str]]
 class Case:
     """Runs of the installer: arguments and environment (`{dest}`, `{home}` and `{path}` are
     the case's), the system the fakes play, tools left off PATH, how many runs in a row, the
-    host tools it needs, and the check each run must pass."""
+    host tools it needs, and the check each run must pass. Before the runs: `setup`, an install
+    with those arguments; then `foreign`, other programs put in DEST by those names; then
+    `beside`, files written in DEST, by path and text."""
 
     name: str
     check: Check
@@ -241,6 +279,7 @@ class Case:
     needs: tuple[str, ...] = ()
     setup: tuple[str, ...] | None = None
     foreign: tuple[str, ...] = ()
+    beside: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -347,7 +386,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def build_release(files: Path) -> None:
     """Writes the fake release: per version, each target's archive and SHA256SUMS."""
-    for version in (GOOD, MISMATCH, NO_LINE, LINUX_ONLY, EMPTY_SUMS):
+    for version in (GOOD, MISMATCH, NO_LINE, LINUX_ONLY, EMPTY_SUMS, NO_UPDATE, FIRST_UPDATE):
         folder = files / f"v{version}"
         folder.mkdir(parents=True)
         lines = []
@@ -488,7 +527,8 @@ def run_case(case: Case, shell: tuple[str, list[str]], box: Sandbox) -> Outcome:
     args = [arg.format(dest=box.dest) for arg in case.args]
     problems = []
 
-    # 1. The state the case starts from: an install, then other programs' files in DEST.
+    # 1. The state the case starts from: an install, then other programs' files in DEST, then
+    # the files of an earlier install or update.
     if case.setup is not None:
         setup = [arg.format(dest=box.dest) for arg in case.setup]
         proc = subprocess.run(
@@ -504,6 +544,11 @@ def run_case(case: Case, shell: tuple[str, list[str]], box: Sandbox) -> Outcome:
     for name in case.foreign:
         box.dest.mkdir(parents=True, exist_ok=True)
         (box.staged / name).rename(box.dest / name)
+    for name, text in case.beside:
+        file = box.dest / name
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(text)
+        file.chmod(0o644)
 
     # 2. The runs, each checked.
     for number in range(1, case.runs + 1):
@@ -578,8 +623,11 @@ def leftovers(run: Run) -> list[str]:
     return [f"TMPDIR still holds {names}"] if names else []
 
 
-def installed(version: str = GOOD, target: str = X86) -> Check:
-    """The run succeeded, and DEST holds exactly both binaries of that archive."""
+def installed(version: str = GOOD, target: str = X86, auto: str = "pinned", receipt: str = "") -> Check:
+    """The run succeeded, and DEST holds exactly both binaries of that archive and the receipt:
+    the one of AUTO_UPDATE's reason `auto`, with that reason's line in the report, or the text
+    `receipt` where the installer is to leave the receipt it found."""
+    wanted, line = AUTO_UPDATE[auto]
 
     def check(run: Run) -> list[str]:
         problems = leftovers(run)
@@ -594,11 +642,26 @@ def installed(version: str = GOOD, target: str = X86) -> Check:
             if text not in run.out:
                 problems.append(f"stdout lacks {text!r}: {run.out!r}")
 
-        # 2. DEST: the two binaries, executable, from that version's archive for that target.
+        # 2. The report's line on automatic update: this reason's, once, and no other; none
+        # for a release that has no `so update`.
+        spoken = [text for text in run.out.splitlines(keepends=True) if AUTO_UPDATE_WORDS in text]
+        if spoken != ([] if version == NO_UPDATE else [line]):
+            problems.append(f"stdout says {spoken} on automatic update, not {line!r}")
+
+        # 3. DEST: the two binaries and the receipt, and nothing half written.
         names = sorted(path.name for path in run.dest.iterdir()) if run.dest.is_dir() else []
-        if names != sorted(BINARIES):
-            problems.append(f"{run.dest} holds {names}, not {sorted(BINARIES)}")
+        if names != sorted((*BINARIES, RECEIPT)):
+            problems.append(f"{run.dest} holds {names}, not {sorted((*BINARIES, RECEIPT))}")
             return problems
+
+        # 4. The receipt: its two lines, or the text it had, readable by every user.
+        left = run.dest / RECEIPT
+        if left.read_text() != (receipt or wanted):
+            problems.append(f"the receipt is {left.read_text()!r}, not {receipt or wanted!r}")
+        if left.is_symlink() or left.stat().st_mode & 0o777 != 0o644:
+            problems.append(f"the receipt's mode is {left.stat().st_mode & 0o777:o}, not 644")
+
+        # 5. The binaries: executable, from that version's archive for that target.
         for name in BINARIES:
             binary = run.dest / name
             if not os.access(binary, os.X_OK):
@@ -687,7 +750,7 @@ def helped(run: Run) -> list[str]:
         problems.append(f"exit {run.code}, not 0")
     if run.err:
         problems.append(f"stderr is not empty: {run.err!r}")
-    for text in ("--version", "--dir", "--uninstall", *ENVIRONMENT):
+    for text in ("--version", "--dir", "--no-auto-update", "--uninstall", RECEIPT, *ENVIRONMENT):
         if text not in run.out:
             problems.append(f"stdout lacks {text!r}")
     return problems
@@ -714,14 +777,68 @@ CASES = (
         args=(),
         env=(("SWARMOPS_VERSION", f"v{GOOD}"), ("SWARMOPS_INSTALL_DIR", "{dest}")),
     ),
-    Case("the latest release, into ~/.local/bin", installed(), args=(), dest="{home}/.local/bin"),
+    Case("the latest release, into ~/.local/bin", installed(auto="on"), args=(), dest="{home}/.local/bin"),
     Case(
         "a reinstall over an install: an update",
         all_of(installed(), on_run(2, says("out", f"Replaced swarmops {GOOD}."))),
         runs=2,
     ),
     Case("root: /usr/local/bin", refused("into /usr/local/bin."), args=version_args("9.9.0")[:2], system=System(uid=0)),
+    # The receipt: automatic update is on for the latest release (above), and off for a named
+    # version (the cases that name one), --no-auto-update and root; a receipt that says no
+    # stays as it is; the report speaks of it only for a release that reads it.
+    Case("--no-auto-update", installed(auto="flag"), args=("--no-auto-update", "--dir", "{dest}")),
+    Case(
+        "--no-auto-update and a version",
+        installed(auto="flag"),
+        args=("--no-auto-update", *version_args(GOOD)),
+    ),
+    Case(
+        "root, the latest release: no automatic update",
+        installed(auto="root"),
+        args=("--dir", "{dest}"),
+        system=System(uid=0),
+    ),
+    Case(
+        "an update of an install made with --no-auto-update",
+        installed(auto="before"),
+        args=("--dir", "{dest}"),
+        setup=("--no-auto-update", "--dir", "{dest}"),
+    ),
+    Case(
+        "a receipt that says no is left as it was found",
+        installed(auto="before", receipt=RECEIPT_KEPT),
+        args=("--dir", "{dest}"),
+        beside=((RECEIPT, RECEIPT_KEPT),),
+    ),
+    Case("a version named over an install that updates itself", installed(), setup=("--dir", "{dest}")),
+    Case(
+        "a receipt that says neither yes nor no is written again",
+        installed(auto="on"),
+        args=("--dir", "{dest}"),
+        beside=((RECEIPT, "auto_update = maybe\n"),),
+    ),
+    Case("the last release without so update", installed(NO_UPDATE), args=version_args(NO_UPDATE)),
+    Case(
+        "a pre-release of the first release with so update",
+        installed(FIRST_UPDATE),
+        args=version_args(FIRST_UPDATE),
+    ),
     Case("--uninstall", uninstalled(), args=("--uninstall", "--dir", "{dest}"), setup=version_args(GOOD)),
+    Case(
+        "--uninstall removes what an update left",
+        uninstalled(),
+        args=("--uninstall", "--dir", "{dest}"),
+        setup=version_args(GOOD),
+        beside=tuple((name, "left\n") for name in UPDATE_FILES),
+    ),
+    Case(
+        "--uninstall, a receipt beside other programs",
+        all_of(uninstalled("so", "swarmops"), says("out", "Removed an install's receipt from {dest}.")),
+        args=("--uninstall", "--dir", "{dest}"),
+        setup=version_args(GOOD),
+        foreign=("so", "swarmops"),
+    ),
     Case(
         "--uninstall leaves another so",
         uninstalled("so"),
@@ -744,7 +861,7 @@ CASES = (
     Case("glibc 2.39, no warning", all_of(installed(), lacks_err("ld.so"))),
     Case("no ldd: getconf", installed(), system=System(ldd=None, getconf="2.39")),
     Case("no glibc version at all", refused("Cannot tell"), system=System(ldd=None)),
-    Case("no curl: wget, and the latest release", installed(), args=("--dir", "{dest}"), drop=("curl",)),
+    Case("no curl: wget, and the latest release", installed(auto="on"), args=("--dir", "{dest}"), drop=("curl",)),
     Case("neither curl nor wget", refused("Neither curl nor wget"), drop=("curl", "wget")),
     Case("no sha256sum: shasum", installed(), drop=("sha256sum",), needs=("shasum",)),
     Case("DIR on PATH", all_of(installed(), lacks_out("not on PATH")), env=(("PATH", "{dest}:{path}"),)),
@@ -767,7 +884,7 @@ CASES = (
     ),
     Case(
         "macOS: the latest release, into ~/.local/bin",
-        installed(target=MAC),
+        installed(target=MAC, auto="on"),
         args=(),
         dest="{home}/.local/bin",
         system=mac(),
@@ -816,7 +933,7 @@ CASES = (
     Case("macOS: no sha256sum: shasum", installed(target=MAC), drop=("sha256sum",), needs=("shasum",), system=mac()),
     Case(
         "macOS: no curl: wget, and the latest release",
-        installed(target=MAC),
+        installed(target=MAC, auto="on"),
         args=("--dir", "{dest}"),
         drop=("curl",),
         system=mac(),

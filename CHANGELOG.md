@@ -145,6 +145,14 @@ collects the changes on `stable` that no release holds yet, until the next relea
   no macOS archive, as 0.11.0 and every release before it, ends with
   `SwarmOps X.Y.Z has no macOS build (its SHA256SUMS lists no …)`, and installs nothing. On Linux nothing changes but `--help`'s platform paragraph; any other system
   now reads `SwarmOps runs on Linux and macOS; Windows is next.`
+- The installer leaves a receipt beside the binaries, `.swarmops-receipt`: two lines of TOML,
+  `receipt = 1` and `auto_update = true` or `false`. It says that the installer put the binaries
+  there and whether they may update themselves: not with the new `--no-auto-update`, not when a
+  version is named (`--version` or `SWARMOPS_VERSION`: a pin stays), and not for root. A receipt
+  that says `false` already is left as it is by a later run. For a release after 0.11.0 the
+  report says which it is; no build reads the receipt yet. `--uninstall` removes the receipt
+  and the files an update leaves beside the binaries (`.swarmops-update.lock`,
+  `.swarmops-update.note`, `.swarmops-update.d`), also where no binary of SwarmOps' is left.
 - The release workflow builds `swarmops` and `so` for `aarch64-apple-darwin` on the maintainers'
   Mac (a self-hosted runner labelled `macos-local`, which the release now needs), for macOS 11 or
   newer, smoke-runs them and publishes `swarmops-<version>-aarch64-apple-darwin.tar.gz` with the

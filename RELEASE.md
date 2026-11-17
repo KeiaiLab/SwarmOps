@@ -173,6 +173,9 @@ installs the same tool versions as `ci.yml`'s: move them together.
      When this commit's release workflow has no `build aarch64-apple-darwin` job, this
      release holds none either: name this release there instead. After the first release that
      holds one, the pages name that release as the first with a macOS build.
+   - the installer's `UPDATE_AFTER` (`scripts/install.sh` and its copy) names the last release
+     without `so update`, 0.11.0, and `scripts/test-install.py`'s `NO_UPDATE` and `FIRST_UPDATE`
+     agree: when this release does not hold the command either, name this release there.
 
      Other sentences say the same without a version, and turn false with the first release
      that holds a macOS archive. Change them when the sentences above come to name that
