@@ -36,7 +36,9 @@ process, with no daemon and no network service. Since M13, `clone`, `fetch`, `pu
 reach a git remote, through the user's own git as a child process: SwarmOps opens no connection
 itself. Every agent and person that runs `swarmops`
 against a store is a trusted local user acting for the same owner, and the store directory's
-filesystem permissions are the access boundary. Within that model, these are vulnerabilities:
+filesystem permissions are the access boundary. A login (`swarmops auth login`) keeps a token in
+one file of the user's, outside every store, whose own mode is its boundary. Within that model,
+these are vulnerabilities:
 
 - **Crafted or damaged store files.** SwarmOps reads files it did not necessarily write: a
   store copied or restored from elsewhere, a damaged disk, a file someone placed there. Reading
@@ -115,11 +117,11 @@ filesystem permissions are the access boundary. Within that model, these are vul
   repository at a path that the request names, on the caller's host, so the export is a trust
   boundary. A request that makes SwarmOps write outside that repository, move a branch other than
   the one it names, or write through a name that git does not take as a branch is a vulnerability.
-- **The git remotes (M13): credentials and the child's environment.** SwarmOps stores no
+- **The git remotes (M13): credentials and the child's environment.** No store holds a
   credential: `remotes.toml` holds a token's variable name (`token_env`), never its value, and a URL
-  with a password in it is refused. The token reaches git only through the child's environment, as
-  an HTTP header scoped to the remote's URL, never as an argument or in a file, and is removed, with
-  its base64 forms, from whatever git prints before it enters an error. The child runs
+  with a password in it is refused. The variable's token reaches git only through the child's
+  environment, as an HTTP header scoped to the remote's URL, never as an argument or in a file, and
+  is removed, with its base64 forms, from whatever git prints before it enters an error. The child runs
   without a shell, its arguments after `--end-of-options`, with `GIT_TERMINAL_PROMPT=0`,
   `GIT_ALLOW_PROTOCOL` set to the remote URL's scheme alone (`file://`, `ext::` and local paths are
   refused as remotes), an empty hooks directory, and the variables that point git at another
@@ -131,6 +133,16 @@ filesystem permissions are the access boundary. Within that model, these are vul
   import above takes any repository. A `SwarmOps-` trailer line in a remote commit is trusted as
   proof that the remote holds a change (the known limitations' "A trailer line is taken as
   proof"): anyone who can push to the remote is trusted with its content.
+- **The login file (`auth login`).** `swarmops auth login` keeps one token per host in one file
+  of the user's, outside every store: the file `SWARMOPS_AUTH_FILE` names, else
+  `swarmops/auth.toml` in the user's state directory. The token is there in plain text, by design
+  and with no keyring: the file is made with mode `0600` in a directory made with mode `0700`, and
+  any process that runs as the same user can read it. The token is read from stdin, never from an
+  argument. A login file that is a symbolic link, or that its group or others can read or write,
+  is refused, and its mode is never changed for the user. A token that reaches any other file, an
+  argument, an envelope, an error or what `auth status` prints; a login file made with a wider
+  mode; or a login file read through a link, is a vulnerability. No store, remote or request can
+  name the login file: only the user's environment does.
 - **The SwarmOps supply chain.** A dependency or a CI workflow that could change what we build
   or run. `cargo deny check` (advisories, licenses, bans, sources) runs over every lockfile the
   project builds: the workspace's and the fuzz crate's in every `just check`, and

@@ -21,6 +21,8 @@
 //!   pushes decided by a `proc-receive` hook.
 //!
 //! - [`userdir`] names the host's per-user directory for what is kept outside every store.
+//! - [`auth`] keeps the user's logins, a token per host, in one file under that directory:
+//!   `auth login`, `auth status` and `auth logout`, client-side operations on no store.
 //!
 //! - Maintenance (M6): `gc`, `repair` and `upgrade`, [`StoreOps`](swarmops_api::StoreOps) methods
 //!   that record nothing, so they take no identity.
@@ -28,6 +30,7 @@
 //! The CLI calls these and prints each result in one envelope. A remote client will implement
 //! `StoreOps` over the same types later, resolving identities and file contents the same way.
 
+pub mod auth;
 mod authors;
 mod blob_get;
 mod conflict;

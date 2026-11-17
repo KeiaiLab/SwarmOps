@@ -1,0 +1,162 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "auth login --gh --with-token",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/auth.toml"
+    },
+    "stdin": "",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "auth_login",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the token is empty",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "reason": "token"
+        },
+        "hint": null
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth status",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "auth.toml"
+    },
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "auth_status",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "SWARMOPS_AUTH_FILE: the login file's path is not absolute",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "source": "SWARMOPS_AUTH_FILE"
+        },
+        "hint": null
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth login --gh",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/auth.toml"
+    },
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "auth_login",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the following required arguments were not provided: <--with-token>",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops auth login <--gh> <--with-token>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth login --with-token",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/auth.toml"
+    },
+    "stdin": "example-token-not-a-secret",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "auth_login",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the following required arguments were not provided: <--gh>",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops auth login <--gh> <--with-token>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth logout",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/auth.toml"
+    },
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "auth_logout",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the following required arguments were not provided: <--gh>",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops auth logout <--gh>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/auth.toml"
+    },
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "swarmops",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "'swarmops auth' requires a subcommand but one was not provided [subcommands: login, status, logout, help]",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops auth [OPTIONS] <COMMAND>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

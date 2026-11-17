@@ -202,6 +202,199 @@ expression: s.redact(&all)
       "title": "Attribution",
       "type": "object"
     },
+    "AuthEntry": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One login the user's login file holds, without its token.",
+      "properties": {
+        "host": {
+          "description": "The host the token is for, as `host` or `host:port`: `github.com`.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "The provider the login is with: `gh` for GitHub. A file may hold the logins of providers\nthis build does not know; they are listed and never used.",
+          "type": "string"
+        },
+        "scopes": {
+          "description": "The scopes the provider granted the token. Omitted when they are not known, as for a\ntoken read from stdin.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "How the token was obtained: `with_token` (read from stdin) or `device` (the provider's\ndevice flow). Omitted for an entry that does not say.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "provider",
+        "host"
+      ],
+      "title": "AuthEntry",
+      "type": "object"
+    },
+    "AuthLogin": {
+      "$defs": {
+        "AuthEntry": {
+          "description": "One login the user's login file holds, without its token.",
+          "properties": {
+            "host": {
+              "description": "The host the token is for, as `host` or `host:port`: `github.com`.",
+              "type": "string"
+            },
+            "provider": {
+              "description": "The provider the login is with: `gh` for GitHub. A file may hold the logins of providers\nthis build does not know; they are listed and never used.",
+              "type": "string"
+            },
+            "scopes": {
+              "description": "The scopes the provider granted the token. Omitted when they are not known, as for a\ntoken read from stdin.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "source": {
+              "description": "How the token was obtained: `with_token` (read from stdin) or `device` (the provider's\ndevice flow). Omitted for an entry that does not say.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "provider",
+            "host"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`auth login`: the login now kept.",
+      "properties": {
+        "file": {
+          "description": "The login file that holds it, a path on the caller's host.",
+          "type": "string"
+        },
+        "login": {
+          "$ref": "#/$defs/AuthEntry",
+          "description": "The login, without its token."
+        },
+        "replaced": {
+          "description": "Whether the file held a login for this host already, which this one replaced.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "login",
+        "file",
+        "replaced"
+      ],
+      "title": "AuthLogin",
+      "type": "object"
+    },
+    "AuthLogout": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`auth logout`: the login removed, or that there was none.",
+      "properties": {
+        "file": {
+          "description": "The login file, a path on the caller's host. Omitted on a host that names no directory\nfor it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host": {
+          "description": "The host the login was for.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "The provider logged out of.",
+          "type": "string"
+        },
+        "removed": {
+          "description": "Whether the file held the login; false when there was none to remove.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provider",
+        "host",
+        "removed"
+      ],
+      "title": "AuthLogout",
+      "type": "object"
+    },
+    "AuthStatus": {
+      "$defs": {
+        "AuthEntry": {
+          "description": "One login the user's login file holds, without its token.",
+          "properties": {
+            "host": {
+              "description": "The host the token is for, as `host` or `host:port`: `github.com`.",
+              "type": "string"
+            },
+            "provider": {
+              "description": "The provider the login is with: `gh` for GitHub. A file may hold the logins of providers\nthis build does not know; they are listed and never used.",
+              "type": "string"
+            },
+            "scopes": {
+              "description": "The scopes the provider granted the token. Omitted when they are not known, as for a\ntoken read from stdin.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "source": {
+              "description": "How the token was obtained: `with_token` (read from stdin) or `device` (the provider's\ndevice flow). Omitted for an entry that does not say.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "provider",
+            "host"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`auth status`: the logins the user's login file holds.",
+      "properties": {
+        "file": {
+          "description": "The login file, a path on the caller's host, whether or not it exists. Omitted on a host\nthat names no directory for it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "logins": {
+          "description": "The logins, in the file's order; empty when there is no file or it holds none.",
+          "items": {
+            "$ref": "#/$defs/AuthEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "logins"
+      ],
+      "title": "AuthStatus",
+      "type": "object"
+    },
     "BlobGetReq": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`blob_get` (M5): blobs by id, for a client that writes them out (a workspace's\nmaterialisation). Not an MCP tool.",

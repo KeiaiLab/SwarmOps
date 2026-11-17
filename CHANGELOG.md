@@ -21,6 +21,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Added
 
+- `auth login --gh --with-token`, `auth status` and `auth logout --gh` (`so auth …`): a login
+  keeps a token for `github.com`, read from stdin, in one file of the user's outside every store
+  (`SWARMOPS_AUTH_FILE`, else `swarmops/auth.toml` in the state directory); `status` lists the
+  logins without their tokens, and `logout` removes one. The token is kept and not used yet:
+  `clone`, `fetch`, `push` and `sync` authenticate as before. The three commands open no store
+  and have no MCP tool, each with its reason in the MCP reference's index. New result types:
+  `AuthEntry`, `AuthLogin`, `AuthStatus`, `AuthLogout`.
 - Each workspace mutation that succeeds records its holder in `workspaces/hold/<name>.json`
   beside the registry: who changed the workspace last, when, the lease and the commits not landed
   yet; unsynced, a failed write is a warning, and `ws delete` removes it.
@@ -312,6 +319,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Security
 
+- A login's token is kept in plain text in the user's login file, made with mode `0600` in a
+  directory made with mode `0700`; no store holds it. A login file that is a symbolic link, or that
+  its group or others can read or write, is refused (`E_INVALID_ARG`, `details.reason`
+  `auth_file_kind` or `auth_file_mode`), by the mode of the file as opened, and is never
+  overwritten. The token is read from stdin, never from an argument, and appears in no envelope
+  and no error ([SECURITY.md](SECURITY.md)).
 - `ws create` refuses a `.swarmws` that is a link (`E_WS_DIRTY`) before its volume probe writes or
   removes a file through it; the probe wrote `probe-a` and `probe-l` at the link's target.
 - A token given as the user of an `http://` or `https://` URL was stored in `remotes.toml` and

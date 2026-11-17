@@ -15,6 +15,8 @@ use std::fmt;
 use std::fmt::Write as _;
 use std::fs;
 use std::ops::Index;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::Path;
 
 use assert_cmd::Command;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -146,6 +148,198 @@ fn init_info_whoami_golden() {
     assert_eq!(bad_env["error"]["details"]["source"], "SWARMOPS_AGENT");
 
     insta::assert_json_snapshot!(s.transcript());
+}
+
+/// The token the login tests keep: a placeholder in no provider's shape, which the snapshot and
+/// the `auth login` page's example show as the command's stdin, by design.
+const LOGIN_TOKEN: &str = "example-token-not-a-secret";
+
+#[test]
+fn auth_login_status_logout_golden() {
+    let mut s = Session::new();
+    let file = format!("{}/state/swarmops/auth.toml", s.tmp());
+    let env = [("SWARMOPS_AUTH_FILE", file.as_str())];
+    let login = ["auth", "login", "--gh", "--with-token"];
+    let mut replies = Vec::new();
+
+    // 1. No file is no logins, and makes none.
+    let none = s.run_env(&env, &["auth", "status"]);
+    assert_eq!(none.exit, 0);
+    assert_eq!(none["result"], json!({"file": file, "logins": []}));
+    assert!(none["meta"].get("repo").is_none(), "auth uses no store");
+    assert!(!Path::new(&file).exists());
+    replies.push(none);
+
+    // 2. A login keeps the token read from stdin, in a file and a directory of the user's alone.
+    let first = s.step(&env, &login, Some(LOGIN_TOKEN));
+    assert_eq!(first.exit, 0);
+    let entry = json!({"provider": "gh", "host": "github.com", "source": "with_token"});
+    assert_eq!(
+        first["result"],
+        json!({"login": entry, "file": file, "replaced": false})
+    );
+    let mode = |path: &Path| fs::metadata(path).expect("stat").permissions().mode() & 0o7777;
+    assert_eq!(mode(Path::new(&file)), 0o600);
+    assert_eq!(mode(Path::new(&file).parent().expect("a directory")), 0o700);
+    let kept = fs::read_to_string(&file).expect("read the login file");
+    assert!(
+        kept.contains(&format!("token = \"{LOGIN_TOKEN}\"")),
+        "{kept}"
+    );
+    replies.push(first);
+
+    // 3. Status lists it; a second login replaces it, the white space around the token dropped.
+    let listed = s.run_env(&env, &["auth", "status"]);
+    assert_eq!(listed["result"]["logins"], json!([entry]));
+    replies.push(listed);
+    let again = s.step(&env, &login, Some(&format!("  {LOGIN_TOKEN}\n")));
+    assert_eq!(again["result"]["replaced"], true);
+    assert_eq!(fs::read_to_string(&file).expect("read"), kept);
+    replies.push(again);
+
+    // 4. A file its group can read is refused, with the command that fixes it, and left alone.
+    let loose = fs::Permissions::from_mode(0o640);
+    fs::set_permissions(&file, loose).expect("set the mode");
+    let refused = s.run_env(&env, &["auth", "status"]);
+    assert_eq!((refused.exit, refused.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(refused["error"]["details"]["reason"], "auth_file_mode");
+    assert_eq!(refused["error"]["details"]["auth_file"], file.as_str());
+    assert_eq!(
+        refused["error"]["hint"],
+        format!("chmod 600 {file}").as_str()
+    );
+    replies.push(refused);
+    let refused = s.step(&env, &login, Some(LOGIN_TOKEN));
+    assert_eq!(refused["error"]["details"]["reason"], "auth_file_mode");
+    assert_eq!(mode(Path::new(&file)), 0o640);
+    replies.push(refused);
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).expect("set the mode");
+
+    // 5. A logout removes it; a second finds none to remove.
+    let out = s.run_env(&env, &["auth", "logout", "--gh"]);
+    let gone = json!({"provider": "gh", "host": "github.com", "removed": true, "file": file});
+    assert_eq!(out["result"], gone);
+    assert!(
+        !fs::read_to_string(&file)
+            .expect("read")
+            .contains(LOGIN_TOKEN)
+    );
+    replies.push(out);
+    let nothing = s.run_env(&env, &["auth", "logout", "--gh"]);
+    assert_eq!(
+        (nothing.exit, &nothing["result"]["removed"]),
+        (0, &json!(false))
+    );
+    replies.push(nothing);
+
+    no_token_in(&replies);
+    insta::assert_json_snapshot!(s.transcript());
+}
+
+/// No envelope of `replies` holds [`LOGIN_TOKEN`]; stderr is empty in each, which the session
+/// checks.
+fn no_token_in(replies: &[Reply]) {
+    for reply in replies {
+        let printed = reply.json.to_string();
+        assert!(!printed.contains(LOGIN_TOKEN), "{printed}");
+    }
+}
+
+#[test]
+fn auth_login_refusals_golden() {
+    let mut s = Session::new();
+    let file = format!("{}/auth.toml", s.tmp());
+    let env = [("SWARMOPS_AUTH_FILE", file.as_str())];
+    let login = ["auth", "login", "--gh", "--with-token"];
+    let mut replies = Vec::new();
+
+    // 1. What is no token is refused, and never quoted: nothing on stdin, two words.
+    let empty = s.step(&env, &login, Some(""));
+    assert_eq!((empty.exit, empty.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(empty["error"]["details"]["reason"], "token");
+    replies.push(empty);
+    let words = Session::run_raw(&env, &login, Some("not-a-secret two-words"));
+    assert_eq!(words.exit, 2);
+    assert!(!words.stdout.contains("two-words"), "{}", words.stdout);
+
+    // 2. The file is named by an absolute path.
+    let relative = [("SWARMOPS_AUTH_FILE", "auth.toml")];
+    let unnamed = s.run_env(&relative, &["auth", "status"]);
+    assert_eq!((unnamed.exit, unnamed.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(unnamed["error"]["details"]["source"], "SWARMOPS_AUTH_FILE");
+    replies.push(unnamed);
+
+    // 3. The grammar: a login names its provider and how the token comes, and no flag takes
+    //    the token; auth alone is no command.
+    let no_way = s.run_env(&env, &["auth", "login", "--gh"]);
+    assert_eq!((no_way.exit, no_way.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(no_way["op"], "auth_login");
+    replies.push(no_way);
+    let no_provider = s.step(&env, &["auth", "login", "--with-token"], Some(LOGIN_TOKEN));
+    assert_eq!((no_provider.exit, no_provider.code()), (2, "E_INVALID_ARG"));
+    replies.push(no_provider);
+    let no_logout = s.run_env(&env, &["auth", "logout"]);
+    assert_eq!((no_logout.exit, no_logout.code()), (2, "E_INVALID_ARG"));
+    replies.push(no_logout);
+    let bare = s.run_env(&env, &["auth"]);
+    assert_eq!((bare.exit, bare.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(bare["op"], "swarmops");
+    replies.push(bare);
+    let flag = ["auth", "login", "--gh", "--token", LOGIN_TOKEN];
+    assert_eq!(Session::run_raw(&env, &flag, None).exit, 2, "no --token");
+
+    // Nothing was refused into a file.
+    assert!(!Path::new(&file).exists());
+    no_token_in(&replies);
+    insta::assert_json_snapshot!(s.transcript());
+}
+
+/// The harness names a login file where nothing is (the kit's `isolation`), so a run of the
+/// binary finds no login whatever the developer's home directory holds; only a test that names
+/// a file of its own reads one.
+#[test]
+fn a_spawned_binary_never_reads_the_developer_s_login() {
+    // A home directory with a login where each host's rule looks for one.
+    let home = tempfile::tempdir().expect("create a temp dir");
+    let home = home.path().to_str().expect("temp paths are UTF-8");
+    let state = format!("{home}/.local/state");
+    let login = format!(
+        "version = 1\n[[login]]\nprovider = \"gh\"\nhost = \"github.com\"\n\
+         token = \"{LOGIN_TOKEN}\"\nsource = \"with_token\"\n"
+    );
+    for dir in [
+        format!("{state}/swarmops"),
+        format!("{home}/Library/Application Support/swarmops"),
+    ] {
+        fs::create_dir_all(&dir).expect("make the state directory");
+        let file = format!("{dir}/auth.toml");
+        fs::write(&file, &login).expect("write a login");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).expect("set the mode");
+    }
+    let at_home = [("HOME", home), ("XDG_STATE_HOME", state.as_str())];
+
+    // 1. As every test runs the binary: the file is the harness's, which nothing makes, and
+    //    not the home directory's.
+    let output = Session::run_raw(&at_home, &["auth", "status"], None);
+    let status = check(&["auth", "status"], &output);
+    let file = status["result"]["file"].as_str().expect("a login file");
+    assert!(!file.starts_with(home), "{file}");
+    assert!(!Path::new(file).exists(), "{file}");
+    assert_eq!(status["result"]["logins"], json!([]));
+
+    // 2. Without the harness's variable, the same run reads the home directory's login: the
+    //    isolation, and nothing else, is what kept it away.
+    let mut unset = at_home.to_vec();
+    unset.push(("SWARMOPS_AUTH_FILE", ""));
+    let output = Session::run_raw(&unset, &["auth", "status"], None);
+    let status = check(&["auth", "status"], &output);
+    assert!(
+        status["result"]["file"]
+            .as_str()
+            .is_some_and(|file| file.starts_with(home)),
+        "{status}"
+    );
+    assert_eq!(status["result"]["logins"][0]["host"], "github.com");
 }
 
 #[test]

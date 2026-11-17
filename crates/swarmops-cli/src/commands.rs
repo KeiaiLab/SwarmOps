@@ -27,7 +27,11 @@
 //!
 //! `whoami` prints `IdentityInfo` as the API writes it: for a caller without an identity,
 //! `{"auth":"anonymous"}`, with `agent` omitted rather than null.
+//!
+//! `auth login`, `auth status` and `auth logout` use no store either: they read and write the
+//! user's login file (the `auth` module), and their envelopes have no `meta.repo`.
 
+mod auth;
 pub(crate) mod prepare;
 mod run;
 mod serve;

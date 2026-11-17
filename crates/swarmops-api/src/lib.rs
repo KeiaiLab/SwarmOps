@@ -7,6 +7,7 @@
 //! `swarmops schema` prints [`schema_for_all`], whose snapshot is where contract changes are
 //! reviewed.
 
+pub mod auth;
 pub mod envelope;
 pub mod error;
 pub mod health;
@@ -18,6 +19,7 @@ mod schema;
 pub mod serve;
 pub mod wire;
 
+pub use auth::{AuthEntry, AuthLogin, AuthLogout, AuthStatus};
 pub use envelope::{API_VERSION, Envelope, LogCutOut, Meta, RecoveredOut};
 pub use error::{ErrorCode, OpError};
 pub use identity::Identity;

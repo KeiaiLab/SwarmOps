@@ -92,7 +92,9 @@ Two rules shape the layers (umbrella §1, [CONTRIBUTING.md](../CONTRIBUTING.md#t
   in `RemoteInfo`; `fetch`, `push`, `sync` and `sync status` take a remote by its name. The
   workspace operations (M5) are client-side too, as `git import` is: their requests carry host
   paths as strings (`WsCreateReq.path`, `.from`), and they reach the store only through
-  `StoreOps` (operations §0, §2). This is
+  `StoreOps` (operations §0, §2). The results of `auth login`, `auth status` and `auth logout`
+  name the user's login file by its path (`file`): they run on no store, and no server receives
+  them. This is
   also why `swarmops-api` and `swarmops-repo` each have their own `ChangeOp`, `RepoInfo` and
   `VerifyReport`: the first are the wire format, the second the domain, and `swarmops-ops`
   converts between them.
@@ -176,6 +178,22 @@ A store is one directory (storage §2, §3):
   access.toml                optional (M14): who may read, push, force (a backward move or a deletion) and land through `serve`; a person writes it
   quarantine/objects/<64 hex>  object files repair found damaged (M6), set aside, never deleted
 ```
+
+Three things are kept outside every store, for the user and not for a store, under `swarmops/` in
+the user's state directory (`$XDG_STATE_HOME`, else `~/.local/state`; on macOS
+`~/Library/Application Support`):
+
+```text
+<state>/swarmops/
+  workspaces/                the workspaces' default root (M5); SWARMOPS_WS_ROOT names another
+  memo-keys/<repo_id>.key    a store's memo key, 32 bytes (below); SWARMOPS_MEMO_KEY_DIR names another directory
+  auth.toml                  the logins: a token per host, in plain text, mode 0600; SWARMOPS_AUTH_FILE names another file
+```
+
+The login file is the only place SwarmOps keeps a credential. `auth login` writes it whole (a temp
+file of mode 0600, renamed over it), `auth status` and `auth logout` read it, and each refuses a
+file that is a symbolic link or that its group or others can read or write, by the mode of the
+file it has open. No store names it, and no command sends its token anywhere yet.
 
 Objects are compressed one at a time with zstd at level 3, with zstd's content checksum, when
 they hold at least 128 bytes and compression makes them smaller; otherwise they are stored raw.
@@ -858,7 +876,7 @@ nothing, so a follower that has caught up prints nothing):
 A failure's `code` is one of 55 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 3 conflict, 4 retryable, 5 identity or policy, 6 not
 found) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 190 types, and its snapshot test is where contract
+`swarmops schema` prints the JSON Schema of 194 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what

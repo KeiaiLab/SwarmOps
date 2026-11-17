@@ -820,6 +820,26 @@ left).
   not, and under an MCP server no one answers it. Agents' hosts use ssh keys or `--token-env`.
   *Documented ([GitHub as a remote](guides/github-remote.md#credentials)). Found: the M13 design's
   risks.*
+- **A login is kept, and not used yet.** `auth login --gh --with-token` keeps a token for
+  `github.com` in the user's login file; `clone`, `fetch`, `push` and `sync` do not read it, and
+  authenticate as before, through git's credential helpers, ssh keys or `--token-env`.
+  *Unscheduled. Found: the login's design.*
+- **A login's token is kept in plain text.** The login file holds it unencrypted, with no keyring:
+  its mode (0600, in a directory made 0700) is the protection, and any process that runs as the
+  same user can read it. A loose file is refused, never fixed for the user. *Documented
+  ([`auth login`](reference/commands/auth-login.md#the-login-file)). Found: the login's design.*
+- **A login is not checked with the provider, and a logout does not revoke.** `auth login
+  --with-token` keeps whatever token stdin held, wrong or expired ones too, and `auth status` reads
+  the file alone. `auth logout` removes the token from the file; it stays valid at the provider
+  until it is revoked there. *Documented ([`auth login`](reference/commands/auth-login.md)). Found:
+  the login's design.*
+- **One login, for `github.com`.** `--gh` is the one provider, and its host is fixed: no flag
+  names a GitHub Enterprise host, and a second login replaces the first. *Unscheduled. Found: the
+  login's design.*
+- **Two logins at once: the later one's file stands.** The login file is rewritten whole with no
+  lock, so a login or a logout that ran between another's read and its write is lost. A rewrite
+  keeps the keys and logins the build does not know, and drops comments. *Documented
+  ([`auth login`](reference/commands/auth-login.md#the-login-file)). Found: the login's design.*
 - **A long fetch inside an MCP call holds the agent's session.** The MCP server answers one request
   at a time, so a `fetch` or `sync` of a large remote blocks that session until git ends.
   *Unscheduled. Found: the M13 design's risks.*

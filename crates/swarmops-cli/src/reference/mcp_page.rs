@@ -167,6 +167,18 @@ const NOT_A_TOOL: &[(&str, &str)] = &[
         "It only fills ahead of time a cache that each read fills itself, so it changes no result \
          an agent reads",
     ),
+    (
+        "auth login",
+        "It reads a token from stdin, which a tool call's arguments would record",
+    ),
+    (
+        "auth status",
+        "It reads the user's login file, not the store the server was started on",
+    ),
+    (
+        "auth logout",
+        "It changes the user's login file, not the store the server was started on",
+    ),
 ];
 
 /// clap's own subcommand, which prints a command's help and runs nothing.

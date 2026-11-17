@@ -37,7 +37,7 @@ or later, moves the packs; SwarmOps has no network code of its own.*
 > - **Pull requests merge by any method.** After a merge commit, a squash or a rebase on GitHub,
 >   `so sync` recognises the changes GitHub holds and drops them rather than land them twice.
 > - **Your git, your credentials.** SwarmOps runs `git` with your credential helpers, ssh keys and
->   proxies, stores no credential, and never prompts.
+>   proxies, keeps no credential in a store, and never prompts.
 
 ## Before you start
 

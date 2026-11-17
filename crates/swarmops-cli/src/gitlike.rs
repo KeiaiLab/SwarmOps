@@ -1886,6 +1886,9 @@ mod tests {
         "git",
         "remote",
         "serve",
+        "auth",
+        "auth login",
+        "auth logout",
     ];
 
     /// The grammar's lines that `cli::parse` reads, at any place, and that `parse` reads

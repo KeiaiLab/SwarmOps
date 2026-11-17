@@ -148,3 +148,13 @@ Work in a directory of your own: a workspace holds a sparse copy of a changeset'
 
 - [`swarmops mcp`](commands/mcp.md): Serve the store's operations to an agent as an MCP server on stdin and stdout.
 - [`swarmops serve`](commands/serve.md): Serve the stores under --root to stock git: fetch, clone and push over ssh as a forced command, or over smart HTTP as a CGI program.
+
+## Logins
+
+### swarmops auth
+
+Keep, list or remove your logins: a token per host, in one file of your own.
+
+- [`swarmops auth login`](commands/auth-login.md): Keep a token for a provider in your login file.
+- [`swarmops auth status`](commands/auth-status.md): List the logins your login file holds, without their tokens.
+- [`swarmops auth logout`](commands/auth-logout.md): Remove a provider's login from your login file.

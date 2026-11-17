@@ -804,7 +804,8 @@ pub enum Command {
     /// protocol until stdin ends, and a command line it refuses has its envelope on stderr. The
     /// derive command has no tool: it only fills ahead of time a cache that each read fills
     /// itself, so it changes no result an agent reads; nor have clone and remote add|remove, so
-    /// that an agent cannot point the store at a URL of its choosing.
+    /// that an agent cannot point the store at a URL of its choosing; nor has auth, whose login
+    /// file is the user's, not the store's.
     Mcp,
     #[command(about = SERVE_HELP, long_about = SERVE_LONG_HELP)]
     Serve(ServeArgs),
@@ -839,6 +840,9 @@ pub enum Command {
         #[arg(long, requires = "follow")]
         from_start: bool,
     },
+    /// Keep, list or remove your logins: a token per host, in one file of your own.
+    #[command(subcommand)]
+    Auth(AuthCommand),
 }
 
 /// `serve`'s arguments.
@@ -1441,10 +1445,10 @@ pub enum RemoteCommand {
     /// The name is 1 to 63 lowercase letters, digits, dots, underscores and dashes, starting with
     /// a letter or a digit, not ending in a dot, and not status. Without --branch the remote is
     /// asked for its default branch (a network call); an empty remote gives main, with a
-    /// warning. No credential is stored: --token-env records a variable's name. A URL holding a
-    /// password is refused, and so is an http or https URL with a user part, whatever the user
-    /// is: a token there cannot be told from a name. An ssh URL keeps its user. It needs no
-    /// identity.
+    /// warning. The store holds no credential: --token-env records a variable's name. A URL
+    /// holding a password is refused, and so is an http or https URL with a user part, whatever
+    /// the user is: a token there cannot be told from a name. An ssh URL keeps its user. It
+    /// needs no identity.
     Add {
         /// The remote's name.
         name: String,
@@ -1467,6 +1471,52 @@ pub enum RemoteCommand {
     },
     /// List the store's git remotes.
     List,
+}
+
+/// `auth`'s operations.
+#[derive(Subcommand, Debug)]
+pub enum AuthCommand {
+    /// Keep a token for a provider in your login file.
+    ///
+    /// --gh is GitHub, at github.com. --with-token reads the token from stdin: at most 1024
+    /// visible ASCII characters, the white space around them dropped. No flag takes the token
+    /// itself, which a process list would show. The token is not checked with the provider.
+    ///
+    /// The login file is the one SWARMOPS_AUTH_FILE names by an absolute path, else
+    /// swarmops/auth.toml in your state directory ($XDG_STATE_HOME or ~/.local/state; on macOS
+    /// ~/Library/Application Support). It is made with mode 0600, in a directory made with mode
+    /// 0700, and holds the token in plain text. A login for a host replaces the one the file
+    /// held for it (replaced). The result names the file and never holds the token. It uses no
+    /// store and needs no identity.
+    #[command(
+        group(ArgGroup::new("provider").required(true).args(["gh"])),
+        group(ArgGroup::new("way").required(true).args(["with_token"]))
+    )]
+    Login {
+        /// Log in to GitHub (github.com).
+        #[arg(long)]
+        gh: bool,
+        /// Read the token from stdin.
+        #[arg(long)]
+        with_token: bool,
+    },
+    /// List the logins your login file holds, without their tokens.
+    ///
+    /// It reads the login file alone, and reaches no network: no token is checked with its
+    /// provider. No file is no logins. A login of a provider this build does not know is listed
+    /// too. A file that is a symbolic link, that its group or others can read or write, or that
+    /// is not a login file of this version is E_INVALID_ARG, with the file in details.auth_file.
+    Status,
+    /// Remove a provider's login from your login file.
+    ///
+    /// The token is forgotten here and not revoked at the provider: revoke it there if it may
+    /// have leaked. Removing a login the file does not hold succeeds (removed is false).
+    #[command(group(ArgGroup::new("provider").required(true).args(["gh"])))]
+    Logout {
+        /// Log out of GitHub (github.com).
+        #[arg(long)]
+        gh: bool,
+    },
 }
 
 /// `sync`'s operation besides syncing.
@@ -1760,6 +1810,9 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["mcp"] => "mcp",
         ["serve"] => "serve",
         ["derive"] => "derive",
+        ["auth", "login"] => "auth_login",
+        ["auth", "status"] => "auth_status",
+        ["auth", "logout"] => "auth_logout",
         _ => return None,
     })
 }
@@ -1806,6 +1859,7 @@ fn command() -> clap::Command {
         .mut_subcommand("git", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("op", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("remote", |cmd| cmd.arg_required_else_help(false))
+        .mut_subcommand("auth", |cmd| cmd.arg_required_else_help(false))
 }
 
 /// Of `--json` and `--human`, keeps the one given last: clap's `overrides_with` settles them
@@ -1887,16 +1941,17 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 60);
+        assert_eq!(ops.len(), 63);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 60, "two subcommands name one op");
+        assert_eq!(ops.len(), 63, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["ws"]), None);
         assert_eq!(op_name(&["git"]), None);
         assert_eq!(op_name(&["op"]), None);
         assert_eq!(op_name(&["remote"]), None);
+        assert_eq!(op_name(&["auth"]), None);
     }
 
     #[test]
@@ -1964,7 +2019,7 @@ mod tests {
             panic!("a usage error");
         };
         assert_eq!(path, Vec::<String>::new());
-        for line in [&[][..], &["ref"], &["blob"], &["git"], &["op"]] {
+        for line in [&[][..], &["ref"], &["blob"], &["git"], &["op"], &["auth"]] {
             let Parsed::Usage { error, .. } = parse(&args(line)) else {
                 panic!("{line:?}: a usage error, not a help screen");
             };

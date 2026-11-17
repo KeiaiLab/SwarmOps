@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 190 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 194 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -12,6 +12,10 @@ The 190 request, response and value types of the API, as `swarmops schema` print
 | [`AncestryReq`](#ancestryreq) | object | `ancestry`: two revisions' ancestry along every parent, and a page of the changesets the second reaches and the first does not. |
 | [`AncestryResp`](#ancestryresp) | object | `ancestry`: the answers, and a page of `from..to`, by generation descending, then id ascending. |
 | [`Attribution`](#attribution) | object | Whom a changeset is attributed to. |
+| [`AuthEntry`](#authentry) | object | One login the user's login file holds, without its token. |
+| [`AuthLogin`](#authlogin) | object | `auth login`: the login now kept. |
+| [`AuthLogout`](#authlogout) | object | `auth logout`: the login removed, or that there was none. |
+| [`AuthStatus`](#authstatus) | object | `auth status`: the logins the user's login file holds. |
 | [`BlobGetReq`](#blobgetreq) | object | `blob_get` (M5): blobs by id, for a client that writes them out (a workspace's materialisation). |
 | [`BlobGetResp`](#blobgetresp) | object | `blob_get`: the blobs found, in the order asked, and the ids the store holds no blob under. |
 | [`BlobHasReq`](#blobhasreq) | object | `blob_has` (CLI `blob has`): which of some blobs the store holds. |
@@ -252,6 +256,55 @@ Kind: object. `swarmops schema Attribution` prints its JSON Schema.
 | `agent` | `string` | yes | The agent that wrote it: the changeset's `agent` metadata, or `unknown/unknown` for a changeset that records none. |
 | `on_behalf_of` | `string` or `null` | no | Whom the agent acted for; recorded once the review model exists, so omitted in M1. |
 | `run_id` | `string` or `null` | no | The run it was written in: the changeset's `run_id` metadata, when present. |
+
+## AuthEntry
+
+One login the user's login file holds, without its token.
+
+Kind: object. `swarmops schema AuthEntry` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `host` | `string` | yes | The host the token is for, as `host` or `host:port`: `github.com`. |
+| `provider` | `string` | yes | The provider the login is with: `gh` for GitHub. A file may hold the logins of providers this build does not know; they are listed and never used. |
+| `scopes` | array of `string` or `null` | no | The scopes the provider granted the token. Omitted when they are not known, as for a token read from stdin. |
+| `source` | `string` or `null` | no | How the token was obtained: `with_token` (read from stdin) or `device` (the provider's device flow). Omitted for an entry that does not say. |
+
+## AuthLogin
+
+`auth login`: the login now kept.
+
+Kind: object. `swarmops schema AuthLogin` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `file` | `string` | yes | The login file that holds it, a path on the caller's host. |
+| `login` | [`AuthEntry`](#authentry) | yes | The login, without its token. |
+| `replaced` | `boolean` | yes | Whether the file held a login for this host already, which this one replaced. |
+
+## AuthLogout
+
+`auth logout`: the login removed, or that there was none.
+
+Kind: object. `swarmops schema AuthLogout` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `file` | `string` or `null` | no | The login file, a path on the caller's host. Omitted on a host that names no directory for it. |
+| `host` | `string` | yes | The host the login was for. |
+| `provider` | `string` | yes | The provider logged out of. |
+| `removed` | `boolean` | yes | Whether the file held the login; false when there was none to remove. |
+
+## AuthStatus
+
+`auth status`: the logins the user's login file holds.
+
+Kind: object. `swarmops schema AuthStatus` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `file` | `string` or `null` | no | The login file, a path on the caller's host, whether or not it exists. Omitted on a host that names no directory for it. |
+| `logins` | array of [`AuthEntry`](#authentry) | yes | The logins, in the file's order; empty when there is no file or it holds none. |
 
 ## BlobGetReq
 

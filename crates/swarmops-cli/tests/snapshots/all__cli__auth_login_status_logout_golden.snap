@@ -1,0 +1,211 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "auth status",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/state/swarmops/auth.toml"
+    },
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "auth_status",
+      "api": 1,
+      "result": {
+        "file": "[tmp]/state/swarmops/auth.toml",
+        "logins": []
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth login --gh --with-token",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/state/swarmops/auth.toml"
+    },
+    "stdin": "example-token-not-a-secret",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "auth_login",
+      "api": 1,
+      "result": {
+        "login": {
+          "provider": "gh",
+          "host": "github.com",
+          "source": "with_token"
+        },
+        "file": "[tmp]/state/swarmops/auth.toml",
+        "replaced": false
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth status",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/state/swarmops/auth.toml"
+    },
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "auth_status",
+      "api": 1,
+      "result": {
+        "file": "[tmp]/state/swarmops/auth.toml",
+        "logins": [
+          {
+            "provider": "gh",
+            "host": "github.com",
+            "source": "with_token"
+          }
+        ]
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth login --gh --with-token",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/state/swarmops/auth.toml"
+    },
+    "stdin": "  example-token-not-a-secret\n",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "auth_login",
+      "api": 1,
+      "result": {
+        "login": {
+          "provider": "gh",
+          "host": "github.com",
+          "source": "with_token"
+        },
+        "file": "[tmp]/state/swarmops/auth.toml",
+        "replaced": true
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth status",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/state/swarmops/auth.toml"
+    },
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "auth_status",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the login file [tmp]/state/swarmops/auth.toml has mode 0640: its group or others can read or write it",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "auth_file": "[tmp]/state/swarmops/auth.toml",
+          "reason": "auth_file_mode"
+        },
+        "hint": "chmod 600 [tmp]/state/swarmops/auth.toml"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth login --gh --with-token",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/state/swarmops/auth.toml"
+    },
+    "stdin": "example-token-not-a-secret",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "auth_login",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the login file [tmp]/state/swarmops/auth.toml has mode 0640: its group or others can read or write it",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "auth_file": "[tmp]/state/swarmops/auth.toml",
+          "reason": "auth_file_mode"
+        },
+        "hint": "chmod 600 [tmp]/state/swarmops/auth.toml"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth logout --gh",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/state/swarmops/auth.toml"
+    },
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "auth_logout",
+      "api": 1,
+      "result": {
+        "provider": "gh",
+        "host": "github.com",
+        "removed": true,
+        "file": "[tmp]/state/swarmops/auth.toml"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "auth logout --gh",
+    "env": {
+      "SWARMOPS_AUTH_FILE": "[tmp]/state/swarmops/auth.toml"
+    },
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "auth_logout",
+      "api": 1,
+      "result": {
+        "provider": "gh",
+        "host": "github.com",
+        "removed": false,
+        "file": "[tmp]/state/swarmops/auth.toml"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

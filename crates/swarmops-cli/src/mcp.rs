@@ -87,7 +87,9 @@
 //!
 //! `derive` and `serve` have no tool: `swarmops derive` only fills ahead of time the cache of
 //! derived values that each read fills itself, so it changes no result an agent reads, and
-//! `swarmops serve` serves stock git to git clients.
+//! `swarmops serve` serves stock git to git clients. `auth login`, `auth status` and `auth logout`
+//! have none either: they read and write the user's login file, not the store the server was
+//! started on, and a login reads a secret that a tool call's arguments would record.
 //!
 //! A call that moved a ref of a store holding `access.toml` (the CLI's `PREPARE_AFTER`, the M17
 //! design §4.3) starts a detached `serve --prepare --prepare-wait zero` once its response line is

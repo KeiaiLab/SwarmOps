@@ -20,7 +20,8 @@ macro_rules! schemas {
 /// response, whose type has its own entry.
 pub fn schema_for_all() -> serde_json::Value {
     // The store's operations' types, then ancestry's, ref log's, revert's, the conflict
-    // report's touches, the maintenance's, the git remotes', the workspaces' and serve's records.
+    // report's touches, the maintenance's, the git remotes', the workspaces', serve's records
+    // and the logins'.
     let mut all = store_schemas();
     let groups = [
         ancestry_schemas(),
@@ -35,6 +36,7 @@ pub fn schema_for_all() -> serde_json::Value {
         remote_schemas(),
         workspace_schemas(),
         serve_schemas(),
+        auth_schemas(),
     ];
     for more in groups {
         if let (serde_json::Value::Object(all), serde_json::Value::Object(more)) = (&mut all, more)
@@ -303,4 +305,10 @@ fn workspace_schemas() -> serde_json::Value {
 /// The schemas of the records `serve` writes of each request it served (the M17 design §6).
 fn serve_schemas() -> serde_json::Value {
     schemas![ServeRecord, ServeService]
+}
+
+/// The schemas of the logins' types, which run on the client and on no store: `auth login`,
+/// `auth status` and `auth logout` read and write one file of the user's, whose path they give.
+fn auth_schemas() -> serde_json::Value {
+    schemas![AuthEntry, AuthLogin, AuthStatus, AuthLogout]
 }

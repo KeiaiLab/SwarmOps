@@ -112,6 +112,10 @@ const TAKE_BACK_COMMANDS: [&str; 7] = [
 ];
 const TAKE_BACK_SINCE: &str = "0.11.0";
 
+/// The logins' commands, and the release they first ship in.
+const AUTH_COMMANDS: [&str; 3] = ["auth login", "auth status", "auth logout"];
+const AUTH_SINCE: &str = "0.12.0";
+
 /// The release the command at `path` first shipped in.
 fn since(path: &str) -> &'static str {
     if path == SERVE_COMMAND {
@@ -131,6 +135,9 @@ fn since(path: &str) -> &'static str {
     }
     if TAKE_BACK_COMMANDS.contains(&path) {
         return TAKE_BACK_SINCE;
+    }
+    if AUTH_COMMANDS.contains(&path) {
+        return AUTH_SINCE;
     }
     SINCE
 }
@@ -169,11 +176,12 @@ pub(super) enum Group {
     Remotes,
     Workspaces,
     Server,
+    Auth,
 }
 
 impl Group {
     /// Every group, in the index's order.
-    pub(super) const ALL: [Group; 10] = [
+    pub(super) const ALL: [Group; 11] = [
         Group::Store,
         Group::Write,
         Group::Read,
@@ -184,6 +192,7 @@ impl Group {
         Group::Remotes,
         Group::Workspaces,
         Group::Server,
+        Group::Auth,
     ];
 
     /// The group's name in the metadata.
@@ -199,6 +208,7 @@ impl Group {
             Group::Remotes => "remotes",
             Group::Workspaces => "workspaces",
             Group::Server => "server",
+            Group::Auth => "auth",
         }
     }
 
@@ -215,6 +225,7 @@ impl Group {
             Group::Remotes => "Git remotes",
             Group::Workspaces => "Workspaces",
             Group::Server => "Server",
+            Group::Auth => "Logins",
         }
     }
 }
@@ -243,7 +254,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 60] = [
+const META: [Meta; 63] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -609,6 +620,27 @@ const META: [Meta; 60] = [
         false,
         false,
         Returns::Type("DeriveResp"),
+    ),
+    meta(
+        "auth login",
+        Group::Auth,
+        false,
+        false,
+        Returns::Type("AuthLogin"),
+    ),
+    meta(
+        "auth status",
+        Group::Auth,
+        false,
+        false,
+        Returns::Type("AuthStatus"),
+    ),
+    meta(
+        "auth logout",
+        Group::Auth,
+        false,
+        false,
+        Returns::Type("AuthLogout"),
     ),
 ];
 
@@ -1410,7 +1442,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 56] = [
+const RETURN_SITES: [(&str, &str, &str); 59] = [
     ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1523,6 +1555,21 @@ const RETURN_SITES: [(&str, &str, &str); 56] = [
         "fn sync_status(",
     ),
     ("derive", "../swarmops-api/src/ops.rs", "fn derive("),
+    (
+        "auth login",
+        "../swarmops-ops/src/auth/file.rs",
+        "fn login(",
+    ),
+    (
+        "auth status",
+        "../swarmops-ops/src/auth/file.rs",
+        "fn status(",
+    ),
+    (
+        "auth logout",
+        "../swarmops-ops/src/auth/file.rs",
+        "fn logout(",
+    ),
 ];
 
 /// The calls that refuse a command without an identity.

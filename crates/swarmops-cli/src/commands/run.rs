@@ -48,7 +48,7 @@ use swarmops_ops::{LocalOps, Recording, Resolved};
 use swarmops_ws::workspace::Locate;
 
 use super::prepare::{self, After};
-use super::{serve, ws};
+use super::{auth, serve, ws};
 use crate::cli::{
     self, BlobCommand, Command, DiffArgs, DiffFormatArg, GitCommand, Global, OpCommand, RefCommand,
     RemoteCommand, SyncCommand,
@@ -237,8 +237,7 @@ fn dispatch(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
                 ctx.used.repo.replace(Some(dir.clone()));
             }
             let result = init(&dir, name.as_deref(), format);
-            let (repo, resolved, recovered) = ctx.used.meta();
-            ctx.finish(op, (repo, resolved, recovered), result)
+            ctx.finish(op, ctx.used.meta(), result)
         }
         Command::Info => ctx.on_store(op, || Ok(InfoReq::default()), |ops, req| ops.repo_info(req)),
         Command::Whoami => whoami(ctx, op),
@@ -328,6 +327,7 @@ fn dispatch(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         Command::Mcp => mcp::serve(ctx.global, ctx.env),
         Command::Serve(args) => serve::run(ctx, op, args),
         derive @ Command::Derive { .. } => run_derive(ctx, op, &derive),
+        Command::Auth(command) => auth::run(ctx, op, &command),
         // The rest: the git remotes' commands (M13).
         remotes => run_remotes(ctx, op, remotes),
     }

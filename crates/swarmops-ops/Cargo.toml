@@ -39,7 +39,7 @@ blake3.workspace = true
 camino.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# The store's TOML files: `remotes.toml`, `authors.toml` (M13).
+# The store's TOML files, `remotes.toml` and `authors.toml` (M13), and the user's login file.
 toml.workspace = true
 
 [dev-dependencies]

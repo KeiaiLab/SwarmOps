@@ -63,6 +63,9 @@ These commands have no tool; an operator or a script runs them as commands.
 | [`swarmops mcp`](../commands/mcp.md) | It is the server that serves the tools. |
 | [`swarmops serve`](../commands/serve.md) | It is git's server for the store, a process of its own. |
 | [`swarmops derive`](../commands/derive.md) | It only fills ahead of time a cache that each read fills itself, so it changes no result an agent reads. |
+| [`swarmops auth login`](../commands/auth-login.md) | It reads a token from stdin, which a tool call's arguments would record. |
+| [`swarmops auth status`](../commands/auth-status.md) | It reads the user's login file, not the store the server was started on. |
+| [`swarmops auth logout`](../commands/auth-logout.md) | It changes the user's login file, not the store the server was started on. |
 
 ## Protocol versions
 
