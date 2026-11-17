@@ -96,11 +96,20 @@ SwarmOps runs your git, so git's own ways to authenticate apply, as they do for 
   the variable's name, never its value; each command reads the variable and hands git the token as
   an HTTP header for that remote's URL alone (basic authentication, user name `x-access-token`),
   through the environment, never as an argument.
+- **HTTPS with a login**: `so auth login --gh --with-token` reads a token from stdin and keeps it
+  for `github.com` in your login file, a file of your own outside every store
+  ([`auth login`](../reference/commands/auth-login.md)). An https remote at that host that names no
+  `--token-env` then goes with it, handed to git as a variable's token is. `so auth status` lists
+  the logins, without their tokens.
+
+A remote that names a variable goes with the variable alone, set or not. Otherwise the login for
+the remote's host is used, if there is one: the host and port must be equal, so a login for
+`github.com` is not sent to `gist.github.com`. Otherwise git's own credentials apply.
 
 git never prompts: SwarmOps sets `GIT_TERMINAL_PROMPT=0`, so a missing credential fails at once
 with `E_REMOTE_REJECTED` (`details.reason` `auth`, exit 5). A credential helper that opens a
 window of its own ignores that setting and can wait for a person; under an MCP server nobody is
-there to answer it. Give agents' hosts an ssh key or `--token-env` instead.
+there to answer it. Give agents' hosts an ssh key, `--token-env` or a login instead.
 
 **Tokens in CI.** A GitHub Actions job passes its token in the variable it names:
 
@@ -434,7 +443,8 @@ commit and land are never blocked by a sync: the store's own lock is not held ac
 `sync_status`. Each takes a remote by its name only. `clone` and `remote add|remove` are CLI only,
 so that an agent cannot point the store at a URL of its choosing. A tool call waits for git, so a
 long fetch holds that agent's session until it ends. The MCP server's environment is the
-credentials' environment: start it with the ssh agent or the token variable the remotes need.
+credentials' environment: start it with the ssh agent or the token variable the remotes need, or
+log in once as the user it runs as, whose login file it reads.
 
 ## Limits to know
 

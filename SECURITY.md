@@ -139,9 +139,13 @@ these are vulnerabilities:
   and with no keyring: the file is made with mode `0600` in a directory made with mode `0700`, and
   any process that runs as the same user can read it. The token is read from stdin, never from an
   argument. A login file that is a symbolic link, or that its group or others can read or write,
-  is refused, and its mode is never changed for the user. A token that reaches any other file, an
-  argument, an envelope, an error or what `auth status` prints; a login file made with a wider
-  mode; or a login file read through a link, is a vulnerability. No store, remote or request can
+  is refused, and its mode is never changed for the user. `clone`, `fetch`, `push`, `sync` and
+  `remote add` send the token to a remote over https (or over http to a loopback address) that
+  names no token variable and whose host and port are the login's, exactly; it reaches git as a
+  variable's token does, and is removed the same way from what git prints. A token that reaches
+  any other file, an argument, an envelope, an error or what `auth status` prints; a token sent to
+  a remote at another host or port, or to one that names a variable; a login file made with a
+  wider mode; or a login file read through a link, is a vulnerability. No store, remote or request can
   name the login file: only the user's environment does.
 - **The SwarmOps supply chain.** A dependency or a CI workflow that could change what we build
   or run. `cargo deny check` (advisories, licenses, bans, sources) runs over every lockfile the

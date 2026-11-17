@@ -817,13 +817,22 @@ left).
   the store's objects. Found: the M13 design's risks.*
 - **A credential helper that opens a window can wait for a person.** SwarmOps sets
   `GIT_TERMINAL_PROMPT=0`, which git's own prompts obey; a helper with a window of its own does
-  not, and under an MCP server no one answers it. Agents' hosts use ssh keys or `--token-env`.
+  not, and under an MCP server no one answers it. Agents' hosts use ssh keys, `--token-env` or a
+  login (`auth login --gh --with-token`).
   *Documented ([GitHub as a remote](guides/github-remote.md#credentials)). Found: the M13 design's
   risks.*
-- **A login is kept, and not used yet.** `auth login --gh --with-token` keeps a token for
-  `github.com` in the user's login file; `clone`, `fetch`, `push` and `sync` do not read it, and
-  authenticate as before, through git's credential helpers, ssh keys or `--token-env`.
-  *Unscheduled. Found: the login's design.*
+- **A login whose token the remote refuses is not passed over.** An https remote that names no
+  `--token-env` goes with the token of the login for its host, sent with the first request, before
+  git asks a credential helper. A token that has expired or cannot see the repository can fail the
+  command (`E_REMOTE_REJECTED`, `details.login_used` true) on a host where a helper holds one that
+  works; what git does with a helper after such a refusal is not tested. Log in again, or log out.
+  *Documented ([`auth login`](reference/commands/auth-login.md#where-the-login-is-used)). Found:
+  the login's design.*
+- **A login is for one host and port, exactly.** A login for `github.com` is not sent to
+  `gist.github.com` or to another port, and a remote that names a token variable never uses a
+  login, the variable set or not. *Documented
+  ([`auth login`](reference/commands/auth-login.md#where-the-login-is-used)). Found: the login's
+  design.*
 - **A login's token is kept in plain text.** The login file holds it unencrypted, with no keyring:
   its mode (0600, in a directory made 0700) is the protection, and any process that runs as the
   same user can read it. A loose file is refused, never fixed for the user. *Documented

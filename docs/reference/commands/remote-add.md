@@ -4,7 +4,7 @@
 
 Record a git remote in the store.
 
-The name is 1 to 63 lowercase letters, digits, dots, underscores and dashes, starting with a letter or a digit, not ending in a dot, and not status. Without --branch the remote is asked for its default branch (a network call); an empty remote gives main, with a warning. The store holds no credential: --token-env records a variable's name. A URL holding a password is refused, and so is an http or https URL with a user part, whatever the user is: a token there cannot be told from a name. An ssh URL keeps its user. It needs no identity.
+The name is 1 to 63 lowercase letters, digits, dots, underscores and dashes, starting with a letter or a digit, not ending in a dot, and not status. Without --branch the remote is asked for its default branch (a network call); an empty remote gives main, with a warning. The store holds no credential: --token-env records a variable's name, and an https remote without one goes with the login kept for its host, if any (auth login). A URL holding a password is refused, and so is an http or https URL with a user part, whatever the user is: a token there cannot be told from a name. An ssh URL keeps its user. It needs no identity.
 
 ```yaml
 title: "swarmops remote add"

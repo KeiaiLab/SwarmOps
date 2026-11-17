@@ -7,7 +7,8 @@
 //! only in the requests that write the store's remote configuration (`CloneReq`,
 //! `RemoteAddReq`) and in [`RemoteInfo`]; a clone's directory is a client path, as `InitReq`'s
 //! is. No credential is ever a field: a remote may name the environment variable that holds a
-//! token (`token_env`), never the token.
+//! token (`token_env`), never the token, and the token of a login (`auth login`) is looked up by
+//! the remote's host when a call is made, and recorded nowhere in a store.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

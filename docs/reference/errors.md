@@ -327,7 +327,7 @@ A push or a sync found the remote branch elsewhere than it can move from: `detai
 
 Exit 5. Retryable: no.
 
-The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or a rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a pack whose checksum does not match, or one its refs reach is missing, or corrupt in the store's mirror already; no tracking ref moved) or `unclassified` (a failure git's messages do not explain, never retried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the token redacted).
+The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or a rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a pack whose checksum does not match, or one its refs reach is missing, or corrupt in the store's mirror already; no tracking ref moved) or `unclassified` (a failure git's messages do not explain, never retried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the token redacted). `token_env_unset` is true when the variable the remote names held no token, and `login_used` when the call sent the token of a login (`auth login`).
 
 ## E_REMOTE_UNREACHABLE
 

@@ -8,6 +8,8 @@ Keep a token for a provider in your login file.
 
 The login file is the one SWARMOPS\_AUTH\_FILE names by an absolute path, else swarmops/auth.toml in your state directory ($XDG\_STATE\_HOME or \~/.local/state; on macOS \~/Library/Application Support). It is made with mode 0600, in a directory made with mode 0700, and holds the token in plain text. A login for a host replaces the one the file held for it (replaced). The result names the file and never holds the token. It uses no store and needs no identity.
 
+clone, fetch, push, sync and remote add send the token to an https remote at that host which names no --token-env; a remote that names a variable goes with the variable alone.
+
 ```yaml
 title: "swarmops auth login"
 description: "Keep a token for a provider in your login file."
@@ -90,9 +92,9 @@ Exit code 0. Recorded by the CLI tests. A name in square brackets, such as `[tmp
 store. It opens no store: `--repo` and `--as` are read and not used, and the envelope has no
 `meta.repo`. It has no MCP tool: a tool call's arguments would record the token.
 
-In this release it keeps the token and does nothing else with it: `clone`, `fetch`, `push` and
-`sync` do not read the login file, and take a token from git's credential helpers or from the
-variable `--token-env` names, as before.
+The token is then what `clone`, `fetch`, `push`, `sync` and `remote add` send to an https remote
+at the login's host that names no `--token-env`
+([Where the login is used](#where-the-login-is-used)).
 
 ### Giving the token
 
@@ -134,11 +136,42 @@ token = "<the token>"
   another provider, as it read them. Comments are not kept.
 - **No lock.** Of two logins at the same moment, the later one's file stands.
 
+### Where the login is used
+
+Each command that reaches a git remote ([`clone`](../commands/clone.md),
+[`fetch`](../commands/fetch.md), [`push`](../commands/push.md),
+[`sync`](../commands/sync.md), and [`remote add`](../commands/remote-add.md) when it asks
+for the default branch) picks one credential, in this order:
+
+1. **The remote names a variable** (`--token-env`): the variable's token, and nothing else. With
+   the variable unset no token is sent, the login is not used in its place, and a refusal says so
+   (`details.token_env_unset`).
+2. **An https remote whose host is the login's**: the login's token. git gets it as it gets a
+   variable's token, as an HTTP header for that remote's URL alone (basic authentication, user
+   name `x-access-token`), through its environment and never as an argument.
+3. **Anything else**: no token from SwarmOps. git's own credentials apply: a credential helper,
+   an ssh key.
+
+The host matches when it is equal, port included: a login for `github.com` goes to
+`https://github.com/…` and to `https://github.com:443/…`, and not to `gist.github.com`, to
+`github.com:8443` or to a name that ends in `github.com`. An ssh remote never reads the login
+file. Only a login of a provider this build knows is sent.
+
+A remote that refuses the login's token ends `E_REMOTE_REJECTED` (`details.reason` `auth`, or
+`not_found` for a repository the token cannot see) with `details.login_used` true. The login's
+token goes with the first request, before git asks any credential helper, so a token that has
+expired can fail a remote that a helper would open: log in again, or log out
+([`auth logout`](../commands/auth-logout.md)) to leave the remote to git's credentials.
+
+A login file that is refused (below) fails these commands before git runs. The MCP server's
+`fetch`, `push` and `sync` tools use the login file of the user the server runs as.
+
 ### A file that is refused
 
-`auth login`, [`auth status`](../commands/auth-status.md) and
-[`auth logout`](../commands/auth-logout.md) refuse a login file they cannot trust or read,
-with `E_INVALID_ARG`, the file in `details.auth_file`, and never overwrite it:
+`auth login`, [`auth status`](../commands/auth-status.md),
+[`auth logout`](../commands/auth-logout.md) and the commands that would send a login's token
+refuse a login file they cannot trust or read, with `E_INVALID_ARG`, the file in
+`details.auth_file`, and never overwrite it:
 
 | `details.reason` | The file |
 | --- | --- |

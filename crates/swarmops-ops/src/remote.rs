@@ -54,6 +54,7 @@ use swarmops_git::{GitOid, GixSource, ImportError, ImportReport, ImportRequest, 
 use swarmops_repo::RepoError;
 use swarmops_store::{IoFailure, SYSTEM_GIT, StoreError};
 
+use crate::auth;
 use crate::error::{self, Phase};
 use crate::local::{LocalOps, Recording, Resolved};
 use crate::native;
@@ -352,8 +353,7 @@ impl Recording<'_> {
         let branch = if let Some(branch) = branch {
             branch
         } else {
-            let mut cred = Credential::default();
-            cred.token_env = token_env.map(str::to_owned);
+            let cred = auth::credential(parsed, token_env, &auth::process_env)?;
             let (branch, unknown) = default_branch(parsed, &cred, name)?;
             warnings.extend(unknown);
             branch
@@ -376,8 +376,7 @@ impl Recording<'_> {
         // 1. The mirror, made or rebuilt, its stale git lock files removed.
         let (mirror, mut warnings) = ready(self.mirror()?, lock)?;
         let url = RemoteUrl::parse(&remote.url).map_err(error::url_refused)?;
-        let mut cred = Credential::default();
-        cred.token_env.clone_from(&remote.token_env);
+        let cred = auth::credential(&url, remote.token_env.as_deref(), &auth::process_env)?;
         let git = GitCli::find().map_err(failed)?;
 
         // 2. git fetch into the incoming refs, then the closure check of their tips: every

@@ -96,6 +96,11 @@ A restore on a host without it gets a new key at its first export or import, whi
 history below the head once and is incremental from then on. Copy it only to keep that first run
 short, and with mode 0600: whoever can write the store and the key can steer an export.
 
+The **login file** (`swarmops/auth.toml` in the same state directory, or the file
+`SWARMOPS_AUTH_FILE` names) belongs to the user, not to a store, and no store backup carries it. It
+holds tokens in plain text: keep it out of backups, and on a restored host log in again
+(`swarmops auth login`).
+
 ## What writers see while you hold the lock
 
 A writer that meets the held lock waits, then gives up:

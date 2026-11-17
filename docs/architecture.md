@@ -193,7 +193,9 @@ the user's state directory (`$XDG_STATE_HOME`, else `~/.local/state`; on macOS
 The login file is the only place SwarmOps keeps a credential. `auth login` writes it whole (a temp
 file of mode 0600, renamed over it), `auth status` and `auth logout` read it, and each refuses a
 file that is a symbolic link or that its group or others can read or write, by the mode of the
-file it has open. No store names it, and no command sends its token anywhere yet.
+file it has open. No store names it. `clone`, `fetch`, `push`, `sync` and `remote add` read it for
+an https remote that names no token variable, and send the token of the login whose host is the
+remote's ([Git remotes](#git-remotes)).
 
 Objects are compressed one at a time with zstd at level 3, with zstd's content checksum, when
 they hold at least 128 bytes and compression makes them smaller; otherwise they are stored raw.
@@ -674,8 +676,11 @@ the environment (`GIT_CONFIG_COUNT`: `core.fsync=all`, an empty hooks directory,
 variables that point git at another repository, git's tracing and the locale, and gains `GIT_DIR`
 (the mirror), `LC_ALL=C`, `GIT_TERMINAL_PROMPT=0` and `GIT_ALLOW_PROTOCOL` (the remote URL's scheme
 alone); credential helpers, `SSH_AUTH_SOCK`, `GIT_SSH_COMMAND` and proxy variables pass through. A
-remote's `token_env` reaches git as an HTTP header scoped to the remote's URL, and is redacted, with
-its base64 form, from whatever git prints before it enters an error. A failure is classified by one
+remote's token reaches git as an HTTP header scoped to the remote's URL, and is redacted, with
+its base64 form, from whatever git prints before it enters an error. The token is the one in the
+variable the remote names (`token_env`), and that alone when one is named; else the one of the
+login kept for the URL's host, which `swarmops-ops` looks up in the user's login file by the
+host and port as one key, equal or not sent; else none, and git's helpers apply. A failure is classified by one
 table, from git's exit status, push's porcelain and git's messages under `LC_ALL=C`, into
 `E_REMOTE_UNREACHABLE` (retryable), `E_REMOTE_REJECTED` and `E_REMOTE_DIVERGED`; a failure the table
 does not know is `E_REMOTE_REJECTED` with the reason `unclassified`, never retried; an object git's

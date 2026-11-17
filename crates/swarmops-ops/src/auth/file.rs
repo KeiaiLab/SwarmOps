@@ -57,7 +57,8 @@
 //! logins at once the later one's file stands, whole and valid.
 //!
 //! The token appears in no error, no result and no `Debug` output of this module: the results
-//! are the API's types, which have no field for it.
+//! are the API's types, which have no field for it, and the one function that hands a token out
+//! ([`token_for`]) gives a [`StoredToken`], which prints as redacted.
 
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -67,7 +68,7 @@ use std::os::unix::fs::MetadataExt as _;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::Value;
 use swarmops_api::{AuthEntry, AuthLogin, AuthLogout, AuthStatus, ErrorCode, OpError};
-use swarmops_git::transport::host_key;
+use swarmops_git::transport::{StoredToken, host_key};
 use swarmops_store::{FsOps as _, RealFs};
 
 use crate::{error, identity, userdir};
@@ -264,6 +265,29 @@ pub fn logout(file: Option<&Utf8Path>, provider: Provider) -> Result<AuthLogout,
     let mut out = AuthLogout::new(provider.key(), provider.host(), at.is_some());
     out.file = Some(file.as_str().to_owned());
     Ok(out)
+}
+
+/// The token of the login the login file `file` keeps for `host`, a [`host_key`]: the entry
+/// whose `host` is exactly `host`, when its provider is one this build knows. `None` when there
+/// is no file, no login for that host, or a login of another provider, whose token is never
+/// used. No other host's token is given: not a subdomain's, not another port's.
+///
+/// `E_INVALID_ARG` for a file this build does not read (`details.reason` `auth_file_kind`,
+/// `auth_file_mode`, `auth_file_version` or `auth_file`); `E_IO` when it cannot be read.
+pub(crate) fn token_for(file: &Utf8Path, host: &str) -> Result<Option<StoredToken>, OpError> {
+    let logins = Logins::read(file)?;
+
+    // `listed` and the file's entries are in the same order: `read` listed each entry.
+    let at = logins.listed.iter().position(|entry| entry.host == host);
+    let Some(at) = at.filter(|at| Provider::named(&logins.listed[*at].provider).is_some()) else {
+        return Ok(None);
+    };
+    let entries = logins.table.get(LOGINS_KEY).and_then(toml::Value::as_array);
+    let token = entries
+        .and_then(|entries| entries.get(at))
+        .and_then(|entry| entry.get(TOKEN_KEY))
+        .and_then(toml::Value::as_str);
+    Ok(token.map(|token| StoredToken::new(token.to_owned())))
 }
 
 /// Refuses a token that is not 1 to [`MAX_TOKEN_BYTES`] visible ASCII characters
@@ -934,6 +958,51 @@ mod tests {
         assert_eq!(left[0].host, "127.0.0.1:8080");
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("loopback-token-not-a-secret") && !text.contains(TOKEN));
+    }
+
+    #[test]
+    fn a_token_is_given_for_its_own_host_alone() {
+        let (_dir, path) = holding(
+            "version = 1\n\
+             [[login]]\nprovider = \"so\"\nhost = \"cloud.example\"\n\
+             token = \"cloud-token-not-a-secret\"\n\
+             [[login]]\nprovider = \"gh\"\nhost = \"127.0.0.1:8080\"\n\
+             token = \"loopback-token-not-a-secret\"\nsource = \"with_token\"\n",
+        );
+        log_in(&path, TOKEN).unwrap();
+        let token = |host: &str| token_for(&path, host).unwrap();
+
+        // 1. The host's own login, whichever entry of the file it is.
+        assert_eq!(
+            token("github.com"),
+            Some(StoredToken::new(TOKEN.to_owned()))
+        );
+        let loopback = StoredToken::new("loopback-token-not-a-secret".to_owned());
+        assert_eq!(token("127.0.0.1:8080"), Some(loopback));
+
+        // 2. No other host's: a subdomain, a parent, another port, another case.
+        for other in [
+            "gist.github.com",
+            "com",
+            "github.com:8443",
+            "127.0.0.1",
+            "127.0.0.1:8081",
+            "GitHub.com",
+            "",
+        ] {
+            assert_eq!(token(other), None, "{other:?}");
+        }
+
+        // 3. A login of a provider this build does not know is never used.
+        assert_eq!(token("cloud.example"), None);
+
+        // 4. What is given prints no token; no file gives none; a file that is refused fails.
+        assert!(!format!("{:?}", token("github.com")).contains(TOKEN));
+        let (_dir, gone) = nowhere();
+        assert_eq!(token_for(&gone, "github.com").unwrap(), None);
+        chmod(&path, 0o644);
+        let error = token_for(&path, "github.com").unwrap_err();
+        assert_eq!(reason(&error), ("E_INVALID_ARG", "auth_file_mode"));
     }
 
     #[test]

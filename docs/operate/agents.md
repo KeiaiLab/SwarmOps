@@ -70,7 +70,8 @@ arguments and returning the envelope the CLI prints for it:
 
 `init`, `whoami`, `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`,
 `derive`, `clone` and `remote add|remove` are commands only: you run them, not the agents. The git remote tools take a remote by its name
-only, and run git with the server's environment: its ssh agent and token variables
+only, and run git with the server's environment: its ssh agent and token variables, and the login
+file of the user it runs as
 ([GitHub as a remote](../guides/github-remote.md#through-mcp)).
 
 - The store and the identity are the server's: `--repo` (else `SWARMOPS_REPO`) and `--as` (else

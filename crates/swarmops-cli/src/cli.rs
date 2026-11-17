@@ -253,9 +253,11 @@ default branch) imported into main.
 The URL is an https or ssh URL, or the scp form user@host:path; a plain http URL only to a \
 loopback address. A URL holding a password is refused, and so is an http or https URL with a \
 user part, whatever the user is: a token there cannot be told from a name (leave the token to \
-git's credential helper, or name its variable with --token-env). An ssh URL keeps its user. \
+git's credential helper, name its variable with --token-env, or log in with auth login). An ssh \
+URL keeps its user. \
 Git 2.39 or later runs the transfer, with the \
-user's own credentials, proxies and ssh configuration. It needs an identity, as git import does: it moves main. Run again into the \
+user's own credentials, proxies and ssh configuration. An https remote that names no --token-env \
+goes with the token of the login kept for its host, when auth status lists one. It needs an identity, as git import does: it moves main. Run again into the \
 same directory with the same URL, it continues an interrupted clone.";
 
 /// `push`'s target's help.
@@ -1445,7 +1447,8 @@ pub enum RemoteCommand {
     /// The name is 1 to 63 lowercase letters, digits, dots, underscores and dashes, starting with
     /// a letter or a digit, not ending in a dot, and not status. Without --branch the remote is
     /// asked for its default branch (a network call); an empty remote gives main, with a
-    /// warning. The store holds no credential: --token-env records a variable's name. A URL
+    /// warning. The store holds no credential: --token-env records a variable's name, and an
+    /// https remote without one goes with the login kept for its host, if any (auth login). A URL
     /// holding a password is refused, and so is an http or https URL with a user part, whatever
     /// the user is: a token there cannot be told from a name. An ssh URL keeps its user. It
     /// needs no identity.
@@ -1488,6 +1491,9 @@ pub enum AuthCommand {
     /// 0700, and holds the token in plain text. A login for a host replaces the one the file
     /// held for it (replaced). The result names the file and never holds the token. It uses no
     /// store and needs no identity.
+    ///
+    /// clone, fetch, push, sync and remote add send the token to an https remote at that host
+    /// which names no --token-env; a remote that names a variable goes with the variable alone.
     #[command(
         group(ArgGroup::new("provider").required(true).args(["gh"])),
         group(ArgGroup::new("way").required(true).args(["with_token"]))

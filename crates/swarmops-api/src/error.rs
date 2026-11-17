@@ -246,7 +246,9 @@ error_codes! {
     /// pack whose checksum does not match, or one its refs reach is missing, or corrupt in the
     /// store's mirror already; no tracking ref moved) or `unclassified` (a failure git's
     /// messages do not explain, never retried), with `remote` and what git said (`refs`,
-    /// `remote_messages`, `git_exit`, `stderr_tail`, the token redacted).
+    /// `remote_messages`, `git_exit`, `stderr_tail`, the token redacted). `token_env_unset` is
+    /// true when the variable the remote names held no token, and `login_used` when the call
+    /// sent the token of a login (`auth login`).
     RemoteRejected => "E_REMOTE_REJECTED", EXIT_AUTH, false;
     /// The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,
     /// `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,

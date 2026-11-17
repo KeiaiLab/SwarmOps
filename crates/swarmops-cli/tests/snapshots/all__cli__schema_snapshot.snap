@@ -3430,7 +3430,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_REMOTE_REJECTED",
-          "description": "The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or\na rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a\npack whose checksum does not match, or one its refs reach is missing, or corrupt in the\nstore's mirror already; no tracking ref moved) or `unclassified` (a failure git's\nmessages do not explain, never retried), with `remote` and what git said (`refs`,\n`remote_messages`, `git_exit`, `stderr_tail`, the token redacted).",
+          "description": "The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or\na rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a\npack whose checksum does not match, or one its refs reach is missing, or corrupt in the\nstore's mirror already; no tracking ref moved) or `unclassified` (a failure git's\nmessages do not explain, never retried), with `remote` and what git said (`refs`,\n`remote_messages`, `git_exit`, `stderr_tail`, the token redacted). `token_env_unset` is\ntrue when the variable the remote names held no token, and `login_used` when the call\nsent the token of a login (`auth login`).",
           "type": "string"
         },
         {
@@ -11312,7 +11312,7 @@ expression: s.redact(&all)
             },
             {
               "const": "E_REMOTE_REJECTED",
-              "description": "The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or\na rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a\npack whose checksum does not match, or one its refs reach is missing, or corrupt in the\nstore's mirror already; no tracking ref moved) or `unclassified` (a failure git's\nmessages do not explain, never retried), with `remote` and what git said (`refs`,\n`remote_messages`, `git_exit`, `stderr_tail`, the token redacted).",
+              "description": "The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or\na rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a\npack whose checksum does not match, or one its refs reach is missing, or corrupt in the\nstore's mirror already; no tracking ref moved) or `unclassified` (a failure git's\nmessages do not explain, never retried), with `remote` and what git said (`refs`,\n`remote_messages`, `git_exit`, `stderr_tail`, the token redacted). `token_env_unset` is\ntrue when the variable the remote names held no token, and `login_used` when the call\nsent the token of a login (`auth login`).",
               "type": "string"
             },
             {

@@ -25,15 +25,14 @@
 use swarmops_api::{ErrorCode, LossyClass, OpError, PushReq, PushResp, PushStatus, RemoteInfo};
 use swarmops_core::ChangesetId;
 use swarmops_git::mirror::{Mirror, MirrorError, MirrorLock, Rebuilt};
-use swarmops_git::transport::{
-    Credential, GitCli, PushOutcome, PushUpdate, RemoteUrl, Transport as _,
-};
+use swarmops_git::transport::{GitCli, PushOutcome, PushUpdate, RemoteUrl, Transport as _};
 use swarmops_git::{
     DivergedReason, ExportError, ExportReport, ExportRequest, GitOid, GixSink, GixSource,
     ImportError, ImportRequest, LossySet, SinkError, limits,
 };
 use swarmops_store::{Recovered, RefKind, SYSTEM_GIT, TailRepair};
 
+use crate::auth;
 use crate::error::{self, Phase};
 use crate::local::{LocalOps, Recording, Resolved};
 use crate::native;
@@ -195,8 +194,7 @@ impl Recording<'_> {
         }
 
         // 8. The compare-and-swap: the remote moves only from `seen`, to `new`.
-        let mut cred = Credential::default();
-        cred.token_env.clone_from(&remote.token_env);
+        let cred = auth::credential(&url, remote.token_env.as_deref(), &auth::process_env)?;
         let update = PushUpdate::new(new, branch.clone(), seen);
         let outcome = git
             .push(mirror.git_dir(), &url, &cred, &update)

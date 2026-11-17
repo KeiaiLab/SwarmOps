@@ -24,8 +24,7 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - `auth login --gh --with-token`, `auth status` and `auth logout --gh` (`so auth …`): a login
   keeps a token for `github.com`, read from stdin, in one file of the user's outside every store
   (`SWARMOPS_AUTH_FILE`, else `swarmops/auth.toml` in the state directory); `status` lists the
-  logins without their tokens, and `logout` removes one. The token is kept and not used yet:
-  `clone`, `fetch`, `push` and `sync` authenticate as before. The three commands open no store
+  logins without their tokens, and `logout` removes one. The three commands open no store
   and have no MCP tool, each with its reason in the MCP reference's index. New result types:
   `AuthEntry`, `AuthLogin`, `AuthStatus`, `AuthLogout`.
 - Each workspace mutation that succeeds records its holder in `workspaces/hold/<name>.json`
@@ -122,6 +121,15 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Changed
 
+- `clone`, `fetch`, `push`, `sync` and `remote add` send the token of the login kept for a
+  remote's host (`auth login`) to an https remote that names no `--token-env`. A remote that names
+  a variable goes with the variable alone, set or not, and git's own credentials apply when there
+  is no login. The host matches when it is equal, port included: no subdomain and no other port.
+  A login file that is refused fails these commands before git runs (`E_INVALID_ARG`,
+  `details.auth_file`). `E_REMOTE_REJECTED` carries `details.login_used` when the call sent a
+  login's token; its `auth` and `not_found` hints, the `credential_in_url` hint and `clone`'s help
+  name the login. The MCP tools `fetch`, `push` and `sync` use the login file of the user the
+  server runs as.
 - `git import` and `git export` refuse an empty `git_path` with `E_INVALID_ARG`
   (`details.reason` `git_path_empty`), before any repository is opened. It was read as the
   working directory: at a work tree's root the commands read or wrote that repository.
@@ -324,7 +332,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   its group or others can read or write, is refused (`E_INVALID_ARG`, `details.reason`
   `auth_file_kind` or `auth_file_mode`), by the mode of the file as opened, and is never
   overwritten. The token is read from stdin, never from an argument, and appears in no envelope
-  and no error ([SECURITY.md](SECURITY.md)).
+  and no error. It is sent only to an https remote whose host and port are the login's, as a
+  header scoped to that remote's URL in git's environment, and is removed from what git prints
+  ([SECURITY.md](SECURITY.md)).
 - `ws create` refuses a `.swarmws` that is a link (`E_WS_DIRTY`) before its volume probe writes or
   removes a file through it; the probe wrote `probe-a` and `probe-l` at the link's target.
 - A token given as the user of an `http://` or `https://` URL was stored in `remotes.toml` and

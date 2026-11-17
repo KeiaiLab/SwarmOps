@@ -1285,7 +1285,8 @@ pub(crate) fn url_refused(why: UrlRefused) -> OpError {
         ),
         UrlRefused::CredentialInUrl => (
             "a remote's URL holds no password",
-            "leave the token to git's credential helper, or name its variable with --token-env",
+            "leave the token to git's credential helper, name its variable with --token-env, or \
+             log in (swarmops auth login)",
         ),
         UrlRefused::OptionLike => (
             "a remote's URL or host does not start with -",
@@ -1425,11 +1426,12 @@ fn rejected(reason: RejectReason, said: Said, remote: &str) -> OpError {
     // 2. The next step the reason calls for.
     let next = match reason {
         RejectReason::Auth => {
-            "check the credential git uses for the remote, or the variable --token-env names"
+            "check the credential git uses for the remote, the variable --token-env names, or \
+             the login for its host (swarmops auth status)"
         }
         RejectReason::NotFound => {
             "check the URL: a host such as GitHub answers so for a private repository the \
-             credential cannot see"
+             credential cannot see (swarmops auth status lists the logins)"
         }
         RejectReason::Declined => {
             "details.refs and details.remote_messages give the remote's reason"

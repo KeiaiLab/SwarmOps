@@ -1293,15 +1293,21 @@ check:
 
 | `reason` | Means | What to do |
 | --- | --- | --- |
-| `auth` | No credential, or one the remote refuses. | Check the credential git uses for the remote, or the variable `--token-env` names ([Credentials](guides/github-remote.md#credentials)). |
-| `not_found` | The remote says the repository is not there. | Check the URL: a host such as GitHub answers so for a private repository the credential cannot see. |
+| `auth` | No credential, or one the remote refuses. | Check the credential git uses for the remote, the variable `--token-env` names, or the login for its host, which `swarmops auth status` lists ([Credentials](guides/github-remote.md#credentials)). |
+| `not_found` | The remote says the repository is not there. | Check the URL: a host such as GitHub answers so for a private repository the credential cannot see; `swarmops auth status` lists the logins. |
 | `declined` | A hook or a rule of the remote's refused. | `details.refs` and `details.remote_messages` give the remote's reason. |
 | `bad_objects` | A fetch received an object git's fsck refuses, a pack whose checksum does not match, or one its refs reach is missing; no tracking ref moved. | Fix the remote's history. |
 | `unclassified` | A failure git's messages do not explain; never retried. | `details.stderr_tail` gives what git said. |
 
 `details` also names the `remote` and what git said (`refs`, `remote_messages`, `git_exit`,
 `stderr_tail`, the token removed), and `token_env_unset` when the variable `--token-env` names is
-not set.
+not set: a login is not used in its place. `login_used` is true when the call sent the token of a
+login (`swarmops auth login`): that token is what the remote refused. Log in again with one that
+can see the repository, or `swarmops auth logout --gh` to leave the remote to git's credentials.
+
+A remote command that ends `E_INVALID_ARG` with `details.auth_file` was stopped by the login
+file, before git ran: its hint, and
+[`auth login`](reference/commands/auth-login.md#a-file-that-is-refused), say what to fix.
 
 ### `E_REMOTE_UNREACHABLE`
 

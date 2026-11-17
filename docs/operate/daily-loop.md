@@ -36,8 +36,9 @@ Commands and outputs here follow the
 
 - An identity of your own ([Stores](stores.md)), and agents that reach the store
   ([Give agents the store](agents.md)).
-- git 2.39 or later on the host, with access to the remote (an ssh key, or a credential helper or
-  a token for HTTPS: [GitHub as a remote](../guides/github-remote.md#credentials)), and `python3`
+- git 2.39 or later on the host, with access to the remote (an ssh key, or a credential helper, a
+  token variable or a login for HTTPS:
+  [GitHub as a remote](../guides/github-remote.md#credentials)), and `python3`
   for the `field` helper of step 2.
 - CI that runs on a push of the review branch ([step 4](#4-send-it-to-git-for-review)).
 

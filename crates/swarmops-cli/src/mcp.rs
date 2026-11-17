@@ -89,7 +89,9 @@
 //! derived values that each read fills itself, so it changes no result an agent reads, and
 //! `swarmops serve` serves stock git to git clients. `auth login`, `auth status` and `auth logout`
 //! have none either: they read and write the user's login file, not the store the server was
-//! started on, and a login reads a secret that a tool call's arguments would record.
+//! started on, and a login reads a secret that a tool call's arguments would record. The
+//! `fetch`, `push` and `sync` tools do use a login: the server reads the login file of the user
+//! it runs as, as the commands do.
 //!
 //! A call that moved a ref of a store holding `access.toml` (the CLI's `PREPARE_AFTER`, the M17
 //! design §4.3) starts a detached `serve --prepare --prepare-wait zero` once its response line is
