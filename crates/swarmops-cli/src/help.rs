@@ -21,6 +21,9 @@
 //! the styles clap gives its own (bold, underlined), which clap writes to a terminal only. The
 //! summaries are this module's ([`GROUPS`], [`FAMILIES`]): a line each, shorter than the
 //! commands' own help, which their own screens and the reference pages keep.
+//!
+//! [`bare`] is the rule for a line that names no command: a person at a terminal reads the
+//! screen, and everything else gets the usage error's envelope as before.
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
@@ -28,11 +31,16 @@ use std::fmt::Write as _;
 use clap::builder::Styles;
 use clap::{Arg, ArgAction, Command};
 
+use crate::output::Stdout;
+
 /// The most columns a line of these screens takes.
 pub(crate) const WIDTH: usize = 80;
 
 /// The program's name where the line gives none.
 const PROGRAM: &str = "swarmops";
+
+/// What the format variable holds when it asks for the envelope.
+const JSON: &str = "json";
 
 /// A command's line in a list: its name and what it does, in at most 60 characters, which the
 /// tests hold every summary to.
@@ -348,10 +356,12 @@ pub(crate) const FAMILIES: [Family; 7] = [
     },
 ];
 
-/// What the program's screen says of its output.
+/// What the program's screen says of its output, the rule of [`bare`] included.
 const OUTPUT: &str = "Every command prints one JSON envelope on stdout, or with --human a short \
 text, and exits 0 or with its error's code. mcp, serve, derive --follow and auth \
-git-credential print something else there.";
+git-credential print something else there. At a terminal, a line that names no command prints \
+help like this instead of its usage error's envelope, unless --json or SWARMOPS_FORMAT=json \
+asks for the envelope; it exits 2 either way.";
 
 /// What `<command> --help` gives.
 const COMMAND_HELP: &str = "A command's arguments, options and long help";
@@ -418,6 +428,31 @@ fn refilled(cmd: Command) -> Command {
         Some(long) => cmd.long_about(long),
         None => cmd,
     }
+}
+
+/// The format flag a line settles on: of `--json` and `--human`, the one given last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Flag {
+    /// `--json`: the envelope was asked for.
+    Json,
+    /// `--human`: text was asked for.
+    Human,
+    /// Neither flag: the variable decides.
+    Neither,
+}
+
+/// Whether a line that names no command (the program alone, or a family alone) prints its help
+/// instead of its usage error's envelope: when `stdout` is a terminal and nothing asks for the
+/// envelope, neither `--json` nor, without `--human`, a `SWARMOPS_FORMAT` (`format`) of
+/// `json`. A flag outranks the variable, as for every command's format. Whatever is not a
+/// person at a terminal gets the envelope, as every command gives one.
+pub(crate) fn bare(stdout: Stdout, flag: Flag, format: Option<&OsStr>) -> bool {
+    let envelope_asked = match flag {
+        Flag::Json => true,
+        Flag::Human => false,
+        Flag::Neither => format == Some(OsStr::new(JSON)),
+    };
+    stdout == Stdout::Terminal && !envelope_asked
 }
 
 /// The program's help template: clap fills in the about and the usage, the rest is text.
@@ -932,6 +967,37 @@ mod tests {
             (None, "swarmops"),
         ] {
             assert_eq!(invoked(first.map(OsStr::new)), name, "{first:?}");
+        }
+    }
+
+    /// The help only for a terminal that nothing asked the envelope of; the envelope for a
+    /// pipe or a file, whatever else is set.
+    #[test]
+    fn a_bare_line_reads_help_at_a_terminal_alone() {
+        let json = Some(OsStr::new("json"));
+        let human = Some(OsStr::new("human"));
+        let other = Some(OsStr::new("JSON"));
+        let empty = Some(OsStr::new(""));
+        for (flag, format, at_a_terminal) in [
+            (Flag::Neither, None, true),
+            (Flag::Neither, human, true),
+            (Flag::Neither, other, true),
+            (Flag::Neither, empty, true),
+            (Flag::Neither, json, false),
+            (Flag::Human, None, true),
+            (Flag::Human, human, true),
+            (Flag::Human, json, true),
+            (Flag::Json, None, false),
+            (Flag::Json, human, false),
+            (Flag::Json, json, false),
+        ] {
+            let said = format!("{flag:?} {format:?}");
+            assert_eq!(
+                bare(Stdout::Terminal, flag, format),
+                at_a_terminal,
+                "{said}"
+            );
+            assert!(!bare(Stdout::Other, flag, format), "a pipe: {said}");
         }
     }
 

@@ -15,16 +15,18 @@ use std::panic::{self, AssertUnwindSafe};
 use std::process::ExitCode;
 use std::time::Instant;
 
+use clap::error::ErrorKind;
 use swarmops_api::ErrorCode;
 use swarmops_ws::RealFs;
 use swarmops_ws::workspace::{self, Locate};
 
-use crate::cli::Parsed;
+use crate::cli::{Global, Parsed};
 use crate::commands::prepare::{self, After};
 use crate::commands::{Ctx, Used};
 use crate::gitlike::{self, Place};
+use crate::help::Flag;
 use crate::output::{Format, Printed, Stdout};
-use crate::{cli, commands, context};
+use crate::{cli, commands, context, help};
 
 /// What follows an envelope once it is out: neither changes the envelope or the exit code.
 #[derive(Default)]
@@ -147,7 +149,16 @@ fn answer(
                 .unwrap_or_else(|_| context::json_format(&global, stdout));
             // git's line first, if the refused line is a git verb's.
             let first = gitlike::hint(&error, &path, bin.as_deref(), args, &place);
-            let printed = commands::usage(&error, bin.as_deref(), &path, first, format, started);
+            let mut printed =
+                commands::usage(&error, bin.as_deref(), &path, first, format, started);
+
+            // A person at a terminal who named no command reads the help screen instead: text
+            // like `--help`'s, so a write that fails is not reported. The exit code stays the
+            // usage error's.
+            if reads_help(&error, &global, &env, stdout) {
+                let _ = cli::help_screen(bin.as_deref(), &path).print_help();
+                printed.stdout = String::new();
+            }
             (printed, Followup::default())
         }
         Parsed::Run(cli, op) => match context::format(&cli.global, &env, stdout) {
@@ -178,6 +189,27 @@ fn answer(
             }
         },
     }
+}
+
+/// Whether the line clap refused with `error` is answered with a help screen and not with the
+/// usage error's envelope: a line that names no command, the program alone or a command
+/// family alone (clap's missing subcommand), at a terminal where neither `--json` nor, without
+/// `--human`, `SWARMOPS_FORMAT=json` asks for the envelope (`help::bare`). Every other refused line, and
+/// every line whose stdout is no terminal, keeps its envelope.
+fn reads_help(
+    error: &clap::Error,
+    global: &Global,
+    env: &dyn Fn(&str) -> Option<OsString>,
+    stdout: Stdout,
+) -> bool {
+    // Of the two flags the line keeps the one given last (`cli::parse` settles them).
+    let flag = match (global.json, global.human) {
+        (true, _) => Flag::Json,
+        (false, true) => Flag::Human,
+        (false, false) => Flag::Neither,
+    };
+    error.kind() == ErrorKind::MissingSubcommand
+        && help::bare(stdout, flag, env(context::FORMAT_ENV).as_deref())
 }
 
 /// `printed`, with what it holds for stdout written to stderr instead: what `swarmops mcp` prints
@@ -247,7 +279,6 @@ mod tests {
     use swarmops_ops::LocalOps;
 
     use super::*;
-    use crate::cli::Global;
     use crate::output::Layout;
 
     fn envelope(printed: &Printed) -> Value {
@@ -330,6 +361,93 @@ mod tests {
         assert_eq!(json["error"]["code"], "E_INTERNAL");
         assert_eq!(json["meta"]["repo"], store.as_str());
         assert_eq!(json["meta"]["resolved"], json!({ id.as_str(): id }));
+    }
+
+    /// The line `words`, as `so` reads it: a usage error, and whether it is answered with a
+    /// help screen when stdout is `stdout` and `SWARMOPS_FORMAT` holds `format`.
+    fn help_for(words: &[&str], stdout: Stdout, format: Option<&str>) -> bool {
+        let line: Vec<OsString> = std::iter::once("so")
+            .chain(words.iter().copied())
+            .map(OsString::from)
+            .collect();
+        let Parsed::Usage { error, global, .. } = cli::parse(&line) else {
+            panic!("{words:?}: a usage error");
+        };
+        let env = |name: &str| -> Option<OsString> {
+            assert_eq!(name, context::FORMAT_ENV, "the one variable the rule reads");
+            format.map(OsString::from)
+        };
+        reads_help(&error, &global, &env, stdout)
+    }
+
+    /// The bare-command rule, in both directions: at a terminal a line that names no command
+    /// reads its help, unless `--json` (the last of `--json` and `--human`) or, without
+    /// `--human`, `SWARMOPS_FORMAT=json` asks for the envelope; a pipe always gets the envelope; and a line
+    /// refused for anything else gets it everywhere.
+    #[test]
+    fn a_bare_line_reads_help_only_at_a_terminal_that_asked_for_no_envelope() {
+        let bare: [&[&str]; 9] = [
+            &[],
+            &["ws"],
+            &["ref"],
+            &["op"],
+            &["blob"],
+            &["git"],
+            &["auth"],
+            &["--repo", "s"],
+            &["--repo", "s", "ws"],
+        ];
+        for words in bare {
+            // 1. A person at a terminal.
+            assert!(help_for(words, Stdout::Terminal, None), "{words:?}");
+            assert!(
+                help_for(words, Stdout::Terminal, Some("human")),
+                "{words:?}"
+            );
+
+            // 2. A terminal, but the envelope was asked for.
+            assert!(
+                !help_for(words, Stdout::Terminal, Some("json")),
+                "{words:?}"
+            );
+            let json: Vec<&str> = words.iter().copied().chain(["--json"]).collect();
+            assert!(!help_for(&json, Stdout::Terminal, None), "{json:?}");
+            assert!(
+                !help_for(&json, Stdout::Terminal, Some("human")),
+                "{json:?}"
+            );
+
+            // 3. Not a terminal: the envelope, whatever else is set.
+            for format in [None, Some("human"), Some("json")] {
+                assert!(
+                    !help_for(words, Stdout::Other, format),
+                    "{words:?} {format:?}"
+                );
+            }
+        }
+
+        // Of --json and --human, the later wins, as for every command.
+        assert!(help_for(&["--json", "--human"], Stdout::Terminal, None));
+        assert!(!help_for(&["--human", "--json"], Stdout::Terminal, None));
+        assert!(help_for(
+            &["--json", "ws", "--human"],
+            Stdout::Terminal,
+            None
+        ));
+        // A flag outranks the variable.
+        assert!(help_for(&["--human"], Stdout::Terminal, Some("json")));
+        assert!(!help_for(&["--json"], Stdout::Terminal, Some("human")));
+
+        // A line refused for anything else keeps its envelope, at a terminal too.
+        for words in [
+            &["frobnicate"][..],
+            &["ws", "frobnicate"],
+            &["ws", "--frob"],
+            &["log", "-n", "many"],
+            &["blob", "has"],
+        ] {
+            assert!(!help_for(words, Stdout::Terminal, None), "{words:?}");
+        }
     }
 
     #[test]

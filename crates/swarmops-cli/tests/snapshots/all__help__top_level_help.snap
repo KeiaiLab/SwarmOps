@@ -69,7 +69,10 @@ Examples:
 Output:
   Every command prints one JSON envelope on stdout, or with --human a short
   text, and exits 0 or with its error's code. mcp, serve, derive --follow and
-  auth git-credential print something else there.
+  auth git-credential print something else there. At a terminal, a line that
+  names no command prints help like this instead of its usage error's envelope,
+  unless --json or SWARMOPS_FORMAT=json asks for the envelope; it exits 2 either
+  way.
 
 Learn more:
   so <command> --help   A command's arguments, options and long help

@@ -329,8 +329,10 @@ the web server authenticated";
 /// Source control for coding-agent swarms.
 ///
 /// Every command but mcp, serve, derive --follow and auth git-credential prints one JSON
-/// envelope on stdout. The program's own help screen is laid out by the `help` module, which
-/// shows the first line of this and says the rest under its own headings.
+/// envelope on stdout; at a terminal, a line that names no command prints its help screen
+/// instead of its usage error's envelope, unless --json or SWARMOPS_FORMAT=json asks for the
+/// envelope. The program's own help screen is laid out by the `help` module, which shows the
+/// first line of this and says the rest under its own headings.
 #[derive(Parser, Debug)]
 #[command(name = "swarmops", version = crate::version::version())]
 pub struct Cli {
@@ -1884,7 +1886,20 @@ fn line_range(text: &str) -> Result<LineRange, String> {
 /// one, with the program named `bin` as clap's own usage lines name it (see [`Parsed::Usage`]):
 /// `Usage: so <path> …`.
 pub fn usage(bin: Option<&str>, path: &[String]) -> String {
-    let mut at = command();
+    located(command(), bin, path).render_usage().to_string()
+}
+
+/// The help screen of the subcommand `path` names (the program's own for no path), or of the
+/// deepest part of it that names one, as `-h` prints it for the program named `bin`: what a
+/// line that names no command prints at a terminal (`help::bare`).
+pub fn help_screen(bin: Option<&str>, path: &[String]) -> clap::Command {
+    let name = help::invoked(bin.map(std::ffi::OsStr::new));
+    located(help::shaped(command(), name), bin, path)
+}
+
+/// The subcommand of `grammar` that `path` names, or the deepest part of it that names one,
+/// built with the program named `bin` (`None` leaves clap's own, `swarmops`).
+fn located(mut at: clap::Command, bin: Option<&str>, path: &[String]) -> clap::Command {
     if let Some(bin) = bin {
         at.set_bin_name(bin);
     }
@@ -1895,7 +1910,7 @@ pub fn usage(bin: Option<&str>, path: &[String]) -> String {
             None => break,
         }
     }
-    at.render_usage().to_string()
+    at
 }
 
 /// The grammar of [`Cli`], with a missing subcommand a usage error rather than a help screen,
@@ -2309,6 +2324,56 @@ mod tests {
         ] {
             assert!(!parse(&args(line)).runs_mcp(), "{line:?}");
         }
+    }
+
+    /// A line that names no command, the program alone or a family alone, with or without
+    /// global flags, is refused as a missing subcommand: the one kind `help::bare` answers
+    /// with a help screen. Its screen is the one `-h` prints, by the name it was invoked by.
+    #[test]
+    fn a_line_without_a_command_is_a_missing_subcommand() {
+        for line in [
+            &[][..],
+            &["--repo", "s"],
+            &["--human"],
+            &["ws"],
+            &["ref"],
+            &["op"],
+            &["blob"],
+            &["git"],
+            &["auth"],
+            &["--repo", "s", "ws", "--as", "agent/a"],
+        ] {
+            let Parsed::Usage { error, path, .. } = parse(&args(line)) else {
+                panic!("{line:?}: a usage error");
+            };
+            assert_eq!(error.kind(), ErrorKind::MissingSubcommand, "{line:?}");
+            let screen = help_screen(Some("so"), &path).render_help().to_string();
+            let named: Vec<&str> = std::iter::once("so")
+                .chain(path.iter().map(String::as_str))
+                .collect();
+            let usage = format!("\nUsage: {} [OPTIONS] <COMMAND>\n", named.join(" "));
+            assert!(screen.contains(&usage), "{line:?}: {screen}");
+            assert!(screen.contains("\nLearn more:\n"), "{line:?}: {screen}");
+        }
+        // Anything else clap refuses is another kind, and keeps its envelope everywhere.
+        for line in [
+            &["frobnicate"][..],
+            &["ws", "frobnicate"],
+            &["ws", "--frob"],
+            &["log", "-n", "many"],
+            &["blob", "has"],
+            &["sync", "status", "--frob"],
+        ] {
+            let Parsed::Usage { error, .. } = parse(&args(line)) else {
+                panic!("{line:?}: a usage error");
+            };
+            assert_ne!(error.kind(), ErrorKind::MissingSubcommand, "{line:?}");
+        }
+        let named = help_screen(None, &[]).render_help().to_string();
+        assert!(
+            named.contains("Usage: swarmops [OPTIONS] <COMMAND>"),
+            "{named}"
+        );
     }
 
     #[test]

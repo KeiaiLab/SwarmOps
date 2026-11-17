@@ -7,7 +7,13 @@
 //!   prints `{"ok":false,…,"error":{code,message,retryable,exit,details,hint},…}` and exits
 //!   with `error.exit` (1 error, 2 usage, 4 retryable, 5 identity, 6 not found).
 //! - A command line clap refuses is `E_INVALID_ARG` (exit 2): clap's message in `message`, the
-//!   usage in `hint`. `--help` and `--version` alone print clap's text and exit 0.
+//!   usage in `hint`. `--help` and `--version` alone print clap's text and exit 0; the help of
+//!   the program and of each command family is a screen the `help` module lays out.
+//! - A line that names no command (`so`, `so ws`) is such a refused line, and prints that
+//!   envelope wherever stdout is no terminal. At a terminal it prints the help screen on stdout
+//!   instead, with the same exit code 2, unless `--json` or, without `--human`,
+//!   `SWARMOPS_FORMAT=json` asks for the envelope: the one case where what a run prints depends
+//!   on more than the layout of its JSON.
 //! - A panic is caught and printed as `E_INTERNAL` (exit 1), its message in `message`, with
 //!   `meta.repo` and `meta.resolved` as far as the command got; the panic's location goes to
 //!   stderr.

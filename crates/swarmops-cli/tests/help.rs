@@ -314,3 +314,54 @@ fn family_examples_run() {
     }
     assert_eq!(asked, 2, "the example that asks a remote, by either name");
 }
+
+/// Off a terminal, a line that names no command prints what it printed before there were help
+/// screens to print: its usage error's envelope on stdout (with `SWARMOPS_FORMAT=human` or
+/// `--human`, that error as text), exit 2, and no help. The tests' stdout is a pipe; the
+/// terminal's side of the rule is `entry`'s and `help`'s unit tests, and a run by hand.
+#[test]
+fn a_bare_line_keeps_its_envelope_off_a_terminal() {
+    // `remote` alone is no bare line: it lists the remotes, as `git remote` does.
+    let bare = ["", "ws", "blob", "ref", "op", "git", "auth"];
+    for (bin, name) in [(SO, "so"), (BIN, "swarmops")] {
+        for family in bare {
+            let words: Vec<&str> = family.split_whitespace().collect();
+            let named = format!("{name} {family}");
+            let missing = format!("'{}' requires a subcommand", named.trim_end());
+
+            // 1. The envelope, by default and when it is asked for.
+            let json: Vec<&str> = words.iter().copied().chain(["--json"]).collect();
+            for (line, env) in [
+                (&words, &[][..]),
+                (&words, &[("SWARMOPS_FORMAT", "json")]),
+                (&json, &[]),
+                (&json, &[("SWARMOPS_FORMAT", "human")]),
+            ] {
+                let run = support::run_bin(bin, line, env, "");
+                assert_eq!((run.exit(), run.stderr.as_str()), (2, ""), "{run}");
+                let error = run.err("E_INVALID_ARG");
+                let message = error["message"].as_str().expect("a message");
+                assert!(message.starts_with(&missing), "{run}");
+                let usage = format!("Usage: {} [OPTIONS] <COMMAND>", named.trim_end());
+                assert!(
+                    error["hint"].as_str().expect("a hint").starts_with(&usage),
+                    "{run}"
+                );
+            }
+
+            // 2. The same error as text, where text is asked for: never the help.
+            let human: Vec<&str> = words.iter().copied().chain(["--human"]).collect();
+            for (line, env) in [
+                (&words, &[("SWARMOPS_FORMAT", "human")][..]),
+                (&human, &[]),
+                (&human, &[("SWARMOPS_FORMAT", "json")]),
+            ] {
+                let run = support::run_bin(bin, line, env, "");
+                assert_eq!((run.exit(), run.stderr.as_str()), (2, ""), "{run}");
+                let start = format!("error: E_INVALID_ARG: {missing}");
+                assert!(run.stdout.starts_with(&start), "{run}");
+                assert!(!run.stdout.contains("Learn more"), "{run}");
+            }
+        }
+    }
+}
