@@ -133,12 +133,14 @@ struct Out {
     stdout: String,
 }
 
-/// Runs `so` at `dir` with `words` and none of this process's `SWARMOPS_*` variables.
+/// Runs `so` at `dir` with `words`, none of this process's `SWARMOPS_*` variables, and no login
+/// file or curl (`support::isolate`).
 fn so_at(dir: &Path, words: &[&str]) -> Out {
     let mut command = Command::new(SO);
     for name in support::swarmops_vars() {
         command.env_remove(name);
     }
+    support::isolate(&mut command);
     command.args(words).current_dir(dir).stdin(Stdio::null());
     let done = command.output().expect("run so");
     Out {

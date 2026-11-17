@@ -2562,8 +2562,8 @@ pub(crate) struct ToolCall {
 }
 
 impl Server {
-    /// `swarmops mcp`, then `args`, with the order check on, `env` set and no other `SWARMOPS_*`
-    /// variable.
+    /// `swarmops mcp`, then `args`, with the order check on, no login file and no curl
+    /// (`support::isolate`), `env` set and no other `SWARMOPS_*` variable.
     pub(crate) fn start(args: &[&str], env: &[(&str, &str)]) -> Server {
         Server::start_with(Command::new(support::BIN), args, env)
     }
@@ -2581,6 +2581,7 @@ impl Server {
         for name in support::swarmops_vars() {
             command.env_remove(name);
         }
+        support::isolate(&mut command);
         command.env(swarmops_store::ORDER_CHECK_ENV, "1");
         command
             .envs(env.iter().copied())

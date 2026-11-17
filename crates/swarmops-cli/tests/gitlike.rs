@@ -112,13 +112,14 @@ impl std::fmt::Display for Out {
     }
 }
 
-/// Runs `bin` (the binary by either name) in `dir` with `words`, `env` set and none of this
-/// process's `SWARMOPS_*` variables.
+/// Runs `bin` (the binary by either name) in `dir` with `words`, `env` set, none of this
+/// process's `SWARMOPS_*` variables, and no login file or curl (`support::isolate`).
 fn run_at(bin: &str, dir: &Path, words: &[&str], env: &[(&str, &str)]) -> Out {
     let mut command = Command::new(bin);
     for name in support::swarmops_vars() {
         command.env_remove(name);
     }
+    support::isolate(&mut command);
     command
         .args(words)
         .envs(env.iter().copied())

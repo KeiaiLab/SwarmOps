@@ -20,6 +20,8 @@
 //! - [`serve`] (M14): a directory of stores served to stock git over ssh and smart HTTP, its
 //!   pushes decided by a `proc-receive` hook.
 //!
+//! - [`userdir`] names the host's per-user directory for what is kept outside every store.
+//!
 //! - Maintenance (M6): `gc`, `repair` and `upgrade`, [`StoreOps`](swarmops_api::StoreOps) methods
 //!   that record nothing, so they take no identity.
 //!
@@ -47,6 +49,7 @@ mod repair;
 pub mod serve;
 mod sync;
 mod upgrade;
+pub mod userdir;
 
 pub use error::shell_word;
 pub use local::{LocalOps, NOW_ENV, Recording, Resolved};

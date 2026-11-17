@@ -15,7 +15,8 @@
 //! Every `swarmops` the site starts gets a cleared environment, as sshd and a web server give
 //! a forced command and a CGI script theirs: `PATH` (with [`GIT_ENV`]'s directory first), an
 //! empty `HOME`, `TMPDIR` and [`GIT_ENV`] when set, `LC_ALL=C`, `TZ=UTC`, the test runs'
-//! variables of [`crate::cli`] (the order check, the memo keys' directory), and what
+//! variables of [`crate::cli`] (the order check, the memo keys' directory, no login file and
+//! no curl), and what
 //! [`ServeSite::with_env`] adds. No `SWARMOPS_AGENT` of the developer's reaches it.
 //! [`ServeSite::ssh_command_with`] plays a [`SshFault`] on each connection, as
 //! [`GitServer::ssh_command_with`] does.

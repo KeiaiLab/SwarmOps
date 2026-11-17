@@ -7,7 +7,9 @@
 //! [`Program`] of their own, and run [`Store`], [`Racers`] and the functions here with it.
 //!
 //! Every child runs with none of the developer's `SWARMOPS_*` variables, only those the test
-//! sets, and `SWARMOPS_TEST_ORDER_CHECK=1` (unless the test sets it otherwise): in a build with
+//! sets, with no login file and no curl but those the test names ([`isolate`]), so that none
+//! reads the developer's login or reaches the network, and with
+//! `SWARMOPS_TEST_ORDER_CHECK=1` (unless the test sets it otherwise): in a build with
 //! the `test-hooks` feature, as the gates build it, every write a child makes is checked against
 //! the store's write-ordering rules, and a call that breaks one panics, which the child reports
 //! as `E_INTERNAL`. Its envelope is checked against the contract before a test reads it: stdout
@@ -24,6 +26,6 @@ pub mod sweep;
 mod binary;
 
 pub use binary::{
-    BUSY_RETRIES, Program, RUN_TIMEOUT, Racers, Run, Store, agent, retry_busy, run, run_bin,
-    run_bin_within, run_within, swarmops, swarmops_vars,
+    BUSY_RETRIES, Program, RUN_TIMEOUT, Racers, Run, Store, agent, isolate, isolation, retry_busy,
+    run, run_bin, run_bin_within, run_within, swarmops, swarmops_vars,
 };

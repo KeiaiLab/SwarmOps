@@ -88,7 +88,10 @@ pub fn identity_info(identity: Option<&Identity>) -> IdentityInfo {
 
 /// Environment variable `name` as `env` gives it: `None` when it is unset or empty,
 /// `E_INVALID_ARG` when it is not UTF-8.
-fn var(env: &impl Fn(&str) -> Option<OsString>, name: &str) -> Result<Option<String>, OpError> {
+pub(crate) fn var(
+    env: &impl Fn(&str) -> Option<OsString>,
+    name: &str,
+) -> Result<Option<String>, OpError> {
     match env(name) {
         Some(value) if !value.is_empty() => value.into_string().map(Some).map_err(|_| {
             said_of(

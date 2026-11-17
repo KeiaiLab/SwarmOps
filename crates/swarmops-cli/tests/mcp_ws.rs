@@ -26,7 +26,8 @@ pub struct Client {
 }
 
 impl Client {
-    /// `swarmops mcp --repo <store> --as AGENT`, with `env` set and no other `SWARMOPS_*`.
+    /// `swarmops mcp --repo <store> --as AGENT`, with the order check on, no login file and no
+    /// curl (`support::isolate`), `env` set and no other `SWARMOPS_*`.
     pub fn start(lab: &Lab, env: &[(&str, &str)]) -> Client {
         Client::start_in(lab, env, Command::new(support::BIN))
     }
@@ -44,6 +45,7 @@ impl Client {
         for name in support::swarmops_vars() {
             command.env_remove(name);
         }
+        support::isolate(&mut command);
         command
             .env(swarmops_store::ORDER_CHECK_ENV, "1")
             .envs(env.iter().copied())

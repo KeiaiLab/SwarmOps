@@ -30,7 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, Identity, OpError};
-use swarmops_ops::{MEMO_KEY_LEN, MemoKey};
+use swarmops_ops::{MEMO_KEY_LEN, MemoKey, userdir};
 use swarmops_ws::RealFs;
 use swarmops_ws::hook::Bootstrap;
 use swarmops_ws::workspace::{self, Locate};
@@ -223,33 +223,15 @@ fn make_key(dir: &Utf8Path, file: &Utf8Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
-/// The per-OS directory for state that is neither config nor cache.
+/// The per-OS directory for state that is neither config nor cache
+/// (`swarmops_ops::userdir::state_dir`); `E_INVALID_ARG` for a host that names none.
 fn state_dir(env: Env<'_>) -> Result<Utf8PathBuf, OpError> {
-    let home = || {
-        var(env, "HOME")?.map(Utf8PathBuf::from).ok_or_else(|| {
-            OpError::new(
-                ErrorCode::InvalidArg,
-                format!("no directory for the workspaces: set {WS_ROOT_ENV}"),
-            )
-        })
-    };
-    if cfg!(windows) {
-        return var(env, "LOCALAPPDATA")?
-            .map(Utf8PathBuf::from)
-            .ok_or_else(|| {
-                OpError::new(
-                    ErrorCode::InvalidArg,
-                    format!("no directory for the workspaces: set {WS_ROOT_ENV}"),
-                )
-            });
-    }
-    if cfg!(target_os = "macos") {
-        return Ok(home()?.join("Library").join("Application Support"));
-    }
-    match var(env, "XDG_STATE_HOME")? {
-        Some(state) if Utf8Path::new(&state).is_absolute() => Ok(Utf8PathBuf::from(state)),
-        _ => Ok(home()?.join(".local").join("state")),
-    }
+    userdir::state_dir(env)?.ok_or_else(|| {
+        OpError::new(
+            ErrorCode::InvalidArg,
+            format!("no directory for the workspaces: set {WS_ROOT_ENV}"),
+        )
+    })
 }
 
 /// `E_NOT_A_REPO` for a command that needs a store when the user named none, given `flag`
@@ -458,6 +440,49 @@ mod tests {
         assert_eq!(
             format(&flags(true, false, None), &yaml, Stdout::Other).unwrap(),
             json
+        );
+    }
+
+    #[test]
+    fn the_workspaces_are_under_the_variable_else_the_state_directory() {
+        // 1. The variable, whatever else is set.
+        let named = env_of(&[(WS_ROOT_ENV, b"/ws"), ("HOME", b"/home/me")]);
+        assert_eq!(ws_root(&named).unwrap(), "/ws");
+
+        // 2. Else the host's state directory.
+        let state = if cfg!(target_os = "macos") {
+            "/home/me/Library/Application Support"
+        } else {
+            "/home/me/.local/state"
+        };
+        let home = env_of(&[("HOME", b"/home/me")]);
+        assert_eq!(
+            ws_root(&home).unwrap(),
+            format!("{state}/swarmops/workspaces")
+        );
+
+        // 3. A host that names none is refused with the variable to set; one whose variable is
+        //    not UTF-8, by that variable's name.
+        let refused = ws_root(&env_of(&[])).unwrap_err();
+        assert_eq!((refused.code.as_str(), refused.exit), ("E_INVALID_ARG", 2));
+        assert_eq!(
+            refused.message,
+            "no directory for the workspaces: set SWARMOPS_WS_ROOT"
+        );
+        assert!(refused.details.is_empty(), "{:?}", refused.details);
+        let bad = ws_root(&env_of(&[("HOME", b"/\xff")])).unwrap_err();
+        assert_eq!(bad.message, "HOME: the value is not UTF-8");
+        assert_eq!(bad.details["source"], "HOME");
+    }
+
+    #[test]
+    fn no_state_directory_means_no_memo_key() {
+        let id = "0123456789abcdef0123456789abcdef";
+        assert!(memo_key(&env_of(&[]), id).unwrap().is_none());
+        assert!(
+            memo_key(&env_of(&[("HOME", b"/\xff")]), id)
+                .unwrap()
+                .is_none()
         );
     }
 }

@@ -144,3 +144,67 @@ fn the_test_file_check_finds_a_forgotten_file() {
         ["c.rs", "d.rs", "pkg.rs"]
     );
 }
+
+/// Every test file that spawns the binary on a command of its own, without the test kit's
+/// runner, gives it no login file and no curl (`support::isolate`, `support::isolation`): the
+/// kit's runner does, and a run without them would read the developer's login, and could reach
+/// the network through the host's curl.
+#[test]
+fn every_run_of_the_binary_is_isolated() {
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut open: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(tests).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        // This file runs nothing, and holds the check's own examples.
+        if name != "all.rs" && path.extension().is_some_and(|ext| ext == "rs") {
+            let text = std::fs::read_to_string(&path).unwrap();
+            open.extend(unisolated(&text).map(|why| format!("{name}: {why}")));
+        }
+    }
+    assert!(
+        open.is_empty(),
+        "a run of the binary without support::isolate or support::isolation: {open:#?}"
+    );
+}
+
+/// What is wrong with `text`, a test file, if it runs the binary without the kit's isolation.
+/// A command of the binary's is made from one of its paths (`BIN`, `SO`, `bin`, or Cargo's
+/// variable); each place that drops this process's `SWARMOPS_*` variables from one
+/// (`swarmops_vars()`) isolates it too, and a file that makes one has such a place.
+fn unisolated(text: &str) -> Option<&'static str> {
+    const OWN: [&str; 5] = [
+        "Command::new(support::BIN)",
+        "Command::new(BIN)",
+        "Command::new(SO)",
+        "Command::new(bin)",
+        "Command::new(env!(\"CARGO_BIN_EXE_",
+    ];
+    let count = |needle: &str| text.matches(needle).count();
+    let dropped = count("swarmops_vars()");
+    let isolated = count("support::isolate(") + count("support::isolation()");
+    if dropped != isolated {
+        return Some("a command drops the SWARMOPS_* variables and is not isolated");
+    }
+    let makes = OWN.iter().any(|needle| text.contains(needle));
+    (makes && isolated == 0).then_some("a command of the binary's is never isolated")
+}
+
+/// The check itself: it finds a command that is not isolated, where another of the file is, and
+/// one that keeps the developer's variables whole; and passes a file that runs no command.
+#[test]
+fn the_isolation_check_finds_a_bare_run() {
+    let isolated = "let mut c = Command::new(support::BIN);\n\
+                    for v in support::swarmops_vars() { c.env_remove(v); }\n\
+                    support::isolate(&mut c);\n";
+    assert_eq!(unisolated(isolated), None);
+    assert_eq!(unisolated("support::run(&[\"info\"], &[]);\n"), None);
+
+    let bare = "let mut c = Command::new(SO);\n\
+                for v in support::swarmops_vars() { c.env_remove(v); }\n";
+    assert!(unisolated(bare).is_some(), "{bare}");
+    let one_of_two = format!("{isolated}{bare}");
+    assert!(unisolated(&one_of_two).is_some(), "{one_of_two}");
+    let whole = "Command::new(env!(\"CARGO_BIN_EXE_swarmops\")).arg(\"info\");\n";
+    assert!(unisolated(whole).is_some(), "{whole}");
+}
