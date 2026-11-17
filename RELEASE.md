@@ -28,7 +28,7 @@ the macOS build waits, and nothing is published without it.
 2. **Runs the release gate** (job `just check`): `just check` on the tagged commit, with the tools
    and versions of CI's `check` job but without its cache or the runner's target directory, so
    that it builds from clean.
-3. **Builds the binaries** (job `build <target>`, one per target): `swarmops` and `so` with
+3. **Builds the binaries** (job `build <target>`, one per Linux target): `swarmops` and `so` with
    `cargo build --release --locked` on the pinned toolchain, without the `test-hooks` feature, for
    `x86_64-unknown-linux-gnu`, natively, and `aarch64-unknown-linux-gnu`, cross-compiled with
    Ubuntu's aarch64 GCC, each inside an `ubuntu:24.04` container pinned by digest (glibc 2.39),
@@ -56,7 +56,7 @@ the macOS build waits, and nothing is published without it.
    order of their names, owned by 0:0, dated at the tagged commit, with fixed modes, and a gzip
    header without name or time. No Intel (`x86_64-apple-darwin`) build is made, and no package:
    the `.deb` and `.rpm` are Linux's.
-4. **Makes and installs the packages** (job `packages <target>`, one per target):
+4. **Makes and installs the packages** (job `packages <target>`, one per Linux target):
    [`scripts/packages.py`](scripts/packages.py) makes `swarmops_X.Y.Z_<arch>.deb` and
    `swarmops-X.Y.Z-1.<arch>.rpm` (`amd64` and `x86_64`, `arm64` and `aarch64`) from the target's
    archive alone, checked against its SHA-256 first: the archive's binaries, byte for byte, in
@@ -158,7 +158,17 @@ installs the same tool versions as `ci.yml`'s: move them together.
      `python3 -I scripts/repo-settings.py check` reads the host, so it runs here and not in
      `just check`;
    - when a page was added since the last release, `web/addresses.txt` lists it: run
-     `node scripts/check-site.mjs --write-addresses` in `web/` and commit the result.
+     `node scripts/check-site.mjs --write-addresses` in `web/` and commit the result;
+   - the macOS sentences name the right release. The installer's `MACOS_AFTER`
+     (`scripts/install.sh` and its copy `web/public/install.sh`), the message
+     `scripts/test-install.py` expects, and the sentences beside "0.11.0" in
+     `docs/guides/install.md`, `docs/guides/parallel-agents.md`,
+     `docs/operate/install-and-upgrade.md`, `docs/policies/msrv-and-platforms.md`,
+     `docs/troubleshooting.md`, `docs/known-limitations.md`, CHANGELOG.md's macOS entry and
+     this file's "Not there yet" hold that 0.11.0 is the last release without a macOS archive.
+     When this commit's release workflow has no `build aarch64-apple-darwin` job, this
+     release holds none either: name this release there instead. After the first release that
+     holds one, the pages name that release as the first with a macOS build.
 4. **Write the changelog.** Move the entries under **Unreleased** in
    [CHANGELOG.md](CHANGELOG.md) to a new `## [X.Y.Z] - YYYY-MM-DD` section, mark breaking
    changes, and leave an empty **Unreleased** section. The section's date is the UTC date of the
