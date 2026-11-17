@@ -17,13 +17,14 @@
 //! files a test published ([`FakeRelease::publish`]) and nothing else, so that the installer,
 //! which prefers curl, never runs the host's. The archive is a real one, in the release's
 //! layout, of the binaries under test: packing and compressing them takes seconds, so it is
-//! built once for a build of the binaries and kept under the system's temp directory.
+//! built once for a build of the binaries and kept under the system's temp directory, with those
+//! of a few builds before it.
 
 use std::fs::{self, File};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
 
@@ -54,8 +55,16 @@ const DOWNLOAD_URL: &str = "https://github.com/KeiaiLab/SwarmOps/releases/downlo
 /// The directory, under the system's temp directory, that keeps the archives built.
 const CACHE: &str = "swarmops-test-releases";
 
-/// How long the archives of another build of the binaries are kept.
+/// How long the archives of another build of the binaries are kept at most.
 const KEPT_FOR: Duration = Duration::from_hours(24);
+
+/// How many other builds' archives are kept, the newest ones: every build of the binaries adds
+/// tens of megabytes, and a day of work builds them dozens of times.
+const KEPT_BUILDS: usize = 3;
+
+/// How long any build's archives are kept whatever their number: a test run of another
+/// checkout, which may be using them now, has touched its directory since.
+const KEPT_IN_USE: Duration = Duration::from_hours(1);
 
 /// The stand-in for the curl the installer runs: records the run, then copies the release file
 /// its address names to the file `-o` names. Any other address is a host curl cannot resolve
@@ -292,7 +301,7 @@ pub fn archive_name(version: &str) -> String {
 /// The archive of release `version` holding the binaries `swarmops` and `so`, and its SHA-256,
 /// built once for these files as they are (their sizes and modification times) and kept: a
 /// lock file holds off the other test processes while one builds, and the archives of other
-/// builds of the binaries are removed once they are [`KEPT_FOR`] old.
+/// builds of the binaries are removed ([`prune`]).
 fn cached_archive(version: &str, swarmops: &Path, so: &Path) -> (PathBuf, String) {
     let cache = std::env::temp_dir().join(CACHE);
     fs::create_dir_all(&cache).expect("make the archives' directory");
@@ -307,18 +316,13 @@ fn cached_archive(version: &str, swarmops: &Path, so: &Path) -> (PathBuf, String
         format!("{}-{}", file.len(), since.as_nanos())
     };
     let key = format!("{}-{}", stamp(swarmops), stamp(so));
-    for entry in fs::read_dir(&cache).expect("read the archives' directory") {
-        let entry = entry.expect("an entry");
-        let old = entry
-            .metadata()
-            .and_then(|found| found.modified())
-            .is_ok_and(|at| at.elapsed().is_ok_and(|age| age > KEPT_FOR));
-        if entry.path().is_dir() && entry.file_name() != *key && old {
-            let _ = fs::remove_dir_all(entry.path());
-        }
-    }
+    prune(&cache, &key, SystemTime::now());
     let kept = cache.join(&key);
     fs::create_dir_all(&kept).expect("make this build's directory");
+    // Used now: the time other builds' runs go by.
+    if let Ok(dir) = File::open(&kept) {
+        let _ = dir.set_modified(SystemTime::now());
+    }
 
     // 2. The archive and its digest, built unless both are there.
     let archive = kept.join(format!("{version}.tar.gz"));
@@ -346,6 +350,30 @@ fn cached_archive(version: &str, swarmops: &Path, so: &Path) -> (PathBuf, String
     fs::rename(&staged, &archive).expect("keep the archive");
     fs::write(&digest_file, digest).expect("keep the digest");
     (archive, digest.to_owned())
+}
+
+/// Removes from `cache` the directories of other builds of the binaries than `key`'s, as of
+/// `now`: each that was last used more than [`KEPT_FOR`] ago, and of the rest all but the
+/// [`KEPT_BUILDS`] used last, unless used within [`KEPT_IN_USE`]. A directory whose time
+/// cannot be read is left.
+fn prune(cache: &Path, key: &str, now: SystemTime) {
+    let mut others: Vec<(Duration, PathBuf)> = fs::read_dir(cache)
+        .expect("read the archives' directory")
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let other = entry.path().is_dir() && entry.file_name() != *key;
+            let used = entry.metadata().and_then(|found| found.modified()).ok()?;
+            // A time in the future is one of now.
+            let age = now.duration_since(used).unwrap_or_default();
+            other.then(|| (age, entry.path()))
+        })
+        .collect();
+    others.sort();
+    for (rank, (age, path)) in others.into_iter().enumerate() {
+        if age > KEPT_FOR || (rank >= KEPT_BUILDS && age > KEPT_IN_USE) {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
 }
 
 /// Runs `script` under `sh` with `args`; what it printed. A failure fails the test.
@@ -450,6 +478,58 @@ mod tests {
                 .path()
                 .starts_with(release.dir.path().to_str().unwrap())
         );
+    }
+
+    #[test]
+    fn the_archives_of_a_few_builds_are_kept_and_no_old_one() {
+        let cache = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        let minutes = |n: u64| Duration::from_mins(n);
+        // A build's directory, with an archive in it, last used `ago` before now.
+        let build = |name: &str, ago: Duration| {
+            let dir = cache.path().join(name);
+            fs::create_dir(&dir).unwrap();
+            fs::write(dir.join("0.0.0.tar.gz"), "x").unwrap();
+            File::open(&dir).unwrap().set_modified(now - ago).unwrap();
+        };
+        let left = || {
+            let mut names: Vec<String> = fs::read_dir(cache.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort_unstable();
+            names
+        };
+
+        // This build's, however old; four used in the last day, of which the oldest goes; one
+        // older than a day, which goes whatever the number; the lock, which is no directory.
+        build("this", KEPT_FOR * 3);
+        for (name, ago) in [("a", 90), ("b", 120), ("c", 180), ("d", 600)] {
+            build(name, minutes(ago));
+        }
+        build("old", KEPT_FOR + minutes(1));
+        fs::write(cache.path().join("lock"), "").unwrap();
+        prune(cache.path(), "this", now);
+        assert_eq!(left(), ["a", "b", "c", "lock", "this"]);
+
+        // Builds used within the hour stay beyond the number: another checkout's run may be
+        // linking to them now. So does one whose time is in the future.
+        for (name, ago) in [("e", 5), ("f", 10), ("g", 20)] {
+            build(name, minutes(ago));
+        }
+        let ahead = cache.path().join("ahead");
+        fs::create_dir(&ahead).unwrap();
+        let later = now + minutes(30);
+        File::open(&ahead).unwrap().set_modified(later).unwrap();
+        prune(cache.path(), "this", now);
+        assert_eq!(left(), ["ahead", "e", "f", "g", "lock", "this"]);
+
+        // For another build, the first one's directory is one more old one; and days later
+        // that build's own is all that is left.
+        prune(cache.path(), "e", now);
+        assert_eq!(left(), ["ahead", "e", "f", "g", "lock"]);
+        prune(cache.path(), "e", now + KEPT_FOR * 4);
+        assert_eq!(left(), ["e", "lock"]);
     }
 
     #[test]
