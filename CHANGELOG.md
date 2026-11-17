@@ -28,8 +28,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   no token), then runs the installer built into the program under `/bin/sh` to download the
   release, check it against its `SHA256SUMS` and unpack it beside the binaries
   (`.swarmops-update.d`), runs each new binary once, and renames them over the old ones,
-  `swarmops` first. It never installs an older version or a pre-release, touches no store and
-  never runs `upgrade`. `--check` looks and installs nothing; `--auto on|off` writes the
+  `swarmops` first. It never installs a pre-release or a version older than the program that
+  runs, also where one of the two names is missing or is another program; such a name is
+  written again by an `update` someone runs, never by a run in the background. It touches no
+  store and never runs `upgrade`. `--check` looks and installs nothing; `--auto on|off` writes the
   receipt's `auto_update`; `--status` says whether the install updates itself (`auto_update`) and
   gives a note still unprinted (`pending`); `--background` installs the latest release only when
   it holds the mark for the installed minor line (the file `auto-update-from-<major>.<minor>`,

@@ -273,8 +273,10 @@ fn install(env: Env<'_>, found: &Found) -> Result<UpdateOut, OpError> {
     let mut out = found.out();
     compared(&mut out, installed.as_ref(), &latest);
 
-    // 3. Only a strictly newer release replaces anything.
-    if latest.replaces(installed.as_ref()) {
+    // 3. Only a strictly newer release replaces anything, and none older than this program:
+    //    where a name is missing or another program's, this program's own version is the one
+    //    known to be installed.
+    if running().is_some_and(|running| latest.replaces(installed.as_ref(), &running)) {
         install.replace(&latest, &installer_env(env), EXPLICIT_DEADLINE)?;
         out.previous = installed.map(|version| version.to_string());
         out.current = latest.to_string();
@@ -309,32 +311,34 @@ fn background(env: Env<'_>, found: &Found) -> UpdateOut {
         return out;
     };
 
-    // 2. The latest release: not newer, or failed before, and there is nothing to do.
+    // 2. The latest release: not newer, or failed before, and there is nothing to do. Nor
+    //    where a name is missing or answers as another program: writing that name is for an
+    //    `update` someone runs, not for a run nobody asked for.
     let Ok(latest) = latest(&curl) else {
         return out;
     };
     let installed = install.installed();
     compared(&mut out, installed.as_ref(), &latest);
-    let mut state = lock.state();
-    let before = state.clone();
-    if !latest.replaces(installed.as_ref()) || state.has_failed(&latest) {
-        return out;
-    }
-    let Some(running) = installed.or_else(|| Version::parse(version::version())) else {
+    let (Some(installed), Some(running)) = (installed, running()) else {
         return out;
     };
+    let mut state = lock.state();
+    let before = state.clone();
+    if !latest.replaces(Some(&installed), &running) || state.has_failed(&latest) {
+        return out;
+    }
 
     // 3. The mark for the installed line: there, the release is installed; not there, it is
     //    announced at its second sighting; no answer, nothing.
-    let note = match marked(&curl, &latest, &running) {
+    let note = match marked(&curl, &latest, &installed) {
         Some(true) => match install.replace(&latest, &installer_env(env), BACKGROUND_DEADLINE) {
             Ok(()) => {
-                out.previous = Some(running.to_string());
+                out.previous = Some(installed.to_string());
                 out.current = latest.to_string();
                 out.updated = true;
                 state.forget_failure();
                 Some(Note::Updated {
-                    from: running,
+                    from: installed,
                     to: latest,
                 })
             }
@@ -357,6 +361,12 @@ fn background(env: Env<'_>, found: &Found) -> UpdateOut {
         out.pending = Some(note.pending());
     }
     out
+}
+
+/// The version of the program that runs, without the commit a build from a clone names after
+/// it: what no update goes below (`swarmops_ops::update::Version::replaces`).
+fn running() -> Option<Version> {
+    Version::of_line(&format!("swarmops {}", version::version()))
 }
 
 /// Sets what a look at the latest release found: the version installed, when the two names

@@ -330,6 +330,132 @@ fn a_latest_release_that_is_not_newer_installs_nothing() {
     assert!(!site.install.file(STAGING_DIR).exists());
 }
 
+/// A version newer than every release a test publishes: what the installed copies say they
+/// are where the latest release is older than the program that runs.
+const NEWER: &str = "9.9.9";
+
+/// Makes the installed `so` what `how` says: gone, or a program of the user's own by that name.
+fn without_so(site: &Site, how: &str) {
+    const OWN: &str = "#!/bin/sh\necho my so wrapper\n";
+    let so = site.install.file("so");
+    fs::remove_file(&so).expect("remove so");
+    if how == "another program" {
+        fs::write(&so, OWN).expect("write a program named so");
+        fs::set_permissions(&so, fs::Permissions::from_mode(0o755)).expect("set its mode");
+    }
+}
+
+/// What the install holds by its two names: `swarmops`'s identity, and `so`'s text where it is
+/// a script, `None` where it is missing.
+fn two_names(site: &Site) -> (u64, Option<Vec<u8>>) {
+    let swarmops = fs::metadata(site.install.file("swarmops")).expect("swarmops");
+    (swarmops.ino(), fs::read(site.install.file("so")).ok())
+}
+
+/// The latest release can be older than the program that runs: a release was deleted, or a
+/// patch of an older line was published last. Where one of the two names has no version to
+/// compare, missing or another program's, the running program's own is the bound: nothing is
+/// downloaded and nothing replaced, by `update` or by the run in the background.
+#[test]
+fn a_release_older_than_the_program_that_runs_is_never_installed() {
+    for how in ["missing", "another program"] {
+        // 1. `update`: the latest release is older than this program, so nothing is installed,
+        //    and --check and update say the same.
+        let site = Site::new();
+        site.publish(REAL);
+        without_so(&site, how);
+        let before = two_names(&site);
+        let newer = [(VERSION_HOOK, NEWER)];
+        for form in [&["update", "--check"][..], &["update"]] {
+            site.latest_is(REAL);
+            let result = site.run("swarmops", form, &newer).ok();
+            assert_eq!(result["updated"], false, "{how}, {form:?}: {result}");
+            assert_eq!(result["current"], NEWER, "{how}, {form:?}");
+            assert_eq!(result["latest"], REAL, "{how}, {form:?}");
+            assert!(result.get("previous").is_none(), "{result}");
+        }
+        assert_eq!(two_names(&site), before, "{how}: nothing was replaced");
+        assert_eq!(site.release.downloads(), [], "{how}");
+        assert!(!site.install.file(STAGING_DIR).exists());
+
+        // 2. The run in the background: the same, and it asks for no mark.
+        if !automatic_update_can_be_on() {
+            continue;
+        }
+        let site = Site::new();
+        site.publish(REAL);
+        without_so(&site, how);
+        let before = two_names(&site);
+        let env = [(VERSION_HOOK, NEWER), (AUTO_UPDATE, "on")];
+        site.latest_is(REAL);
+        site.mark_is(true);
+        let result = site.run("swarmops", &["update", "--background"], &env).ok();
+        assert_eq!(result["updated"], false, "{how}: {result}");
+        assert!(result.get("pending").is_none(), "{how}: {result}");
+        assert_eq!(site.curl.calls().len(), 1, "{how}: no mark was asked for");
+        assert_eq!(two_names(&site), before, "{how}: nothing was replaced");
+        assert_eq!(site.release.downloads(), [], "{how}");
+        assert!(!site.install.file(NOTE_FILE).exists(), "{how}");
+    }
+}
+
+/// A name that is missing, or another program's, leaves the install without a version. An
+/// `update` someone runs writes both names, as the installer does, with the latest release
+/// when that is this program's own version or a newer one. The run in the background writes
+/// neither: it replaces no program it cannot tell the version of.
+#[test]
+fn an_install_without_one_of_its_names_is_written_by_update_alone() {
+    // 1. The run in the background, with a newer release that carries the mark: nothing.
+    if automatic_update_can_be_on() {
+        for how in ["missing", "another program"] {
+            let site = Site::new();
+            site.publish(REAL);
+            without_so(&site, how);
+            let before = two_names(&site);
+            site.latest_is(REAL);
+            site.mark_is(true);
+            let result = site
+                .run("swarmops", &["update", "--background"], &AUTOMATIC)
+                .ok();
+            assert_eq!(result["updated"], false, "{how}: {result}");
+            assert_eq!(result["latest"], REAL, "{how}");
+            assert_eq!(site.curl.calls().len(), 1, "{how}: no mark was asked for");
+            assert_eq!(two_names(&site), before, "{how}: nothing was replaced");
+            assert_eq!(site.release.downloads(), [], "{how}");
+            assert!(!site.install.file(NOTE_FILE).exists(), "{how}");
+        }
+    }
+
+    // 2. `update`, with the latest release this program's own version: both names are
+    //    written, and no version is named as replaced.
+    for how in ["missing", "another program"] {
+        let site = Site::new();
+        site.publish(REAL);
+        without_so(&site, how);
+        let before = two_names(&site);
+        site.latest_is(REAL);
+        let result = site.run("swarmops", &["update"], &[]).ok();
+        assert_eq!(result["updated"], true, "{how}: {result}");
+        assert_eq!(result["current"], REAL, "{how}");
+        assert!(result.get("previous").is_none(), "{how}: {result}");
+        assert_ne!(two_names(&site).0, before.0, "{how}: swarmops was written");
+        for name in ["swarmops", "so"] {
+            let version = run_bin(&site.install.bin(name), &["--version"], &[], "");
+            assert_eq!(
+                version.stdout,
+                format!("swarmops {REAL}\n"),
+                "{how}: {name}"
+            );
+        }
+
+        // With both names back, the same release installs nothing more.
+        site.latest_is(REAL);
+        let current = site.run("so", &["update"], &[]).ok();
+        assert_eq!(current["updated"], false, "{how}: {current}");
+        assert_eq!(site.release.downloads().len(), 2, "{how}");
+    }
+}
+
 #[test]
 fn an_answer_that_names_no_release_is_unreachable() {
     let site = Site::new();

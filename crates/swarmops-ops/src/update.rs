@@ -178,10 +178,17 @@ impl Version {
         format!("{}.{}", self.numbers.0, self.numbers.1)
     }
 
-    /// Whether this version may replace an install at `installed`: it is strictly newer, or
-    /// the install has no version at all ([`installed`]).
-    pub fn replaces(&self, installed: Option<&Version>) -> bool {
-        installed.is_none_or(|installed| self > installed)
+    /// Whether this version may replace an install at `installed` ([`installed`]) when a
+    /// program of version `running` asks: never when it is older than `running`, so that
+    /// nothing installs an older version than the one that looked.
+    ///
+    /// - An install with a version is replaced by a strictly newer one.
+    /// - An install with none, where a name is missing or answers as another program, is
+    ///   replaced by `running`'s own version too: that writes the name again.
+    ///
+    /// A version in no order with one of the two replaces nothing.
+    pub fn replaces(&self, installed: Option<&Version>, running: &Version) -> bool {
+        self >= running && installed.is_none_or(|installed| self > installed)
     }
 }
 
@@ -214,8 +221,9 @@ impl PartialOrd for Version {
 
 /// The version an install is at, from what its two names answer to `--version`
 /// ([`Version::of_line`]): the lower one, so that an install stopped between the two renames is
-/// repaired by the next update. `None`, older than every release, when either name is missing
-/// or not SwarmOps'. Of two pre-releases in no order it is `swarmops`'s: whatever is newer than
+/// repaired by the next update. `None` when either name is missing or not SwarmOps': the
+/// install has no version, and what may replace it is the running program's to bound
+/// ([`Version::replaces`]). Of two pre-releases in no order it is `swarmops`'s: whatever is newer than
 /// one of them is newer than the other.
 pub fn installed(swarmops: Option<Version>, so: Option<Version>) -> Option<Version> {
     let (swarmops, so) = (swarmops?, so?);
@@ -749,16 +757,50 @@ mod tests {
             for higher in &ordered[i + 1..] {
                 assert!(v(lower) < v(higher), "{lower} < {higher}");
                 assert!(v(higher) > v(lower), "{higher} > {lower}");
-                assert!(v(higher).replaces(Some(&v(lower))), "{higher} over {lower}");
+                // Asked by the install's own version, as when both names are the same.
                 assert!(
-                    !v(lower).replaces(Some(&v(higher))),
+                    v(higher).replaces(Some(&v(lower)), &v(lower)),
+                    "{higher} over {lower}"
+                );
+                assert!(
+                    !v(lower).replaces(Some(&v(higher)), &v(higher)),
                     "{lower} over {higher}"
                 );
             }
             assert_eq!(v(lower).partial_cmp(&v(lower)), Some(Ordering::Equal));
-            assert!(!v(lower).replaces(Some(&v(lower))), "{lower} over itself");
-            assert!(v(lower).replaces(None), "{lower} over no version");
+            assert!(
+                !v(lower).replaces(Some(&v(lower)), &v(lower)),
+                "{lower} over itself"
+            );
         }
+    }
+
+    #[test]
+    fn nothing_replaces_an_install_with_a_version_older_than_the_program_that_asks() {
+        let (old, new, newer) = (v("0.12.0"), v("0.13.0"), v("0.14.0"));
+
+        // 1. An install with no version, a name missing or another program's: the program
+        //    that asks is the bound. Its own version writes the name again; an older one, as
+        //    `latest` names after a release was deleted, replaces nothing.
+        assert!(newer.replaces(None, &new));
+        assert!(new.replaces(None, &new));
+        assert!(!old.replaces(None, &new));
+
+        // 2. An install stopped between the two renames: `swarmops` is new and `so` old, so
+        //    the install is at the old version, whichever of the two asks.
+        assert!(new.replaces(Some(&old), &old), "asked by so");
+        assert!(new.replaces(Some(&old), &new), "asked by swarmops");
+        // A release between the two would take `swarmops` back.
+        assert!(!v("0.12.5").replaces(Some(&old), &new));
+
+        // 3. Pre-releases: one is replaced by its release, and replaces neither its release
+        //    nor another pre-release of it, with or without a version installed.
+        let (rc1, rc2) = (v("0.13.0-rc.1"), v("0.13.0-rc.2"));
+        assert!(new.replaces(None, &rc1));
+        assert!(!rc1.replaces(None, &new));
+        assert!(!rc2.replaces(None, &rc1));
+        assert!(!rc2.replaces(Some(&old), &rc1));
+        assert!(rc1.replaces(None, &rc1));
     }
 
     #[test]
@@ -768,14 +810,14 @@ mod tests {
         // Before its release, after the release before, before the release after.
         assert!(rc1 < release);
         assert!(release > rc1);
-        assert!(release.replaces(Some(&rc1)));
-        assert!(!rc1.replaces(Some(&release)));
+        assert!(release.replaces(Some(&rc1), &rc1));
+        assert!(!rc1.replaces(Some(&release), &release));
         assert!(rc1 > v("0.12.9") && rc1 < v("0.13.1"));
         assert!(v("0.13.1-rc.1") > release);
 
         // Two pre-releases of one release: in no order, so neither replaces the other.
         assert_eq!(rc1.partial_cmp(&rc2), None);
-        assert!(!rc1.replaces(Some(&rc2)) && !rc2.replaces(Some(&rc1)));
+        assert!(!rc1.replaces(Some(&rc2), &rc2) && !rc2.replaces(Some(&rc1), &rc1));
         assert_eq!(rc1.partial_cmp(&rc1.clone()), Some(Ordering::Equal));
 
         assert!(release.is_release() && !rc1.is_release());
@@ -837,7 +879,7 @@ mod tests {
             at(Some("0.13.0"), Some("0.13.0-rc.1")).as_deref(),
             Some("0.13.0-rc.1")
         );
-        // A name that is missing or not SwarmOps' is older than every release.
+        // A name that is missing or not SwarmOps' leaves the install without a version.
         assert_eq!(at(None, Some("0.12.0")), None);
         assert_eq!(at(Some("0.12.0"), None), None);
         assert_eq!(at(None, None), None);

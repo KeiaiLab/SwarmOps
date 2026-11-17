@@ -135,12 +135,17 @@ form (`details.reason` `receipt`, `details.path`) and never written over.
    names a pre-release.
 2. **What is installed.** `swarmops --version` and `so --version` in the install directory; the
    lower of the two counts, so that an update stopped between the two names is finished by the
-   next one. A name that is missing, or is another program, counts as older than every release,
-   and an update writes both names, as the installer does.
+   next one. A name that is missing, or answers as another program, has no version, and then
+   the install has none: `current` is the running program's own.
 3. **Only a newer release.** A latest release that is not strictly newer installs nothing:
    `updated` is `false`, exit 0. A pre-release is older than its release. Nothing ever installs
-   an older version: to go back, or to pin one, run the installer with `--version`, which also
-   turns automatic update off.
+   a version older than the program that runs, whatever the two names answer: GitHub's `latest`
+   can name an older release, after one was deleted or when a patch of an older line was
+   published last. To go back, or to pin a version, run the installer with `--version`, which
+   also turns automatic update off. Where the install has no version, a latest release that is
+   the running program's own version or a newer one is installed, and writes both names, as
+   the installer does: a program of your own named `so` in that directory is replaced. Only
+   an `update` you run does that; the run in the background installs nothing there.
 4. **Download, check, unpack.** The installer built into the program runs under `/bin/sh` for
    that release, into `.swarmops-update.d` beside the binaries: it downloads the archive for
    this host and the release's `SHA256SUMS`, checks the one against the other, and unpacks the
@@ -248,8 +253,10 @@ background run left: its `kind` (`updated`, `available` or
 `update --background` does what automatic update does, in one run: a command starts it
 ([After a command](#after-a-command)), and it runs when you run it. Unless `auto_update` is `on`
 it does nothing. Otherwise it takes the lock, waiting half a second at most (another update
-running: nothing), asks for the latest release as above, and when that is newer than what is
-installed:
+running: nothing), and asks for the latest release as above. Where one of the two names is
+missing or answers as another program, it stops there: it replaces no program whose version it
+cannot tell. When the release is newer than what is installed, and no older than the program
+that runs:
 
 1. A release that failed to install before is left alone, until an `update` you run goes well.
 2. One more HEAD request asks whether the release holds the file
