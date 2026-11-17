@@ -404,8 +404,9 @@ download() {
 
 # On macOS, before the archive: the release's SHA256SUMS, which lists every archive the release
 # holds. One without a line for this target's is a release without a macOS build, as MACOS_AFTER
-# and every release before it are, and the installer says so and stops. Where SHA256SUMS
-# cannot be downloaded, the archive's download says why.
+# and every release before it are, and the installer says what it saw and stops: the message
+# names the missing line, so it is as true of a later release whose SHA256SUMS lacks it. Where
+# SHA256SUMS cannot be downloaded, the archive's download says why.
 mac_build_listed() {
   url_proto "$release_url/SHA256SUMS"
   if ! fetch "$release_url/SHA256SUMS" "$work/SHA256SUMS" 2>/dev/null; then
@@ -415,8 +416,9 @@ mac_build_listed() {
   listed=$(awk -v name="$archive" '$2 == name || $2 == "*" name' "$work/SHA256SUMS") ||
     die "Cannot read SHA256SUMS."
   if [ -z "$listed" ]; then
-    die "SwarmOps $version has no macOS build: the releases up to $MACOS_AFTER hold Linux" \
-      "builds only, and nothing was installed. The releases: $RELEASES_URL"
+    die "SwarmOps $version has no macOS build (its SHA256SUMS lists no $archive):" \
+      "nothing was installed. Releases up to $MACOS_AFTER hold Linux builds only." \
+      "The releases: $RELEASES_URL"
   fi
 }
 

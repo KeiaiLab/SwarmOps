@@ -115,9 +115,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - The installer (`curl -fsSL https://get.swarmops.cc/install.sh | bash`) installs on an Apple
   silicon Mac: the `aarch64-apple-darwin` archive, checked against `SHA256SUMS`, into
   `~/.local/bin`, with zsh's and login bash's startup files in the `PATH` hint; `--version`, `--dir`, an update and
-  `--uninstall` work there. An Intel Mac is refused. On a Mac, a release without a macOS archive,
-  as 0.11.0 and every release before it, ends with `SwarmOps X.Y.Z has no macOS build`, and
-  installs nothing. On Linux nothing changes but `--help`'s platform paragraph; any other system
+  `--uninstall` work there. An Intel Mac is refused. On a Mac, a release whose `SHA256SUMS` lists
+  no macOS archive, as 0.11.0 and every release before it, ends with
+  `SwarmOps X.Y.Z has no macOS build (its SHA256SUMS lists no …)`, and installs nothing. On Linux nothing changes but `--help`'s platform paragraph; any other system
   now reads `SwarmOps runs on Linux and macOS; Windows is next.`
 - The release workflow builds `swarmops` and `so` for `aarch64-apple-darwin` on the maintainers'
   Mac (a self-hosted runner labelled `macos-local`, which the release now needs), for macOS 11 or

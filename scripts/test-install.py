@@ -45,12 +45,13 @@ SITE_COPY = ROOT / "web" / "public" / "install.sh"
 
 # The fake release's versions: a good one; one whose SHA256SUMS lines for x86_64 Linux and for
 # macOS are wrong; one whose SHA256SUMS has no line for x86_64 Linux; one with the Linux
-# archives only, as every release up to 0.11.0 is; and one whose download the server holds
-# until the installer has been interrupted.
+# archives only, as every release up to 0.11.0 is; one with every archive and an empty
+# SHA256SUMS; and one whose download the server holds until the installer has been interrupted.
 GOOD = "9.9.9"
 MISMATCH = "9.9.9-mismatch"
 NO_LINE = "9.9.9-noline"
 LINUX_ONLY = "9.9.8"
+EMPTY_SUMS = "9.9.9-emptysums"
 HELD = "9.9.9-held"
 X86 = "x86_64-unknown-linux-gnu"
 ARM = "aarch64-unknown-linux-gnu"
@@ -68,7 +69,11 @@ TAG_PATH = f"/releases/tag/v{GOOD}"
 PREFIX = "swarmops-install: "
 NO_BUILD_FOR_OS = "SwarmOps runs on Linux and macOS; Windows is next."
 INTEL_MAC = "No release build runs on an Intel Mac (x86_64)"
-NO_MAC_BUILD = "has no macOS build: the releases up to 0.11.0 hold Linux builds only"
+NO_MAC_BUILD = (
+    "SwarmOps {version} has no macOS build (its SHA256SUMS lists no"
+    " swarmops-{version}-aarch64-apple-darwin.tar.gz): nothing was installed."
+    " Releases up to 0.11.0 hold Linux builds only."
+)
 RELEASES = "https://github.com/KeiaiLab/SwarmOps/releases"
 QUICK_START = "https://github.com/KeiaiLab/SwarmOps#quick-start"
 WEBSITE = "https://swarmops.cc"
@@ -342,7 +347,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def build_release(files: Path) -> None:
     """Writes the fake release: per version, each target's archive and SHA256SUMS."""
-    for version in (GOOD, MISMATCH, NO_LINE, LINUX_ONLY):
+    for version in (GOOD, MISMATCH, NO_LINE, LINUX_ONLY, EMPTY_SUMS):
         folder = files / f"v{version}"
         folder.mkdir(parents=True)
         lines = []
@@ -360,6 +365,9 @@ def build_release(files: Path) -> None:
             if target in (X86, MAC) and version == MISMATCH:
                 digest = hashlib.sha256(b"another archive").hexdigest()
             if target == X86 and version == NO_LINE:
+                continue
+            # The release whose SHA256SUMS was uploaded empty: every archive, no line.
+            if version == EMPTY_SUMS:
                 continue
             lines.append(f"{digest}  {name}\n")
         (folder / "SHA256SUMS").write_text("".join(lines))
@@ -517,10 +525,19 @@ def run_case(case: Case, shell: tuple[str, list[str]], box: Sandbox) -> Outcome:
     return Outcome(label, problems)
 
 
-def interrupt(shell: tuple[str, list[str]], sig: signal.Signals, release: Release, tools: dict, root: Path) -> Outcome:
+def interrupt(
+    shell: tuple[str, list[str]],
+    sig: signal.Signals,
+    system: System,
+    release: Release,
+    tools: dict,
+    root: Path,
+) -> Outcome:
     """The installer, stopped by `sig` while the server holds its download, leaves neither its
-    temporary directory nor a binary behind."""
-    case = Case(f"stopped by {sig.name}", refused(code=128 + sig), args=("--version", HELD, "--dir", "{dest}"))
+    temporary directory nor a binary behind. On Linux the held download is the archive's; on
+    macOS it is SHA256SUMS's, which the installer reads first and with its stderr closed."""
+    name = f"stopped by {sig.name}" if system.os_name == "Linux" else f"macOS: stopped by {sig.name}"
+    case = Case(name, refused(code=128 + sig), args=("--version", HELD, "--dir", "{dest}"), system=system)
     label = f"[{shell[0]}] {case.name}"
     box = sandbox(case, release, tools, root)
     args = [arg.format(dest=box.dest) for arg in case.args]
@@ -775,8 +792,18 @@ CASES = (
     Case("macOS on another machine", refused("macOS on i386"), system=mac("i386")),
     Case(
         "macOS: a release without a macOS build",
-        all_of(refused(NO_MAC_BUILD, RELEASES), lacks_err("Cannot download"), lacks_err("Downloading")),
+        all_of(
+            refused(NO_MAC_BUILD.format(version=LINUX_ONLY), RELEASES),
+            lacks_err("Cannot download"),
+            lacks_err("Downloading"),
+        ),
         args=version_args(LINUX_ONLY),
+        system=mac(),
+    ),
+    Case(
+        "macOS: a release whose SHA256SUMS is empty",
+        all_of(refused(NO_MAC_BUILD.format(version=EMPTY_SUMS), RELEASES), lacks_err("Downloading")),
+        args=version_args(EMPTY_SUMS),
         system=mac(),
     ),
     Case(
@@ -796,7 +823,7 @@ CASES = (
     ),
     Case(
         "macOS: no curl, a release without a macOS build",
-        refused(NO_MAC_BUILD),
+        refused(NO_MAC_BUILD.format(version=LINUX_ONLY)),
         args=version_args(LINUX_ONLY),
         drop=("curl",),
         system=mac(),
@@ -848,8 +875,9 @@ def run_all(shells: list, root: Path) -> list[Outcome]:
         with ThreadPoolExecutor(WORKERS) as pool:
             outcomes += pool.map(lambda job: run_case(*job), jobs)
         for shell in shells:
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                outcomes.append(interrupt(shell, sig, release, tools, root))
+            for system in (System(), mac()):
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    outcomes.append(interrupt(shell, sig, system, release, tools, root))
 
         # 5. No request went anywhere but the fake release.
         if release.escapes:
@@ -884,7 +912,7 @@ def main() -> int:
     passed = sum(1 for outcome in outcomes if not outcome.problems and not outcome.skipped)
     names = ", ".join(name for name, _ in shells)
     absent = [" ".join(argv) for argv in SHELLS if not shutil.which(argv[0])]
-    print(f"test-install: {len(CASES)} cases and 2 interrupts under {names}: {passed} runs passed")
+    print(f"test-install: {len(CASES)} cases and 4 interrupts under {names}: {passed} runs passed")
     if absent:
         print(f"test-install: not installed, so not run: {', '.join(absent)}")
     if skipped:
