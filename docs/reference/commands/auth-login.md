@@ -266,7 +266,7 @@ login's token refuse a login file they cannot trust or read, with `E_INVALID_ARG
 
 | `details.reason` | The file |
 | --- | --- |
-| `auth_file_kind` | is a symbolic link, or not a regular file |
+| `auth_file_kind` | is a symbolic link, or not a regular file, or was replaced by another file each time it was opened |
 | `auth_file_mode` | can be read or written by its group or by others; the hint is the `chmod 600` that fixes it |
 | `auth_file_version` | names no `version`, or one this build does not read |
 | `auth_file` | is larger than 64 KiB, is not TOML, or holds a login that is not one |

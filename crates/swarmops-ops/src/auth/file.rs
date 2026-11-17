@@ -37,7 +37,10 @@
 //! The file is the user's alone, and a read checks that on the file it reads: a symbolic link
 //! is refused, and the kind, the mode (no bit for the group or for others) and the size (at most
 //! 64 KiB) are those of the open file the bytes then come from, not of whatever the path names a
-//! moment later. Nothing loosens or tightens a file's mode for the user: a loose file is refused
+//! moment later. The open follows a link, so the open file must also be the one the path named
+//! when it was looked at without following one, by its device and inode: a link put there in
+//! between is not read through. A file replaced in between (a login written at that moment) is
+//! looked at again, a few times. Nothing loosens or tightens a file's mode for the user: a loose file is refused
 //! with the `chmod` that fixes it. A file that is refused is never overwritten.
 //!
 //! A file this build does not read is `E_INVALID_ARG`, with the file in `details.auth_file` and
@@ -45,7 +48,7 @@
 //!
 //! | `details.reason` | The file |
 //! | --- | --- |
-//! | `auth_file_kind` | is a symbolic link, or not a regular file |
+//! | `auth_file_kind` | is a symbolic link, or not a regular file, or was replaced by another file each time it was opened |
 //! | `auth_file_mode` | can be read or written by its group or by others |
 //! | `auth_file_version` | names no `version`, or not this build's |
 //! | `auth_file` | holds more than 64 KiB, is not UTF-8 or not TOML, or holds an entry that is not a login: no `provider` or `host`, a host met twice, or, for a provider this build knows, a host that is no [`host_key`], a token that is none, or a `source` or `scopes` of another shape |
@@ -88,6 +91,10 @@ const MAX_FILE_BYTES: u64 = 64 * 1024;
 
 /// The most bytes a token may hold.
 const MAX_TOKEN_BYTES: usize = 1024;
+
+/// How often a login file is looked at and opened before a read gives up on a path whose file
+/// is replaced between the two each time.
+const OPEN_TRIES: u32 = 4;
 
 /// The mode bits a login file must not have: any of the group's or of others'.
 const LOOSE_MODE: u32 = 0o077;
@@ -527,45 +534,37 @@ fn listed(entry: &toml::Table) -> Result<AuthEntry, &'static str> {
 
 /// The bytes of the login file at `path`, which must be the user's alone; `None` when there is
 /// no file. The kind, the mode and the size checked are those of the open file the bytes are
-/// read from. The refusals are [the module's table](self)'s.
+/// read from, and that file is the one the path named when it was looked at without following
+/// a link. The refusals are [the module's table](self)'s.
 fn read_private(path: &Utf8Path) -> Result<Option<Vec<u8>>, OpError> {
-    let unreadable = |e: io::Error| {
-        error::error(
-            ErrorCode::Io,
-            format!("the login file {path} cannot be read: {e}"),
-        )
-        .with_details(error::details([("auth_file", path.as_str().into())]))
-    };
-    let other_kind = || {
-        refused(
-            path,
-            "auth_file_kind",
-            "is a symbolic link or no regular file",
-        )
-        .with_hint("keep the login file as a regular file of your own, or remove it")
+    read_private_with(path, &|| ())
+}
+
+/// [`read_private`], with `between` run each time the path was looked at and before it is
+/// opened: the moment in which another process can put something else at the path. A test's
+/// seam.
+fn read_private_with(path: &Utf8Path, between: &dyn Fn()) -> Result<Option<Vec<u8>>, OpError> {
+    let unreadable = |e: io::Error| unreadable(path, &e);
+
+    // 1. The file the path names, opened: looked at again when it was replaced meanwhile, as a
+    //    login written at that moment replaces it, and refused when that happens every time.
+    let mut found = None;
+    for _ in 0..OPEN_TRIES {
+        match open_named(path, between)? {
+            Named::Opened(file, opened) => {
+                found = Some((file, opened));
+                break;
+            }
+            Named::Missing => return Ok(None),
+            Named::Replaced => {}
+        }
+    }
+    let Some((file, opened)) = found else {
+        let why = "was replaced by another file each time it was opened";
+        return Err(refused(path, "auth_file_kind", why).with_hint("run the command again"));
     };
 
-    // 1. What the path names, without following it: a link is refused, and so is anything an
-    //    open could wait on (a FIFO).
-    let named = match fs::symlink_metadata(path) {
-        Ok(named) => named,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(unreadable(e)),
-    };
-    if !named.file_type().is_file() {
-        return Err(other_kind());
-    }
-
-    // 2. The file, opened once; what is checked from here on is the open file's.
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(unreadable(e)),
-    };
-    let opened = file.metadata().map_err(unreadable)?;
-    if !opened.file_type().is_file() {
-        return Err(other_kind());
-    }
+    // 2. The open file's mode.
     if opened.mode() & LOOSE_MODE != 0 {
         let why = format!(
             "has mode {:04o}: its group or others can read or write it",
@@ -587,6 +586,69 @@ fn read_private(path: &Utf8Path) -> Result<Option<Vec<u8>>, OpError> {
     Ok(Some(bytes))
 }
 
+/// What [`open_named`] found at a login file's path.
+enum Named {
+    /// The regular file the path named, open, with the open file's metadata.
+    Opened(File, fs::Metadata),
+    /// Nothing is at the path.
+    Missing,
+    /// The file opened is not the one the path named a moment before.
+    Replaced,
+}
+
+/// Opens the login file at `path` without reading through a link. The path is looked at
+/// without following it, and a link or anything but a regular file is refused
+/// (`auth_file_kind`) unopened; `between` runs; then the path is opened, which does follow a
+/// link, so the open file must be the one looked at, by its device and inode:
+/// [`Named::Replaced`] when it is not, whether a link or another file took its place.
+fn open_named(path: &Utf8Path, between: &dyn Fn()) -> Result<Named, OpError> {
+    let unreadable = |e: io::Error| unreadable(path, &e);
+    let other_kind = || {
+        refused(
+            path,
+            "auth_file_kind",
+            "is a symbolic link or no regular file",
+        )
+        .with_hint("keep the login file as a regular file of your own, or remove it")
+    };
+
+    // 1. What the path names, without following it: a link is refused, and so is anything an
+    //    open could wait on (a FIFO).
+    let named = match fs::symlink_metadata(path) {
+        Ok(named) => named,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Named::Missing),
+        Err(e) => return Err(unreadable(e)),
+    };
+    if !named.file_type().is_file() {
+        return Err(other_kind());
+    }
+
+    // 2. The file, opened once; what is checked from here on is the open file's.
+    between();
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Named::Missing),
+        Err(e) => return Err(unreadable(e)),
+    };
+    let opened = file.metadata().map_err(unreadable)?;
+    if (opened.dev(), opened.ino()) != (named.dev(), named.ino()) {
+        return Ok(Named::Replaced);
+    }
+    if !opened.file_type().is_file() {
+        return Err(other_kind());
+    }
+    Ok(Named::Opened(file, opened))
+}
+
+/// `E_IO` for the login file at `path`, which could not be read for `e`.
+fn unreadable(path: &Utf8Path, e: &io::Error) -> OpError {
+    error::error(
+        ErrorCode::Io,
+        format!("the login file {path} cannot be read: {e}"),
+    )
+    .with_details(error::details([("auth_file", path.as_str().into())]))
+}
+
 /// `E_INVALID_ARG` for the login file at `path`, which `why` (it follows "the login file" and
 /// the path): `details.reason` is `reason` and `details.auth_file` the path.
 fn refused(path: &Utf8Path, reason: &str, why: &str) -> OpError {
@@ -602,6 +664,7 @@ fn refused(path: &Utf8Path, reason: &str, why: &str) -> OpError {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     use tempfile::TempDir;
@@ -945,6 +1008,80 @@ mod tests {
         assert_eq!(reason(&error), ("E_INVALID_ARG", "auth_file_mode"));
         let (_dir, gone) = nowhere();
         assert_eq!(read_private(&gone).unwrap(), None);
+    }
+
+    /// The open follows a link, so a link put at the path after the path was looked at would be
+    /// read through: the file opened must be the one that was looked at.
+    #[test]
+    fn a_file_swapped_for_a_link_before_the_open_is_refused() {
+        // A private file behind a link is what the swap is after: every check on the open
+        // file passes for it.
+        let (dir, target) = holding(&format!(
+            "version = 1\n[[login]]\nprovider = \"gh\"\nhost = \"github.com\"\n\
+             token = \"{TOKEN}\"\nsource = \"with_token\"\n"
+        ));
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        let path = root.join("swapped.toml");
+        fs::write(&path, "version = 1\n").unwrap();
+        chmod(&path, 0o600);
+
+        // 1. Swapped for a link between the look and the open: the open file is the link's
+        //    target, not the file looked at, so nothing of it is read; the next look finds the
+        //    link and refuses it.
+        let swap = || {
+            let link = root.join("link.toml");
+            symlink(&target, &link).unwrap();
+            fs::rename(&link, &path).unwrap();
+        };
+        let error = read_private_with(&path, &swap).unwrap_err();
+        assert_eq!(reason(&error), ("E_INVALID_ARG", "auth_file_kind"));
+        assert_eq!(error.details["auth_file"], path.as_str());
+        assert!(!format!("{error:?}").contains(TOKEN), "{error:?}");
+
+        // 2. The one step: a file that is a link's target by the time it is opened is not
+        //    handed out, whatever the path named before.
+        let plain = || {
+            let next = root.join("next.toml");
+            fs::write(&next, "version = 1\n").unwrap();
+            chmod(&next, 0o600);
+            fs::rename(&next, &path).unwrap();
+        };
+        plain();
+        assert!(matches!(open_named(&path, &swap).unwrap(), Named::Replaced));
+
+        // 3. Replaced at every open, by a file that would pass each check: refused once the
+        //    tries are spent, and no more often opened than that.
+        plain();
+        let opens = Cell::new(0_u32);
+        let always = || {
+            opens.set(opens.get() + 1);
+            plain();
+        };
+        let error = read_private_with(&path, &always).unwrap_err();
+        assert_eq!(reason(&error), ("E_INVALID_ARG", "auth_file_kind"));
+        assert_eq!(error.hint.as_deref(), Some("run the command again"));
+        assert_eq!(opens.get(), OPEN_TRIES);
+
+        // 4. Replaced once by another file of the user's, as a login written meanwhile
+        //    replaces it: that file is the one read.
+        let (_dir, path) = holding("version = 1\n");
+        let written = Cell::new(false);
+        let rewrite = || {
+            if !written.replace(true) {
+                let next = path.with_extension("next");
+                fs::write(&next, "version = 1\n# rewritten\n").unwrap();
+                chmod(&next, 0o600);
+                fs::rename(&next, &path).unwrap();
+            }
+        };
+        assert_eq!(
+            read_private_with(&path, &rewrite).unwrap().as_deref(),
+            Some(&b"version = 1\n# rewritten\n"[..])
+        );
+
+        // 5. Removed in between: no file, as when there never was one.
+        let remove = || fs::remove_file(&path).unwrap();
+        assert_eq!(read_private_with(&path, &remove).unwrap(), None);
     }
 
     #[test]

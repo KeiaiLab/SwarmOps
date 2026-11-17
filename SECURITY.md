@@ -145,7 +145,8 @@ these are vulnerabilities:
   argument, or granted by the provider's device flow (below); a usage error of `auth login`
   quotes nothing of its line but its flags' names, so that a token typed as an argument is not
   repeated in the envelope. A login file that is a symbolic link, or that its group or others can read or write,
-  is refused, and its mode is never changed for the user. `clone`, `fetch`, `push`, `sync` and
+  is refused, and so is a file that is not the one its path named when the path was looked at
+  without following a link (a link put there before the open is not read through), and its mode is never changed for the user. `clone`, `fetch`, `push`, `sync` and
   `remote add` send the token to a remote over https (or over http to a loopback address) that
   names no token variable and whose host and port are the login's, exactly; it reaches git as a
   variable's token does, and is removed the same way from what git prints. One command prints the

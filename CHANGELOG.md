@@ -355,11 +355,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - A login's token is kept in plain text in the user's login file, made with mode `0600` in a
   directory made with mode `0700`; no store holds it. A login file that is a symbolic link, or that
   its group or others can read or write, is refused (`E_INVALID_ARG`, `details.reason`
-  `auth_file_kind` or `auth_file_mode`), by the mode of the file as opened, and is never
-  overwritten. The token is read from stdin, never from an argument, and appears in no envelope
-  and no error: a usage error of `auth login` quotes nothing of its line but its flags' names, so a
-  token typed after `--with-token` is not repeated. It is sent only to an https remote whose host and port are the login's, as a
-  header scoped to that remote's URL in git's environment, and is removed from what git prints
+  `auth_file_kind` or `auth_file_mode`), by the mode of the file as opened, which must be the
+  file the path named and not one a link put there meanwhile leads to, and is never overwritten.
+  The token is read from stdin, never from an argument, and appears in no envelope and no error:
+  a usage error of `auth login` quotes nothing of its line but its flags' names, so a token typed
+  after `--with-token` is not repeated. It is sent only to an https remote whose host and port
+  are the login's, as a header keyed by that remote's URL in git's environment, and is removed
+  from what git prints
   ([SECURITY.md](SECURITY.md)).
 - A token was sent to another address when the remote redirected: git follows a redirect of its
   first request and then adds the configured header itself to what it sends the new address, so
