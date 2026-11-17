@@ -225,23 +225,12 @@ struct Dump {
     argv: Vec<String>,
     /// Its environment, `KEY=value` lines.
     env: Vec<String>,
-    /// What its stdin was: `/dev/null`, or `pipe:[…]`.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "only the Linux test of the children's stdin reads it"
-        )
-    )]
+    /// What its stdin was: `/dev/null`, or `pipe:[…]`. Read on Linux alone, where `/proc` says
+    /// it, as the one test that looks at a start's stdin runs there alone.
+    #[cfg(target_os = "linux")]
     stdin_kind: String,
     /// What its stdin held.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "only the Linux test of the children's stdin reads it"
-        )
-    )]
+    #[cfg(target_os = "linux")]
     stdin: String,
 }
 
@@ -252,7 +241,9 @@ impl Dump {
         Dump {
             argv: read("argv").lines().map(str::to_owned).collect(),
             env: read("env").lines().map(str::to_owned).collect(),
+            #[cfg(target_os = "linux")]
             stdin_kind: read("stdin-kind").trim_end().to_owned(),
+            #[cfg(target_os = "linux")]
             stdin: read("stdin"),
         }
     }

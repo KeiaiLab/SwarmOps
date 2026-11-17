@@ -1185,7 +1185,8 @@ fn an_unreferenced_object_is_sent_unchecked() {
 const PACK_HOOK_LINE: &str = "serve --hook pack-objects";
 
 /// A [`GIT_ENV`] stand-in that logs each git it runs, its parent's command line and its
-/// arguments, then runs the site's git.
+/// arguments, then runs the site's git. The parent's command line is read from `/proc` where the
+/// host has one (Linux), and asked of `ps` elsewhere.
 struct GitLog {
     /// The stand-in, `git`, and its log, `log`.
     dir: TempDir,
@@ -1199,7 +1200,11 @@ impl GitLog {
         let log = dir.path().join("log");
         let script = format!(
             "#!/bin/sh\n\
-             parent=$(tr '\\000' ' ' < /proc/$PPID/cmdline)\n\
+             if [ -r /proc/$PPID/cmdline ]; then\n\
+             \x20 parent=$(tr '\\000' ' ' < /proc/$PPID/cmdline)\n\
+             else\n\
+             \x20 parent=$(ps -o command= -p $PPID)\n\
+             fi\n\
              printf '%s\\t%s\\n' \"$parent\" \"$*\" >> '{}'\n\
              exec '{real}' \"$@\"\n",
             log.display()

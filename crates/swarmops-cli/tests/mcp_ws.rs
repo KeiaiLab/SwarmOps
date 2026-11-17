@@ -222,10 +222,12 @@ fn ws_create_without_a_path_makes_it_in_the_working_directory() {
     let cwd = tempfile::tempdir().expect("a temp dir");
     let mut server = Client::start_at(&lab, &[], cwd.path());
 
-    // 1. Made, in `<cwd>/<name>`.
+    // 1. Made, in `<cwd>/<name>`. The server knows its working directory by the name the system
+    //    gives it, every symlink resolved (macOS's temporary directory is behind one).
     let made = server.ok("ws_create", json!({"name": "here", "all": true}));
     assert_eq!(made["created"], true, "{made}");
-    let dir = std::path::absolute(cwd.path().join("here")).expect("an absolute path");
+    let cwd = cwd.path().canonicalize().expect("the resolved temp dir");
+    let dir = cwd.join("here");
     assert!(dir.join(".swarmws").is_dir(), "{made}");
 
     // 2. The registry has it there.

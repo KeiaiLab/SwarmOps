@@ -1230,6 +1230,8 @@ const MIB: usize = 1 << 20;
 /// One commit of 200 files of 1 MiB, imported with batches of 16 MiB, is stored while it is
 /// converted (the M17 design §3.2): the store's objects grow at least 12 times between the
 /// conversion's reads, and the import's peak memory stays under 64 MiB above what it was before.
+/// The peak is measured on Linux alone, which has a file for it (`/proc/self/status`); the rest of
+/// the test runs everywhere.
 #[test]
 fn one_commit_of_many_files_is_stored_in_batches() {
     let (_dir, root, repo) = unsynced_repo();
@@ -1253,17 +1255,24 @@ fn one_commit_of_many_files_is_stored_in_batches() {
     // 2. The import, in batches of 16 MiB.
     let mut req = request(&tip.to_string());
     req.object_batch_bytes = 16 * MIB;
+    #[cfg(target_os = "linux")]
     let start = peak_kib();
     let report = import(&repo, &watched, &req).unwrap();
+    #[cfg(target_os = "linux")]
     let grown = peak_kib() - start;
+    #[cfg(target_os = "linux")]
+    let peak = format!("the peak grew by {grown} KiB");
+    #[cfg(not(target_os = "linux"))]
+    let peak = "the peak is measured on Linux alone";
     assert_eq!(report.imported, 1);
 
     // 3. Stored as the conversion read: one count of objects per batch stored before a read.
     let seen = watched.seen.borrow();
     assert!(
         seen.len() >= 12,
-        "object counts seen by the reads: {seen:?}; the peak grew by {grown} KiB"
+        "object counts seen by the reads: {seen:?}; {peak}"
     );
+    #[cfg(target_os = "linux")]
     assert!(grown < 64 * 1024, "the import grew the peak by {grown} KiB");
 }
 
@@ -1278,7 +1287,9 @@ fn filled(n: usize, len: usize) -> Vec<u8> {
     bytes
 }
 
-/// This process's peak resident memory (`VmHWM` in `/proc/self/status`), in KiB.
+/// This process's peak resident memory (`VmHWM` in `/proc/self/status`, a file only Linux has),
+/// in KiB.
+#[cfg(target_os = "linux")]
 fn peak_kib() -> u64 {
     let status = fs::read_to_string("/proc/self/status").expect("read /proc/self/status");
     (status.lines())

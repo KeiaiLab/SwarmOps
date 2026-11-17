@@ -4,10 +4,10 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{BufRead as _, BufReader};
+use std::io::{BufRead as _, BufReader, Read as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,8 @@ use swarmops_git::serve::repo::{
     SERVE_MARKER, ServeError, ServeRepo,
 };
 use swarmops_git::{BranchUpdate, GitSink, GixSink, GixSource, RawKind, Stored};
+use swarmops_testkit::child::this_test;
+use swarmops_testkit::test_name;
 use tempfile::TempDir;
 
 /// A short wait, which a held lock outlasts.
@@ -24,6 +26,12 @@ const SHORT: Duration = Duration::from_millis(300);
 
 /// A wait no test reaches when the lock is let go.
 const LONG: Duration = Duration::from_secs(60);
+
+/// Set only in the child that holds the lock for [`the_lock_waits_then_is_busy`]: the lock file.
+const HOLDER_LOCK: &str = "SWARMOPS_TEST_SERVE_LOCK_HOLDER";
+
+/// What that child prints once it holds the lock, at the end of a line.
+const HELD: &str = "serve-lock-held";
 
 /// A temp dir standing in for a store's root: the serving repository needs no more of a store.
 struct Root {
@@ -202,10 +210,16 @@ fn a_broken_repository_is_set_aside_and_made_again() {
     }
 }
 
-/// The lock is held against a second taker, in this process and in another (`flock(1)`): it
-/// waits up to the given wait, then gives `Busy`; a lock let go within the wait is taken.
+/// The lock is held against a second taker, in this process and in another (this test binary run
+/// again, which takes the kernel's `flock` on the lock file as `flock(1)` would, a program that
+/// not every platform has): it waits up to the given wait, then gives `Busy`; a lock let go within
+/// the wait is taken.
 #[test]
 fn the_lock_waits_then_is_busy() {
+    if let Some(lock) = std::env::var_os(HOLDER_LOCK) {
+        hold_until_stdin_closes(Path::new(&lock));
+        return;
+    }
     let root = Root::new();
     let repo = root.open();
 
@@ -230,11 +244,12 @@ fn the_lock_waits_then_is_busy() {
     drop(taken);
 
     // 3. Held by another process: busy until it ends.
-    let mut holder = hold_in_another_process(&root.git().join("serve.lock"));
+    let (mut holder, output) = hold_in_another_process(&root.git().join("serve.lock"));
     assert_eq!(repo.lock(SHORT).unwrap_err(), ServeError::Busy);
     drop(holder.stdin.take());
     let ended = holder.wait().expect("reap the holder");
     assert!(ended.success(), "{ended}");
+    drop(output);
     repo.lock(LONG).expect("taken once the other process ended");
 }
 
@@ -292,24 +307,40 @@ fn blob(repo: &ServeRepo, bytes: &[u8]) -> swarmops_git::GitOid {
     oid
 }
 
-/// A `flock(1)` process holding the lock file `lock` until its stdin closes, once it holds it.
-fn hold_in_another_process(lock: &std::path::Path) -> Child {
-    let mut child = Command::new("flock")
-        .arg("--exclusive")
-        .arg(lock)
-        .args(["sh", "-c", "echo held; read -r line || true"])
+/// A child of this test binary holding the lock file `lock` until its stdin closes, once it
+/// holds it ([`hold_until_stdin_closes`]), and its output, to keep open until the child has
+/// ended: the test harness in it prints its result there last.
+fn hold_in_another_process(lock: &Path) -> (Child, BufReader<ChildStdout>) {
+    let mut child = this_test(&test_name!("the_lock_waits_then_is_busy"))
+        .env(HOLDER_LOCK, lock)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("run flock");
-    let stdout = child.stdout.take().expect("its stdout");
-    let mut line = String::new();
-    BufReader::new(stdout)
-        .read_line(&mut line)
-        .expect("read flock's line");
-    assert_eq!(line, "held\n", "flock did not take the lock");
-    child
+        .expect("run this test binary again");
+    let mut output = BufReader::new(child.stdout.take().expect("its stdout"));
+    // The test harness prints lines of its own around the child's.
+    let held = (output.by_ref().lines())
+        .map(|line| line.expect("read the holder's line"))
+        .any(|line| line.ends_with(HELD));
+    assert!(held, "the holder did not take the lock");
+    (child, output)
+}
+
+/// The holder's side of [`hold_in_another_process`]: takes the kernel's exclusive lock
+/// (`flock`) on the file `lock`, says so, and holds it until its stdin closes.
+fn hold_until_stdin_closes(lock: &Path) {
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(lock)
+        .expect("open the lock file");
+    file.lock().expect("take the lock");
+    println!("{HELD}");
+    let mut rest = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut rest)
+        .expect("read stdin to its end");
+    drop(file);
 }
 
 /// What `git <args>` prints in the git directory `git_dir`, trimmed, by the git `SWARMOPS_GIT`
