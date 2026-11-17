@@ -173,10 +173,18 @@ fn every_run_of_the_binary_is_isolated() {
     );
 }
 
+/// The hook that makes a build with the `test-hooks` feature count as a release's.
+const RELEASE_HOOK: &str = "SWARMOPS_TEST_UPDATE_RELEASE";
+
 /// What is wrong with `text`, a test file, if it runs the binary without the kit's isolation.
 /// A command of the binary's is made from one of its paths (`BIN`, `SO`, `bin`, or Cargo's
 /// variable); each place that drops this process's `SWARMOPS_*` variables from one
 /// (`swarmops_vars()`) isolates it too, and a file that makes one has such a place.
+///
+/// A file that names the hook which makes the binary a release's build makes no command of its
+/// own at all: its binary is a copy at a path of the test's making, which the spellings above
+/// do not know, and a run of it without the kit's runner would look for a newer release with
+/// the host's curl.
 fn unisolated(text: &str) -> Option<&'static str> {
     const OWN: [&str; 5] = [
         "Command::new(support::BIN)",
@@ -186,6 +194,9 @@ fn unisolated(text: &str) -> Option<&'static str> {
         "Command::new(env!(\"CARGO_BIN_EXE_",
     ];
     let count = |needle: &str| text.matches(needle).count();
+    if count(RELEASE_HOOK) > 0 && count("Command::new(") > 0 {
+        return Some("a file whose binary counts as a release's makes a command of its own");
+    }
     let dropped = count("swarmops_vars()");
     let isolated = count("support::isolate(") + count("support::isolation()");
     if dropped != isolated {
@@ -212,6 +223,33 @@ fn the_isolation_check_finds_a_bare_run() {
     assert!(unisolated(&one_of_two).is_some(), "{one_of_two}");
     let whole = "Command::new(env!(\"CARGO_BIN_EXE_swarmops\")).arg(\"info\");\n";
     assert!(unisolated(whole).is_some(), "{whole}");
+
+    // A file with the release hook: no command of its own, whatever the program's path is
+    // spelled as, and isolated or not. Without one it passes.
+    let hook = format!("const HOOK: &str = \"{RELEASE_HOOK}\";\n");
+    let copy = "Command::new(site.install.bin(\"so\")).arg(\"update\");\n";
+    assert_eq!(
+        unisolated(copy),
+        None,
+        "no spelling of the binary's: {copy}"
+    );
+    for spawn in [copy, "Command::new(\"/bin/sh\");\n", isolated] {
+        let file = format!("{hook}{spawn}");
+        assert!(unisolated(&file).is_some(), "{file}");
+    }
+    let kit_alone = format!("{hook}site.run_program(&so, &[\"whoami\"], &[]);\n");
+    assert_eq!(unisolated(&kit_alone), None);
+}
+
+/// The hook's name as the guard reads it is the one the program reads.
+#[test]
+fn the_guard_s_release_hook_is_the_program_s() {
+    let version = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/version.rs");
+    let text = std::fs::read_to_string(version).unwrap();
+    assert!(
+        text.contains(&format!("\"{RELEASE_HOOK}\"")),
+        "{RELEASE_HOOK}"
+    );
 }
 
 /// The isolation turns automatic update off in the words the program reads: the test kit, which
