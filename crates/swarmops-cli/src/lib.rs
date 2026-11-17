@@ -1,6 +1,7 @@
 //! The SwarmOps command line (operations spec §0–§1), the program of two binaries: `swarmops`,
 //! and `so`, its short form. One subcommand per operation, and on stdout exactly one envelope
-//! per run, which agents script against, but for `mcp`, `serve` and `derive --follow` (below).
+//! per run, which agents script against, but for `mcp`, `serve`, `derive --follow` and
+//! `auth git-credential` (below).
 //!
 //! - Success prints `{"ok":true,"op":…,"api":1,"result":…,"meta":…}` and exits 0; a failure
 //!   prints `{"ok":false,…,"error":{code,message,retryable,exit,details,hint},…}` and exits
@@ -20,6 +21,10 @@
 //! - `serve` prints no envelope on stdout either: it carries git's protocol there (with `--cgi`,
 //!   the HTTP response), and a refusal before git starts is one `ERR` pkt-line (with `--cgi`, a
 //!   `Status:` header and the same text), its envelope on stderr.
+//! - `auth git-credential` prints no envelope on stdout either: git runs it as a credential
+//!   helper and reads its stdout, which carries a `username=` and a `password=` line or nothing.
+//!   The envelope of a failure, of a panic or of a command line it refuses goes to stderr, with
+//!   the same exit code.
 //! - `derive --follow` prints one envelope a line for each run that derived something, and
 //!   nothing for a run that derived nothing (a follower that has caught up is silent), until it
 //!   is killed or a run fails, whose envelope is the last.

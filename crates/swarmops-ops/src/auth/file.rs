@@ -57,8 +57,9 @@
 //! logins at once the later one's file stands, whole and valid.
 //!
 //! The token appears in no error, no result and no `Debug` output of this module: the results
-//! are the API's types, which have no field for it, and the one function that hands a token out
-//! ([`token_for`]) gives a [`StoredToken`], which prints as redacted.
+//! are the API's types, which have no field for it. Two functions hand a token out:
+//! [`token_for`] gives a [`StoredToken`], which prints as redacted, and [`secret_for`] gives
+//! the text to the credential helper alone (`helper`), whose answer prints as redacted too.
 
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -275,6 +276,12 @@ pub fn logout(file: Option<&Utf8Path>, provider: Provider) -> Result<AuthLogout,
 /// `E_INVALID_ARG` for a file this build does not read (`details.reason` `auth_file_kind`,
 /// `auth_file_mode`, `auth_file_version` or `auth_file`); `E_IO` when it cannot be read.
 pub(crate) fn token_for(file: &Utf8Path, host: &str) -> Result<Option<StoredToken>, OpError> {
+    Ok(secret_for(file, host)?.map(StoredToken::new))
+}
+
+/// [`token_for`]'s token as text, for the one caller that must write it out: the credential
+/// helper's answer to git (`helper`). Everything else takes [`token_for`]'s.
+pub(super) fn secret_for(file: &Utf8Path, host: &str) -> Result<Option<String>, OpError> {
     let logins = Logins::read(file)?;
 
     // `listed` and the file's entries are in the same order: `read` listed each entry.
@@ -287,7 +294,7 @@ pub(crate) fn token_for(file: &Utf8Path, host: &str) -> Result<Option<StoredToke
         .and_then(|entries| entries.get(at))
         .and_then(|entry| entry.get(TOKEN_KEY))
         .and_then(toml::Value::as_str);
-    Ok(token.map(|token| StoredToken::new(token.to_owned())))
+    Ok(token.map(str::to_owned))
 }
 
 /// Refuses a token that is not 1 to [`MAX_TOKEN_BYTES`] visible ASCII characters

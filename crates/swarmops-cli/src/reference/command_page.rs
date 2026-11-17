@@ -112,8 +112,11 @@ const TAKE_BACK_COMMANDS: [&str; 7] = [
 ];
 const TAKE_BACK_SINCE: &str = "0.11.0";
 
+/// The command git runs as a credential helper: its stdout is git's, not an envelope's.
+const HELPER_COMMAND: &str = "auth git-credential";
+
 /// The logins' commands, and the release they first ship in.
-const AUTH_COMMANDS: [&str; 3] = ["auth login", "auth status", "auth logout"];
+const AUTH_COMMANDS: [&str; 4] = ["auth login", "auth status", "auth logout", HELPER_COMMAND];
 const AUTH_SINCE: &str = "0.12.0";
 
 /// The release the command at `path` first shipped in.
@@ -237,7 +240,8 @@ enum Returns {
     Type(&'static str),
     /// JSON Schemas by type name (`schema`).
     Schemas,
-    /// No envelope: the MCP protocol (`mcp`).
+    /// No envelope: stdout carries a protocol (`mcp`'s, git's for `serve` and for
+    /// `auth git-credential`).
     Protocol,
 }
 
@@ -254,7 +258,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 63] = [
+const META: [Meta; 64] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -642,6 +646,7 @@ const META: [Meta; 63] = [
         false,
         Returns::Type("AuthLogout"),
     ),
+    meta(HELPER_COMMAND, Group::Auth, false, false, Returns::Protocol),
 ];
 
 /// A row of [`META`].
@@ -1271,6 +1276,16 @@ fn returns(out: &mut String, command: &Entry<'_>) {
                  refusal before git starts is one `ERR` pkt-line there (with `--cgi`, a \
                  `Status:` header and its text), and the envelope goes to stderr, as for a \
                  command line it refuses.\n"
+            );
+        }
+        Returns::Protocol if command.meta.path == HELPER_COMMAND => {
+            let _ = writeln!(
+                out,
+                "`{BIN} {HELPER_COMMAND}` prints no envelope on stdout, which git reads as a \
+                 credential helper's: for `get` with a login for the request's host, a \
+                 `username=` line and a `password=` line, and otherwise nothing. A login file \
+                 that is refused, a request it cannot read and a command line it refuses have \
+                 their envelope on stderr.\n"
             );
         }
         Returns::Protocol => {

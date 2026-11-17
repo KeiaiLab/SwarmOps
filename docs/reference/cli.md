@@ -4,7 +4,7 @@
 
 Every command of `swarmops` and `so`, its short form: the same program by a shorter name. This page and the command pages are generated from the command line's own definition, so they say what `swarmops <command> --help` says. `-h` prints the short help and `--help` the long help that the pages give.
 
-Every command but `mcp`, `serve` and `derive --follow` prints one JSON envelope on stdout: `mcp` speaks MCP there, `serve` git's protocol, and `derive --follow` prints one envelope a line for each run that derived something, and nothing for a run that derived nothing. An envelope's `op` names the operation the command runs (`cat` runs `read_file`). [Errors](errors.md) lists every error code an envelope can carry, with its exit code.
+Every command but `mcp`, `serve`, `derive --follow` and `auth git-credential` prints one JSON envelope on stdout: `mcp` speaks MCP there, `serve` git's protocol, `derive --follow` prints one envelope a line for each run that derived something, and nothing for a run that derived nothing, and `auth git-credential` answers git as a credential helper. An envelope's `op` names the operation the command runs (`cat` runs `read_file`). [Errors](errors.md) lists every error code an envelope can carry, with its exit code.
 
 Each command's page gives its syntax, its arguments, an example recorded by the tests, what it returns and the errors it fails with. Its `yaml` metadata block says the same for programs: `group`, `mutates` (it can change what the store holds, its changesets and refs, or make the store; a write to the store's caches alone does not count), `identity_required` (it refuses to run without `--as` or `SWARMOPS_AGENT`), `mcp_tool`, `envelope_op`, `exit_codes`, `errors` and `syntax`.
 
@@ -153,8 +153,9 @@ Work in a directory of your own: a workspace holds a sparse copy of a changeset'
 
 ### swarmops auth
 
-Keep, list or remove your logins: a token per host, in one file of your own.
+Keep, list or remove your logins, or hand one to git: a token per host, in one file of your own.
 
 - [`swarmops auth login`](commands/auth-login.md): Keep a token for a provider in your login file.
 - [`swarmops auth status`](commands/auth-status.md): List the logins your login file holds, without their tokens.
 - [`swarmops auth logout`](commands/auth-logout.md): Remove a provider's login from your login file.
+- [`swarmops auth git-credential`](commands/auth-git-credential.md): Answer git's credential-helper protocol from your login file.

@@ -131,8 +131,8 @@ code, a fixed exit code, whether running it again can succeed (`retryable`), mac
 
 The exit code is `error.exit`: 0 success, 1 error, 2 usage, 3 conflict, 4 retryable, 5 identity or
 policy, 6 not found. An MCP tool's result is the same envelope. `derive --follow` prints one
-envelope a line, `--help`, `--version` and the `help` subcommand print plain text, and `mcp` speaks
-MCP on stdout instead; a run that meets one of the store's four documented aborts prints no
+envelope a line, `--help`, `--version` and the `help` subcommand print plain text, `mcp` speaks
+MCP on stdout instead, and `auth git-credential` answers git there as a credential helper; a run that meets one of the store's four documented aborts prints no
 envelope.
 
 Explained in: [CLI scripting, The envelope](develop/cli-scripting.md#the-envelope) ·

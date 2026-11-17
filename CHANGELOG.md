@@ -27,6 +27,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
   logins without their tokens, and `logout` removes one. The three commands open no store
   and have no MCP tool, each with its reason in the MCP reference's index. New result types:
   `AuthEntry`, `AuthLogin`, `AuthStatus`, `AuthLogout`.
+- `auth git-credential <OPERATION>` answers git's credential-helper protocol from the login file,
+  so a plain git can use a login: `git -c credential.helper='!so auth git-credential' push`. For
+  `get` with a request whose host and port are a login's, over https (or http to a loopback
+  address), it prints `username=x-access-token` and `password=` with the token on stdout;
+  otherwise, and for `store` and `erase`, it prints nothing and exits 0. It prints no envelope on
+  stdout, as `mcp` and `serve` do not: a failure's envelope goes to stderr. It is the one command
+  that prints a token, and it has no MCP tool.
 - Each workspace mutation that succeeds records its holder in `workspaces/hold/<name>.json`
   beside the registry: who changed the workspace last, when, the lease and the commits not landed
   yet; unsynced, a failed write is a warning, and `ws delete` removes it.

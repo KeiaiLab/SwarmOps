@@ -87,5 +87,6 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 
 - [`swarmops auth login`](auth-login.md)
 - [`swarmops auth logout`](auth-logout.md)
+- [`swarmops auth git-credential`](auth-git-credential.md)
 - [CLI reference](../cli.md)
 - [Error codes](../errors.md)

@@ -142,10 +142,14 @@ these are vulnerabilities:
   is refused, and its mode is never changed for the user. `clone`, `fetch`, `push`, `sync` and
   `remote add` send the token to a remote over https (or over http to a loopback address) that
   names no token variable and whose host and port are the login's, exactly; it reaches git as a
-  variable's token does, and is removed the same way from what git prints. A token that reaches
-  any other file, an argument, an envelope, an error or what `auth status` prints; a token sent to
-  a remote at another host or port, or to one that names a variable; a login file made with a
-  wider mode; or a login file read through a link, is a vulnerability. No store, remote or request can
+  variable's token does, and is removed the same way from what git prints. One command prints the
+  token: `auth git-credential get`, the credential helper a user's own git runs, on its stdout
+  alone and only for a request whose protocol, host and port are the login's by the same rule. A
+  token that reaches any other file, an argument, an envelope, an error, stderr, what
+  `auth status` prints or the stdout of any other command; a token sent to a remote at another
+  host or port, or to one that names a variable; a helper's answer to a request for another host
+  or port; a login file made with a wider mode; or a login file read through a link, is a
+  vulnerability. No store, remote or request can
   name the login file: only the user's environment does.
 - **The SwarmOps supply chain.** A dependency or a CI workflow that could change what we build
   or run. `cargo deny check` (advisories, licenses, bans, sources) runs over every lockfile the

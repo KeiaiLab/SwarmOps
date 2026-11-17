@@ -91,7 +91,8 @@ fn finish(
 
 /// What the command line asks for, done: the envelope to print, or nothing more for help or
 /// the version, which clap has printed, and the preparation to start once it is out. For a line
-/// that runs `mcp`, the envelope has gone to stderr ([`on_stderr`]).
+/// that runs `mcp`, `serve` or `auth git-credential`, the envelope has gone to stderr
+/// ([`on_stderr`]).
 fn respond(started: Instant, stdout: Stdout) -> (Printed, Followup) {
     let args: Vec<OsString> = std::env::args_os().collect();
     let parsed = gitlike::parse(&args, &place);
@@ -180,7 +181,8 @@ fn answer(
 }
 
 /// `printed`, with what it holds for stdout written to stderr instead: what `swarmops mcp` prints
-/// before it serves, since its stdout belongs to the protocol. The exit code stays the same.
+/// before it serves, since its stdout belongs to the protocol, and likewise what `serve` and
+/// `auth git-credential` return. The exit code stays the same.
 fn on_stderr(printed: Printed) -> Printed {
     let Printed { stdout, exit } = printed;
     if !stdout.is_empty() {

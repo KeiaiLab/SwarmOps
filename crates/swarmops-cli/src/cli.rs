@@ -26,8 +26,9 @@ use crate::output;
 pub const NO_OP: &str = "swarmops";
 
 /// The operations whose stdout carries a protocol, not an envelope: what they would print before
-/// it goes to stderr.
-const PROTOCOL_OPS: [&str; 2] = ["mcp", "serve"];
+/// it goes to stderr. `auth git-credential`'s is git's credential protocol, which it writes
+/// itself.
+const PROTOCOL_OPS: [&str; 3] = ["mcp", "serve", "auth_git_credential"];
 
 /// The operation `serve --prepare` names: no protocol on its stdout.
 pub const SERVE_PREPARE: &str = "serve_prepare";
@@ -325,8 +326,8 @@ A connection whose store has not moved since serve.git's last export takes no lo
 const SERVE_USER_FAMILY_HELP: &str = "With --cgi: name the caller <FAMILY>/$REMOTE_USER, the user \
 the web server authenticated";
 
-/// Source control for coding-agent swarms. Every command but mcp, serve and derive --follow
-/// prints one JSON envelope on stdout.
+/// Source control for coding-agent swarms. Every command but mcp, serve, derive --follow and
+/// auth git-credential prints one JSON envelope on stdout.
 #[derive(Parser, Debug)]
 #[command(name = "swarmops", version = crate::version::version())]
 pub struct Cli {
@@ -842,7 +843,8 @@ pub enum Command {
         #[arg(long, requires = "follow")]
         from_start: bool,
     },
-    /// Keep, list or remove your logins: a token per host, in one file of your own.
+    /// Keep, list or remove your logins, or hand one to git: a token per host, in one file of
+    /// your own.
     #[command(subcommand)]
     Auth(AuthCommand),
 }
@@ -1523,6 +1525,26 @@ pub enum AuthCommand {
         #[arg(long)]
         gh: bool,
     },
+    /// Answer git's credential-helper protocol from your login file.
+    ///
+    /// For a plain git to use a login: git -c credential.helper='!so auth git-credential' push.
+    /// git adds the operation as the last word and writes its request on stdin, key=value lines
+    /// up to a blank line; at most 64 KiB are read. get prints two lines on stdout,
+    /// username=x-access-token and password= with the login's token, when the request's protocol
+    /// is https (or http to a loopback address) and its host is exactly a login's, port included,
+    /// of a provider this build knows. For anything else it prints nothing and exits 0, and git
+    /// asks its next helper. store, erase and any other word print nothing and change nothing: a
+    /// remote that refuses the token does not remove the login.
+    ///
+    /// It prints no envelope: stdout belongs to git. A login file that is refused, a request
+    /// that cannot be read and a command line it refuses have their envelope on stderr, with
+    /// its exit code, and nothing on stdout. It uses no store and needs no identity. No other
+    /// command prints a token.
+    GitCredential {
+        /// The operation git names: get, store or erase.
+        #[arg(value_name = "OPERATION")]
+        operation: String,
+    },
 }
 
 /// `sync`'s operation besides syncing.
@@ -1658,14 +1680,17 @@ pub enum Parsed {
 }
 
 impl Parsed {
-    /// Whether the line runs `swarmops mcp` or `swarmops serve`, as far as it could be read: a
-    /// command to run, or a usage error in its arguments. Their stdout belongs to the protocol.
+    /// Whether the line runs `swarmops mcp`, `swarmops serve` or `swarmops auth git-credential`,
+    /// as far as it could be read: a command to run, or a usage error in its arguments. Their
+    /// stdout belongs to a protocol. A usage error counts when the subcommands it could read
+    /// name one of those operations: `auth` alone names none.
     pub fn runs_mcp(&self) -> bool {
         match self {
             Parsed::Run(_, op) => PROTOCOL_OPS.contains(op),
-            Parsed::Usage { path, .. } => path
-                .first()
-                .is_some_and(|name| PROTOCOL_OPS.contains(&name.as_str())),
+            Parsed::Usage { path, .. } => {
+                let path: Vec<&str> = path.iter().map(String::as_str).collect();
+                op_name(&path).is_some_and(|op| PROTOCOL_OPS.contains(&op))
+            }
             Parsed::Text(_) => false,
         }
     }
@@ -1819,6 +1844,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["auth", "login"] => "auth_login",
         ["auth", "status"] => "auth_status",
         ["auth", "logout"] => "auth_logout",
+        ["auth", "git-credential"] => "auth_git_credential",
         _ => return None,
     })
 }
@@ -1947,10 +1973,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 63);
+        assert_eq!(ops.len(), 64);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 63, "two subcommands name one op");
+        assert_eq!(ops.len(), 64, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["ws"]), None);
@@ -2242,6 +2268,12 @@ mod tests {
             &["mcp", "x"],
             &["serve"],
             &["serve", "--root", "r", "--as", "person/ada"],
+            &["auth", "git-credential", "get"],
+            &["auth", "git-credential", "frobnicate"],
+            &["auth", "git-credential"],
+            &["auth", "git-credential", "get", "more"],
+            &["auth", "git-credential", "--frob", "get"],
+            &["--repo", "s", "auth", "git-credential", "erase"],
         ] {
             assert!(parse(&args(line)).runs_mcp(), "{line:?}");
         }
@@ -2251,6 +2283,11 @@ mod tests {
             &["frobnicate"],
             &[],
             &["serve", "--prepare"],
+            &["auth"],
+            &["auth", "status"],
+            &["auth", "login"],
+            &["auth", "frobnicate"],
+            &["auth", "git-credential", "--help"],
         ] {
             assert!(!parse(&args(line)).runs_mcp(), "{line:?}");
         }

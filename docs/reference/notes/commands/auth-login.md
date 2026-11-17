@@ -62,6 +62,9 @@ for the default branch) picks one credential, in this order:
 3. **Anything else**: no token from SwarmOps. git's own credentials apply: a credential helper,
    an ssh key.
 
+A git you run yourself can use the login too, with
+[`auth git-credential`](../../commands/auth-git-credential.md) as its credential helper.
+
 The host matches when it is equal, port included: a login for `github.com` goes to
 `https://github.com/…` and to `https://github.com:443/…`, and not to `gist.github.com`, to
 `github.com:8443` or to a name that ends in `github.com`. An ssh remote never reads the login
@@ -79,8 +82,9 @@ A login file that is refused (below) fails these commands before git runs. The M
 ### A file that is refused
 
 `auth login`, [`auth status`](../../commands/auth-status.md),
-[`auth logout`](../../commands/auth-logout.md) and the commands that would send a login's token
-refuse a login file they cannot trust or read, with `E_INVALID_ARG`, the file in
+[`auth logout`](../../commands/auth-logout.md),
+[`auth git-credential`](../../commands/auth-git-credential.md) and the commands that would send a
+login's token refuse a login file they cannot trust or read, with `E_INVALID_ARG`, the file in
 `details.auth_file`, and never overwrite it:
 
 | `details.reason` | The file |

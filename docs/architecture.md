@@ -50,7 +50,7 @@ leave open.
 | `swarmops-api` | The operation contract: serde and JSON Schema types for every request and response, `OpError` and its `ErrorCode` table, the `Envelope`, `Identity`, and the `StoreOps` trait. |
 | `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. Beside them, `git import` and `git export`, client-side operations that no `StoreOps` has: they run `swarmops-git`'s import and export on a repository of the caller's host; and, from M13, the git remotes' client-side operations, `clone`, `remote add|remove|list`, `fetch`, `push`, `sync` and `sync status`, and the signing addresses of `authors.toml`. From M14, `serve`, the server for stock git clients: its ssh and CGI entries, the store's `access.toml` and the caller's identity, the refresh of `git/serve.git` from committed snapshots, the `proc-receive` hook that decides each pushed ref (import, access, compare-and-swap, `refs/land/<target>`), and a guard that masks host paths in what a client reads and refuses `{"file"}` content. |
 | `swarmops-ws` | The workspaces, from M5 (operations §2): a client-side engine over `dyn StoreOps` that writes a sparse copy of a changeset's tree into a directory (`HostFs`), finds edits by stat and an index (`index.bin`, a cache), commits them, rebases and lands them (`ws land --check` lands the tree its check ran on), and keeps its durable files (`workspace.json`, the intent records, the registry `<store>/workspaces/`) through the store's `FsOps`. It also takes snapshots of a workspace's edits (`ws snapshot`, and before an update), and holds the Claude Code and OpenCode hook adapters and the bootstrap. |
-| `swarmops-cli` | The `swarmops` binary and `so`, its short form (the same program): one subcommand per operation, exactly one envelope per run on stdout, but for `mcp`, `serve` and `derive --follow`. |
+| `swarmops-cli` | The `swarmops` binary and `so`, its short form (the same program): one subcommand per operation, exactly one envelope per run on stdout, but for `mcp`, `serve`, `derive --follow` and `auth git-credential`. |
 | `swarmops-testkit` | The support the tests share: `FsOps` doubles, power-loss images, the child-process runner with deadlines, builders of stores, repositories and runs of the binary, from M13, git remotes without the network: git's own `http-backend` served on loopback and a stand-in for ssh; and, from M5, a synthetic workspace tree and its edit driver. A dev-dependency of the store, the repository, the operations, the CLI, the git crate and the workspaces, and a dependency of the fuzz targets, which take it without its default features `cli`, `git` and `repo` (the runs of the binary, the git fixtures and the repository builders); no product build includes it. |
 
 Dependencies point one way, from the binary down to the codec, the test kit's dev edges aside:
@@ -195,7 +195,9 @@ file of mode 0600, renamed over it), `auth status` and `auth logout` read it, an
 file that is a symbolic link or that its group or others can read or write, by the mode of the
 file it has open. No store names it. `clone`, `fetch`, `push`, `sync` and `remote add` read it for
 an https remote that names no token variable, and send the token of the login whose host is the
-remote's ([Git remotes](#git-remotes)).
+remote's ([Git remotes](#git-remotes)). `auth git-credential` reads it for a git that runs it as a
+credential helper, and is the one command that writes a token out: on its stdout, which it writes
+itself, since what a protocol command returns for stdout goes to stderr.
 
 Objects are compressed one at a time with zstd at level 3, with zstd's content checksum, when
 they hold at least 128 bytes and compression makes them smaller; otherwise they are stored raw.

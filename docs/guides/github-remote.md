@@ -100,7 +100,9 @@ SwarmOps runs your git, so git's own ways to authenticate apply, as they do for 
   for `github.com` in your login file, a file of your own outside every store
   ([`auth login`](../reference/commands/auth-login.md)). An https remote at that host that names no
   `--token-env` then goes with it, handed to git as a variable's token is. `so auth status` lists
-  the logins, without their tokens.
+  the logins, without their tokens. A plain `git` can use the same login:
+  `git -c credential.helper='!so auth git-credential' push`
+  ([`auth git-credential`](../reference/commands/auth-git-credential.md)).
 
 A remote that names a variable goes with the variable alone, set or not. Otherwise the login for
 the remote's host is used, if there is one: the host and port must be equal, so a login for

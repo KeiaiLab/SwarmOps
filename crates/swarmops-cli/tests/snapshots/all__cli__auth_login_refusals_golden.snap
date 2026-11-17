@@ -146,7 +146,7 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_INVALID_ARG",
-        "message": "'swarmops auth' requires a subcommand but one was not provided [subcommands: login, status, logout, help]",
+        "message": "'swarmops auth' requires a subcommand but one was not provided [subcommands: login, status, logout, git-credential, help]",
         "retryable": false,
         "exit": 2,
         "details": {},

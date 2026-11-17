@@ -93,8 +93,9 @@ Hints and messages name the program `swarmops`, whichever name ran it, with two 
 name it as you invoked it: a usage error's hint, the usage line (`Usage: so …`), and the message
 for a missing subcommand (`'so' requires a subcommand but one was not provided`).
 
-Two runs print no envelope. `derive --follow` prints one envelope a line for each run that derived
-something, and `mcp` speaks MCP on stdout. And a run that meets one of the store's four documented
+Three runs print no envelope. `derive --follow` prints one envelope a line for each run that
+derived something, `mcp` speaks MCP on stdout, and `auth git-credential` answers git there as a
+credential helper, with a failure's envelope on stderr. And a run that meets one of the store's four documented
 aborts prints no envelope at all: the process aborts, saying why on stderr. A script should treat
 stdout that is not one JSON object as a failure of its own.
 

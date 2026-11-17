@@ -1,6 +1,8 @@
 //! A login's token on the way to a git remote, through the binary: `clone`, `fetch`, `push`,
 //! `sync` and `remote add` send the token of the login kept for the remote's host to a remote
-//! that names no `--token-env`, to that host alone, and never show it.
+//! that names no `--token-env`, to that host alone, and never show it; and
+//! `auth git-credential` hands it to a git that asks as git asks a credential helper, on stdout
+//! and nowhere else.
 //!
 //! The remote is the test kit's [`GitServer`] on `127.0.0.1`, behind HTTP basic authentication
 //! that takes one token. `auth login --gh` keeps a login for `github.com` only, so each test
@@ -18,7 +20,7 @@ use serde_json::Value;
 use swarmops_testkit::remote::{GitServer, HttpAuth, HttpServer};
 use tempfile::TempDir;
 
-use crate::support::{Run, Store, run};
+use crate::support::{Run, SO, Store, run, run_bin};
 
 /// The agent the commands that need an identity run as.
 const AGENT: &str = "agent/worker-17";
@@ -426,4 +428,190 @@ fn a_named_variable_excludes_the_login() {
     let error = auth_refusal(&refused);
     assert!(error["details"].get("login_used").is_none(), "{refused}");
     assert_eq!(site.http.authorizations(), [Site::header(STALE)]);
+}
+
+/// The helper's command line: the binary by its short name, with git's operation as its last
+/// word.
+const HELPER: [&str; 2] = ["auth", "git-credential"];
+
+/// Runs `auth git-credential <operation>` with the site's variables and `request` on stdin.
+fn helper(site: &Site, operation: &str, request: &str) -> Run {
+    let line = [HELPER[0], HELPER[1], operation];
+    run_bin(SO, &line, &site.vars(), request)
+}
+
+/// The envelope a run of the helper that failed left on stderr, its stdout empty: checked for
+/// the exit code and given as its error.
+fn helper_error(failed: &Run, code: &str) -> Value {
+    assert_eq!(failed.stdout, "", "{failed}");
+    let envelope: Value = serde_json::from_str(&failed.stderr)
+        .unwrap_or_else(|e| panic!("stderr is one JSON document ({e}): {failed}"));
+    assert_eq!(envelope["ok"], false, "{failed}");
+    assert_eq!(envelope["op"], "auth_git_credential", "{failed}");
+    assert_eq!(envelope["error"]["code"], code, "{failed}");
+    assert_eq!(envelope["error"]["exit"], failed.exit(), "{failed}");
+    envelope["error"].clone()
+}
+
+/// `auth git-credential get` answers git's request for a login's host with exactly a
+/// `username=` and a `password=` line on stdout and nothing on stderr; a request no login is
+/// for, and `store`, `erase` and any other word, print nothing at all and exit 0; a refused
+/// login file and a missing operation leave stdout empty and their envelope on stderr.
+#[test]
+fn git_credential_get_answers_git() {
+    let site = Site::new();
+    let host = site.host();
+    let quiet = |done: &Run| {
+        assert_eq!(done.exit(), 0, "{done}");
+        assert_eq!(
+            (done.stdout.as_str(), done.stderr.as_str()),
+            ("", ""),
+            "{done}"
+        );
+    };
+    let loopback = format!("protocol=http\nhost={host}\n\n");
+    let github = "protocol=https\nhost=github.com\n\n";
+
+    // 1. No login file: nothing to answer with, and nothing said.
+    quiet(&helper(&site, "get", github));
+
+    // 2. A login for the server's host and one for github.com: each request gets its own
+    //    host's token, as git writes the request (keys this build does not know among them).
+    site.log_in(&[("github.com", ELSEWHERE), (&host, TOKEN)]);
+    let asked = format!(
+        "capability[]=authtype\ncapability[]=state\nprotocol=http\nhost={host}\n\
+         path={REPO}.git\nwwwauth[]=Basic realm=\"git\"\n\n"
+    );
+    for (request, token) in [
+        (loopback.as_str(), TOKEN),
+        (asked.as_str(), TOKEN),
+        (github, ELSEWHERE),
+        ("protocol=https\nhost=GitHub.com:443\n", ELSEWHERE),
+    ] {
+        let answered = helper(&site, "get", request);
+        assert_eq!(answered.exit(), 0, "{answered}");
+        let lines = format!("username={USER}\npassword={token}\n");
+        assert_eq!(answered.stdout, lines, "{answered}");
+        assert_eq!(answered.stderr, "", "{answered}");
+    }
+
+    // 3. No answer: another host, a subdomain, another port, github.com over ssh
+    //    and over http, and a request that names no host.
+    let other_port = format!("protocol=http\nhost={}\n\n", site.other_port());
+    for request in [
+        "protocol=https\nhost=example.com\n\n",
+        "protocol=https\nhost=gist.github.com\n\n",
+        "protocol=https\nhost=github.com:8443\n\n",
+        "protocol=ssh\nhost=github.com\n\n",
+        "protocol=http\nhost=github.com\n\n",
+        other_port.as_str(),
+        "protocol=https\n\n",
+        "",
+    ] {
+        quiet(&helper(&site, "get", request));
+    }
+
+    // 4. store, erase and any other word: nothing printed, and the file as it was, though the
+    //    request names the login's host and another password.
+    let before = fs::read(site.file()).expect("the login file");
+    let told = format!("protocol=http\nhost={host}\nusername={USER}\npassword={STALE}\n\n");
+    for operation in ["store", "erase", "frobnicate", "GET"] {
+        quiet(&helper(&site, operation, &told));
+    }
+    assert_eq!(fs::read(site.file()).expect("the login file"), before);
+
+    // 5. A login file that is refused: nothing on stdout, the envelope on stderr with its exit
+    //    code, and no token in it. store and erase do not open the file.
+    fs::set_permissions(site.file(), fs::Permissions::from_mode(0o644)).expect("set the mode");
+    let refused = helper(&site, "get", &loopback);
+    let error = helper_error(&refused, "E_INVALID_ARG");
+    assert_eq!(refused.exit(), 2, "{refused}");
+    assert_eq!(error["details"]["reason"], "auth_file_mode", "{refused}");
+    let file = path_text(&site.file());
+    assert_eq!(error["details"]["auth_file"], file, "{refused}");
+    assert_unseen(&refused, TOKEN);
+    quiet(&helper(&site, "store", &told));
+    quiet(&helper(&site, "erase", &told));
+
+    // 6. No operation, or two: a usage error, on stderr too.
+    for line in [&HELPER[..], &["auth", "git-credential", "get", "more"]] {
+        let refused = run_bin(SO, line, &site.vars(), &loopback);
+        helper_error(&refused, "E_INVALID_ARG");
+        assert_eq!(refused.exit(), 2, "{refused}");
+    }
+}
+
+/// A plain git that is told to use the helper gets through the remote's basic authentication
+/// with the login's token, and shows it nowhere; without the helper, or with a login the
+/// request is not for, the same git is refused. A store's own fetch works the same with the
+/// helper in git's global configuration.
+#[test]
+fn plain_git_uses_the_helper() {
+    let site = Site::new();
+    let url = site.url();
+    assert!(!SO.contains('\''), "{SO}");
+    let setting = format!("credential.helper=!'{SO}' {} {}", HELPER[0], HELPER[1]);
+    // git in the server's pinned environment, which has no variable of this process's: the
+    // helper it starts inherits that, and the login file named here.
+    let ls_remote = |with_helper: bool| {
+        let mut git = site.server.command();
+        git.env(AUTH_FILE, site.file());
+        if with_helper {
+            git.args(["-c", setting.as_str()]);
+        }
+        git.args(["ls-remote", url.as_str()]);
+        git.output().expect("run git")
+    };
+    let said = |output: &std::process::Output| {
+        let out = String::from_utf8_lossy(&output.stdout);
+        format!("{out}{}", String::from_utf8_lossy(&output.stderr))
+    };
+    let main = site.server.rev_parse(REPO, "main").expect("main");
+
+    // 1. No helper: the server asks for a password and git has none to give.
+    site.log_in(&[("github.com", ELSEWHERE), (&site.host(), TOKEN)]);
+    let refused = ls_remote(false);
+    assert!(!refused.status.success(), "{}", said(&refused));
+    assert_eq!(site.http.authorizations(), NO_HEADERS);
+
+    // 2. With the helper git asks it after the 401 and comes back with the login's token, and
+    //    with no other login's.
+    let listed = ls_remote(true);
+    assert!(listed.status.success(), "{}", said(&listed));
+    assert!(said(&listed).contains(&main), "{}", said(&listed));
+    assert!(!said(&listed).contains(TOKEN), "{}", said(&listed));
+    let sent = site.http.authorizations();
+    assert!(!sent.is_empty(), "no request carried a credential");
+    assert!(
+        sent.iter().all(|seen| *seen == Site::header(TOKEN)),
+        "{sent:?}"
+    );
+
+    // 3. A login for another port only: the helper has no answer, and git is refused as
+    //    without it.
+    site.log_in(&[("github.com", ELSEWHERE), (&site.other_port(), TOKEN)]);
+    let refused = ls_remote(true);
+    assert!(!refused.status.success(), "{}", said(&refused));
+    assert_eq!(
+        site.http.authorizations().len(),
+        sent.len(),
+        "nothing more was sent"
+    );
+
+    // 4. The helper in git's global configuration: a store's fetch, which sends the login's
+    //    token itself, works with it there.
+    site.log_in(&[(&site.host(), TOKEN)]);
+    let config = site.home.path().join("gitconfig");
+    let helper = format!("!'{SO}' {} {}", HELPER[0], HELPER[1]);
+    fs::write(&config, format!("[credential]\n\thelper = \"{helper}\"\n")).expect("write");
+    let store = site.store(&[]);
+    let global = [("GIT_CONFIG_GLOBAL", config.to_str().expect("UTF-8"))];
+    let fetched = store.run_as(AGENT, &["fetch", ORIGIN], &global);
+    assert_eq!(fetched.exit(), 0, "{fetched}");
+    assert_unseen(&fetched, TOKEN);
+    let sent = site.http.authorizations();
+    assert!(
+        sent.iter().all(|seen| *seen == Site::header(TOKEN)),
+        "{sent:?}"
+    );
 }

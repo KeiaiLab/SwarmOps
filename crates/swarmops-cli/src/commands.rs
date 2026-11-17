@@ -30,6 +30,8 @@
 //!
 //! `auth login`, `auth status` and `auth logout` use no store either: they read and write the
 //! user's login file (the `auth` module), and their envelopes have no `meta.repo`.
+//! `auth git-credential` reads that file for git, and prints no envelope on stdout, which
+//! carries git's credential protocol: its envelope, when it fails, goes to stderr.
 
 mod auth;
 pub(crate) mod prepare;

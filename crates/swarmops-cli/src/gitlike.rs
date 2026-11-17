@@ -2191,7 +2191,13 @@ mod tests {
 
     #[test]
     fn protocol_lines_are_untouched() {
-        for line in ["serve status", "mcp", "ws hook worktree-create"] {
+        for line in [
+            "serve status",
+            "mcp",
+            "ws hook worktree-create",
+            "auth git-credential get",
+            "auth git-credential",
+        ] {
             for place in PLACES {
                 assert_eq!(expanded(line, place), line, "{line:?} at {place:?}");
                 let today = reading(&cli::parse(&args(line)));
