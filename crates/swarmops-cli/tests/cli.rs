@@ -5321,9 +5321,10 @@ fn maintenance_pages_show_an_example() {
 // Running the binary.
 // ---------------------------------------------------------------------------------------------
 
-/// The binary, with none of this process's `SWARMOPS_*` variables, no login file and no curl
-/// (`support::isolation`), the order check on (`SWARMOPS_TEST_ORDER_CHECK=1`; a test's own
-/// `env` still wins over each of these), and a deadline
+/// The binary, with none of this process's `SWARMOPS_*` variables, no login file, no curl and
+/// automatic update off (`support::isolation`), the order check on
+/// (`SWARMOPS_TEST_ORDER_CHECK=1`; a test's own `env` still wins over each of these), and a
+/// deadline
 /// (`support::RUN_TIMEOUT`): `output()` kills and reaps a run still going then, whose status
 /// has no exit code.
 fn swarmops() -> Command {

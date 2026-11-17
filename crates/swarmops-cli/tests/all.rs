@@ -148,9 +148,10 @@ fn the_test_file_check_finds_a_forgotten_file() {
 }
 
 /// Every test file that spawns the binary on a command of its own, without the test kit's
-/// runner, gives it no login file and no curl (`support::isolate`, `support::isolation`): the
-/// kit's runner does, and a run without them would read the developer's login, and could reach
-/// the network through the host's curl.
+/// runner, gives it no login file, no curl and no automatic update (`support::isolate`,
+/// `support::isolation`): the kit's runner does, and a run without them would read the
+/// developer's login, and could reach the network through the host's curl or look for a newer
+/// release to replace the binary with.
 #[test]
 fn every_run_of_the_binary_is_isolated() {
     let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");

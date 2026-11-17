@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::marker::PhantomData;
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{self, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
@@ -61,6 +61,15 @@ const AUTH_FILE_ENV: &str = "SWARMOPS_AUTH_FILE";
 /// ([`isolate`]), so that no test reaches the network through the host's.
 const CURL_ENV: &str = crate::curl::CURL_ENV;
 
+/// The variable that turns the binary's automatic update off, which this crate cannot name by
+/// its constant: every run of the binary sets it to [`AUTO_UPDATE_OFF`] ([`isolate`]), so that
+/// no test asks a release host for a newer version, replaces a binary or leaves a file beside
+/// one.
+const AUTO_UPDATE_ENV: &str = "SWARMOPS_AUTO_UPDATE";
+
+/// The value of [`AUTO_UPDATE_ENV`] that turns automatic update off.
+const AUTO_UPDATE_OFF: &str = "off";
+
 /// The directory, under the system's temp directory, of the login file and the `curl` every
 /// run is given: nothing makes it, so neither exists.
 const NO_LOGIN: &str = "swarmops-test-no-login";
@@ -92,31 +101,35 @@ pub fn swarmops_vars() -> impl Iterator<Item = OsString> {
         .filter(|name| name.to_string_lossy().starts_with("SWARMOPS_"))
 }
 
-/// What keeps a run of the binary away from the user's login and from the network: the login
-/// file's variable (`SWARMOPS_AUTH_FILE`) and curl's (`SWARMOPS_CURL`), each naming an absolute
-/// path under the system's temp directory where nothing is and nothing is made. The run then
-/// finds no login and no curl, whatever the developer's home directory and `PATH` hold. A test
-/// of a login names a file of its own, and one of the device flow a stand-in for curl.
-pub fn isolation() -> [(&'static str, PathBuf); 2] {
+/// What keeps a run of the binary away from the user's login, from the network and from the
+/// binary's own file: the login file's variable (`SWARMOPS_AUTH_FILE`) and curl's
+/// (`SWARMOPS_CURL`), each naming an absolute path under the system's temp directory where
+/// nothing is and nothing is made, and `SWARMOPS_AUTO_UPDATE=off`. The run then finds no login
+/// and no curl, whatever the developer's home directory and `PATH` hold, and neither looks for
+/// a newer release nor installs one. A test of a login names a file of its own, one of the
+/// device flow a stand-in for curl, and one of automatic update turns it on for a copy of the
+/// binary in a directory of its own.
+pub fn isolation() -> [(&'static str, OsString); 3] {
     let nowhere = std::env::temp_dir().join(NO_LOGIN);
     [
-        (AUTH_FILE_ENV, nowhere.join("auth.toml")),
-        (CURL_ENV, nowhere.join("curl")),
+        (AUTH_FILE_ENV, nowhere.join("auth.toml").into_os_string()),
+        (CURL_ENV, nowhere.join("curl").into_os_string()),
+        (AUTO_UPDATE_ENV, OsString::from(AUTO_UPDATE_OFF)),
     ]
 }
 
 /// Sets [`isolation`] on `command`, a run of the binary. Every place that spawns the binary
 /// calls this, or sets [`isolation`] itself: after it has removed this process's `SWARMOPS_*`
 /// variables ([`swarmops_vars`]), which would unset these again, and before the test's own
-/// variables, which may name a login file or a curl of the test's.
+/// variables, which may name a login file or a curl of the test's, or turn automatic update on.
 pub fn isolate(command: &mut Command) {
     command.envs(isolation());
 }
 
 /// Gives `command` the environment of this process without its `SWARMOPS_*` variables, then
 /// `SWARMOPS_TEST_ORDER_CHECK=1`, a memo keys' directory under the system's temp directory
-/// (`SWARMOPS_MEMO_KEY_DIR`) and no login or curl ([`isolate`]), then `env`; and pipes for its
-/// output.
+/// (`SWARMOPS_MEMO_KEY_DIR`) and no login, curl or automatic update ([`isolate`]), then `env`;
+/// and pipes for its output.
 fn with_env(command: &mut Command, env: &[(&str, &str)]) {
     for name in swarmops_vars() {
         command.env_remove(name);
@@ -652,6 +665,8 @@ impl<P: Program> Store<P> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     /// A [`Program`] whose variables are read and whose binary is never run.
@@ -663,9 +678,9 @@ mod tests {
     }
 
     /// What `command` sets variable `name` to.
-    fn set(command: &Command, name: &str) -> Option<PathBuf> {
+    fn set(command: &Command, name: &str) -> Option<OsString> {
         let (_, value) = command.get_envs().find(|(n, _)| *n == name)?;
-        value.map(PathBuf::from)
+        value.map(OsString::from)
     }
 
     #[test]
@@ -675,6 +690,7 @@ mod tests {
         for name in [AUTH_FILE_ENV, CURL_ENV] {
             // Set, not left to the developer's environment or home directory.
             let path = set(&command, name).unwrap_or_else(|| panic!("{name} is not set"));
+            let path = PathBuf::from(path);
             assert!(path.is_absolute(), "{name}: {path:?}");
 
             // Nothing is there, nor the directory it would be made in.
@@ -686,12 +702,43 @@ mod tests {
     }
 
     #[test]
-    fn a_test_s_own_login_file_and_curl_win() {
-        let own = [(AUTH_FILE_ENV, "/own/auth.toml"), (CURL_ENV, "/own/curl")];
+    fn every_run_is_given_automatic_update_off() {
+        let command = swarmops::<Any, &str>(&["info"], &[]);
+
+        assert_eq!(
+            set(&command, "SWARMOPS_AUTO_UPDATE"),
+            Some(OsString::from("off")),
+            "a run that could look for a release, or replace the binary under test"
+        );
+    }
+
+    /// The three names, spelled out: a variable dropped from [`isolation`], or renamed there
+    /// and not in the binary, fails here.
+    #[test]
+    fn isolation_names_the_login_file_curl_and_automatic_update() {
+        let names = isolation().map(|(name, _)| name);
+
+        assert_eq!(
+            names,
+            [
+                "SWARMOPS_AUTH_FILE",
+                "SWARMOPS_CURL",
+                "SWARMOPS_AUTO_UPDATE"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_test_s_own_login_file_curl_and_automatic_update_win() {
+        let own = [
+            (AUTH_FILE_ENV, "/own/auth.toml"),
+            (CURL_ENV, "/own/curl"),
+            (AUTO_UPDATE_ENV, "on"),
+        ];
         let command = swarmops::<Any, &str>(&["info"], &own);
 
-        for (name, path) in own {
-            assert_eq!(set(&command, name), Some(PathBuf::from(path)), "{name}");
+        for (name, value) in own {
+            assert_eq!(set(&command, name), Some(OsString::from(value)), "{name}");
         }
     }
 
@@ -702,8 +749,8 @@ mod tests {
 
         let named = isolation();
         assert_eq!(command.get_envs().count(), named.len());
-        for (name, path) in named {
-            assert_eq!(set(&command, name), Some(path), "{name}");
+        for (name, value) in named {
+            assert_eq!(set(&command, name), Some(value), "{name}");
         }
     }
 }
