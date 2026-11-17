@@ -34,12 +34,18 @@
 //! which writes the code to enter and its page to stderr before the envelope.
 //! `auth git-credential` reads that file for git, and prints no envelope on stdout, which
 //! carries git's credential protocol: its envelope, when it fails, goes to stderr.
+//!
+//! `update` uses no store either: it reads and writes what is beside the binaries, in the
+//! directory the running program is installed in (the `update` module), and its envelope has no
+//! `meta.repo`. It runs the host's curl for the latest release, and the installer built into the
+//! program to download, check and unpack one.
 
 mod auth;
 mod device_flow;
 pub(crate) mod prepare;
 mod run;
 mod serve;
+mod update;
 pub(crate) mod ws;
 
 pub use self::run::{Ctx, Used, failed, failed_after, failed_envelope, panicked, run, usage};

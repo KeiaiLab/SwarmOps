@@ -1,7 +1,7 @@
 //! The CLI's integration tests, in one test binary (one link): each file of `tests/` is a module
 //! here, and its tests are named after it (`multiprocess::<test>`); `support` binds the binaries
-//! under test. `crash.rs`, `faults.rs` and `serve_lock.rs` drive the test hooks, so they are here
-//! only with the `test-hooks` feature, which the workspace's gates turn on (`--all-features`).
+//! under test. `crash.rs`, `faults.rs`, `serve_lock.rs` and `update.rs` drive the test hooks, so
+//! they are here only with the `test-hooks` feature, which the workspace's gates turn on (`--all-features`).
 //! The release proof, `test_hooks.rs`, is a binary of its own, built without the feature. Cargo
 //! builds no other test target from `tests/` (`autotests = false` in `Cargo.toml`): a new test
 //! file is a `mod` line here.
@@ -67,6 +67,8 @@ mod sigkill;
 mod so;
 mod sync_load;
 mod undo_kinds;
+#[cfg(feature = "test-hooks")]
+mod update;
 mod ws;
 mod ws_processes;
 mod ws_sigkill;

@@ -57,6 +57,9 @@ camino.workspace = true
 clap.workspace = true
 # A store's memo key, made on first use (`context::memo_key`).
 getrandom.workspace = true
+# `update` stops the installer's process group at its deadline, and asks who runs it: the
+# package swarmops-store and swarmops-ws already use.
+rustix.workspace = true
 serde.workspace = true
 # `swarmops mcp` reads a message line's members as their JSON text (`RawValue`), so that it
 # parses only what it serves and nothing else a line holds.
@@ -76,8 +79,3 @@ insta.workspace = true
 # same order every time.
 rayon.workspace = true
 tempfile.workspace = true
-
-# The counted-work gates copy a store's object files with one `fclonefileat(2)` on macOS, where
-# 100,000 hard links take minutes; the package swarmops-store and swarmops-ws already use.
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-rustix.workspace = true

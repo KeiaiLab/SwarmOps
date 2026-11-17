@@ -3357,7 +3357,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_IO",
-          "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root. A journal append it\nrefused for want of permission or as a read-only filesystem also says\n`details.committed: false`: nothing was committed, and running the same operation again\nfails the same way until the hint's cause is fixed. `git import` also gives it for a\nframe that committed but failed after its commit point, with `details.committed: true`,\n`details.warnings` and no `fs_op`: the import stopped there, `details.imported` and\n`details.last_commit` say what it recorded, and the hint is to run it again, which\ncontinues after them.",
+          "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root. A journal append it\nrefused for want of permission or as a read-only filesystem also says\n`details.committed: false`: nothing was committed, and running the same operation again\nfails the same way until the hint's cause is fixed. `git import` also gives it for a\nframe that committed but failed after its commit point, with `details.committed: true`,\n`details.warnings` and no `fs_op`: the import stopped there, `details.imported` and\n`details.last_commit` say what it recorded, and the hint is to run it again, which\ncontinues after them. `update` gives it, with no `fs_op`, for a replacement of the\nprogram that failed: `details.step` names where (`install`, with the installer's exit\ncode in `details.installer_exit` and its last line in `details.installer`; `verify`,\nwith `details.expected` and `details.found`; `swap`, `lock` and `receipt`, with\n`details.path`), and the message says whether anything was replaced.",
           "type": "string"
         },
         {
@@ -3367,7 +3367,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_BUSY",
-          "description": "Another writer held the store's metadata lock for the whole wait, or commits landed during\nevery one of a read's attempts to take a snapshot, and running the operation again can\nsucceed. Nothing was committed (a commit's flushed objects may remain, for GC), unless the\nlock's holder had claimed the write into its batch and left it unanswered 60 s past the\nwait: that holder may still commit it when it runs again.",
+          "description": "Another writer held the store's metadata lock for the whole wait, or commits landed during\nevery one of a read's attempts to take a snapshot, and running the operation again can\nsucceed. Nothing was committed (a commit's flushed objects may remain, for GC), unless the\nlock's holder had claimed the write into its batch and left it unanswered 60 s past the\nwait: that holder may still commit it when it runs again. `update` gives it, with\n`details.reason` `update_running`, while another update of the same install runs: no\nstore is involved, and nothing was replaced.",
           "type": "string"
         },
         {
@@ -3482,7 +3482,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_REMOTE_UNREACHABLE",
-          "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed. A login\nwhose provider did not answer (`auth login`) has `details.phase` `login`, with\n`details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no\nlogin was kept.",
+          "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed. A login\nwhose provider did not answer (`auth login`) has `details.phase` `login`, with\n`details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no\nlogin was kept. An `update` that could not learn the latest release has `details.phase`\n`update`, with `details.host`, and either curl's exit code in `details.curl_exit` or,\nfor an answer that is no redirect to a release's page, its status in\n`details.http_status`; nothing was replaced.",
           "type": "string"
         },
         {
@@ -11239,7 +11239,7 @@ expression: s.redact(&all)
             },
             {
               "const": "E_IO",
-              "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root. A journal append it\nrefused for want of permission or as a read-only filesystem also says\n`details.committed: false`: nothing was committed, and running the same operation again\nfails the same way until the hint's cause is fixed. `git import` also gives it for a\nframe that committed but failed after its commit point, with `details.committed: true`,\n`details.warnings` and no `fs_op`: the import stopped there, `details.imported` and\n`details.last_commit` say what it recorded, and the hint is to run it again, which\ncontinues after them.",
+              "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root. A journal append it\nrefused for want of permission or as a read-only filesystem also says\n`details.committed: false`: nothing was committed, and running the same operation again\nfails the same way until the hint's cause is fixed. `git import` also gives it for a\nframe that committed but failed after its commit point, with `details.committed: true`,\n`details.warnings` and no `fs_op`: the import stopped there, `details.imported` and\n`details.last_commit` say what it recorded, and the hint is to run it again, which\ncontinues after them. `update` gives it, with no `fs_op`, for a replacement of the\nprogram that failed: `details.step` names where (`install`, with the installer's exit\ncode in `details.installer_exit` and its last line in `details.installer`; `verify`,\nwith `details.expected` and `details.found`; `swap`, `lock` and `receipt`, with\n`details.path`), and the message says whether anything was replaced.",
               "type": "string"
             },
             {
@@ -11249,7 +11249,7 @@ expression: s.redact(&all)
             },
             {
               "const": "E_BUSY",
-              "description": "Another writer held the store's metadata lock for the whole wait, or commits landed during\nevery one of a read's attempts to take a snapshot, and running the operation again can\nsucceed. Nothing was committed (a commit's flushed objects may remain, for GC), unless the\nlock's holder had claimed the write into its batch and left it unanswered 60 s past the\nwait: that holder may still commit it when it runs again.",
+              "description": "Another writer held the store's metadata lock for the whole wait, or commits landed during\nevery one of a read's attempts to take a snapshot, and running the operation again can\nsucceed. Nothing was committed (a commit's flushed objects may remain, for GC), unless the\nlock's holder had claimed the write into its batch and left it unanswered 60 s past the\nwait: that holder may still commit it when it runs again. `update` gives it, with\n`details.reason` `update_running`, while another update of the same install runs: no\nstore is involved, and nothing was replaced.",
               "type": "string"
             },
             {
@@ -11364,7 +11364,7 @@ expression: s.redact(&all)
             },
             {
               "const": "E_REMOTE_UNREACHABLE",
-              "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed. A login\nwhose provider did not answer (`auth login`) has `details.phase` `login`, with\n`details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no\nlogin was kept.",
+              "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed. A login\nwhose provider did not answer (`auth login`) has `details.phase` `login`, with\n`details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no\nlogin was kept. An `update` that could not learn the latest release has `details.phase`\n`update`, with `details.host`, and either curl's exit code in `details.curl_exit` or,\nfor an answer that is no redirect to a release's page, its status in\n`details.http_status`; nothing was replaced.",
               "type": "string"
             },
             {

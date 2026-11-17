@@ -73,6 +73,7 @@ pub(crate) const GROUPS: [Group; 7] = [
             entry("clone", "Make a store from a git remote"),
             entry("info", "Describe the store"),
             entry("whoami", "Show the identity your changes carry"),
+            entry("update", "Replace this program with the latest release"),
         ],
     },
     Group {

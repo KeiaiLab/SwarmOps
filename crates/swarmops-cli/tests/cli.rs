@@ -381,6 +381,70 @@ fn auth_login_refusals_golden() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// `update` in a build from source, as the binaries under test are: it says that such a build
+/// never updates itself, and refuses to replace it, before any file or request. The version is
+/// this build's, which changes with every release: `[version]` in the snapshot. What `update`
+/// does to an install is in `update.rs`, against a release on this host.
+#[test]
+fn update_golden() {
+    let mut s = Session::new();
+    s.name(env!("CARGO_PKG_VERSION"), "version");
+
+    // 1. Whether it updates itself: no, and why. No receipt was found, so no directory.
+    let status = s.run(&["update", "--status"]);
+    assert_eq!(status.exit, 0);
+    assert_eq!(status["op"], "update");
+    assert_eq!(
+        status["result"],
+        json!({
+            "current": env!("CARGO_PKG_VERSION"),
+            "updated": false,
+            "auto_update": "off_source_build",
+        })
+    );
+    assert!(status["meta"].get("repo").is_none(), "no store is used");
+
+    // 2. Turning it off where it is off already is no error; nothing is written.
+    let off = s.run(&["update", "--auto", "off"]);
+    assert_eq!(off["result"], status["result"]);
+
+    // 3. The forms that would replace it, or let it replace itself, are refused.
+    for form in [
+        &["update"][..],
+        &["update", "--check"],
+        &["update", "--auto", "on"],
+    ] {
+        let refused = s.run(form);
+        assert_eq!(
+            (refused.exit, refused.code()),
+            (2, "E_INVALID_ARG"),
+            "{form:?}"
+        );
+        assert_eq!(refused["error"]["details"]["reason"], "not_a_release_build");
+    }
+
+    // 4. The grammar: one form at a time, and --auto takes on or off.
+    let both = s.run(&["update", "--check", "--status"]);
+    assert_eq!((both.exit, both.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(both["op"], "update");
+    let neither = s.run(&["update", "--auto", "maybe"]);
+    assert_eq!((neither.exit, neither.code()), (2, "E_INVALID_ARG"));
+
+    // 5. No file was left beside the binaries under test.
+    let beside = Path::new(support::BIN)
+        .parent()
+        .expect("the binaries' directory");
+    for name in [
+        swarmops_ops::update::RECEIPT_FILE,
+        swarmops_ops::update::LOCK_FILE,
+        swarmops_ops::update::NOTE_FILE,
+        swarmops_ops::update::STAGING_DIR,
+    ] {
+        assert!(!beside.join(name).exists(), "{name} beside the binaries");
+    }
+    insta::assert_json_snapshot!(s.transcript());
+}
+
 /// The harness names a login file where nothing is (the kit's `isolation`), so a run of the
 /// binary finds no login whatever the developer's home directory holds; only a test that names
 /// a file of its own reads one.

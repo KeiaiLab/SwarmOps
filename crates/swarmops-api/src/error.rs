@@ -113,7 +113,11 @@ error_codes! {
     /// frame that committed but failed after its commit point, with `details.committed: true`,
     /// `details.warnings` and no `fs_op`: the import stopped there, `details.imported` and
     /// `details.last_commit` say what it recorded, and the hint is to run it again, which
-    /// continues after them.
+    /// continues after them. `update` gives it, with no `fs_op`, for a replacement of the
+    /// program that failed: `details.step` names where (`install`, with the installer's exit
+    /// code in `details.installer_exit` and its last line in `details.installer`; `verify`,
+    /// with `details.expected` and `details.found`; `swap`, `lock` and `receipt`, with
+    /// `details.path`), and the message says whether anything was replaced.
     Io => "E_IO", EXIT_ERROR, false;
     /// A journal append failed, and the store cut what it wrote back off the journal
     /// (`details.committed` is `false`): nothing was committed, so running the same operation
@@ -124,7 +128,9 @@ error_codes! {
     /// every one of a read's attempts to take a snapshot, and running the operation again can
     /// succeed. Nothing was committed (a commit's flushed objects may remain, for GC), unless the
     /// lock's holder had claimed the write into its batch and left it unanswered 60 s past the
-    /// wait: that holder may still commit it when it runs again.
+    /// wait: that holder may still commit it when it runs again. `update` gives it, with
+    /// `details.reason` `update_running`, while another update of the same install runs: no
+    /// store is involved, and nothing was replaced.
     Busy => "E_BUSY", EXIT_RETRYABLE, true;
     /// A bug in SwarmOps, such as a caught panic.
     Internal => "E_INTERNAL", EXIT_ERROR, false;
@@ -261,7 +267,10 @@ error_codes! {
     /// `ssh`). Nothing changed in the store; running the command again can succeed. A login
     /// whose provider did not answer (`auth login`) has `details.phase` `login`, with
     /// `details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no
-    /// login was kept.
+    /// login was kept. An `update` that could not learn the latest release has `details.phase`
+    /// `update`, with `details.host`, and either curl's exit code in `details.curl_exit` or,
+    /// for an answer that is no redirect to a release's page, its status in
+    /// `details.http_status`; nothing was replaced.
     RemoteUnreachable => "E_REMOTE_UNREACHABLE", EXIT_RETRYABLE, true;
     /// The store records no remote of that name (`details.remote`).
     RemoteNotFound => "E_REMOTE_NOT_FOUND", EXIT_NOT_FOUND, false;

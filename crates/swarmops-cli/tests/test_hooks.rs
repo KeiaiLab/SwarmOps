@@ -90,13 +90,21 @@ fn a_build_without_the_feature_ignores_the_test_hooks() {
 
 /// `SWARMOPS_TEST_VERSION` and `SWARMOPS_TEST_UPDATE_RELEASE`, the seams of `update`'s tests: a
 /// build with the test hooks prints the first's version for its own
-/// (`so::the_version_hook_gives_both_names_its_version`); this build prints its own, with both
-/// set.
+/// (`so::the_version_hook_gives_both_names_its_version`) and counts as a release's build with
+/// the second (`update::update_replaces_both_names_with_a_newer_release`). This build, with
+/// both set, prints its own version and is what it was built as: with automatic update asked
+/// for besides, `update --status` says it is no release's build, under its own version, and
+/// `update` is refused. Neither writes a file beside the binaries.
 #[test]
 fn a_build_without_the_feature_prints_its_own_version() {
+    use swarmops_ops::update::{LOCK_FILE, NOTE_FILE, RECEIPT_FILE, STAGING_DIR};
+
+    // A build with the channel set is a release's for real, and has no hook to ignore here.
+    let release = option_env!("SWARMOPS_BUILD_CHANNEL").is_some();
     let env = [
         ("SWARMOPS_TEST_VERSION", "0.0.1"),
         ("SWARMOPS_TEST_UPDATE_RELEASE", "1"),
+        ("SWARMOPS_AUTO_UPDATE", "on"),
     ];
     for bin in [BIN, SO] {
         let run = run_bin(bin, &["--version"], &env, "");
@@ -105,6 +113,31 @@ fn a_build_without_the_feature_prints_its_own_version() {
             (0, version_line().as_str(), ""),
             "{bin}: the version hook is ignored"
         );
+        if release {
+            continue;
+        }
+
+        let status = run_bin(bin, &["update", "--status"], &env, "");
+        let said = status.ok();
+        assert_eq!(
+            said["auto_update"], "off_source_build",
+            "{bin}: the release hook is ignored: {status}"
+        );
+        let own = version_line();
+        let own = own.trim_end().strip_prefix("swarmops ").unwrap();
+        assert_eq!(said["current"], own, "{bin}: the version hook is ignored");
+        assert_eq!(said["updated"], false, "{bin}");
+        assert!(said.get("dir").is_none(), "{bin}: no receipt: {status}");
+
+        let refused = run_bin(bin, &["update"], &env, "").err("E_INVALID_ARG");
+        assert_eq!(refused["details"]["reason"], "not_a_release_build", "{bin}");
+        let background = run_bin(bin, &["update", "--background"], &env, "").ok();
+        assert_eq!(background["updated"], false, "{bin}");
+
+        let beside = std::path::Path::new(bin).parent().unwrap();
+        for name in [RECEIPT_FILE, LOCK_FILE, NOTE_FILE, STAGING_DIR] {
+            assert!(!beside.join(name).exists(), "{bin}: {name} was written");
+        }
     }
 }
 

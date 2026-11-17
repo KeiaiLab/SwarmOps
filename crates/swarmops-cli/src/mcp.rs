@@ -93,7 +93,8 @@
 //! in a browser, and `--with-token` reads a secret that a tool call's arguments would record);
 //! nor has `auth git-credential`, which speaks git's credential protocol and prints a token. The
 //! `fetch`, `push` and `sync` tools do use a login: the server reads the login file of the user
-//! it runs as, as the commands do.
+//! it runs as, as the commands do. `update` has none: it replaces the program the server runs
+//! from, and no request may switch automatic update.
 //!
 //! A call that moved a ref of a store holding `access.toml` (the CLI's `PREPARE_AFTER`, the M17
 //! design §4.3) starts a detached `serve --prepare --prepare-wait zero` once its response line is

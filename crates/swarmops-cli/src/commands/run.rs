@@ -48,7 +48,7 @@ use swarmops_ops::{LocalOps, Recording, Resolved};
 use swarmops_ws::workspace::Locate;
 
 use super::prepare::{self, After};
-use super::{auth, serve, ws};
+use super::{auth, serve, update, ws};
 use crate::cli::{
     self, BlobCommand, Command, DiffArgs, DiffFormatArg, GitCommand, Global, OpCommand, RefCommand,
     RemoteCommand, SyncCommand,
@@ -327,9 +327,24 @@ fn dispatch(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         Command::Mcp => mcp::serve(ctx.global, ctx.env),
         Command::Serve(args) => serve::run(ctx, op, args),
         derive @ Command::Derive { .. } => run_derive(ctx, op, &derive),
-        Command::Auth(command) => auth::run(ctx, op, &command),
+        own @ (Command::Auth(_) | Command::Update { .. }) => run_own(ctx, op, own),
         // The rest: the git remotes' commands (M13).
         remotes => run_remotes(ctx, op, remotes),
+    }
+}
+
+/// Runs `auth` and `update`, which name operation `op`: the commands on the user's own files
+/// and the program's, which open no store.
+fn run_own(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    match command {
+        Command::Auth(command) => auth::run(ctx, op, &command),
+        Command::Update {
+            check,
+            auto,
+            status,
+            background,
+        } => update::run(ctx, op, update::Form::of(check, auto, status, background)),
+        other => unreachable!("run passes auth and update alone, not {other:?}"),
     }
 }
 

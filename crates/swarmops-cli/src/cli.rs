@@ -322,6 +322,40 @@ hook files serve writes; they take no --as. --stdio, the store-to-store sync, is
 
 A connection whose store has not moved since serve.git's last export takes no lock: git/serve.state names that export. serve --prepare makes serve.git ready for the store --repo names before a client connects, so that the connection finds it current and exports nothing; it needs no --root. With --seed-from <GIT_DIR>, the repository a git import read, it first fetches the imported commits' objects from it and packs them with a bitmap, so that the first clone after an import writes no object. --prepare-wait zero gives up at once when another refresh holds serve.git's lock, and marks it for that one to run again. It prints {\"op\": \"serve_prepare\", ...} on stdout, and exits 0 when it was skipped or found the lock held. Without the store's memo key, on a store whose main head is no imported commit, it exports nothing and warns: run it as the account the agents and serve run as.";
 
+/// `update`'s long help.
+const UPDATE_LONG_HELP: &str = "Replace this program, swarmops and so, with the latest release, \
+or set automatic update. Touches no store and never runs upgrade.
+
+Without a flag it reads the latest release from where GitHub's releases page redirects, and when \
+that is newer than what is installed it downloads the release, checks it against the release's \
+SHA256SUMS, runs the new binaries once, and renames them over the old ones, swarmops first: \
+updated is true and previous is the version replaced. A latest release that is not newer \
+installs nothing and is no error; an older version or a pre-release is never installed. Running \
+MCP servers keep the program they started with until they are restarted.
+
+It works on an install the installer made, which left a receipt beside the binaries \
+(.swarmops-receipt), in a release's build. Any other install is refused as E_INVALID_ARG, \
+details.reason no_receipt or not_a_release_build, and is updated the way it was installed: by \
+its package, or by building again. Nothing that turns automatic update off stops this command.
+
+It runs the host's curl for the one request of its own (SWARMOPS_CURL by an absolute path, else \
+the first on PATH; none is details.reason curl_missing), and the installer built into this \
+program, under /bin/sh, with the tools that needs: curl or wget, tar, and sha256sum or shasum. \
+One update runs at a time for an install: a second is E_BUSY, details.reason update_running. A \
+host that does not answer is E_REMOTE_UNREACHABLE, details.phase update. A download, check or \
+replacement that fails is E_IO with details.step (install, verify, swap, lock or receipt): \
+before the two renames nothing was replaced.
+
+--auto off and --auto on write the receipt's auto_update, and --status says whether the install \
+updates itself (auto_update: on, or what turned it off) and gives the note a run in the \
+background left (pending). SWARMOPS_AUTO_UPDATE=off turns automatic update \
+off for the processes that have it; CI and a container turn it off unless that variable is on; \
+root's install, and one in another user's directory, never update themselves. --background does \
+what automatic update does: with automatic update on, it installs the latest release only when \
+that carries the mark for the installed minor line (auto-update-from-<major>.<minor>, a file of \
+the release), and leaves a note beside the binaries; a release without the mark is noted at \
+its second sighting, and a request that fails changes nothing and is no error.";
+
 /// `serve --user-family`'s help.
 const SERVE_USER_FAMILY_HELP: &str = "With --cgi: name the caller <FAMILY>/$REMOTE_USER, the user \
 the web server authenticated";
@@ -813,7 +847,8 @@ pub enum Command {
     /// derive command has no tool: it only fills ahead of time a cache that each read fills
     /// itself, so it changes no result an agent reads; nor have clone and remote add|remove, so
     /// that an agent cannot point the store at a URL of its choosing; nor has auth, whose login
-    /// file is the user's, not the store's.
+    /// file is the user's, not the store's; nor has update, which replaces the program the
+    /// server runs from.
     Mcp,
     #[command(about = SERVE_HELP, long_about = SERVE_LONG_HELP)]
     Serve(ServeArgs),
@@ -852,6 +887,33 @@ pub enum Command {
     /// your own.
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// Replace this program, swarmops and so, with the latest release, or set automatic
+    /// update. Touches no store and never runs upgrade.
+    #[command(long_about = UPDATE_LONG_HELP)]
+    Update {
+        /// Look for the latest release and say what it is: install nothing.
+        #[arg(long, group = "form")]
+        check: bool,
+        /// Turn this install's automatic update on or off, in its receipt. Reaches no network.
+        #[arg(long, value_name = "SWITCH", group = "form")]
+        auto: Option<AutoArg>,
+        /// Say whether this install updates itself, and what decided so. Reaches no network.
+        #[arg(long, group = "form")]
+        status: bool,
+        /// Do what automatic update does: install the latest release only if it is marked
+        /// for the installed line, and leave a note of what was done.
+        #[arg(long, group = "form")]
+        background: bool,
+    },
+}
+
+/// `update --auto`'s value.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoArg {
+    /// Automatic update on.
+    On,
+    /// Automatic update off.
+    Off,
 }
 
 /// `serve`'s arguments.
@@ -1865,6 +1927,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["auth", "status"] => "auth_status",
         ["auth", "logout"] => "auth_logout",
         ["auth", "git-credential"] => "auth_git_credential",
+        ["update"] => "update",
         _ => return None,
     })
 }
@@ -2006,10 +2069,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 64);
+        assert_eq!(ops.len(), 65);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 64, "two subcommands name one op");
+        assert_eq!(ops.len(), 65, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["ws"]), None);

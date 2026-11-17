@@ -183,7 +183,7 @@ The store path is not on a native Linux filesystem (for example WSL's `/mnt/*`).
 
 Exit 1. Retryable: no.
 
-The filesystem refused an operation: `details.fs_op` names it, and `details.store_file` the file of the store it was on, relative to the store's root. A journal append it refused for want of permission or as a read-only filesystem also says `details.committed: false`: nothing was committed, and running the same operation again fails the same way until the hint's cause is fixed. `git import` also gives it for a frame that committed but failed after its commit point, with `details.committed: true`, `details.warnings` and no `fs_op`: the import stopped there, `details.imported` and `details.last_commit` say what it recorded, and the hint is to run it again, which continues after them.
+The filesystem refused an operation: `details.fs_op` names it, and `details.store_file` the file of the store it was on, relative to the store's root. A journal append it refused for want of permission or as a read-only filesystem also says `details.committed: false`: nothing was committed, and running the same operation again fails the same way until the hint's cause is fixed. `git import` also gives it for a frame that committed but failed after its commit point, with `details.committed: true`, `details.warnings` and no `fs_op`: the import stopped there, `details.imported` and `details.last_commit` say what it recorded, and the hint is to run it again, which continues after them. `update` gives it, with no `fs_op`, for a replacement of the program that failed: `details.step` names where (`install`, with the installer's exit code in `details.installer_exit` and its last line in `details.installer`; `verify`, with `details.expected` and `details.found`; `swap`, `lock` and `receipt`, with `details.path`), and the message says whether anything was replaced.
 
 ## E_IO_TRANSIENT
 
@@ -195,7 +195,7 @@ A journal append failed, and the store cut what it wrote back off the journal (`
 
 Exit 4. Retryable: yes.
 
-Another writer held the store's metadata lock for the whole wait, or commits landed during every one of a read's attempts to take a snapshot, and running the operation again can succeed. Nothing was committed (a commit's flushed objects may remain, for GC), unless the lock's holder had claimed the write into its batch and left it unanswered 60 s past the wait: that holder may still commit it when it runs again.
+Another writer held the store's metadata lock for the whole wait, or commits landed during every one of a read's attempts to take a snapshot, and running the operation again can succeed. Nothing was committed (a commit's flushed objects may remain, for GC), unless the lock's holder had claimed the write into its batch and left it unanswered 60 s past the wait: that holder may still commit it when it runs again. `update` gives it, with `details.reason` `update_running`, while another update of the same install runs: no store is involved, and nothing was replaced.
 
 ## E_INTERNAL
 
@@ -333,7 +333,7 @@ The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (
 
 Exit 4. Retryable: yes.
 
-The network or the remote's host did not answer: `details.phase` (`fetch`, `push`, `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`, `ssh`). Nothing changed in the store; running the command again can succeed. A login whose provider did not answer (`auth login`) has `details.phase` `login`, with `details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no login was kept.
+The network or the remote's host did not answer: `details.phase` (`fetch`, `push`, `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`, `ssh`). Nothing changed in the store; running the command again can succeed. A login whose provider did not answer (`auth login`) has `details.phase` `login`, with `details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no login was kept. An `update` that could not learn the latest release has `details.phase` `update`, with `details.host`, and either curl's exit code in `details.curl_exit` or, for an answer that is no redirect to a release's page, its status in `details.http_status`; nothing was replaced.
 
 ## E_REMOTE_NOT_FOUND
 

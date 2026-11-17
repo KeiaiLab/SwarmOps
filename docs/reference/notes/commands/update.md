@@ -1,0 +1,180 @@
+`update` replaces the program itself, `swarmops` and `so`, with the latest release, and holds the
+switch of automatic update. It opens no store: `--repo` and `--as` are read and not used, and
+the envelope has no `meta.repo`. It never changes a store, and never runs
+[`upgrade`](../../commands/upgrade.md), which is the store's command and yours alone to run. It
+has no MCP tool: a call would replace the program the server runs from.
+
+The forms are one at a time: no flag installs, `--check` looks, `--auto on|off` and `--status`
+are the switch ([Automatic update's switch](#automatic-updates-switch)), and `--background` is
+what automatic update runs ([In the background](#in-the-background)).
+
+### What it updates
+
+Only an install the installer made, in a build a release holds:
+
+| The binaries came from | `update` |
+| --- | --- |
+| The installer (`install.sh`) | Works. The installer leaves a receipt beside them, `.swarmops-receipt`. |
+| A `.deb` or `.rpm`, or a server image | `E_INVALID_ARG`, `details.reason` `no_receipt`, with `details.dir`. Install the next release's package. |
+| An archive unpacked by hand, or an installer older than the receipt | `no_receipt`. Running the installer once, with `--dir` naming the directory, leaves a receipt. |
+| A clone (`cargo install`, `cargo build`) | `not_a_release_build`, whatever is beside them. Build the newer source. |
+
+The install is the directory the running program's own file is in, with every link on the way
+followed: `so` reached through a link in another directory updates the directory it points
+into. A release's build that cannot find its own file is `E_INVALID_ARG` (`details.reason`
+`exe_unknown`). A file by the receipt's name that is no receipt (not TOML, without
+`receipt = 1`, without `auto_update = true` or `false`, or over 64 KiB) is refused by every
+form (`details.reason` `receipt`, `details.path`) and never written over.
+
+### What an update does
+
+1. **The latest release.** One HEAD request to
+   `https://github.com/KeiaiLab/SwarmOps/releases/latest`, which GitHub answers with a redirect
+   to the latest release's page. The redirect is not followed. Its address must be exactly
+   `https://github.com/KeiaiLab/SwarmOps/releases/tag/v<X.Y.Z>`, three plain numbers: anything
+   else, a pre-release's page among it, is `E_REMOTE_UNREACHABLE`. GitHub's `latest` never
+   names a pre-release.
+2. **What is installed.** `swarmops --version` and `so --version` in the install directory; the
+   lower of the two counts, so that an update stopped between the two names is finished by the
+   next one. A name that is missing, or is another program, counts as older than every release,
+   and an update writes both names, as the installer does.
+3. **Only a newer release.** A latest release that is not strictly newer installs nothing:
+   `updated` is `false`, exit 0. A pre-release is older than its release. Nothing ever installs
+   an older version: to go back, or to pin one, run the installer with `--version`, which also
+   turns automatic update off.
+4. **Download, check, unpack.** The installer built into the program runs under `/bin/sh` for
+   that release, into `.swarmops-update.d` beside the binaries: it downloads the archive for
+   this host and the release's `SHA256SUMS`, checks the one against the other, and unpacks the
+   two binaries. It is the installer this build's source holds, not one fetched for the
+   occasion, and it refuses what the installer refuses: a host without a build in the release,
+   a glibc older than the release needs, a checksum that does not match.
+5. **Run before replacing.** Each staged binary is run once and must print exactly
+   `swarmops <X.Y.Z>`, the release's line. One that does not start on this host, or is another
+   version, replaces nothing.
+6. **Replace.** The staged `swarmops` is renamed over the installed one, then `so`, and the
+   directory is flushed. Each name is whole at every moment. Between the two renames `swarmops`
+   is new and `so` old; step 2 repairs an update that stopped there.
+
+`previous` is the version replaced and `current` the one installed when the command ended;
+`latest` and `notes` are the latest release and its page. A process that already runs keeps the
+program it started with: a `swarmops mcp` server serves with the old one until it is restarted.
+
+One update runs at a time for an install. A second `update` is `E_BUSY` (`details.reason`
+`update_running`, exit 4): run it again when the first has ended. The lock is
+`.swarmops-update.lock` beside the binaries, held from before the latest release is asked for
+until the binaries are replaced, and freed by the system however the process ends. The installer
+itself takes no lock: do not run it into the same directory while an update runs.
+
+### What it runs, and what that sends
+
+SwarmOps has no network code of its own.
+
+- **curl, for the latest release.** One run of the curl `SWARMOPS_CURL` names by an absolute
+  path, else the first `curl` on `PATH`, as [`auth login`](../../commands/auth-login.md) runs
+  it: the request on its stdin, a cleared environment but for `PATH`, the proxy variables and
+  the certificate variables, https only, TLS 1.2 or later, no redirect followed. A host without
+  curl is `E_INVALID_ARG` (`details.reason` `curl_missing`), also where the installer itself
+  would have used wget. The request carries no token; GitHub sees your address, the
+  repository's path, and the header `User-Agent: swarmops-update`, which names no version.
+- **The installer, for the release.** `/bin/sh` and the tools the installer needs on `PATH`:
+  curl or wget, tar, and sha256sum or shasum. It gets `PATH`, `HOME`, `TMPDIR`, the proxy
+  variables and the certificate variables, and no other variable: `SWARMOPS_VERSION`,
+  `SWARMOPS_INSTALL_DIR` and the installer's test seams do not reach it. It downloads from
+  `https://github.com/KeiaiLab/SwarmOps/releases/download/`, following GitHub's redirects, with
+  its downloader's own headers. What it prints is read and dropped; its last line is in the
+  error when it fails. It is stopped after ten minutes.
+
+What this is checked against: HTTPS to GitHub, and the release's own `SHA256SUMS`, which comes
+from the same place as the archive. No signature is checked, as none is by the installer. A
+release older than what is installed is never taken, so an old release cannot be replayed; a
+host that is shown no newer release at all cannot tell. These requests have been tested against
+stand-ins on the testing host, and not yet run against GitHub.
+
+### What can fail
+
+| What happened | Error | `details` |
+| --- | --- | --- |
+| The build is no release's | `E_INVALID_ARG` | `reason` `not_a_release_build` |
+| No receipt is beside the binaries | `E_INVALID_ARG` | `reason` `no_receipt`, `dir` |
+| The receipt is none this build reads | `E_INVALID_ARG` | `reason` `receipt`, `path` |
+| The program cannot find its own file | `E_INVALID_ARG` | `reason` `exe_unknown` |
+| There is no curl | `E_INVALID_ARG` | `reason` `curl_missing` |
+| Another update runs | `E_BUSY` | `reason` `update_running` |
+| curl reached no answer | `E_REMOTE_UNREACHABLE` | `phase` `update`, `host`, `cause`, `curl_exit` |
+| The answer names no release | `E_REMOTE_UNREACHABLE` | `phase` `update`, `host`, `http_status` when it had one |
+| The lock file cannot be made | `E_IO` | `step` `lock`, `path` |
+| The installer failed, or was stopped | `E_IO` | `step` `install`, `installer_exit` and `installer` (its last line), or `deadline_s` |
+| A staged binary is not the release | `E_IO` | `step` `verify`, `expected`, `found` |
+| A binary could not be renamed into place | `E_IO` | `step` `swap`, `path` |
+| The receipt could not be read or written | `E_IO` | `step` `receipt`, `path` |
+
+Exit 2 for `E_INVALID_ARG`, 4 for `E_BUSY` and `E_REMOTE_UNREACHABLE`, which can be run again,
+and 1 for `E_IO`. Up to and including `verify`, nothing was replaced, and the message says so.
+A `swap` that failed on `so` has replaced `swarmops`: run `update` again.
+
+### Automatic update's switch
+
+`--status` reaches no network and says whether this install updates itself after a command.
+`auto_update` is `on`, or the first of these that holds:
+
+| `auto_update` | What decided |
+| --- | --- |
+| `off_source_build` | The build is no release's. |
+| `off_no_receipt` | No receipt is beside the binaries. |
+| `off` | The receipt says `auto_update = false`: `--auto off` wrote it, or the installer did (for `--no-auto-update`, a named `--version`, or root). |
+| `off_env` | `SWARMOPS_AUTO_UPDATE` is `off`, or holds anything but `on` and `off`. Empty counts as unset. |
+| `off_ci` | `CI` is set to anything but the empty string, `0` or `false`, and `SWARMOPS_AUTO_UPDATE` is not `on`. |
+| `off_container` | `/.dockerenv` or `/run/.containerenv` exists, and `SWARMOPS_AUTO_UPDATE` is not `on`. |
+| `off_owner` | The caller is root, or the install directory belongs to another user. |
+
+`SWARMOPS_AUTO_UPDATE=on` only cancels the `CI` and container rules. No store, remote, workspace
+file or MCP request reads or sets any of this.
+
+`--auto off` and `--auto on` write the receipt's `auto_update`, through a temporary file renamed
+over it, mode 0644, and reach no network. Keys this build does not know are kept; comments are
+not. `--auto on` needs what `update` needs, so it never makes a receipt for a package's install;
+`--auto off` where there is no receipt changes nothing and is no error. The result's
+`auto_update` is the answer after the write: `--auto on` as root still says `off_owner`.
+
+None of the rules stops an `update` you run yourself, which needs only a release's build and a
+receipt.
+
+`dir` is the install directory, there only when a receipt was found. `pending` is the note a
+background run left: its `kind` (`updated`, `available` or
+`failed`), the release it is about (`to`) and, for `updated`, the version replaced (`from`).
+`--status` reads the note and leaves it.
+
+### In the background
+
+`update --background` does what automatic update does, in one run. No command starts it after
+itself in this build: it runs when it is run. Unless `auto_update` is `on` it does nothing. Otherwise it takes the lock without waiting (another update running: nothing),
+asks for the latest release as above, and when that is newer than what is installed:
+
+1. A release that failed to install before is left alone, until an `update` you run goes well.
+2. One more HEAD request asks whether the release holds the file
+   `auto-update-from-<major>.<minor>`, named for the minor line installed: the release's mark
+   that a build of that line may install it unasked. GitHub sees the minor line in that address.
+3. **302**, the redirect to a file the release holds: the release is installed as above, with
+   three minutes for the installer. The note is `updated <from> <to>`, or, when it failed,
+   `failed <to> <the installer's last line>`, and the failure is remembered.
+4. **404**, no such file: the release is announced, not installed. The first time a release is
+   seen unmarked, only that is remembered; the note `available <to>` is written the next time it
+   is still unmarked, and once. A release is the latest before its marks are uploaded.
+5. **Anything else**, or no answer: nothing is written, and the next run asks again.
+
+It prints its envelope like every command, exit 0 unless the receipt is refused, with
+`updated` and `pending` saying what it did; a request that fails changes nothing and is no
+error. Only the latest release is ever looked at: an install on an older line installs nothing
+automatically while the latest release carries no mark for that line.
+
+### The files beside the binaries
+
+| File | What it is |
+| --- | --- |
+| `.swarmops-receipt` | The installer's receipt: `receipt = 1` and `auto_update = true` or `false`. |
+| `.swarmops-update.lock` | The lock, and what the background run remembers: a line each for the release last `seen` unmarked, `announced` and `failed`. |
+| `.swarmops-update.note` | One line: the note a background run left, which `--status` gives as `pending`. |
+| `.swarmops-update.d` | The staging directory, there only while an update runs; one left behind is removed by the next. |
+
+The installer's `--uninstall` removes all four. See
+[Install](../../../guides/install.md) for the installer.

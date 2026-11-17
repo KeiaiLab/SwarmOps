@@ -32,6 +32,7 @@ Every command takes these, before or after its subcommand.
 - [`swarmops schema`](commands/schema.md): Print the JSON Schema of every request and response type, or of TYPE's.
 - [`swarmops upgrade`](commands/upgrade.md): Move the store to the latest format this build writes. Irreversible: older releases do not open it afterwards.
 - [`swarmops derive`](commands/derive.md): Derive the eager derived values of new changesets, ahead of any reader.
+- [`swarmops update`](commands/update.md): Replace this program, swarmops and so, with the latest release, or set automatic update. Touches no store and never runs upgrade.
 
 ## Write
 

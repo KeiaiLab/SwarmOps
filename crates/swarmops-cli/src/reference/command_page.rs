@@ -119,6 +119,10 @@ const HELPER_COMMAND: &str = "auth git-credential";
 const AUTH_COMMANDS: [&str; 4] = ["auth login", "auth status", "auth logout", HELPER_COMMAND];
 const AUTH_SINCE: &str = "0.12.0";
 
+/// The program's own update, and the release it first ships in.
+const UPDATE_COMMAND: &str = "update";
+const UPDATE_SINCE: &str = "0.12.0";
+
 /// The release the command at `path` first shipped in.
 fn since(path: &str) -> &'static str {
     if path == SERVE_COMMAND {
@@ -141,6 +145,9 @@ fn since(path: &str) -> &'static str {
     }
     if AUTH_COMMANDS.contains(&path) {
         return AUTH_SINCE;
+    }
+    if path == UPDATE_COMMAND {
+        return UPDATE_SINCE;
     }
     SINCE
 }
@@ -258,7 +265,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 64] = [
+const META: [Meta; 65] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -647,6 +654,13 @@ const META: [Meta; 64] = [
         Returns::Type("AuthLogout"),
     ),
     meta(HELPER_COMMAND, Group::Auth, false, false, Returns::Protocol),
+    meta(
+        UPDATE_COMMAND,
+        Group::Store,
+        false,
+        false,
+        Returns::Type("UpdateOut"),
+    ),
 ];
 
 /// A row of [`META`].
@@ -1457,7 +1471,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 59] = [
+const RETURN_SITES: [(&str, &str, &str); 60] = [
     ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1585,6 +1599,7 @@ const RETURN_SITES: [(&str, &str, &str); 59] = [
         "../swarmops-ops/src/auth/file.rs",
         "fn logout(",
     ),
+    (UPDATE_COMMAND, "src/commands/update.rs", "fn update("),
 ];
 
 /// The calls that refuse a command without an identity.

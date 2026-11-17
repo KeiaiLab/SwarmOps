@@ -1,0 +1,160 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "update --status",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "update",
+      "api": 1,
+      "result": {
+        "current": "[version]",
+        "updated": false,
+        "auto_update": "off_source_build"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "update --auto off",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "update",
+      "api": 1,
+      "result": {
+        "current": "[version]",
+        "updated": false,
+        "auto_update": "off_source_build"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "update",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "update",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "this build is no release's: it was built from source, and update replaces only what the installer installed",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "reason": "not_a_release_build"
+        },
+        "hint": "build the newer source again, as this build was made"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "update --check",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "update",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "this build is no release's: it was built from source, and update replaces only what the installer installed",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "reason": "not_a_release_build"
+        },
+        "hint": "build the newer source again, as this build was made"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "update --auto on",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "update",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "this build is no release's: it was built from source, and update replaces only what the installer installed",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "reason": "not_a_release_build"
+        },
+        "hint": "build the newer source again, as this build was made"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "update --check --status",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "update",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the argument '--check' cannot be used with '--status'",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops update --check\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "update --auto maybe",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "update",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "invalid value 'maybe' for '--auto <SWITCH>' [possible values: on, off]",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops update [OPTIONS]\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

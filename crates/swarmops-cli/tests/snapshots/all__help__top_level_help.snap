@@ -11,6 +11,7 @@ Start here:
   clone       Make a store from a git remote
   info        Describe the store
   whoami      Show the identity your changes carry
+  update      Replace this program with the latest release
 
 Record and land changes:
   ws          Workspaces: edit in a directory of your own, commit, land

@@ -121,10 +121,6 @@ pub(crate) fn version() -> &'static str {
 /// Whether this build is a release's: compiled with `SWARMOPS_BUILD_CHANNEL=release`. A build
 /// from a clone is none, whatever version it prints. In a build with the `test-hooks` feature,
 /// also when `SWARMOPS_TEST_UPDATE_RELEASE` is `1`.
-#[allow(
-    dead_code,
-    reason = "`update` and automatic update, which come next, read it"
-)]
 pub(crate) fn is_release() -> bool {
     BUILD_CHANNEL.is_some() || test_release()
 }

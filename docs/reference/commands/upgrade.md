@@ -94,5 +94,6 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 - [`swarmops whoami`](whoami.md)
 - [`swarmops schema`](schema.md)
 - [`swarmops derive`](derive.md)
+- [`swarmops update`](update.md)
 - [CLI reference](../cli.md)
 - [Error codes](../errors.md)

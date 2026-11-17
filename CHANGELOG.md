@@ -21,6 +21,30 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Added
 
+- `update` (`so update`) replaces the program, `swarmops` and `so`, with the latest release when
+  that is newer than what is installed, and is the switch of automatic update. It asks
+  `github.com/KeiaiLab/SwarmOps/releases/latest` where it redirects (one HEAD request by the
+  host's `curl`, `SWARMOPS_CURL` or the first on `PATH`, with `User-Agent: swarmops-update` and
+  no token), then runs the installer built into the program under `/bin/sh` to download the
+  release, check it against its `SHA256SUMS` and unpack it beside the binaries
+  (`.swarmops-update.d`), runs each new binary once, and renames them over the old ones,
+  `swarmops` first. It never installs an older version or a pre-release, touches no store and
+  never runs `upgrade`. `--check` looks and installs nothing; `--auto on|off` writes the
+  receipt's `auto_update`; `--status` says whether the install updates itself (`auto_update`) and
+  gives a note still unprinted (`pending`); `--background` installs the latest release only when
+  it holds the mark for the installed minor line (the file `auto-update-from-<major>.<minor>`,
+  asked for by one more HEAD request), notes a release without the mark at its second sighting,
+  and does not try a release again that failed. Nothing starts `--background` after a command
+  yet. It works only on an install with the installer's receipt, in a release's build: otherwise
+  `E_INVALID_ARG` with `details.reason` `no_receipt` (a package, an archive unpacked by hand) or
+  `not_a_release_build` (a clone); also `receipt`, `exe_unknown` and `curl_missing`. A second
+  update of the same install is `E_BUSY` (`details.reason` `update_running`); a releases page
+  that does not answer with a redirect to a release's page is `E_REMOTE_UNREACHABLE`
+  (`details.phase` `update`, with `curl_exit` or `http_status`); a failed download, check or
+  replacement is `E_IO` with `details.step` (`install`, `verify`, `swap`, `lock`, `receipt`).
+  The three codes' descriptions in `schema` say so. The command has no MCP tool, with its reason
+  in the MCP reference's index, and is listed under "Start here" in the program's help. It is
+  tested against a release served on the testing host, and has not been run against GitHub.
 - `auth login --gh` without `--with-token` logs in by GitHub's device flow: it prints a code and
   the page to enter it on (two lines on stderr), waits until the code is approved, and keeps the
   token GitHub grants with the scopes it names (`source` `device`). `--scope <SCOPE>` names a
@@ -150,7 +174,7 @@ collects the changes on `stable` that no release holds yet, until the next relea
   there and whether they may update themselves: not with the new `--no-auto-update`, not when a
   version is named (`--version` or `SWARMOPS_VERSION`: a pin stays), and not for root. A receipt
   that says `false` already is left as it is by a later run. For a release after 0.11.0 the
-  report says which it is; no build reads the receipt yet. `--uninstall` removes the receipt
+  report says which it is, and `update` reads the receipt. `--uninstall` removes the receipt
   and the files an update leaves beside the binaries (`.swarmops-update.lock`,
   `.swarmops-update.note`, `.swarmops-update.d`), also where no binary of SwarmOps' is left.
 - The release workflow builds `swarmops` and `so` for `aarch64-apple-darwin` on the maintainers'
@@ -160,16 +184,16 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - The release workflow builds the binaries of all three targets with
   `SWARMOPS_BUILD_CHANNEL=release`, a variable read at compile time that marks a build as a
   release's; a build from a clone leaves it unset. Any other value fails the build, as does the
-  variable together with `SWARMOPS_BUILD_COMMIT`. It changes nothing `--version` prints, and
-  nothing reads the mark yet. The workflow's smoke runs set `SWARMOPS_AUTO_UPDATE=off`, and ask
+  variable together with `SWARMOPS_BUILD_COMMIT`. It changes nothing `--version` prints;
+  `update` replaces only a build that has it. The workflow's smoke runs set `SWARMOPS_AUTO_UPDATE=off`, and ask
   for the version with the new test hook `SWARMOPS_TEST_VERSION` set, which a release build
   ignores.
-- Four types in `schema`'s output, 198 in all, for a command that does not exist yet: `UpdateOut`
+- Four types in `schema`'s output, 198 in all, for `update`: `UpdateOut`
   (the installed version, what was replaced, the latest release and its notes' page, the install
   directory, and a note still to be printed), `AutoUpdate` (whether an install updates itself:
   `on`, or `off_source_build`, `off_no_receipt`, `off`, `off_env`, `off_ci`, `off_container` or
   `off_owner`, the first that holds in that order), `UpdatePending` and `UpdatePendingKind`
-  (`updated`, `available`, `failed`). No command returns them yet.
+  (`updated`, `available`, `failed`).
 
 ### Changed
 

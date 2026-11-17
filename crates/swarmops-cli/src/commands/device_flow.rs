@@ -18,8 +18,9 @@
 //! addresses are constants: no flag, variable, store or answer moves a request to another host,
 //! and curl follows no redirect.
 //!
-//! The runner has one other request, which the flow does not make ([`Curl::redirect`]): a HEAD
-//! that reads where an address redirects to, and goes there no more than a posted form does.
+//! The runner has one other request, which the flow does not make and `update` does
+//! ([`Curl::redirect`]): a HEAD that reads where an address redirects to, and goes there no more
+//! than a posted form does.
 //!
 //! The app the login is asked in the name of is the client ID of `SWARMOPS_GH_CLIENT_ID`, else
 //! the one built in ([`client_id`]). A client ID is public; the flow uses no client secret.
@@ -60,7 +61,7 @@ const CURL_ARGS: [&str; 3] = ["-q", "--config", "-"];
 
 /// The variables a curl inherits, of all the caller's: where programs are, the proxies and the
 /// certificate stores.
-const CURL_ENV_KEPT: [&str; 10] = [
+pub(super) const CURL_ENV_KEPT: [&str; 10] = [
     "PATH",
     "HTTPS_PROXY",
     "https_proxy",
@@ -191,7 +192,6 @@ impl Answer {
 
 /// What a request for a redirect got: the HTTP status and, of a redirect, where it points; or
 /// neither when what curl printed is no such answer.
-#[allow(dead_code, reason = "`update`, which comes next, reads it")]
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Redirect {
     /// The HTTP status.
@@ -324,7 +324,6 @@ impl Curl {
     /// Asks `url` for its headers, in one run of curl, and follows no redirect: the answer is
     /// the status and where a redirect points ([`Redirect`]). The request goes to `url` alone,
     /// and no further.
-    #[allow(dead_code, reason = "`update`, which comes next, asks with it")]
     pub(super) fn redirect(&self, url: &str) -> Result<Redirect, Failed> {
         let Some(config) = redirect_config(url) else {
             let why = "a request's address holds a character curl's configuration cannot carry";
@@ -798,7 +797,7 @@ fn unreachable(exit: Option<i32>) -> OpError {
 }
 
 /// Why a curl that ended with `exit` reached no answer, in the words a remote's failure has.
-fn cause(exit: Option<i32>) -> &'static str {
+pub(super) fn cause(exit: Option<i32>) -> &'static str {
     match exit {
         Some(6) => "dns",
         Some(7) => "connect",

@@ -184,6 +184,11 @@ const NOT_A_TOOL: &[(&str, &str)] = &[
         "auth git-credential",
         "It speaks git's credential protocol on stdin and stdout, and prints a token",
     ),
+    (
+        "update",
+        "It replaces the program this server runs from, and no request may switch automatic \
+         update",
+    ),
 ];
 
 /// clap's own subcommand, which prints a command's help and runs nothing.
