@@ -6,12 +6,14 @@
 
     python3 -I scripts/test-install.py
 
-A fake release, both targets' archives in the real layout and SHA256SUMS, is served on
+A fake release, each target's archive in the real layout and SHA256SUMS, is served on
 127.0.0.1 with a `releases/latest` that redirects to its tag page; its "binaries" are sh scripts
 that print `swarmops <version>` and their arguments. The installer runs against it in every case
-below, under sh, and under dash and busybox sh where they are installed. A case's PATH holds
-fake `uname`, `ldd` and `getconf`, which play other systems, then links to the tools the
-installer runs, so that a case can leave curl or sha256sum out. Nothing reaches the network:
+below, under sh, and under bash, dash and busybox sh where they are installed. A case's PATH
+holds fake `uname`, `id`, `ldd`, `getconf` and `sysctl`, which play other systems, then links to
+the tools the installer runs, so that a case can leave curl or sha256sum out: a Linux host runs
+the macOS cases and a Mac the Linux ones, each with its own tools (GNU or BSD). Nothing reaches
+the network:
 the installer is given the server's URLs, and every proxy variable names that server, which
 refuses whatever is not its own. Also checks that web/public/install.sh, the copy
 get.swarmops.cc serves, is scripts/install.sh byte for byte. Prints a summary; exit 1 on a failure.
@@ -41,15 +43,18 @@ INSTALLER = ROOT / "scripts" / "install.sh"
 # web/public/ into the site.
 SITE_COPY = ROOT / "web" / "public" / "install.sh"
 
-# The fake release's versions: a good one; one whose SHA256SUMS line for x86_64 is wrong; one
-# whose SHA256SUMS has no line for x86_64; and one whose download the server holds until the
-# installer has been interrupted.
+# The fake release's versions: a good one; one whose SHA256SUMS lines for x86_64 Linux and for
+# macOS are wrong; one whose SHA256SUMS has no line for x86_64 Linux; one with the Linux
+# archives only, as every release up to 0.11.0 is; and one whose download the server holds
+# until the installer has been interrupted.
 GOOD = "9.9.9"
 MISMATCH = "9.9.9-mismatch"
 NO_LINE = "9.9.9-noline"
+LINUX_ONLY = "9.9.8"
 HELD = "9.9.9-held"
 X86 = "x86_64-unknown-linux-gnu"
 ARM = "aarch64-unknown-linux-gnu"
+MAC = "aarch64-apple-darwin"
 BINARIES = ("swarmops", "so")
 DOCS = ("CHANGELOG.md", "LICENSE", "README.md", "THIRD-PARTY-LICENSES")
 MTIME = 1_760_000_000
@@ -61,12 +66,16 @@ TAG_PATH = f"/releases/tag/v{GOOD}"
 
 # The installer's pinned strings.
 PREFIX = "swarmops-install: "
-NOT_LINUX = "SwarmOps runs on Linux today; macOS and Windows are next."
+NO_BUILD_FOR_OS = "SwarmOps runs on Linux and macOS; Windows is next."
+INTEL_MAC = "No release build runs on an Intel Mac (x86_64)"
+NO_MAC_BUILD = "has no macOS build: the releases up to 0.11.0 hold Linux builds only"
 RELEASES = "https://github.com/KeiaiLab/SwarmOps/releases"
 QUICK_START = "https://github.com/KeiaiLab/SwarmOps#quick-start"
 WEBSITE = "https://swarmops.cc"
 LD_SO_WARNING = "weak version 'GLIBC_2.39' not found"
 SH_PATH_LINE = 'export PATH="{dest}:$PATH"'
+LINUX_PATH_FILES = "(~/.profile, ~/.bashrc or ~/.zshrc):"
+MAC_PATH_FILES = "(~/.zshrc, or ~/.bash_profile under bash):"
 FISH_PATH_LINE = 'fish_add_path "{dest}"'
 ENVIRONMENT = (
     "SWARMOPS_VERSION",
@@ -75,8 +84,8 @@ ENVIRONMENT = (
     "SWARMOPS_LATEST_URL",
 )
 
-# The tools the installer runs, linked into each case's PATH. `uname`, `ldd` and `getconf` are
-# the case's fakes; the proxy variables all name the fake server.
+# The tools the installer runs, linked into each case's PATH. `uname`, `id`, `ldd`, `getconf`
+# and `sysctl` are the case's fakes; the proxy variables all name the fake server.
 TOOLS = (
     "awk", "cat", "chmod", "cp", "curl", "grep", "gzip", "head", "mkdir", "mktemp", "mv", "rm",
     "sed", "sha256sum", "shasum", "tail", "tar", "tr", "wget",
@@ -134,6 +143,15 @@ fi
 exit 1
 """
 
+# macOS's `sysctl -n sysctl.proc_translated`: 1 in a process Rosetta translates, else 0.
+FAKE_SYSCTL = """#!/bin/sh
+if [ "$1" = -n ] && [ "$2" = sysctl.proc_translated ]; then
+  echo '@TRANSLATED@'
+  exit 0
+fi
+exit 1
+"""
+
 # Used where the host has no wget: the two forms the installer runs,
 # `wget -q -O FILE URL` and `wget -q -S --spider URL`.
 FAKE_WGET = '''#!@PYTHON@ -I
@@ -175,13 +193,15 @@ class Body(enum.Enum):
 @dataclass(frozen=True)
 class System:
     """What a case's fakes report: `uname -s`, `uname -m`, ldd's C library (a glibc version,
-    MUSL, or None for no ldd) and getconf's glibc version (None for no getconf)."""
+    MUSL, or None for no ldd), getconf's glibc version (None for no getconf), `id -u`, and
+    macOS's `sysctl.proc_translated` (None for no sysctl)."""
 
     os_name: str = "Linux"
     machine: str = "x86_64"
     ldd: str | None = "2.39"
     getconf: str | None = None
     uid: int = 1000
+    translated: int | None = None
 
 
 @dataclass
@@ -321,19 +341,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def build_release(files: Path) -> None:
-    """Writes the fake release: per version, both targets' archives and SHA256SUMS."""
-    for version in (GOOD, MISMATCH, NO_LINE):
+    """Writes the fake release: per version, each target's archive and SHA256SUMS."""
+    for version in (GOOD, MISMATCH, NO_LINE, LINUX_ONLY):
         folder = files / f"v{version}"
         folder.mkdir(parents=True)
         lines = []
-        for target in (X86, ARM):
+        for target in (X86, ARM, MAC):
+            # The release from before the macOS build: neither its archive nor its line.
+            if target == MAC and version == LINUX_ONLY:
+                continue
             name = f"swarmops-{version}-{target}.tar.gz"
             data = pack(version, target)
             (folder / name).write_bytes(data)
             digest = hashlib.sha256(data).hexdigest()
 
-            # The two broken versions: a wrong line, or none, for the x86_64 archive.
-            if target == X86 and version == MISMATCH:
+            # The two broken versions: a wrong line for the x86_64 Linux and the macOS archive,
+            # or none for the x86_64 Linux one.
+            if target in (X86, MAC) and version == MISMATCH:
                 digest = hashlib.sha256(b"another archive").hexdigest()
             if target == X86 and version == NO_LINE:
                 continue
@@ -389,7 +413,7 @@ def script(path: Path, text: str) -> None:
 
 
 def write_fakes(folder: Path, system: System) -> None:
-    """The fake `uname`, `ldd` and `getconf` that play `system`."""
+    """The fake `uname`, `id`, `ldd`, `getconf` and `sysctl` that play `system`."""
     uname = FAKE_UNAME.replace("@OS@", system.os_name).replace("@MACHINE@", system.machine)
     script(folder / "uname", uname)
     script(folder / "id", FAKE_ID.replace("@UID@", str(system.uid)))
@@ -399,6 +423,8 @@ def write_fakes(folder: Path, system: System) -> None:
         script(folder / "ldd", FAKE_LDD_GLIBC.replace("@VERSION@", system.ldd))
     if system.getconf:
         script(folder / "getconf", FAKE_GETCONF.replace("@VERSION@", system.getconf))
+    if system.translated is not None:
+        script(folder / "sysctl", FAKE_SYSCTL.replace("@TRANSLATED@", str(system.translated)))
 
 
 def sandbox(case: Case, release: Release, tools: dict, root: Path) -> Sandbox:
@@ -654,12 +680,17 @@ def all_of(*checks: Check) -> Check:
     return lambda run: [problem for check in checks for problem in check(run)]
 
 
+def mac(machine: str = "arm64", translated: int | None = None, uid: int = 1000) -> System:
+    """A Mac: no ldd and no getconf answer for glibc, which the installer must not ask."""
+    return System("Darwin", machine, ldd=None, translated=translated, uid=uid)
+
+
 def version_args(version: str) -> tuple[str, ...]:
     return ("--version", version, "--dir", "{dest}")
 
 
 CASES = (
-    Case("an explicit version", all_of(installed(), says("out", SH_PATH_LINE))),
+    Case("an explicit version", all_of(installed(), says("out", SH_PATH_LINE), says("out", LINUX_PATH_FILES))),
     Case(
         "SWARMOPS_VERSION (with its v) and SWARMOPS_INSTALL_DIR",
         installed(),
@@ -685,7 +716,7 @@ CASES = (
     Case("a checksum mismatch", refused("does not match"), args=version_args(MISMATCH)),
     Case("no SHA256SUMS line", refused("has no line"), args=version_args(NO_LINE)),
     Case("a version that is not released", refused("Cannot download"), args=version_args("9.9.0")),
-    Case("not Linux", refused(NOT_LINUX, RELEASES), system=System("Darwin", "arm64")),
+    Case("neither Linux nor macOS", refused(NO_BUILD_FOR_OS, "This system is FreeBSD.", RELEASES), system=System("FreeBSD")),
     Case("an unsupported uname -m", refused("riscv64"), system=System(machine="riscv64")),
     Case("uname -m amd64", installed(target=X86), system=System(machine="amd64")),
     Case("uname -m aarch64", installed(target=ARM), system=System(machine="aarch64")),
@@ -705,12 +736,89 @@ CASES = (
     Case("a version that is not one", refused("not a release version"), args=version_args("1.2")),
     Case("an http URL off 127.0.0.1", refused("https:// only"), env=(("SWARMOPS_DOWNLOAD_BASE", "http://example.com"),)),
     Case("an unknown option", refused("Unknown option", code=2), args=("--frobnicate",)),
+    # macOS: the Apple silicon archive, no glibc check, its own PATH files and messages.
+    Case(
+        "macOS on arm64",
+        all_of(
+            installed(target=MAC),
+            says("err", f"swarmops-{GOOD}-{MAC}.tar.gz matches SHA256SUMS."),
+            says("out", SH_PATH_LINE),
+            says("out", MAC_PATH_FILES),
+            lacks_err("glibc"),
+        ),
+        system=mac(),
+    ),
+    Case(
+        "macOS: the latest release, into ~/.local/bin",
+        installed(target=MAC),
+        args=(),
+        dest="{home}/.local/bin",
+        system=mac(),
+    ),
+    Case("macOS, root: /usr/local/bin", refused("into /usr/local/bin."), args=version_args("9.9.0")[:2], system=mac(uid=0)),
+    Case(
+        "macOS: a reinstall over an install: an update",
+        all_of(installed(target=MAC), on_run(2, says("out", f"Replaced swarmops {GOOD}."))),
+        runs=2,
+        system=mac(),
+    ),
+    Case(
+        "macOS: --uninstall",
+        uninstalled(),
+        args=("--uninstall", "--dir", "{dest}"),
+        setup=version_args(GOOD),
+        system=mac(),
+    ),
+    Case("macOS on an Intel Mac", refused(INTEL_MAC, RELEASES), system=mac("x86_64", translated=0)),
+    Case("macOS on an Intel Mac, no sysctl", refused(INTEL_MAC), system=mac("x86_64")),
+    Case("macOS on arm64 under Rosetta", installed(target=MAC), system=mac("x86_64", translated=1)),
+    Case("macOS on another machine", refused("macOS on i386"), system=mac("i386")),
+    Case(
+        "macOS: a release without a macOS build",
+        all_of(refused(NO_MAC_BUILD, RELEASES), lacks_err("Cannot download"), lacks_err("Downloading")),
+        args=version_args(LINUX_ONLY),
+        system=mac(),
+    ),
+    Case(
+        "macOS: a version that is not released",
+        all_of(refused("Cannot download", "is 9.9.0 a release?"), lacks_err("macOS build")),
+        args=version_args("9.9.0"),
+        system=mac(),
+    ),
+    Case("macOS: a checksum mismatch", refused("does not match"), args=version_args(MISMATCH), system=mac()),
+    Case("macOS: no sha256sum: shasum", installed(target=MAC), drop=("sha256sum",), needs=("shasum",), system=mac()),
+    Case(
+        "macOS: no curl: wget, and the latest release",
+        installed(target=MAC),
+        args=("--dir", "{dest}"),
+        drop=("curl",),
+        system=mac(),
+    ),
+    Case(
+        "macOS: no curl, a release without a macOS build",
+        refused(NO_MAC_BUILD),
+        args=version_args(LINUX_ONLY),
+        drop=("curl",),
+        system=mac(),
+    ),
+    Case(
+        "macOS: fish",
+        all_of(installed(target=MAC), says("out", FISH_PATH_LINE)),
+        env=(("SHELL", "/opt/homebrew/bin/fish"),),
+        system=mac(),
+    ),
+    Case(
+        "macOS: an http URL off 127.0.0.1",
+        refused("https:// only"),
+        env=(("SWARMOPS_DOWNLOAD_BASE", "http://example.com"),),
+        system=mac(),
+    ),
 )
 
 
 def found_shells() -> list[tuple[str, list[str]]]:
-    """The shells to run the installer under, by name and argv: sh, and dash and busybox sh
-    where they are installed."""
+    """The shells to run the installer under, by name and argv: sh, and bash, dash and busybox
+    sh where they are installed."""
     shells = []
     for argv in SHELLS:
         found = shutil.which(argv[0])

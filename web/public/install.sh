@@ -32,6 +32,11 @@ LATEST_URL=${SWARMOPS_LATEST_URL:-$RELEASES_URL/latest}
 GLIBC_MIN=2.34
 GLIBC_QUIET=2.39
 
+# The last release without a macOS build: it and every release before it hold Linux archives
+# only. The macOS build is for Apple silicon and macOS 11 or newer, which every such Mac runs,
+# so no macOS version is checked.
+MACOS_AFTER=0.11.0
+
 # A release version, as the tags name it without their `v`: 0.1.0, 0.2.0-rc.1.
 VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
 
@@ -87,9 +92,10 @@ Environment:
 
 Run it again to update: it replaces both binaries in place.
 
-Linux only: x86_64 or aarch64, with glibc $GLIBC_MIN or newer. Needs curl or wget, tar, and
-sha256sum or shasum. It writes only DIR and a temporary directory, and edits no shell startup
-file; it needs root only for a DIR that only root can write.
+Linux: x86_64 or aarch64, with glibc $GLIBC_MIN or newer. macOS: Apple silicon (arm64), from
+the first release after $MACOS_AFTER on; there is no build for an Intel Mac. Needs curl or wget,
+tar, and sha256sum or shasum. It writes only DIR and a temporary directory, and edits no shell
+startup file; it needs root only for a DIR that only root can write.
 EOF
 }
 
@@ -157,19 +163,25 @@ pick_dir() {
   dir=$HOME/.local/bin
 }
 
-# 1. The system: the releases hold Linux builds only.
+# 1. The system: the releases hold builds for Linux and, after MACOS_AFTER, for macOS.
 check_os() {
   os=$(uname -s)
-  if [ "$os" = Linux ]; then
-    return 0
-  fi
-  say 'SwarmOps runs on Linux today; macOS and Windows are next.'
+  case $os in
+    Linux | Darwin)
+      return 0
+      ;;
+  esac
+  say 'SwarmOps runs on Linux and macOS; Windows is next.'
   die "This system is $os. The releases: $RELEASES_URL"
 }
 
 # 2. The target: the release build for this machine's architecture.
 pick_target() {
   machine=$(uname -m)
+  if [ "$os" = Darwin ]; then
+    pick_mac_target
+    return 0
+  fi
   case $machine in
     x86_64 | amd64)
       target=x86_64-unknown-linux-gnu
@@ -184,10 +196,36 @@ pick_target() {
   esac
 }
 
-# 3. The C library: glibc 2.34 or newer. `ldd --version` names it on its first line
+# The macOS target: Apple silicon only. No release holds a build for an Intel Mac. A shell
+# that Rosetta translates says x86_64 on Apple silicon, where `sysctl.proc_translated` is 1:
+# the arm64 build is the one for that Mac.
+pick_mac_target() {
+  case $machine in
+    arm64 | aarch64)
+      target=aarch64-apple-darwin
+      ;;
+    x86_64)
+      translated=$(sysctl -n sysctl.proc_translated 2>/dev/null) || translated=
+      if [ "$translated" != 1 ]; then
+        die "No release build runs on an Intel Mac ($machine): the macOS build is for Apple" \
+          "silicon (arm64) only. The releases: $RELEASES_URL"
+      fi
+      target=aarch64-apple-darwin
+      ;;
+    *)
+      die "No release build runs on macOS on $machine, only on Apple silicon (arm64)." \
+        "The releases: $RELEASES_URL"
+      ;;
+  esac
+}
+
+# 3. The C library, on Linux: glibc 2.34 or newer. `ldd --version` names it on its first line
 # ("ldd (GNU libc) 2.39"), and musl's names musl; `getconf GNU_LIBC_VERSION` ("glibc 2.39")
-# answers where ldd is missing.
+# answers where ldd is missing. macOS has one C library, the system's, and nothing to check.
 check_libc() {
+  if [ "$os" != Linux ]; then
+    return 0
+  fi
   glibc=
 
   # 1. ldd: musl is refused at once; glibc's version ends its first line.
@@ -351,11 +389,35 @@ download() {
   archive=swarmops-$version-$target.tar.gz
   release_url=$DOWNLOAD_BASE/v$version
   say "Installing SwarmOps $version ($target) into $dir."
+  if [ "$os" = Darwin ]; then
+    mac_build_listed
+  fi
   say "Downloading $release_url/$archive"
   fetch "$release_url/$archive" "$work/$archive" ||
     die "Cannot download $release_url/$archive: is $version a release? $RELEASES_URL"
+  if [ -s "$work/SHA256SUMS" ]; then
+    return 0
+  fi
   fetch "$release_url/SHA256SUMS" "$work/SHA256SUMS" ||
     die "Cannot download $release_url/SHA256SUMS."
+}
+
+# On macOS, before the archive: the release's SHA256SUMS, which lists every archive the release
+# holds. One without a line for this target's is a release without a macOS build, as MACOS_AFTER
+# and every release before it are, and the installer says so and stops. Where SHA256SUMS
+# cannot be downloaded, the archive's download says why.
+mac_build_listed() {
+  url_proto "$release_url/SHA256SUMS"
+  if ! fetch "$release_url/SHA256SUMS" "$work/SHA256SUMS" 2>/dev/null; then
+    rm -f -- "$work/SHA256SUMS"
+    return 0
+  fi
+  listed=$(awk -v name="$archive" '$2 == name || $2 == "*" name' "$work/SHA256SUMS") ||
+    die "Cannot read SHA256SUMS."
+  if [ -z "$listed" ]; then
+    die "SwarmOps $version has no macOS build: the releases up to $MACOS_AFTER hold Linux" \
+      "builds only, and nothing was installed. The releases: $RELEASES_URL"
+  fi
 }
 
 # Removes what the installer leaves behind, however it ends: its temporary directory, and a
@@ -448,7 +510,9 @@ report() {
   printf 'Website: %s\n' "$WEBSITE_URL"
 }
 
-# The line that puts DIR on PATH, unless PATH has it: for fish, or for sh and its kin.
+# The line that puts DIR on PATH, unless PATH has it: for fish, or for sh and its kin. On
+# macOS the files are zsh's, its default shell's, and the one a login bash reads: Terminal
+# starts login shells, which do not read ~/.bashrc.
 path_hint() {
   case ":$PATH:" in
     *":$dir:"* | *":$dir/:"*)
@@ -461,8 +525,13 @@ path_hint() {
       printf '  fish_add_path "%s"\n' "$(quoted fish "$dir")"
       ;;
     *)
-      printf '%s is not on PATH. Add this line to your shell startup file' "$dir"
-      printf ' (~/.profile, ~/.bashrc or ~/.zshrc):\n'
+      if [ "$os" = Darwin ]; then
+        printf '%s is not on PATH. Add this line to your shell startup file' "$dir"
+        printf ' (~/.zshrc, or ~/.bash_profile under bash):\n'
+      else
+        printf '%s is not on PATH. Add this line to your shell startup file' "$dir"
+        printf ' (~/.profile, ~/.bashrc or ~/.zshrc):\n'
+      fi
       printf '  export PATH="%s:$PATH"\n' "$(quoted sh "$dir")"
       ;;
   esac
