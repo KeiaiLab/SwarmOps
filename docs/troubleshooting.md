@@ -235,7 +235,7 @@ update prints one line on stderr at a terminal, once; a script sees none, and re
 | --- | --- | --- | --- |
 | `E_INVALID_ARG` | `reason` `no_receipt`, `dir` | The binaries did not come from the installer: a package, or an archive unpacked by hand. | Install the next release's package; or run the installer once with `--dir` naming `details.dir`. |
 | `E_INVALID_ARG` | `reason` `not_a_release_build` | The build is from a clone. | Build the newer source. |
-| `E_INVALID_ARG` | `reason` `receipt`, `path` | The file by the receipt's name is none this build reads. It is not written over. | Look at the file; the installer run again writes a new one. |
+| `E_INVALID_ARG` | `reason` `receipt`, `path` | The file by the receipt's name is none this build reads. It is not written over. | Look at the file, remove it, then run the installer again, which leaves a new one. The installer leaves a file that holds a line `auto_update = false` as it is, so running it alone does not help. |
 | `E_INVALID_ARG` | `reason` `curl_missing` | No `curl` on `PATH`, and `SWARMOPS_CURL` names none by an absolute path. | Install curl, or run the installer, which also takes wget. |
 | `E_BUSY` | `reason` `update_running` | Another update of this install runs. No store is involved. | Run it again when that one has ended. |
 | `E_REMOTE_UNREACHABLE` | `phase` `update`, `host`, `curl_exit` and `cause`, or `http_status` | GitHub did not answer, or the answer was no redirect to a release's page (a proxy's page, say). | Run it again; look at `HTTPS_PROXY` and the certificates curl trusts. |

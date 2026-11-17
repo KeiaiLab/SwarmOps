@@ -341,7 +341,7 @@ The installer's `--uninstall` removes all four. See
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `auto_update` | `AutoUpdate` | yes | Whether the install updates itself after a command, and if not, why. |
-| `current` | `string` | yes | The installed version when the command ended. |
+| `current` | `string` | yes | The installed version when the command ended. For the forms that ask no binary for its version (`--status`, `--auto`, a `--background` that stops before it looks), and where one of the two names has none, the running program's own. |
 | `dir` | `string or null` | no | The directory the binaries are installed in, a path on the caller's host. Omitted when no receipt is beside them. |
 | `latest` | `string or null` | no | The latest release. Omitted when the command did not look for it. |
 | `notes` | `string or null` | no | The page of the latest release's notes. Omitted when the command did not look for it. |

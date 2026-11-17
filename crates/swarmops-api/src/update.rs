@@ -41,7 +41,8 @@ pub enum UpdatePendingKind {
     Updated,
     /// A newer release is out and was not installed automatically.
     Available,
-    /// A newer release could not be installed, and is not tried again automatically.
+    /// A newer release could not be installed, and is not tried again automatically: it was
+    /// downloaded and refused, or could not be downloaded at three checks.
     Failed,
 }
 
@@ -74,7 +75,9 @@ impl UpdatePending {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UpdateOut {
-    /// The installed version when the command ended.
+    /// The installed version when the command ended. For the forms that ask no binary for
+    /// its version (`--status`, `--auto`, a `--background` that stops before it looks), and
+    /// where one of the two names has none, the running program's own.
     pub current: String,
     /// The version this run replaced. Omitted when nothing was replaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]

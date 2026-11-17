@@ -115,9 +115,11 @@ error_codes! {
     /// `details.last_commit` say what it recorded, and the hint is to run it again, which
     /// continues after them. `update` gives it, with no `fs_op`, for a replacement of the
     /// program that failed: `details.step` names where (`install`, with the installer's exit
-    /// code in `details.installer_exit` and its last line in `details.installer`; `verify`,
-    /// with `details.expected` and `details.found`; `swap`, `lock` and `receipt`, with
-    /// `details.path`), and the message says whether anything was replaced.
+    /// code in `details.installer_exit` and its last line in `details.installer`, or
+    /// `details.deadline_s` when it was stopped, or `details.path` for what an earlier update
+    /// left and could not be removed; `verify`, with `details.expected` and `details.found`;
+    /// `swap`, `lock` and `receipt`, with `details.path`), and the message says whether
+    /// anything was replaced.
     Io => "E_IO", EXIT_ERROR, false;
     /// A journal append failed, and the store cut what it wrote back off the journal
     /// (`details.committed` is `false`): nothing was committed, so running the same operation
@@ -268,9 +270,9 @@ error_codes! {
     /// whose provider did not answer (`auth login`) has `details.phase` `login`, with
     /// `details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no
     /// login was kept. An `update` that could not learn the latest release has `details.phase`
-    /// `update`, with `details.host`, and either curl's exit code in `details.curl_exit` or,
-    /// for an answer that is no redirect to a release's page, its status in
-    /// `details.http_status`; nothing was replaced.
+    /// `update`, with `details.host`, and curl's exit code in `details.curl_exit` beside
+    /// `details.cause`, or, for an answer that is no redirect to a release's page,
+    /// `details.http_status` when the answer had a status; nothing was replaced.
     RemoteUnreachable => "E_REMOTE_UNREACHABLE", EXIT_RETRYABLE, true;
     /// The store records no remote of that name (`details.remote`).
     RemoteNotFound => "E_REMOTE_NOT_FOUND", EXIT_NOT_FOUND, false;

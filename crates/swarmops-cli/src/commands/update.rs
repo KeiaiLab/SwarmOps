@@ -1149,34 +1149,43 @@ enum Unreached {
 
 /// `E_REMOTE_UNREACHABLE` for a releases page that did not say what the latest release is:
 /// `details.phase` `update`, `details.host`, and `details.curl_exit` with `details.cause`, or
-/// `details.http_status`.
+/// `details.http_status`. The hint is the network's for a curl that reached no answer, and
+/// names what stands in between for an answer that came and is not GitHub's redirect.
 fn unreachable(what: Unreached) -> OpError {
     let host = host();
     let mut details = Map::new();
     details.insert("phase".to_owned(), "update".into());
     details.insert("host".to_owned(), host.into());
-    let why = match what {
+    let (why, hint) = match what {
         Unreached::Curl(exit) => {
             let cause = device_flow::cause(exit);
             details.insert("cause".to_owned(), cause.into());
             if let Some(exit) = exit {
                 details.insert("curl_exit".to_owned(), exit.into());
             }
-            format!("{host} did not answer ({cause})")
+            let why = format!("{host} did not answer ({cause})");
+            (
+                why,
+                "run it again once the network is back: nothing was replaced",
+            )
         }
         Unreached::Answer(status) => {
             if let Some(status) = status {
                 details.insert("http_status".to_owned(), status.into());
             }
-            format!(
+            let why = format!(
                 "{host} did not name the latest release: its answer is no redirect to a \
-                     release's page"
-            )
+                 release's page"
+            );
+            let hint = "something answered that is not GitHub's releases page, such as a proxy \
+                        or a sign-in page of the network: check the proxy variables, then run \
+                        it again; nothing was replaced";
+            (why, hint)
         }
     };
     OpError::new(ErrorCode::RemoteUnreachable, why)
         .with_details(details)
-        .with_hint("run it again once the network is back: nothing was replaced")
+        .with_hint(hint)
 }
 
 /// The host of the releases page.
@@ -1746,8 +1755,20 @@ mod tests {
         let killed = unreachable(Unreached::Curl(None));
         assert!(!killed.details.contains_key("curl_exit"));
 
+        // The network is the hint where nothing answered, not where something did.
+        let network = "once the network is back";
+        assert!(
+            timeout
+                .hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains(network))
+        );
+
         let portal = unreachable(Unreached::Answer(Some(200)));
         assert_eq!(portal.details["http_status"], 200);
+        let hint = portal.hint.as_deref().expect("a hint");
+        assert!(hint.contains("proxy") && !hint.contains(network), "{hint}");
+        assert!(hint.ends_with("nothing was replaced"), "{hint}");
         assert!(!portal.details.contains_key("curl_exit"));
         let unread = unreachable(Unreached::Answer(None));
         assert!(!unread.details.contains_key("http_status"));

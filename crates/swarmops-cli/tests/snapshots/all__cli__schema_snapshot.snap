@@ -3357,7 +3357,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_IO",
-          "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root. A journal append it\nrefused for want of permission or as a read-only filesystem also says\n`details.committed: false`: nothing was committed, and running the same operation again\nfails the same way until the hint's cause is fixed. `git import` also gives it for a\nframe that committed but failed after its commit point, with `details.committed: true`,\n`details.warnings` and no `fs_op`: the import stopped there, `details.imported` and\n`details.last_commit` say what it recorded, and the hint is to run it again, which\ncontinues after them. `update` gives it, with no `fs_op`, for a replacement of the\nprogram that failed: `details.step` names where (`install`, with the installer's exit\ncode in `details.installer_exit` and its last line in `details.installer`; `verify`,\nwith `details.expected` and `details.found`; `swap`, `lock` and `receipt`, with\n`details.path`), and the message says whether anything was replaced.",
+          "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root. A journal append it\nrefused for want of permission or as a read-only filesystem also says\n`details.committed: false`: nothing was committed, and running the same operation again\nfails the same way until the hint's cause is fixed. `git import` also gives it for a\nframe that committed but failed after its commit point, with `details.committed: true`,\n`details.warnings` and no `fs_op`: the import stopped there, `details.imported` and\n`details.last_commit` say what it recorded, and the hint is to run it again, which\ncontinues after them. `update` gives it, with no `fs_op`, for a replacement of the\nprogram that failed: `details.step` names where (`install`, with the installer's exit\ncode in `details.installer_exit` and its last line in `details.installer`, or\n`details.deadline_s` when it was stopped, or `details.path` for what an earlier update\nleft and could not be removed; `verify`, with `details.expected` and `details.found`;\n`swap`, `lock` and `receipt`, with `details.path`), and the message says whether\nanything was replaced.",
           "type": "string"
         },
         {
@@ -3482,7 +3482,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_REMOTE_UNREACHABLE",
-          "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed. A login\nwhose provider did not answer (`auth login`) has `details.phase` `login`, with\n`details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no\nlogin was kept. An `update` that could not learn the latest release has `details.phase`\n`update`, with `details.host`, and either curl's exit code in `details.curl_exit` or,\nfor an answer that is no redirect to a release's page, its status in\n`details.http_status`; nothing was replaced.",
+          "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed. A login\nwhose provider did not answer (`auth login`) has `details.phase` `login`, with\n`details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no\nlogin was kept. An `update` that could not learn the latest release has `details.phase`\n`update`, with `details.host`, and curl's exit code in `details.curl_exit` beside\n`details.cause`, or, for an answer that is no redirect to a release's page,\n`details.http_status` when the answer had a status; nothing was replaced.",
           "type": "string"
         },
         {
@@ -11239,7 +11239,7 @@ expression: s.redact(&all)
             },
             {
               "const": "E_IO",
-              "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root. A journal append it\nrefused for want of permission or as a read-only filesystem also says\n`details.committed: false`: nothing was committed, and running the same operation again\nfails the same way until the hint's cause is fixed. `git import` also gives it for a\nframe that committed but failed after its commit point, with `details.committed: true`,\n`details.warnings` and no `fs_op`: the import stopped there, `details.imported` and\n`details.last_commit` say what it recorded, and the hint is to run it again, which\ncontinues after them. `update` gives it, with no `fs_op`, for a replacement of the\nprogram that failed: `details.step` names where (`install`, with the installer's exit\ncode in `details.installer_exit` and its last line in `details.installer`; `verify`,\nwith `details.expected` and `details.found`; `swap`, `lock` and `receipt`, with\n`details.path`), and the message says whether anything was replaced.",
+              "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root. A journal append it\nrefused for want of permission or as a read-only filesystem also says\n`details.committed: false`: nothing was committed, and running the same operation again\nfails the same way until the hint's cause is fixed. `git import` also gives it for a\nframe that committed but failed after its commit point, with `details.committed: true`,\n`details.warnings` and no `fs_op`: the import stopped there, `details.imported` and\n`details.last_commit` say what it recorded, and the hint is to run it again, which\ncontinues after them. `update` gives it, with no `fs_op`, for a replacement of the\nprogram that failed: `details.step` names where (`install`, with the installer's exit\ncode in `details.installer_exit` and its last line in `details.installer`, or\n`details.deadline_s` when it was stopped, or `details.path` for what an earlier update\nleft and could not be removed; `verify`, with `details.expected` and `details.found`;\n`swap`, `lock` and `receipt`, with `details.path`), and the message says whether\nanything was replaced.",
               "type": "string"
             },
             {
@@ -11364,7 +11364,7 @@ expression: s.redact(&all)
             },
             {
               "const": "E_REMOTE_UNREACHABLE",
-              "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed. A login\nwhose provider did not answer (`auth login`) has `details.phase` `login`, with\n`details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no\nlogin was kept. An `update` that could not learn the latest release has `details.phase`\n`update`, with `details.host`, and either curl's exit code in `details.curl_exit` or,\nfor an answer that is no redirect to a release's page, its status in\n`details.http_status`; nothing was replaced.",
+              "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed. A login\nwhose provider did not answer (`auth login`) has `details.phase` `login`, with\n`details.host` and no `details.remote`, and curl's exit code in `details.curl_exit`; no\nlogin was kept. An `update` that could not learn the latest release has `details.phase`\n`update`, with `details.host`, and curl's exit code in `details.curl_exit` beside\n`details.cause`, or, for an answer that is no redirect to a release's page,\n`details.http_status` when the answer had a status; nothing was replaced.",
               "type": "string"
             },
             {
@@ -12501,7 +12501,7 @@ expression: s.redact(&all)
             },
             {
               "const": "failed",
-              "description": "A newer release could not be installed, and is not tried again automatically.",
+              "description": "A newer release could not be installed, and is not tried again automatically: it was\ndownloaded and refused, or could not be downloaded at three checks.",
               "type": "string"
             }
           ]
@@ -12515,7 +12515,7 @@ expression: s.redact(&all)
           "description": "Whether the install updates itself after a command, and if not, why."
         },
         "current": {
-          "description": "The installed version when the command ended.",
+          "description": "The installed version when the command ended. For the forms that ask no binary for\nits version (`--status`, `--auto`, a `--background` that stops before it looks), and\nwhere one of the two names has none, the running program's own.",
           "type": "string"
         },
         "dir": {
@@ -12587,7 +12587,7 @@ expression: s.redact(&all)
             },
             {
               "const": "failed",
-              "description": "A newer release could not be installed, and is not tried again automatically.",
+              "description": "A newer release could not be installed, and is not tried again automatically: it was\ndownloaded and refused, or could not be downloaded at three checks.",
               "type": "string"
             }
           ]
@@ -12635,7 +12635,7 @@ expression: s.redact(&all)
         },
         {
           "const": "failed",
-          "description": "A newer release could not be installed, and is not tried again automatically.",
+          "description": "A newer release could not be installed, and is not tried again automatically: it was\ndownloaded and refused, or could not be downloaded at three checks.",
           "type": "string"
         }
       ],
