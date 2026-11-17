@@ -164,6 +164,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   nothing reads the mark yet. The workflow's smoke runs set `SWARMOPS_AUTO_UPDATE=off`, and ask
   for the version with the new test hook `SWARMOPS_TEST_VERSION` set, which a release build
   ignores.
+- Four types in `schema`'s output, 198 in all, for a command that does not exist yet: `UpdateOut`
+  (the installed version, what was replaced, the latest release and its notes' page, the install
+  directory, and a note still to be printed), `AutoUpdate` (whether an install updates itself:
+  `on`, or `off_source_build`, `off_no_receipt`, `off`, `off_env`, `off_ci`, `off_container` or
+  `off_owner`, the first that holds in that order), `UpdatePending` and `UpdatePendingKind`
+  (`updated`, `available`, `failed`). No command returns them yet.
 
 ### Changed
 

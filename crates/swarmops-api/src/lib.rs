@@ -17,6 +17,7 @@ pub mod remote;
 pub mod rev;
 mod schema;
 pub mod serve;
+pub mod update;
 pub mod wire;
 
 pub use auth::{AuthEntry, AuthLogin, AuthLogout, AuthStatus};
@@ -76,6 +77,7 @@ pub use remote::{
 pub use rev::Rev;
 pub use schema::schema_for_all;
 pub use serve::{ServeRecord, ServeService};
+pub use update::{AutoUpdate, UpdateOut, UpdatePending, UpdatePendingKind};
 pub use wire::{
     MAX_CHUNK_BYTES, MAX_WIRE_IDS, MAX_WIRE_LINE, WIRE_PROTOCOL, WIRE_STALL_SECS, WireBlobWant,
     WireChunks, WireCursor, WireGetReq, WireHas, WireHasReq, WireHello, WireHelloReq, WireLandReq,

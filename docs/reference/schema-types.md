@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 194 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 198 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -16,6 +16,7 @@ The 194 request, response and value types of the API, as `swarmops schema` print
 | [`AuthLogin`](#authlogin) | object | `auth login`: the login now kept. |
 | [`AuthLogout`](#authlogout) | object | `auth logout`: the login removed, or that there was none. |
 | [`AuthStatus`](#authstatus) | object | `auth status`: the logins the user's login file holds. |
+| [`AutoUpdate`](#autoupdate) | enumeration | Whether an install updates itself after a command, and when it does not, what decided so. |
 | [`BlobGetReq`](#blobgetreq) | object | `blob_get` (M5): blobs by id, for a client that writes them out (a workspace's materialisation). |
 | [`BlobGetResp`](#blobgetresp) | object | `blob_get`: the blobs found, in the order asked, and the ids the store holds no blob under. |
 | [`BlobHasReq`](#blobhasreq) | object | `blob_has` (CLI `blob has`): which of some blobs the store holds. |
@@ -166,6 +167,9 @@ The 194 request, response and value types of the API, as `swarmops schema` print
 | [`TreeListing`](#treelisting) | object | `read_tree` (CLI `ls`): a page of a directory's entries, in pre-order: a directory, then the entries below it to the request's `depth`, each directory's entries by name bytes (at `depth` 1, the tree's order). |
 | [`UndoReq`](#undoreq) | object | `undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by compare-and-swap, in one transaction: all of them or none. |
 | [`UndoResp`](#undoresp) | object | `undo` (CLI `op undo`): the moves that restored the refs. |
+| [`UpdateOut`](#updateout) | object | `update`: what the program's version is now, and whether the install updates itself. |
+| [`UpdatePending`](#updatepending) | object | A note an automatic update left: the next command at a terminal prints it, once, and it is kept until then. |
+| [`UpdatePendingKind`](#updatependingkind) | enumeration | The kind of a note an automatic update left: what became of a newer release. |
 | [`UpgradeReq`](#upgradereq) | object | `upgrade`: move the store to the latest format this build writes. |
 | [`UpgradeResp`](#upgraderesp) | object | `upgrade`: the formats before and after. |
 | [`VerifyFinding`](#verifyfinding) | object | One problem `verify` found, as a program reads it: what kind of damage it is, and what it names. |
@@ -305,6 +309,23 @@ Kind: object. `swarmops schema AuthStatus` prints its JSON Schema.
 | --- | --- | --- | --- |
 | `file` | `string` or `null` | no | The login file, a path on the caller's host, whether or not it exists. Omitted on a host that names no directory for it. |
 | `logins` | array of [`AuthEntry`](#authentry) | yes | The logins, in the file's order; empty when there is no file or it holds none. |
+
+## AutoUpdate
+
+Whether an install updates itself after a command, and when it does not, what decided so. The values after `on` are in the order that decides: the first that holds is the answer.
+
+Kind: enumeration. `swarmops schema AutoUpdate` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"on"` | Automatic update is on: nothing below holds. |
+| `"off_source_build"` | Off: the build is no release's, but one from a clone of the source. |
+| `"off_no_receipt"` | Off: no receipt of the installer's is beside the binaries, as for a package's install or an archive unpacked by hand. |
+| `"off"` | Off: the receipt says so, as `update --auto off` or the installer wrote it. |
+| `"off_env"` | Off: `SWARMOPS_AUTO_UPDATE` is `off`, or holds a value that is neither `on` nor `off`. |
+| `"off_ci"` | Off: `CI` is set, and `SWARMOPS_AUTO_UPDATE` is not `on`. |
+| `"off_container"` | Off: the host is a container, and `SWARMOPS_AUTO_UPDATE` is not `on`. |
+| `"off_owner"` | Off: the caller is root, or the install directory is another user's. |
 
 ## BlobGetReq
 
@@ -2337,6 +2358,47 @@ Kind: object. `swarmops schema UndoResp` prints its JSON Schema.
 | `ref_moves` | array of [`RefMoveOut`](#refmoveout) | yes | The moves it made: each ref from what the operation set back to what it named before. |
 | `undone` | `integer` (uint64) | yes | The operation undone. |
 | `warnings` | array of `string` | no | Problems found after the undo became durable, such as failed housekeeping; the undo itself succeeded. Omitted when empty. |
+
+## UpdateOut
+
+`update`: what the program's version is now, and whether the install updates itself.
+
+Kind: object. `swarmops schema UpdateOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `auto_update` | [`AutoUpdate`](#autoupdate) | yes | Whether the install updates itself after a command, and if not, why. |
+| `current` | `string` | yes | The installed version when the command ended. |
+| `dir` | `string` or `null` | no | The directory the binaries are installed in, a path on the caller's host. Omitted when no receipt is beside them. |
+| `latest` | `string` or `null` | no | The latest release. Omitted when the command did not look for it. |
+| `notes` | `string` or `null` | no | The page of the latest release's notes. Omitted when the command did not look for it. |
+| `pending` | [`UpdatePending`](#updatepending) or `null` | no | The note an automatic update left that no command has printed yet. Omitted when there is none. |
+| `previous` | `string` or `null` | no | The version this run replaced. Omitted when nothing was replaced. |
+| `updated` | `boolean` | yes | Whether this run replaced the program. False when the latest release is not newer than what is installed, and for the forms of the command that install nothing. |
+
+## UpdatePending
+
+A note an automatic update left: the next command at a terminal prints it, once, and it is kept until then.
+
+Kind: object. `swarmops schema UpdatePending` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `from` | `string` or `null` | no | The version that was replaced. There for `updated` alone. |
+| `kind` | [`UpdatePendingKind`](#updatependingkind) | yes | What happened. |
+| `to` | `string` | yes | The release the note is about: the one installed, out, or not installed. |
+
+## UpdatePendingKind
+
+The kind of a note an automatic update left: what became of a newer release.
+
+Kind: enumeration. `swarmops schema UpdatePendingKind` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"updated"` | A newer release was installed. |
+| `"available"` | A newer release is out and was not installed automatically. |
+| `"failed"` | A newer release could not be installed, and is not tried again automatically. |
 
 ## UpgradeReq
 

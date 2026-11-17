@@ -395,6 +395,53 @@ expression: s.redact(&all)
       "title": "AuthStatus",
       "type": "object"
     },
+    "AutoUpdate": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Whether an install updates itself after a command, and when it does not, what decided so.\nThe values after `on` are in the order that decides: the first that holds is the answer.",
+      "oneOf": [
+        {
+          "const": "on",
+          "description": "Automatic update is on: nothing below holds.",
+          "type": "string"
+        },
+        {
+          "const": "off_source_build",
+          "description": "Off: the build is no release's, but one from a clone of the source.",
+          "type": "string"
+        },
+        {
+          "const": "off_no_receipt",
+          "description": "Off: no receipt of the installer's is beside the binaries, as for a package's install\nor an archive unpacked by hand.",
+          "type": "string"
+        },
+        {
+          "const": "off",
+          "description": "Off: the receipt says so, as `update --auto off` or the installer wrote it.",
+          "type": "string"
+        },
+        {
+          "const": "off_env",
+          "description": "Off: `SWARMOPS_AUTO_UPDATE` is `off`, or holds a value that is neither `on` nor `off`.",
+          "type": "string"
+        },
+        {
+          "const": "off_ci",
+          "description": "Off: `CI` is set, and `SWARMOPS_AUTO_UPDATE` is not `on`.",
+          "type": "string"
+        },
+        {
+          "const": "off_container",
+          "description": "Off: the host is a container, and `SWARMOPS_AUTO_UPDATE` is not `on`.",
+          "type": "string"
+        },
+        {
+          "const": "off_owner",
+          "description": "Off: the caller is root, or the install directory is another user's.",
+          "type": "string"
+        }
+      ],
+      "title": "AutoUpdate"
+    },
     "BlobGetReq": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`blob_get` (M5): blobs by id, for a client that writes them out (a workspace's\nmaterialisation). Not an MCP tool.",
@@ -12366,6 +12413,233 @@ expression: s.redact(&all)
       ],
       "title": "UndoResp",
       "type": "object"
+    },
+    "UpdateOut": {
+      "$defs": {
+        "AutoUpdate": {
+          "description": "Whether an install updates itself after a command, and when it does not, what decided so.\nThe values after `on` are in the order that decides: the first that holds is the answer.",
+          "oneOf": [
+            {
+              "const": "on",
+              "description": "Automatic update is on: nothing below holds.",
+              "type": "string"
+            },
+            {
+              "const": "off_source_build",
+              "description": "Off: the build is no release's, but one from a clone of the source.",
+              "type": "string"
+            },
+            {
+              "const": "off_no_receipt",
+              "description": "Off: no receipt of the installer's is beside the binaries, as for a package's install\nor an archive unpacked by hand.",
+              "type": "string"
+            },
+            {
+              "const": "off",
+              "description": "Off: the receipt says so, as `update --auto off` or the installer wrote it.",
+              "type": "string"
+            },
+            {
+              "const": "off_env",
+              "description": "Off: `SWARMOPS_AUTO_UPDATE` is `off`, or holds a value that is neither `on` nor `off`.",
+              "type": "string"
+            },
+            {
+              "const": "off_ci",
+              "description": "Off: `CI` is set, and `SWARMOPS_AUTO_UPDATE` is not `on`.",
+              "type": "string"
+            },
+            {
+              "const": "off_container",
+              "description": "Off: the host is a container, and `SWARMOPS_AUTO_UPDATE` is not `on`.",
+              "type": "string"
+            },
+            {
+              "const": "off_owner",
+              "description": "Off: the caller is root, or the install directory is another user's.",
+              "type": "string"
+            }
+          ]
+        },
+        "UpdatePending": {
+          "description": "A note an automatic update left: the next command at a terminal prints it, once, and it is\nkept until then.",
+          "properties": {
+            "from": {
+              "description": "The version that was replaced. There for `updated` alone.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "$ref": "#/$defs/UpdatePendingKind",
+              "description": "What happened."
+            },
+            "to": {
+              "description": "The release the note is about: the one installed, out, or not installed.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "to"
+          ],
+          "type": "object"
+        },
+        "UpdatePendingKind": {
+          "description": "The kind of a note an automatic update left: what became of a newer release.",
+          "oneOf": [
+            {
+              "const": "updated",
+              "description": "A newer release was installed.",
+              "type": "string"
+            },
+            {
+              "const": "available",
+              "description": "A newer release is out and was not installed automatically.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "A newer release could not be installed, and is not tried again automatically.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`update`: what the program's version is now, and whether the install updates itself.",
+      "properties": {
+        "auto_update": {
+          "$ref": "#/$defs/AutoUpdate",
+          "description": "Whether the install updates itself after a command, and if not, why."
+        },
+        "current": {
+          "description": "The installed version when the command ended.",
+          "type": "string"
+        },
+        "dir": {
+          "description": "The directory the binaries are installed in, a path on the caller's host. Omitted when\nno receipt is beside them.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "latest": {
+          "description": "The latest release. Omitted when the command did not look for it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notes": {
+          "description": "The page of the latest release's notes. Omitted when the command did not look for it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pending": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpdatePending"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The note an automatic update left that no command has printed yet. Omitted when there\nis none."
+        },
+        "previous": {
+          "description": "The version this run replaced. Omitted when nothing was replaced.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updated": {
+          "description": "Whether this run replaced the program. False when the latest release is not newer than\nwhat is installed, and for the forms of the command that install nothing.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "current",
+        "updated",
+        "auto_update"
+      ],
+      "title": "UpdateOut",
+      "type": "object"
+    },
+    "UpdatePending": {
+      "$defs": {
+        "UpdatePendingKind": {
+          "description": "The kind of a note an automatic update left: what became of a newer release.",
+          "oneOf": [
+            {
+              "const": "updated",
+              "description": "A newer release was installed.",
+              "type": "string"
+            },
+            {
+              "const": "available",
+              "description": "A newer release is out and was not installed automatically.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "A newer release could not be installed, and is not tried again automatically.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A note an automatic update left: the next command at a terminal prints it, once, and it is\nkept until then.",
+      "properties": {
+        "from": {
+          "description": "The version that was replaced. There for `updated` alone.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/UpdatePendingKind",
+          "description": "What happened."
+        },
+        "to": {
+          "description": "The release the note is about: the one installed, out, or not installed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "to"
+      ],
+      "title": "UpdatePending",
+      "type": "object"
+    },
+    "UpdatePendingKind": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The kind of a note an automatic update left: what became of a newer release.",
+      "oneOf": [
+        {
+          "const": "updated",
+          "description": "A newer release was installed.",
+          "type": "string"
+        },
+        {
+          "const": "available",
+          "description": "A newer release is out and was not installed automatically.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "A newer release could not be installed, and is not tried again automatically.",
+          "type": "string"
+        }
+      ],
+      "title": "UpdatePendingKind"
     },
     "UpgradeReq": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",

@@ -20,8 +20,8 @@ macro_rules! schemas {
 /// response, whose type has its own entry.
 pub fn schema_for_all() -> serde_json::Value {
     // The store's operations' types, then ancestry's, ref log's, revert's, the conflict
-    // report's touches, the maintenance's, the git remotes', the workspaces', serve's records
-    // and the logins'.
+    // report's touches, the maintenance's, the git remotes', the workspaces', serve's records,
+    // the logins' and the program's own update's.
     let mut all = store_schemas();
     let groups = [
         ancestry_schemas(),
@@ -37,6 +37,7 @@ pub fn schema_for_all() -> serde_json::Value {
         workspace_schemas(),
         serve_schemas(),
         auth_schemas(),
+        update_schemas(),
     ];
     for more in groups {
         if let (serde_json::Value::Object(all), serde_json::Value::Object(more)) = (&mut all, more)
@@ -311,4 +312,10 @@ fn serve_schemas() -> serde_json::Value {
 /// `auth status` and `auth logout` read and write one file of the user's, whose path they give.
 fn auth_schemas() -> serde_json::Value {
     schemas![AuthEntry, AuthLogin, AuthStatus, AuthLogout]
+}
+
+/// The schemas of the program's own update, which runs on the client and on no store: `update`
+/// replaces the installed binaries or says whether they update themselves.
+fn update_schemas() -> serde_json::Value {
+    schemas![UpdateOut, AutoUpdate, UpdatePending, UpdatePendingKind]
 }

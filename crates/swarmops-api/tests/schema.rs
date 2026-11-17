@@ -167,6 +167,8 @@ const RESPONSES: &[&str] = &[
     "TreeEntryOut",
     "TreeListing",
     "UndoResp",
+    "UpdateOut",
+    "UpdatePending",
     "VerifyFinding",
     "UpgradeResp",
     "VerifyReport",
@@ -188,6 +190,7 @@ const RESPONSES: &[&str] = &[
 
 /// Enums and newtypes, which have no object fields of their own.
 const SCALARS: &[&str] = &[
+    "AutoUpdate",
     "ChangeOp",
     "ConflictKindOut",
     "ContentEncoding",
@@ -217,6 +220,7 @@ const SCALARS: &[&str] = &[
     "StatusAfter",
     "SyncMode",
     "SyncStatusKind",
+    "UpdatePendingKind",
     "WsChangeKind",
     "WsRebaseAction",
     "WsState",
@@ -2009,6 +2013,111 @@ mod git_export {
                 "head_sha": "4b82", "branch": "main", "branch_moved": false,
                 "incremental": true, "rewritten": 0,
             }),
+        );
+    }
+}
+
+/// `update`'s result and the values inside it.
+mod update {
+    use serde_json::json;
+    use swarmops_api::{AutoUpdate, UpdateOut, UpdatePending, UpdatePendingKind, schema_for_all};
+
+    use super::assert_ignores_unknown_fields;
+
+    /// Whether an install updates itself is one of eight words: `on`, and one for each thing
+    /// that turns it off. The schema lists the same eight, in the order that decides.
+    #[test]
+    fn automatic_update_is_on_or_off_for_a_named_reason() {
+        let values = [
+            (AutoUpdate::On, "on"),
+            (AutoUpdate::OffSourceBuild, "off_source_build"),
+            (AutoUpdate::OffNoReceipt, "off_no_receipt"),
+            (AutoUpdate::Off, "off"),
+            (AutoUpdate::OffEnv, "off_env"),
+            (AutoUpdate::OffCi, "off_ci"),
+            (AutoUpdate::OffContainer, "off_container"),
+            (AutoUpdate::OffOwner, "off_owner"),
+        ];
+        for (value, word) in values {
+            assert_eq!(serde_json::to_value(value).unwrap(), word);
+            assert_eq!(
+                serde_json::from_value::<AutoUpdate>(json!(word)).unwrap(),
+                value
+            );
+        }
+        let all = schema_for_all();
+        let listed: Vec<&str> = all["AutoUpdate"]["oneOf"]
+            .as_array()
+            .expect("one schema a value")
+            .iter()
+            .filter_map(|one| one["const"].as_str())
+            .collect();
+        let words: Vec<&str> = values.iter().map(|(_, word)| *word).collect();
+        assert_eq!(listed, words);
+        assert!(serde_json::from_value::<AutoUpdate>(json!("maybe")).is_err());
+    }
+
+    /// A result that installed nothing and looked for nothing holds three fields; every other
+    /// one is omitted until it is known, and they are written in the documented order.
+    #[test]
+    fn an_update_result_omits_what_it_lacks() {
+        let status = UpdateOut::new("0.12.0", false, AutoUpdate::OffSourceBuild);
+        assert_eq!(
+            serde_json::to_string(&status).unwrap(),
+            r#"{"current":"0.12.0","updated":false,"auto_update":"off_source_build"}"#
+        );
+        assert_eq!(
+            schema_for_all()["UpdateOut"]["required"],
+            json!(["current", "updated", "auto_update"])
+        );
+
+        let mut pending = UpdatePending::new(UpdatePendingKind::Updated, "0.13.0");
+        pending.from = Some("0.12.0".to_owned());
+        let mut updated = UpdateOut::new("0.13.0", true, AutoUpdate::On);
+        updated.previous = Some("0.12.0".to_owned());
+        updated.latest = Some("0.13.0".to_owned());
+        updated.dir = Some("/home/me/.local/bin".to_owned());
+        updated.notes = Some("https://example.com/v0.13.0".to_owned());
+        updated.pending = Some(pending);
+        let text = serde_json::to_string(&updated).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"current":"0.13.0","previous":"0.12.0","latest":"0.13.0","updated":true,"#,
+                r#""auto_update":"on","dir":"/home/me/.local/bin","#,
+                r#""notes":"https://example.com/v0.13.0","#,
+                r#""pending":{"kind":"updated","from":"0.12.0","to":"0.13.0"}}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(serde_json::from_str::<UpdateOut>(&text).unwrap(), updated);
+        assert_ignores_unknown_fields::<UpdateOut>(
+            "UpdateOut",
+            json!({"current": "0.12.0", "updated": false, "auto_update": "on"}),
+        );
+    }
+
+    /// A pending note names its kind and the release it is about; only an update that happened
+    /// has a version it replaced.
+    #[test]
+    fn a_pending_note_is_one_of_three_kinds() {
+        for (kind, word) in [
+            (UpdatePendingKind::Updated, "updated"),
+            (UpdatePendingKind::Available, "available"),
+            (UpdatePendingKind::Failed, "failed"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&UpdatePending::new(kind, "0.13.0")).unwrap(),
+                format!(r#"{{"kind":"{word}","to":"0.13.0"}}"#)
+            );
+        }
+        assert_eq!(
+            schema_for_all()["UpdatePending"]["required"],
+            json!(["kind", "to"])
+        );
+        assert_ignores_unknown_fields::<UpdatePending>(
+            "UpdatePending",
+            json!({"kind": "available", "to": "0.13.0"}),
         );
     }
 }

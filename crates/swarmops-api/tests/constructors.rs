@@ -9,28 +9,30 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use swarmops_api::{
-    Advanced, Attribution, AuthEntry, AuthLogin, AuthLogout, AuthStatus, BlobGetReq, BlobGetResp,
-    BlobHasReq, BlobHasResp, BlobOut, BlobPutReq, BlobPutResp, BranchUpdate, ChangeInput, ChangeOp,
-    ChangeOut, ChangesetDetail, ChangesetSummary, CloneReq, CloneResp, CommitReq, CommitResp,
-    ConflictKindOut, ConflictReport, ContentEncoding, ContentInput, DeriveReq, DeriveResp, Diff,
-    DiffHunk, DiffLineOut, DiffReq, DiffStatus, DropReason, DroppedChange, EntryKindOut, ErrorCode,
-    FetchReq, FetchResp, FileConflictOut, FileContent, FileDiff, FileKind, GitExportReq,
-    GitExportResp, GitImportReq, GitImportResp, HeadMove, HunkOut, IdentityInfo, InfoReq, InitReq,
-    LandReq, LandResp, LandStatus, LineOp, LineRange, LinesOut, LogCutOut, LogPage, LogReq,
-    LossyCommitOut, Meta, OpChangesetOut, OpError, OpLogPage, OpLogReq, OperationKind,
-    OperationOut, PathHistoryEntry, PathHistoryPage, PathHistoryReq, PublishedChange, PushReq,
-    PushResp, PushStatus, ReadFileReq, ReadTreeReq, RebaseReq, RebaseResp, RebaseStatus,
-    RefDeleteReq, RefListReq, RefListResp, RefMoveOut, RefOut, RefSetReq, RefSetResp, RemoteAddReq,
-    RemoteHead, RemoteInfo, RemoteList, RemoteListReq, RemoteRemoveReq, RemoteRemoveResp, RepoInfo,
-    ResolutionInput, ResolutionsInput, ResolveRevReq, ResolvedRev, RevKind, ServeRecord,
-    ServeService, ShowReq, SignatureOut, Signatures, SyncReq, SyncResp, SyncStatus, SyncStatusKind,
-    SyncStatusReq, TreeEntryOut, TreeListing, UndoReq, UndoResp, VerifyFinding, VerifyReport,
-    VerifyReq, WsChange, WsChangeKind, WsCheckInput, WsCommitReq, WsCommitResp, WsCreateReq,
-    WsDeleteReq, WsDeleteResp, WsDiffReq, WsDiscardReq, WsDiscardResp, WsInfo, WsInfoReq,
-    WsLandReq, WsLandResp, WsList, WsListReq, WsMaterializeReq, WsMaterializeResp, WsRebaseReq,
-    WsRebaseResp, WsRebasing, WsResolveReq, WsResolveResp, WsState, WsStatus, WsStatusReq,
+    Advanced, Attribution, AuthEntry, AuthLogin, AuthLogout, AuthStatus, AutoUpdate, BlobGetReq,
+    BlobGetResp, BlobHasReq, BlobHasResp, BlobOut, BlobPutReq, BlobPutResp, BranchUpdate,
+    ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary, CloneReq, CloneResp,
+    CommitReq, CommitResp, ConflictKindOut, ConflictReport, ContentEncoding, ContentInput,
+    DeriveReq, DeriveResp, Diff, DiffHunk, DiffLineOut, DiffReq, DiffStatus, DropReason,
+    DroppedChange, EntryKindOut, ErrorCode, FetchReq, FetchResp, FileConflictOut, FileContent,
+    FileDiff, FileKind, GitExportReq, GitExportResp, GitImportReq, GitImportResp, HeadMove,
+    HunkOut, IdentityInfo, InfoReq, InitReq, LandReq, LandResp, LandStatus, LineOp, LineRange,
+    LinesOut, LogCutOut, LogPage, LogReq, LossyCommitOut, Meta, OpChangesetOut, OpError, OpLogPage,
+    OpLogReq, OperationKind, OperationOut, PathHistoryEntry, PathHistoryPage, PathHistoryReq,
+    PublishedChange, PushReq, PushResp, PushStatus, ReadFileReq, ReadTreeReq, RebaseReq,
+    RebaseResp, RebaseStatus, RefDeleteReq, RefListReq, RefListResp, RefMoveOut, RefOut, RefSetReq,
+    RefSetResp, RemoteAddReq, RemoteHead, RemoteInfo, RemoteList, RemoteListReq, RemoteRemoveReq,
+    RemoteRemoveResp, RepoInfo, ResolutionInput, ResolutionsInput, ResolveRevReq, ResolvedRev,
+    RevKind, ServeRecord, ServeService, ShowReq, SignatureOut, Signatures, SyncReq, SyncResp,
+    SyncStatus, SyncStatusKind, SyncStatusReq, TreeEntryOut, TreeListing, UndoReq, UndoResp,
+    VerifyFinding, VerifyReport, VerifyReq, WsChange, WsChangeKind, WsCheckInput, WsCommitReq,
+    WsCommitResp, WsCreateReq, WsDeleteReq, WsDeleteResp, WsDiffReq, WsDiscardReq, WsDiscardResp,
+    WsInfo, WsInfoReq, WsLandReq, WsLandResp, WsList, WsListReq, WsMaterializeReq,
+    WsMaterializeResp, WsRebaseReq, WsRebaseResp, WsRebasing, WsResolveReq, WsResolveResp, WsState,
+    WsStatus, WsStatusReq,
 };
 use swarmops_api::{SnapshotWrite, WsSnapshotReq, WsSnapshotResp};
+use swarmops_api::{UpdateOut, UpdatePending, UpdatePendingKind};
 
 /// `built`, written as JSON, cut to its schema's required fields and read back, is unchanged.
 #[track_caller]
@@ -153,6 +155,7 @@ fn every_response_new_fills_the_serde_defaults() {
     reads_back(&AuthLogin::new(AuthEntry::new("x", "x"), "x", true));
     reads_back(&AuthStatus::new(Vec::new()));
     reads_back(&AuthLogout::new("x", "x", true));
+    reads_back(&UpdateOut::new("x", true, AutoUpdate::On));
     reads_back(&RemoteRemoveResp::new("x", 7));
     reads_back(&SyncResp::new(
         "x",
@@ -274,6 +277,7 @@ fn every_shared_new_fills_the_serde_defaults() {
     reads_back(&RemoteHead::new("x", "x"));
     reads_back(&RemoteInfo::new("x", "x", "x", Vec::new()));
     reads_back(&AuthEntry::new("x", "x"));
+    reads_back(&UpdatePending::new(UpdatePendingKind::Updated, "x"));
     reads_back(&RemoteList::new(Vec::new()));
     reads_back(&RepoInfo::new("x", "x", 7, 7, 7));
     reads_back(&ResolvedRev::new("x", RevKind::Ref));
