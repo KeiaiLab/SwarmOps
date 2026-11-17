@@ -18,6 +18,9 @@
 //! addresses are constants: no flag, variable, store or answer moves a request to another host,
 //! and curl follows no redirect.
 //!
+//! The runner has one other request, which the flow does not make ([`Curl::redirect`]): a HEAD
+//! that reads where an address redirects to, and goes there no more than a posted form does.
+//!
 //! The app the login is asked in the name of is the client ID of `SWARMOPS_GH_CLIENT_ID`, else
 //! the one built in ([`client_id`]). A client ID is public; the flow uses no client secret.
 //!
@@ -30,7 +33,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, OpError};
@@ -70,10 +73,10 @@ const CURL_ENV_KEPT: [&str; 10] = [
     "CURL_CA_BUNDLE",
 ];
 
-/// What every request's configuration holds besides its address and its form: https alone, also
-/// after a redirect, of which none is followed; TLS 1.2 or later; nothing printed but the
-/// answer; ten seconds to connect and thirty in all; and the answer asked for as JSON.
-const FIXED_CONFIG: &str = concat!(
+/// What every request's configuration holds besides its address: https alone, also after a
+/// redirect, of which none is followed; TLS 1.2 or later; nothing printed but the answer; ten
+/// seconds to connect and thirty in all.
+const COMMON_CONFIG: &str = concat!(
     "proto = \"=https\"\n",
     "proto-redir = \"=https\"\n",
     "max-redirs = 0\n",
@@ -81,11 +84,27 @@ const FIXED_CONFIG: &str = concat!(
     "silent\n",
     "connect-timeout = 10\n",
     "max-time = 30\n",
+);
+
+/// What a posted form's configuration adds, before the form: no answer over 64 KiB, the answer
+/// asked for as JSON, and the program named with its version.
+const POST_CONFIG: &str = concat!(
     "max-filesize = 65536\n",
     "header = \"Accept: application/json\"\n",
     "header = \"User-Agent: swarmops/",
     env!("CARGO_PKG_VERSION"),
     "\"\n",
+);
+
+/// What the configuration of a request for a redirect adds: a HEAD, whose headers curl would
+/// print before the two lines asked for and so writes nowhere, and the program named without
+/// its version, which the host asked has no need of. No `max-filesize`: there is no body, and
+/// curl holds the bound against the length a HEAD's answer names all the same, which would
+/// make a failure of a plain 404 with a long page. The `Accept` header is curl's own.
+const REDIRECT_CONFIG: &str = concat!(
+    "head\n",
+    "output = \"/dev/null\"\n",
+    "header = \"User-Agent: swarmops-update\"\n",
 );
 
 /// The most bytes read of what a curl prints: an answer and its status line.
@@ -170,9 +189,66 @@ impl Answer {
     }
 }
 
+/// What a request for a redirect got: the HTTP status and, of a redirect, where it points; or
+/// neither when what curl printed is no such answer.
+#[allow(dead_code, reason = "`update`, which comes next, reads it")]
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Redirect {
+    /// The HTTP status.
+    pub(super) status: Option<u16>,
+    /// Where the answer redirects to, as curl resolved its `Location`; `None` when it names no
+    /// place. It is what a host said and nothing more: its reader checks it.
+    pub(super) to: Option<String>,
+}
+
+impl Redirect {
+    /// The answer in what a curl printed: the two lines [`redirect_config`] asks for and no
+    /// byte more, the address (or nothing) and the status's three digits. An address holding a
+    /// space, a control character or anything outside ASCII is no answer.
+    fn of(printed: &[u8]) -> Redirect {
+        let unread = Redirect {
+            status: None,
+            to: None,
+        };
+        if printed.len() > MAX_ANSWER_BYTES {
+            return unread;
+        }
+        let Some((to, digits)) = std::str::from_utf8(printed)
+            .ok()
+            .and_then(|printed| printed.split_once('\n'))
+        else {
+            return unread;
+        };
+        if !to.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return unread;
+        }
+        if digits.len() != 3 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return unread;
+        }
+        Redirect {
+            status: digits.parse().ok(),
+            to: (!to.is_empty()).then(|| to.to_owned()),
+        }
+    }
+}
+
+/// What runs curl, for the words of the refusal where there is none.
+pub(super) struct Caller {
+    /// What runs it, as the refusal's subject.
+    pub(super) what: &'static str,
+    /// What does without curl, which ends the hint; `None` when nothing does.
+    pub(super) without: Option<&'static str>,
+}
+
+/// The device flow, which a login with a token handed to it does without.
+pub(super) const DEVICE_FLOW: Caller = Caller {
+    what: "the device flow",
+    without: Some("a login with --with-token needs none"),
+};
+
 /// A request that got no answer.
 pub(super) enum Failed {
-    /// curl could not be run at all: the login's error, which no second try changes.
+    /// curl could not be run at all: the caller's error, which no second try changes.
     Curl(OpError),
     /// curl ran and reached no answer; `exit` is its exit code, `None` when a signal ended it.
     Network {
@@ -187,12 +263,15 @@ pub(super) struct Curl {
     binary: PathBuf,
     /// The variables of [`CURL_ENV_KEPT`] the caller has set.
     env: Vec<(&'static str, OsString)>,
+    /// What runs it.
+    caller: &'static Caller,
 }
 
 impl Curl {
-    /// The curl `env` names: [`CURL_ENV`]'s absolute path when set, else the first `curl` on
-    /// `PATH`. `E_INVALID_ARG` (`details.reason` `curl_missing`) when there is none.
-    pub(super) fn find(env: Env<'_>) -> Result<Curl, OpError> {
+    /// The curl `env` names, for `caller` to run: [`CURL_ENV`]'s absolute path when set, else
+    /// the first `curl` on `PATH`. `E_INVALID_ARG` (`details.reason` `curl_missing`) when there
+    /// is none.
+    pub(super) fn find(env: Env<'_>, caller: &'static Caller) -> Result<Curl, OpError> {
         let binary = match env(CURL_ENV).filter(|named| !named.is_empty()) {
             Some(named) => {
                 let named = PathBuf::from(named);
@@ -206,10 +285,11 @@ impl Curl {
         };
         let Some(binary) = binary else {
             let why = format!(
-                "the device flow runs curl, and there is none: {CURL_ENV} names no file by an \
-                 absolute path, or no directory of PATH holds one"
+                "{} runs curl, and there is none: {CURL_ENV} names no file by an absolute path, \
+                 or no directory of PATH holds one",
+                caller.what
             );
-            return Err(missing(why));
+            return Err(missing(caller, why));
         };
         let kept = CURL_ENV_KEPT
             .iter()
@@ -217,6 +297,7 @@ impl Curl {
         Ok(Curl {
             binary,
             env: kept.collect(),
+            caller,
         })
     }
 
@@ -227,9 +308,44 @@ impl Curl {
             let why = "a login request holds a character curl's configuration cannot carry";
             return Err(Failed::Curl(OpError::new(ErrorCode::Internal, why)));
         };
+        let (status, printed) = self.run(&config)?;
+
+        // An answer too long was not read to its end, which curl may count as a failure of its
+        // own: it is an answer all the same, and one the flow refuses.
+        if status.success() || printed.len() > MAX_ANSWER_BYTES {
+            Ok(Answer::of(&printed))
+        } else {
+            Err(Failed::Network {
+                exit: status.code(),
+            })
+        }
+    }
+
+    /// Asks `url` for its headers, in one run of curl, and follows no redirect: the answer is
+    /// the status and where a redirect points ([`Redirect`]). The request goes to `url` alone,
+    /// and no further.
+    #[allow(dead_code, reason = "`update`, which comes next, asks with it")]
+    pub(super) fn redirect(&self, url: &str) -> Result<Redirect, Failed> {
+        let Some(config) = redirect_config(url) else {
+            let why = "a request's address holds a character curl's configuration cannot carry";
+            return Err(Failed::Curl(OpError::new(ErrorCode::Internal, why)));
+        };
+        let (status, printed) = self.run(&config)?;
+        if status.success() {
+            Ok(Redirect::of(&printed))
+        } else {
+            Err(Failed::Network {
+                exit: status.code(),
+            })
+        }
+    }
+
+    /// Runs curl once with `config` as its whole request: how it ended, and what it printed, of
+    /// which no more than one byte over [`MAX_ANSWER_BYTES`] is read.
+    fn run(&self, config: &str) -> Result<(ExitStatus, Vec<u8>), Failed> {
         let cannot_run = |e: io::Error| {
             let binary = self.binary.display();
-            Failed::Curl(missing(format!("cannot run {binary}: {e}")))
+            Failed::Curl(missing(self.caller, format!("cannot run {binary}: {e}")))
         };
         let mut child = Command::new(&self.binary)
             .args(CURL_ARGS)
@@ -252,16 +368,7 @@ impl Curl {
             let _ = stdout.take(most + 1).read_to_end(&mut printed);
         }
         let status = child.wait().map_err(cannot_run)?;
-
-        // An answer too long was not read to its end, which curl may count as a failure of its
-        // own: it is an answer all the same, and one the flow refuses.
-        if status.success() || printed.len() > MAX_ANSWER_BYTES {
-            Ok(Answer::of(&printed))
-        } else {
-            Err(Failed::Network {
-                exit: status.code(),
-            })
-        }
+        Ok((status, printed))
     }
 }
 
@@ -275,7 +382,20 @@ fn config(url: &str, form: &str) -> Option<String> {
     let url = quoted(url)?;
     let form = quoted(form)?;
     Some(format!(
-        "url = {url}\n{FIXED_CONFIG}data = {form}\nwrite-out = \"\\n%{{http_code}}\"\n"
+        "url = {url}\n{COMMON_CONFIG}{POST_CONFIG}data = {form}\nwrite-out = \
+         \"\\n%{{http_code}}\"\n"
+    ))
+}
+
+/// The configuration of a request for where `url` redirects to: its headers asked for and
+/// dropped, and two lines printed, the address a redirect names (empty when the answer is
+/// none) and the HTTP status. `None` when `url` could add a line or an option of its own
+/// ([`quoted`]'s rule).
+fn redirect_config(url: &str) -> Option<String> {
+    let url = quoted(url)?;
+    Some(format!(
+        "url = {url}\n{COMMON_CONFIG}{REDIRECT_CONFIG}write-out = \
+         \"%{{redirect_url}}\\n%{{http_code}}\"\n"
     ))
 }
 
@@ -688,10 +808,13 @@ fn cause(exit: Option<i32>) -> &'static str {
     }
 }
 
-/// `E_INVALID_ARG` for a host with no curl to run (`details.reason` `curl_missing`).
-fn missing(why: String) -> OpError {
-    let hint =
-        format!("install curl, or name it with {CURL_ENV}; a login with --with-token needs none");
+/// `E_INVALID_ARG` for a host with no curl for `caller` to run (`details.reason`
+/// `curl_missing`).
+fn missing(caller: &Caller, why: String) -> OpError {
+    let hint = match caller.without {
+        Some(without) => format!("install curl, or name it with {CURL_ENV}; {without}"),
+        None => format!("install curl, or name it with {CURL_ENV}"),
+    };
     OpError::new(ErrorCode::InvalidArg, why)
         .with_details(reason("curl_missing"))
         .with_hint(hint)
@@ -1095,7 +1218,12 @@ mod tests {
         assert_eq!(ran.waits, [5; 6]);
 
         // 3. A curl that cannot be run is not tried again.
-        let gone = || Err(Failed::Curl(missing("cannot run it".to_owned())));
+        let gone = || {
+            Err(Failed::Curl(missing(
+                &DEVICE_FLOW,
+                "cannot run it".to_owned(),
+            )))
+        };
         let ran = flow(&["repo"], vec![Ok(code(900, 5)), gone()]);
         assert_eq!(
             why(&ran.ended.unwrap_err()),
@@ -1298,11 +1426,11 @@ mod tests {
             ("HOME", "/home/me"),
             ("SWARMOPS_AUTH_FILE", "/home/me/auth.toml"),
         ]);
-        let curl = Curl::find(&env).unwrap();
+        let curl = Curl::find(&env, &DEVICE_FLOW).unwrap();
         assert_eq!(curl.binary, named);
         let kept: Vec<&str> = curl.env.iter().map(|(name, _)| *name).collect();
         assert_eq!(kept, ["PATH", "HTTPS_PROXY"]);
-        let curl = Curl::find(&env_of(&[("PATH", &path), (CURL_ENV, "")])).unwrap();
+        let curl = Curl::find(&env_of(&[("PATH", &path), (CURL_ENV, "")]), &DEVICE_FLOW).unwrap();
         assert_eq!(curl.binary, on_path);
 
         // 2. A variable that names no file by an absolute path is no curl, whatever PATH holds;
@@ -1315,11 +1443,221 @@ mod tests {
             env_of(&[("PATH", &empty)]),
             env_of(&[]),
         ] {
-            let Err(error) = Curl::find(&env) else {
+            let Err(error) = Curl::find(&env, &DEVICE_FLOW) else {
                 panic!("a curl was found where there is none");
             };
             assert_eq!(why(&error), ("E_INVALID_ARG", "curl_missing"));
             assert_eq!(error.exit, 2);
         }
+    }
+
+    /// The refusal names what runs curl, and its hint what does without: the login's words
+    /// are the ones it had before the runner had a second caller.
+    #[test]
+    fn a_missing_curl_is_said_in_its_caller_s_words() {
+        const OTHER: Caller = Caller {
+            what: "another command",
+            without: None,
+        };
+
+        let Err(login) = Curl::find(&env_of(&[]), &DEVICE_FLOW) else {
+            panic!("a curl was found where there is none");
+        };
+        assert_eq!(
+            login.message,
+            "the device flow runs curl, and there is none: SWARMOPS_CURL names no file by an \
+             absolute path, or no directory of PATH holds one"
+        );
+        assert_eq!(
+            login.hint.as_deref(),
+            Some(
+                "install curl, or name it with SWARMOPS_CURL; a login with --with-token needs \
+                 none"
+            )
+        );
+
+        let Err(other) = Curl::find(&env_of(&[]), &OTHER) else {
+            panic!("a curl was found where there is none");
+        };
+        assert_eq!(why(&other), ("E_INVALID_ARG", "curl_missing"));
+        assert!(
+            other
+                .message
+                .starts_with("another command runs curl, and there is none: "),
+            "{}",
+            other.message
+        );
+        assert_eq!(
+            other.hint.as_deref(),
+            Some("install curl, or name it with SWARMOPS_CURL")
+        );
+    }
+
+    /// An address whose redirect is asked for, in these tests.
+    const LATEST: &str = "https://github.com/KeiaiLab/SwarmOps/releases/latest";
+
+    #[test]
+    fn a_redirect_is_asked_for_and_not_followed() {
+        // 1. The whole configuration: the address, the common part, a HEAD whose headers go
+        //    nowhere, the program without its version, and the two lines to print.
+        let config = redirect_config(LATEST).unwrap();
+        let want = "url = \"https://github.com/KeiaiLab/SwarmOps/releases/latest\"\n\
+                    proto = \"=https\"\n\
+                    proto-redir = \"=https\"\n\
+                    max-redirs = 0\n\
+                    tlsv1.2\n\
+                    silent\n\
+                    connect-timeout = 10\n\
+                    max-time = 30\n\
+                    head\n\
+                    output = \"/dev/null\"\n\
+                    header = \"User-Agent: swarmops-update\"\n\
+                    write-out = \"%{redirect_url}\\n%{http_code}\"\n";
+        assert_eq!(config, want);
+        assert!(!config.contains("location"), "no redirect is followed");
+        assert!(
+            !config.contains(env!("CARGO_PKG_VERSION")),
+            "the request does not say which version asks"
+        );
+        for absent in ["data", "Accept", "max-filesize"] {
+            assert!(!config.contains(absent), "{absent} in {config}");
+        }
+
+        // 2. An address that could end its quotes or its line makes no request.
+        for bad in [
+            "https://a\"b",
+            "https://a b",
+            "https://a\nhead",
+            "https://caf\u{e9}",
+        ] {
+            assert_eq!(redirect_config(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_redirect_s_answer_is_an_address_line_and_a_status() {
+        let to = "https://github.com/KeiaiLab/SwarmOps/releases/tag/v9.9.9";
+        let read = Redirect::of(format!("{to}\n302").as_bytes());
+        assert_eq!((read.status, read.to.as_deref()), (Some(302), Some(to)));
+
+        // No redirect: the address's line is empty.
+        let none = Redirect {
+            status: Some(404),
+            to: None,
+        };
+        assert_eq!(Redirect::of(b"\n404"), none);
+        assert_eq!(Redirect::of(b"\n200").status, Some(200));
+
+        // Anything else is no answer: no line break, a status that is none, a line more (a
+        // header curl printed, or an address that holds a line break), an address with a space
+        // or outside ASCII, bytes that are no text, or more than the bound.
+        let unread = Redirect {
+            status: None,
+            to: None,
+        };
+        let long = [vec![b'x'; MAX_ANSWER_BYTES - 3], b"\n302".to_vec()].concat();
+        for printed in [
+            &b""[..],
+            b"302",
+            b"https://github.com/a",
+            b"https://github.com/a\n30",
+            b"https://github.com/a\n3020",
+            b"https://github.com/a\n30x",
+            b"https://github.com/a\n302\n",
+            b"HTTP/2 302\nhttps://github.com/a\n302",
+            b"https://github.com/a\nb\n302",
+            b"https://github.com/a b\n302",
+            b"https://github.com/a\r\n302",
+            b"https://github.com/caf\xc3\xa9\n302",
+            b"https://github.com/\xff\n302",
+            &long,
+        ] {
+            assert_eq!(Redirect::of(printed), unread, "{printed:?}");
+        }
+        let fits = [vec![b'x'; MAX_ANSWER_BYTES - 4], b"\n302".to_vec()].concat();
+        assert_eq!(Redirect::of(&fits).status, Some(302));
+    }
+
+    /// Both requests through a stand-in for curl: what it is run with, and what its answer is
+    /// read as.
+    #[test]
+    fn each_request_is_one_run_of_curl() {
+        use swarmops_testkit::curl::FakeCurl;
+
+        let fake = FakeCurl::new();
+        let stand_in = fake.path();
+        let env = env_of(&[
+            (CURL_ENV, stand_in.to_str().expect("a UTF-8 path")),
+            ("PATH", "/usr/bin:/bin"),
+            ("HOME", "/home/me"),
+            ("SWARMOPS_AUTO_UPDATE", "on"),
+        ]);
+        let curl = Curl::find(&env, &DEVICE_FLOW).unwrap();
+        let ended = |asked: Result<Redirect, Failed>| match asked {
+            Ok(read) => Ok(read),
+            Err(Failed::Network { exit }) => Err(exit),
+            Err(Failed::Curl(error)) => panic!("curl was not run: {error:?}"),
+        };
+
+        // 1. A redirect, an answer that is none, a failure of curl's, and a curl that printed
+        //    the headers before the two lines.
+        let to = "https://github.com/KeiaiLab/SwarmOps/releases/tag/v9.9.9";
+        fake.print(&format!("{to}\n302"))
+            .print("\n404")
+            .fail(7)
+            .print("HTTP/2 302\nlocation: /a\n\nhttps://github.com/a\n302");
+        let found = Redirect {
+            status: Some(302),
+            to: Some(to.to_owned()),
+        };
+        assert_eq!(ended(curl.redirect(LATEST)), Ok(found));
+        let none = Redirect {
+            status: Some(404),
+            to: None,
+        };
+        assert_eq!(ended(curl.redirect(LATEST)), Ok(none));
+        assert_eq!(ended(curl.redirect(LATEST)), Err(Some(7)));
+        let unread = Redirect {
+            status: None,
+            to: None,
+        };
+        assert_eq!(ended(curl.redirect(LATEST)), Ok(unread));
+
+        // 2. A posted form, by the same runner.
+        fake.answer(200, "{\"a\": 1}");
+        let Ok(answer) = curl.post(DEVICE_CODE_URL, "client_id=x") else {
+            panic!("the form got no answer");
+        };
+        assert_eq!(answer.status, Some(200));
+        assert_eq!(answer.said().unwrap()["a"], 1);
+
+        // 3. Every run: the three arguments, the request on stdin, and of the caller's
+        //    variables only the listed ones.
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 5);
+        for call in &calls {
+            assert_eq!(call.args, CURL_ARGS);
+            for name in ["HOME", "SWARMOPS_AUTO_UPDATE", CURL_ENV] {
+                assert!(
+                    !call.env.iter().any(|set| set == name),
+                    "{name} was passed on"
+                );
+            }
+            assert!(call.env.iter().any(|set| set == "PATH"), "{:?}", call.env);
+        }
+        for call in &calls[..4] {
+            assert_eq!(call.stdin, redirect_config(LATEST).unwrap());
+        }
+        assert_eq!(
+            calls[4].stdin,
+            config(DEVICE_CODE_URL, "client_id=x").unwrap()
+        );
+
+        // 4. An address curl's configuration cannot carry is never asked: no run.
+        let Err(Failed::Curl(error)) = curl.redirect("https://github.com/a b") else {
+            panic!("an address with a space was asked");
+        };
+        assert_eq!(error.code, "E_INTERNAL");
+        assert_eq!(fake.calls().len(), 5);
     }
 }

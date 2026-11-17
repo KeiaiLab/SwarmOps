@@ -80,7 +80,7 @@ fn device_login(ctx: &Ctx<'_>, asked: &[String]) -> Result<AuthLogin, OpError> {
     let client_id = device_flow::client_id(ctx.env)?;
     let file = auth::file(ctx.env)?;
     auth::can_keep(file.as_deref(), Provider::Gh)?;
-    let curl = Curl::find(ctx.env)?;
+    let curl = Curl::find(ctx.env, &device_flow::DEVICE_FLOW)?;
 
     // 2. The flow: the code on stderr, then the wait for its approval.
     let granted = device_flow::grant(
