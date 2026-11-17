@@ -37,8 +37,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   it holds the mark for the installed minor line (the file `auto-update-from-<major>.<minor>`,
   asked for by one more HEAD request), notes a release without the mark at its second sighting,
   does not try a release again that it downloaded and could not install, and tries one that
-  could not be downloaded at the next two checks before it counts it as failed. It works only on an install with the installer's receipt, in a release's build: otherwise
-  `E_INVALID_ARG` with `details.reason` `no_receipt` (a package, an archive unpacked by hand) or
+  could not be downloaded, or whose installer ended with no exit code or without a line of its
+  own, at the next two checks before it counts it as failed. It works only on an install with
+  the installer's receipt, in a release's build: otherwise `E_INVALID_ARG` with
+  `details.reason` `no_receipt` (a package, an archive unpacked by hand) or
   `not_a_release_build` (a clone); also `receipt`, `exe_unknown` and `curl_missing`. A second
   update of the same install is `E_BUSY` (`details.reason` `update_running`); a releases page
   that does not answer with a redirect to a release's page is `E_REMOTE_UNREACHABLE`

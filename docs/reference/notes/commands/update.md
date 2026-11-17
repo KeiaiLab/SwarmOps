@@ -171,8 +171,9 @@ that runs:
    build for) or because a staged binary is not the release, is remembered as failed at once,
    with the note `failed <to> <the installer's last line>`. One that could not be downloaded,
    was stopped at the three minutes, or could not be renamed into place may go well another
-   day: the try is counted and nothing is said, the next day's check tries again, and the third
-   try that fails is remembered as the failure, with its note.
+   day, and so may one whose installer ended with no exit code or without a line of its own,
+   which named nothing it refused: the try is counted and nothing is said, the next day's check
+   tries again, and the third try that fails is remembered as the failure, with its note.
 4. **404**, no such file: the release is announced, not installed. The first time a release is
    seen unmarked, only that is remembered; the note `available <to>` is written the next time it
    is still unmarked, and once. A release is the latest before its marks are uploaded.

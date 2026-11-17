@@ -123,6 +123,10 @@ const MAX_QUOTED_CHARS: usize = 200;
 /// the archive, or its SHA256SUMS.
 const NOT_FETCHED: &str = "Cannot download ";
 
+/// What [`last_line`] gives for an installer that printed no line: it refused nothing in
+/// words of its own.
+const SAID_NOTHING: &str = "it said nothing";
+
 /// The mode of the files written beside the binaries: the installer's for its receipt.
 const FILE_MODE: u32 = 0o644;
 
@@ -396,14 +400,23 @@ fn compared(out: &mut UpdateOut, installed: Option<&Version>, latest: &Version) 
 
 /// Whether `error`, an update's, says that the release was fetched and refused, which no later
 /// try changes: the staged binaries are not the release's (`details.step` `verify`), or the
-/// installer ended with a line that is not a download's ([`NOT_FETCHED`]). Anything else may
-/// pass: a download that failed, an installer that was stopped at its deadline or could not
-/// run, a file that could not be renamed or removed.
+/// installer ended with an exit code and a line of its own that is not a download's
+/// ([`NOT_FETCHED`]). Anything else may pass: a download that failed, an installer that was
+/// stopped at its deadline or could not run, one that ended with no exit code (a signal ended
+/// it, at whatever it was doing) or without a line ([`SAID_NOTHING`]: it named nothing it
+/// refused), a file that could not be renamed or removed.
 fn was_refused(error: &OpError) -> bool {
     let detail = |name: &str| error.details.get(name).and_then(Value::as_str);
     match detail("step") {
         Some("verify") => true,
-        Some("install") => detail("installer").is_some_and(|line| !line.starts_with(NOT_FETCHED)),
+        Some("install") => {
+            let exited = error
+                .details
+                .get("installer_exit")
+                .is_some_and(Value::is_number);
+            let refused = |line: &str| line != SAID_NOTHING && !line.starts_with(NOT_FETCHED);
+            exited && detail("installer").is_some_and(refused)
+        }
         _ => false,
     }
 }
@@ -1075,7 +1088,7 @@ fn last_line(stderr: &[u8]) -> String {
     let said = lines()
         .find_map(|line| line.strip_prefix(INSTALLER_PREFIX))
         .or_else(|| lines().next())
-        .unwrap_or("it said nothing");
+        .unwrap_or(SAID_NOTHING);
     let cut: String = said.trim().chars().take(MAX_QUOTED_CHARS).collect();
     output::printable(&cut)
 }
@@ -1373,8 +1386,9 @@ mod tests {
             last_line(b"sh: 1: uname: not found\n"),
             "sh: 1: uname: not found"
         );
-        assert_eq!(last_line(b""), "it said nothing");
-        assert_eq!(last_line(b"\n  \n"), "it said nothing");
+        assert_eq!(last_line(b""), SAID_NOTHING);
+        assert_eq!(last_line(b"\n  \n"), SAID_NOTHING);
+        assert_eq!(SAID_NOTHING, "it said nothing");
         // No control character reaches an envelope or a terminal, and no line is long.
         let hostile = format!("swarmops-install: a\u{1b}[2Jb {}\n", "x".repeat(500));
         let line = last_line(hostile.as_bytes());
@@ -1786,19 +1800,20 @@ mod tests {
 
     #[test]
     fn only_a_release_that_was_fetched_and_refused_is_not_tried_again() {
-        let installer = |line: &str| {
+        let ended = |exit: Option<i32>, line: &str| {
             let mut details = step_details("install");
-            details.insert("installer_exit".to_owned(), 1.into());
+            details.insert("installer_exit".to_owned(), exit.into());
             details.insert("installer".to_owned(), line.into());
             failed_step("install", "the installer did not install").with_details(details)
         };
+        let installer = |line: &str| ended(Some(1), line);
 
         // 1. Refused: what the installer checked, and what the staged binaries said.
         for line in [
             "x.tar.gz does not match its line in SHA256SUMS: nothing was installed.",
             "SwarmOps 1.2.3 has no macOS build (its SHA256SUMS lists no x.tar.gz):",
             "This system has glibc 2.17; the release binaries need 2.28 or newer.",
-            "it said nothing",
+            "sh: 1: uname: not found",
         ] {
             assert!(was_refused(&installer(line)), "{line}");
         }
@@ -1810,6 +1825,19 @@ mod tests {
             "Cannot download https://example.com/v1.2.3/SHA256SUMS.",
         ] {
             assert!(!was_refused(&installer(line)), "{line}");
+        }
+
+        // And an installer that refused nothing in words of its own: one that ended with no
+        // exit code, as a signal ends it, whatever its last line was, and one that said
+        // nothing, as `last_line` gives it.
+        let mismatch = "x.tar.gz does not match its line in SHA256SUMS: nothing was installed.";
+        assert!(was_refused(&ended(Some(1), mismatch)));
+        assert!(!was_refused(&ended(None, mismatch)));
+        assert!(!was_refused(&ended(None, "Terminated")));
+        for silent in [last_line(b""), last_line(b"\n  \n")] {
+            assert!(!was_refused(&ended(Some(1), &silent)), "{silent}");
+            assert!(!was_refused(&ended(Some(137), &silent)), "{silent}");
+            assert!(!was_refused(&ended(None, &silent)), "{silent}");
         }
         let mut stopped = step_details("install");
         stopped.insert("deadline_s".to_owned(), 180.into());
