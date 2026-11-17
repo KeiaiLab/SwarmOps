@@ -89,6 +89,8 @@ has expired is kept all the same.
 error (`E_INVALID_ARG`, exit 2) that keeps nothing, and its envelope quotes no word of the line:
 the message is a fixed one and the hint is the command's usage. A line that lacks `--gh`, or
 that has both `--with-token` and `--scope`, is answered in clap's words, which name flags alone.
+A token typed as the value of `--scope` is refused as a scope (`details.reason` `scope`), by a
+message that states what a scope is and does not quote the value.
 The token was still in an argument, where a process list and a shell's history show it: revoke
 such a token.
 

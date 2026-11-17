@@ -143,7 +143,8 @@ these are vulnerabilities:
   and with no keyring: the file is made with mode `0600` in a directory made with mode `0700`, and
   any process that runs as the same user can read it. The token is read from stdin, never from an
   argument, or granted by the provider's device flow (below); a usage error of `auth login`
-  quotes nothing of its line but its flags' names, so that a token typed as an argument is not
+  quotes nothing of its line but its flags' names, and the refusal of a `--scope` that is no
+  scope states the rule without the value, so that a token typed as an argument is not
   repeated in the envelope. A login file that is a symbolic link, or that its group or others can read or write,
   is refused, and so is a file that is not the one its path named when the path was looked at
   without following a link (a link put there before the open is not read through). A read

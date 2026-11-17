@@ -127,7 +127,7 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_INVALID_ARG",
-        "message": "--scope: \"Not A Scope\" is not 1 to 64 lower-case letters, underscores and colons",
+        "message": "--scope: a scope is 1 to 64 lower-case letters, underscores and colons",
         "retryable": false,
         "exit": 2,
         "details": {

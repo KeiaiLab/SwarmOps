@@ -245,6 +245,26 @@ fn no_token_in(replies: &[Reply]) {
     }
 }
 
+/// A token typed as a scope is refused as one (exit 2, `details.reason` `scope`) and not
+/// repeated: such a line parses, so the refusal is the scope's own, which states the rule
+/// without the value.
+fn no_scope_is_quoted(env: &[(&str, &str)]) {
+    let glued = format!("--scope={LOGIN_TOKEN}");
+    let lines: [&[&str]; 3] = [
+        &["auth", "login", "--gh", "--scope", LOGIN_TOKEN],
+        &["auth", "login", "--gh", &glued],
+        &["auth", "login", "--gh", "--scope", "repo", &glued],
+    ];
+    for line in lines {
+        let refused = Session::run_raw(env, line, None);
+        assert_eq!(refused.exit, 2, "{line:?}");
+        let printed = format!("{}{}", refused.stdout, refused.stderr);
+        assert!(!printed.contains(LOGIN_TOKEN), "{line:?}: {printed}");
+        let scope = r#""reason":"scope""#;
+        assert!(printed.contains(scope), "{line:?}: {printed}");
+    }
+}
+
 /// What a usage error of `auth login` says when clap's own message would quote the line.
 const AUTH_LOGIN_USAGE: &str = "auth login: the arguments are not as its usage has them; none is \
                                 quoted here, since one may be a token (--with-token takes no \
@@ -350,6 +370,10 @@ fn auth_login_refusals_golden() {
         let printed = format!("{}{}", refused.stdout, refused.stderr);
         assert!(!printed.contains(LOGIN_TOKEN), "{line:?}: {printed}");
     }
+
+    // 6. Nor is a token typed as a scope, with or without an app to ask in the name of.
+    no_scope_is_quoted(&env);
+    no_scope_is_quoted(&app);
 
     // Nothing was refused into a file.
     assert!(!Path::new(&file).exists());

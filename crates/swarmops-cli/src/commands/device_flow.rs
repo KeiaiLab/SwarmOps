@@ -326,7 +326,8 @@ fn is_client_id(id: &str) -> bool {
 
 /// The scopes to ask for: `asked` (`--scope`), each once, or `repo` alone when it names none.
 /// `E_INVALID_ARG` (`details.reason` `scope`) for one that is not 1 to 64 lower-case letters,
-/// underscores and colons.
+/// underscores and colons. The refusal states the rule and quotes no value: a token typed where
+/// a scope goes is an argument like any other of `auth login`, and no envelope repeats one.
 pub(super) fn scopes(asked: &[String]) -> Result<Vec<String>, OpError> {
     if asked.is_empty() {
         return Ok(vec![DEFAULT_SCOPE.to_owned()]);
@@ -334,9 +335,7 @@ pub(super) fn scopes(asked: &[String]) -> Result<Vec<String>, OpError> {
     let mut scopes: Vec<String> = Vec::new();
     for scope in asked {
         if !is_scope(scope) {
-            let why = format!(
-                "--scope: {scope:?} is not 1 to 64 lower-case letters, underscores and colons"
-            );
+            let why = "--scope: a scope is 1 to 64 lower-case letters, underscores and colons";
             return Err(OpError::new(ErrorCode::InvalidArg, why).with_details(reason("scope")));
         }
         if !scopes.contains(scope) {
@@ -1261,6 +1260,18 @@ mod tests {
         ] {
             let error = named(&["repo", bad]).unwrap_err();
             assert_eq!(why(&error), ("E_INVALID_ARG", "scope"), "{bad:?}");
+        }
+
+        // The refusal quotes no value: a token typed where a scope goes is not repeated.
+        for typed in [TOKEN, "example words", "Repo"] {
+            let error = named(&["repo", typed]).unwrap_err();
+            assert_eq!(why(&error), ("E_INVALID_ARG", "scope"), "{typed:?}");
+            let shown = format!("{error:?}");
+            assert!(!shown.contains(typed), "{typed} in {shown}");
+            assert_eq!(
+                error.message,
+                "--scope: a scope is 1 to 64 lower-case letters, underscores and colons"
+            );
         }
     }
 
