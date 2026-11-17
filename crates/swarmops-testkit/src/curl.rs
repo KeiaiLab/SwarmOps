@@ -4,7 +4,7 @@
 //!
 //! ```text
 //!   so auth login --gh ── SWARMOPS_CURL=<dir>/curl ── the stand-in
-//!                              request n:  its arguments, stdin and variables ──► <dir>/calls/
+//!                              request n:  its arguments, stdin and variables ──► <dir>/calls/<n>/
 //!                              answer n:   what the test queued ◄── <dir>/answers/
 //! ```
 //!
@@ -12,7 +12,8 @@
 //! stand-in records what it was run with ([`FakeCurl::calls`]) and prints the next answer the
 //! test queued ([`FakeCurl::answer`], [`FakeCurl::print`], [`FakeCurl::fail`]); a run with no
 //! answer left prints nothing and exits 97. Its directory is written into the script, as the
-//! product clears its children's environment.
+//! product clears its children's environment. A run takes its number by making its directory,
+//! which only one of several runs at once can: each has a number, and an answer, of its own.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,15 +29,15 @@ pub const CURL_ENV: &str = "SWARMOPS_CURL";
 /// The exit code of a run of the stand-in that had no answer queued.
 pub const NO_ANSWER_EXIT: i32 = 97;
 
-/// The stand-in: records a run, then prints its answer and exits with its code. It runs `cat`
-/// and `env` by their paths, since the product may give it no `PATH`.
+/// The stand-in: records a run, then prints its answer and exits with its code. It runs
+/// `mkdir`, `cat` and `env` by their paths, since the product may give it no `PATH`.
 const SCRIPT: &str = r#"#!/bin/sh
 dir=@DIR@
 n=1
-while [ -e "$dir/calls/$n.args" ]; do n=$((n + 1)); done
-for arg in "$@"; do printf '%s\n' "$arg"; done > "$dir/calls/$n.args"
-/bin/cat > "$dir/calls/$n.stdin"
-/usr/bin/env > "$dir/calls/$n.env"
+while ! /bin/mkdir "$dir/calls/$n" 2>/dev/null; do n=$((n + 1)); done
+for arg in "$@"; do printf '%s\n' "$arg"; done > "$dir/calls/$n/args"
+/bin/cat > "$dir/calls/$n/stdin"
+/usr/bin/env > "$dir/calls/$n/env"
 [ -e "$dir/answers/$n.exit" ] || exit 97
 /bin/cat "$dir/answers/$n.out"
 read -r code < "$dir/answers/$n.exit"
@@ -106,25 +107,25 @@ impl FakeCurl {
     /// Queues `printed` and `exit` for the next run without an answer.
     fn queue(&self, printed: &str, exit: i32) -> &FakeCurl {
         let answers = self.dir.path().join("answers");
-        let n = numbered(&answers, "exit").len() + 1;
+        let n = numbered(&answers, Some("exit")).len() + 1;
         fs::write(answers.join(format!("{n}.out")), printed).expect("queue an answer");
         fs::write(answers.join(format!("{n}.exit")), format!("{exit}\n")).expect("queue an exit");
         self
     }
 
-    /// The runs so far, in order.
+    /// The runs so far that have ended, in the order of their numbers. A run still going has
+    /// its number, and no record yet that is whole.
     pub fn calls(&self) -> Vec<CurlCall> {
         let calls = self.dir.path().join("calls");
         let read = |file: PathBuf| fs::read_to_string(file).expect("read a run's record");
-        numbered(&calls, "args")
+        numbered(&calls, None)
             .into_iter()
-            .map(|n| CurlCall {
-                args: read(calls.join(format!("{n}.args")))
-                    .lines()
-                    .map(str::to_owned)
-                    .collect(),
-                stdin: read(calls.join(format!("{n}.stdin"))),
-                env: read(calls.join(format!("{n}.env")))
+            .map(|n| calls.join(n.to_string()))
+            .filter(|call| call.join("env").is_file())
+            .map(|call| CurlCall {
+                args: read(call.join("args")).lines().map(str::to_owned).collect(),
+                stdin: read(call.join("stdin")),
+                env: read(call.join("env"))
                     .lines()
                     .filter_map(|line| line.split_once('='))
                     .map(|(name, _)| name.to_owned())
@@ -134,12 +135,13 @@ impl FakeCurl {
     }
 }
 
-/// The numbers `n` of the files `<n>.<extension>` in `dir`, in order.
-fn numbered(dir: &Path, extension: &str) -> Vec<usize> {
+/// The numbers `n` of the entries `<n>.<extension>` in `dir`, or `<n>` for no extension, in
+/// order.
+fn numbered(dir: &Path, extension: Option<&str>) -> Vec<usize> {
     let mut numbers: Vec<usize> = fs::read_dir(dir)
         .expect("read the stand-in's directory")
         .map(|entry| entry.expect("an entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == extension))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == extension)
         .filter_map(|path| path.file_stem()?.to_str()?.parse().ok())
         .collect();
     numbers.sort_unstable();
@@ -196,5 +198,48 @@ mod tests {
         assert_eq!((calls[1].args.len(), calls[1].stdin.as_str()), (0, ""));
         assert_eq!(calls[2].args, ["two words", "x"]);
         assert_eq!(calls[2].stdin, "second request\n");
+    }
+
+    /// Runs at once each take a number of their own: none writes over another's record, and no
+    /// answer is given twice.
+    #[test]
+    fn runs_at_once_each_have_their_own_number_and_answer() {
+        const RUNS: usize = 24;
+        let curl = FakeCurl::new();
+        for n in 0..RUNS {
+            curl.print(&format!("answer {n}"));
+        }
+        let start = std::sync::Barrier::new(RUNS);
+        let printed: Vec<String> = std::thread::scope(|scope| {
+            let runs: Vec<_> = (0..RUNS)
+                .map(|n| {
+                    let (curl, start) = (&curl, &start);
+                    scope.spawn(move || {
+                        start.wait();
+                        let output = run(curl, &[&format!("run {n}")], "");
+                        assert_eq!(output.status.code(), Some(0));
+                        String::from_utf8(output.stdout).expect("UTF-8 output")
+                    })
+                })
+                .collect();
+            runs.into_iter()
+                .map(|run| run.join().expect("a run"))
+                .collect()
+        });
+
+        let mut answers = printed;
+        answers.sort_unstable();
+        let mut queued: Vec<String> = (0..RUNS).map(|n| format!("answer {n}")).collect();
+        queued.sort_unstable();
+        assert_eq!(answers, queued, "each answer once");
+        let mut ran: Vec<String> = curl
+            .calls()
+            .into_iter()
+            .map(|call| call.args.concat())
+            .collect();
+        ran.sort_unstable();
+        let mut expected: Vec<String> = (0..RUNS).map(|n| format!("run {n}")).collect();
+        expected.sort_unstable();
+        assert_eq!(ran, expected, "each run's record");
     }
 }
