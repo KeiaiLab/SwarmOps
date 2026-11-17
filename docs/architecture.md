@@ -882,7 +882,8 @@ in the CLI. `op_log` shows the journal as the store's operations, a frame each (
 `undo` moves an operation's refs back by compare-and-swap, `main` only forward.
 
 Every run of `swarmops` prints exactly one envelope on stdout (only `--help` and `--version` print
-plain text, `mcp`, below, speaks MCP there instead, `serve` git's protocol, and `derive --follow`
+plain text, and so does a line that names no command when stdout is a terminal and nothing asks
+for the envelope, `mcp`, below, speaks MCP there instead, `serve` git's protocol, and `derive --follow`
 prints one envelope a line for each run that derived something, and nothing for a run that derived
 nothing, so a follower that has caught up prints nothing):
 

@@ -27,7 +27,9 @@ to the weakest:
    `{ok, op, api, result | error{code, message, retryable, exit, details, hint}, meta}` (but
    for `--help` and `--version`, which print plain text, `mcp` and `serve`, which speak MCP and
    git's protocol there, `auth git-credential`, which answers git as a credential helper, and
-   `derive --follow`, which prints one envelope a line for each run that derived something), with
+   `derive --follow`, which prints one envelope a line for each run that derived something, and
+   a line that names no command at a terminal, which prints its help screen with the usage
+   error's exit code 2 unless `--json` or `SWARMOPS_FORMAT=json` asks for the envelope), with
    `api` 1; the `E_*` error codes, each with its fixed exit code (1 to 6, 3 for a conflict; 0
    is success) and its `retryable` flag; the commands, their flags and the grammar
    of their arguments, such as revisions and change lists (operations spec §0, §1); and the

@@ -34,6 +34,10 @@ If the shell says `command not found`, [Install SwarmOps on Linux](install.md) i
 command, checked against the release's `SHA256SUMS`. `so` is the short form of `swarmops`; every
 command runs the same by either name.
 
+`so --help` lists the commands in groups, with a few examples; `so <command> --help` explains one
+command, and `so ws --help` a family of them. Typed at a terminal, `so` alone prints the same
+screen.
+
 ## 2. How do I create a store?
 
 Name the store and your identity, then create the store:

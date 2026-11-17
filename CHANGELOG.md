@@ -141,6 +141,19 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Changed
 
+- `swarmops --help` (and `-h`, and `swarmops help`) is a screen of its own instead of clap's flat
+  list: the commands in seven named groups, in the order a newcomer needs them, each with a
+  summary of at most 60 characters, then examples, what a command prints, where to read more,
+  and the options, at most 80 columns wide. The help of each command that only groups
+  subcommands (`ws`, `ref`, `op`, `blob`, `git`, `remote`, `auth`) has the same shape, with its
+  subcommands, an example or two and its guide. No other command's help changes, nor the
+  reference pages' text of any command. Help text stays outside the contract.
+- A line that names no command, `swarmops` alone or one of `ws`, `ref`, `op`, `blob`, `git` and
+  `auth` alone, prints its help screen on stdout when stdout is a terminal, instead of its usage
+  error's envelope; the exit code stays 2. `--json`, or `SWARMOPS_FORMAT=json` without
+  `--human`, asks for the envelope at a terminal too. Where stdout is a pipe or a file nothing
+  changes: the same `E_INVALID_ARG` envelope, byte for byte, so no script or agent sees a
+  difference unless it runs under a pseudo-terminal without either.
 - `clone`, `fetch`, `push`, `sync` and `remote add` send the token of the login kept for a
   remote's host (`auth login`) to an https remote (or an http one at a loopback address) that
   names no `--token-env`. A remote that names a variable goes with the variable alone, set or

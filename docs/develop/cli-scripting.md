@@ -95,7 +95,9 @@ for a missing subcommand (`'so' requires a subcommand but one was not provided`)
 
 Three runs print no envelope. `derive --follow` prints one envelope a line for each run that
 derived something, `mcp` speaks MCP on stdout, and `auth git-credential` answers git there as a
-credential helper, with a failure's envelope on stderr. And a run that meets one of the store's four documented
+credential helper, with a failure's envelope on stderr. `--help`, `--version` and the `help`
+subcommand print plain text, and so does a line that names no command when a terminal reads it
+([Exit codes](#exit-codes)). And a run that meets one of the store's four documented
 aborts prints no envelope at all: the process aborts, saying why on stderr. A script should treat
 stdout that is not one JSON object as a failure of its own.
 
@@ -197,6 +199,13 @@ exit=2
 ```
 
 A usage error is an envelope too, on stdout, with `op` naming the command as far as it parsed.
+
+One usage error prints something else for a person: a line that names no command, `swarmops`
+alone or a command that only groups subcommands alone (`swarmops ws`), prints its help screen
+instead of the envelope when stdout is a terminal and neither `--json` nor, without `--human`,
+`SWARMOPS_FORMAT=json` asks for the envelope. The exit code is 2 either way. A script's stdout is
+a pipe or a file, so a script always gets the envelope; one that runs under a pseudo-terminal
+sets `SWARMOPS_FORMAT=json` or passes `--json`.
 
 ## jq recipes
 

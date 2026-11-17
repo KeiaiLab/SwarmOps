@@ -1314,7 +1314,10 @@ so log -n many
 then its details as `details.<key>` lines, `retryable: true` when it is, and the hint. The text
 is for a person to read; a program reads the JSON.
 
-Of the commands here, only `--help`, `--version` and the `help` subcommand print plain text. A run that meets one of
+Of the commands here, only `--help`, `--version` and the `help` subcommand print plain text; so
+does `so` alone, or `so ref` or `so op` alone, at a terminal, where it prints its help screen
+instead of its usage error's envelope unless `--json` or `SWARMOPS_FORMAT=json` asks for the
+envelope. A run that meets one of
 the store's four documented aborts prints no envelope: the process aborts, saying why on stderr.
 
 ### Commands and their operation names

@@ -133,7 +133,10 @@ The exit code is `error.exit`: 0 success, 1 error, 2 usage, 3 conflict, 4 retrya
 policy, 6 not found. An MCP tool's result is the same envelope. `derive --follow` prints one
 envelope a line, `--help`, `--version` and the `help` subcommand print plain text, `mcp` speaks
 MCP on stdout instead, and `auth git-credential` answers git there as a credential helper; a run that meets one of the store's four documented aborts prints no
-envelope.
+envelope. A line that names no command (`swarmops`, `swarmops ws`) is a usage error with an
+envelope like any other; only at a terminal, and only when neither `--json` nor
+`SWARMOPS_FORMAT=json` asks for the envelope, it prints its help screen instead, with the same
+exit code 2.
 
 Explained in: [CLI scripting, The envelope](develop/cli-scripting.md#the-envelope) ·
 [architecture, The contract](architecture.md#the-contract).
