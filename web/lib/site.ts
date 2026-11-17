@@ -11,7 +11,7 @@ export const SITE_TAGLINE =
 
 // Install: the installer line and the platforms it serves (scripts/install.sh).
 export const INSTALL_LINE = 'curl -fsSL https://get.swarmops.cc/install.sh | bash';
-export const PLATFORMS = ['Linux x86_64', 'Linux aarch64'];
+export const PLATFORMS = ['Linux x86_64', 'Linux aarch64', 'macOS aarch64'];
 
 // Addresses other pages link to.
 export const QUICK_START_URL = '/docs/guides/quick-start';

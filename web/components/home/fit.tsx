@@ -20,7 +20,7 @@ const COLUMNS: { title: string; items: ReactNode[] }[] = [
     title: 'Do not use it when',
     items: [
       <>You need git parity: user hooks, signing, submodules or LFS.</>,
-      <>You need macOS or Windows: Linux only, for now.</>,
+      <>You need Windows or an Intel Mac.</>,
       <>
         Several hosts write into one store: one host writes at a time today.
       </>,

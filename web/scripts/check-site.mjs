@@ -23,7 +23,7 @@
 //   feature-words      Home: each feature <= 45 words with exactly one guide link [S13]
 //   home-words         Home: <= 1,200 words in main outside pre [S14]
 //   copy-control       Home: button[data-copy] with a name, a live region, the line as text [S6]
-//   platforms          Home's architectures equal the target triples of out/install.sh [S8]
+//   platforms          Home names the systems and architectures out/install.sh installs [S8]
 //   mcp-command        Home's MCP registration line occurs byte for byte in the MCP guide [S11]
 //   next-version       product pages: a version in a "next" sentence is above the latest [S17]
 //   tool-comparison    product pages: a comparison with git says it is from the design [S20]
@@ -296,8 +296,9 @@ const TOOL_COMPARE = /\b(faster|slower|smaller|larger|fewer|cheaper|quicker)\b|Ã
 const DESIGN_ONLY = /from the design/i; // S20
 const NO_BENCHMARK = /no benchmark/i; // S20
 const ARCH_WORDS = /\b(x86_64|aarch64|arm64|amd64|armv7|i686|riscv64|ppc64le|s390x)\b/g; // S8
-const TRIPLE = /\b([a-z0-9_]+)-unknown-linux-(?:gnu|musl)\b/g; // S8
-const UNSUPPORTED = ['macOS', 'Windows']; // S8
+const TRIPLE = /\b([a-z0-9_]+)-(unknown-linux|apple-darwin)\b/g; // S8
+const SYSTEM_NAMES = { 'unknown-linux': 'Linux', 'apple-darwin': 'macOS' }; // S8
+const UNSUPPORTED = ['Windows', 'Intel Mac']; // S8
 const MCP_SERVER = ' -- swarmops mcp'; // S11
 const NEXT_WORD = /\bnext\b/i; // S17
 const VERSION = /\bv?(\d+)\.(\d+)\.(\d+)\b/g; // S17
@@ -825,8 +826,8 @@ function copyControl(site) {
   return found;
 }
 
-// S8: the architectures Home names equal those of out/install.sh's target triples, and Home
-// names the platforms without a build.
+// S8: the architectures Home names equal those of out/install.sh's target triples, Home names
+// each system a triple is for, and Home names the platforms without a build.
 function platforms(site) {
   const found = [];
   const html = homeOf(site, found);
@@ -834,12 +835,17 @@ function platforms(site) {
   if (html === null || !existsSync(script)) {
     return [...found, 'install.sh:0: missing'];
   }
-  const built = new Set([...readFileSync(script, 'utf8').matchAll(TRIPLE)].map((m) => m[1]));
+  const triples = [...readFileSync(script, 'utf8').matchAll(TRIPLE)];
+  const built = new Set(triples.map((m) => m[1]));
+  const systems = new Set(triples.map((m) => SYSTEM_NAMES[m[2]]));
   const text = textOf(mainOf(html).inner);
   const named = new Set([...text.matchAll(ARCH_WORDS)].map((m) => m[1]));
   const same = built.size > 0 && built.size === named.size && [...built].every((a) => named.has(a));
   if (!same) {
     found.push(`${HOME}:1: Home names ${[...named].join(', ') || 'no architecture'}; install.sh builds ${[...built].join(', ')}`);
+  }
+  for (const system of [...systems].filter((s) => !text.includes(s))) {
+    found.push(`${HOME}:1: Home does not name ${system}; install.sh installs there`);
   }
   for (const platform of UNSUPPORTED.filter((p) => !text.includes(p))) {
     found.push(`${HOME}:1: Home does not name ${platform} as unsupported`);
@@ -1486,7 +1492,7 @@ function fixture() {
   const home = [
     '<p>Many agent processes commit into one store at once.</p>',
     // React splits adjacent text nodes with an empty comment: `v<!-- -->0.11.0`.
-    `<p>Pre-release, v<!-- -->${FX_RELEASE}. Linux x86_64 and aarch64; no macOS or Windows build yet.</p>`,
+    `<p>Pre-release, v<!-- -->${FX_RELEASE}. Linux x86_64 and aarch64; macOS aarch64; no Windows or Intel Mac build.</p>`,
     '<p>Measured on v0.6.0.</p>',
     `<div><code>${INSTALL_LINE}</code><button type="button" data-copy="${INSTALL_LINE}" aria-label="Copy the install line">Copy</button><span aria-live="polite"></span></div>`,
     '<a data-primary="" href="/docs/guides/quick-start">Quick start</a>',
@@ -1520,7 +1526,7 @@ function fixture() {
   ]));
 
   // Served files, built CSS, own sources, repository files.
-  files.set('web/out/install.sh', 'target=x86_64-unknown-linux-gnu\ntarget=aarch64-unknown-linux-gnu\n');
+  files.set('web/out/install.sh', 'target=x86_64-unknown-linux-gnu\ntarget=aarch64-unknown-linux-gnu\ntarget=aarch64-apple-darwin\n');
   files.set('web/out/_redirects', '# moved\n/guides/old /docs 308\n');
   files.set('web/out/logo.svg', '<svg xmlns="http://www.w3.org/2000/svg"/>\n');
   files.set('web/out/_next/static/chunks/a.css', [

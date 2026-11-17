@@ -128,7 +128,15 @@ const BODY_COMPONENTS: MDXComponents = {
 function AtAGlance({ className }: { className?: string }) {
   const { version, date, preRelease } = LATEST_RELEASE;
   const facts = [
-    { term: 'Runs on', detail: <>Linux, x86_64 or aarch64, glibc 2.34 or newer (Ubuntu 22.04, Debian 12, RHEL 9)</> },
+    {
+      term: 'Runs on',
+      detail: (
+        <>
+          Linux, x86_64 or aarch64, glibc 2.34 or newer (Ubuntu 22.04, Debian 12, RHEL 9); from 0.12.0 on, macOS 11
+          or newer on Apple silicon
+        </>
+      ),
+    },
     { term: 'Shape', detail: <>One Rust program, no external database, no daemon</> },
     {
       term: 'Interfaces',
