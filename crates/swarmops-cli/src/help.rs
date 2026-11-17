@@ -78,12 +78,15 @@ pub(crate) const GROUPS: [Group; 7] = [
     Group {
         title: "Record and land changes",
         commands: &[
-            entry("ws", "Work in a directory of your own: edit, commit, land"),
+            entry(
+                "ws",
+                "Workspaces: edit in a directory of your own, commit, land",
+            ),
             entry("commit", "Record a changeset from a list of changes"),
             entry("land", "Merge a change onto a ref and publish it there"),
             entry(
                 "land-check",
-                "Say what landing changes would come to, writing nothing",
+                "Preview a land: clean or conflict, writing nothing",
             ),
             entry(
                 "land-group",
@@ -108,7 +111,7 @@ pub(crate) const GROUPS: [Group; 7] = [
             entry("history", "List the changesets that changed a path"),
             entry("ancestry", "Compare two revisions' ancestry"),
             entry("merge-base", "Find where a revision forks from another"),
-            entry("resolve", "Name the changeset a revision names"),
+            entry("resolve", "Print the changeset id a revision names"),
         ],
     },
     Group {
@@ -160,7 +163,7 @@ pub(crate) const GROUPS: [Group; 7] = [
             entry("serve", "Serve stores to stock git over ssh or HTTP"),
             entry(
                 "derive",
-                "Derive new changesets' derived values ahead of readers",
+                "Fill the read cache for new changesets ahead of readers",
             ),
             entry(
                 "schema",
@@ -283,7 +286,10 @@ pub(crate) const FAMILIES: [Family; 7] = [
             entry("list", "List the store's workspaces"),
             entry("info", "Describe one workspace"),
             entry("delete", "Remove a workspace's directory, then its entry"),
-            entry("hook", "The agent hosts' hooks, on stdin and stdout"),
+            entry(
+                "hook",
+                "Run by agent hosts: workspace hooks on stdin and stdout",
+            ),
         ],
         examples: &[
             run(&["ws", "create", "fix-1"]),
@@ -390,14 +396,15 @@ pub(crate) const FAMILIES: [Family; 7] = [
 ];
 
 /// What the program's screen says of its output, the rule of [`bare`] included.
-const OUTPUT: &str = "Every command prints one JSON envelope on stdout, or with --human a short \
-text, and exits 0 or with its error's code. mcp, serve, derive --follow and auth \
-git-credential print something else there. At a terminal, a line that names no command prints \
-help like this instead of its usage error's envelope, unless --json or SWARMOPS_FORMAT=json \
-asks for the envelope; it exits 2 either way.";
+const OUTPUT: &str = "Every command prints one JSON envelope on stdout, or a short text with \
+--human or SWARMOPS_FORMAT=human, and exits 0 or with its error's code. mcp, serve, derive \
+--follow and auth git-credential speak their own protocols there. The program alone, or a \
+command group alone (ws, auth, ...), is a usage error, exit 2: at a terminal it prints its help \
+instead of the envelope, unless --json or SWARMOPS_FORMAT=json is given.";
 
-/// What `<command> --help` gives.
-const COMMAND_HELP: &str = "A command's arguments, options and long help";
+/// The label of the line that says how to read one command's help: its arguments, its options
+/// and its long text.
+const COMMAND_HELP: &str = "A command's help";
 
 /// The site's pages the program's screen names.
 const PAGES: [(&str, &str); 4] = [
@@ -491,12 +498,9 @@ fn program_template(bin: &str, styles: &Styles, options: &str) -> String {
     heading(&mut out, styles, "Output");
     let _ = writeln!(out, "{}", wrapped(OUTPUT, 2));
     heading(&mut out, styles, "Learn more");
-    let mut rows = vec![(format!("{bin} <command> --help"), COMMAND_HELP)];
-    rows.extend(
-        PAGES
-            .iter()
-            .map(|(label, page)| ((*label).to_owned(), *page)),
-    );
+    let command = format!("{bin} <command> --help");
+    let mut rows = vec![(COMMAND_HELP, command.as_str())];
+    rows.extend(PAGES);
     table(&mut out, &rows);
 
     // 4. The options, last.
@@ -525,12 +529,13 @@ fn family_template(family: &Family, bin: &str, styles: &Styles, options: &str) -
     // 3. Where to read more.
     heading(&mut out, styles, "Learn more");
     let name = family.name;
-    let _ = writeln!(out, "  {bin} {name} <command> --help  {COMMAND_HELP}");
-    let pages = [("Guide", family.guide), ("Reference", REFERENCE)];
-    table(
-        &mut out,
-        &pages.map(|(label, page)| (label.to_owned(), page)),
-    );
+    let command = format!("{bin} {name} <command> --help");
+    let rows = [
+        (COMMAND_HELP, command.as_str()),
+        ("Guide", family.guide),
+        ("Reference", REFERENCE),
+    ];
+    table(&mut out, &rows);
 
     // 4. The options, last. `--version` is the program's alone.
     heading(&mut out, styles, "Options");
@@ -597,7 +602,7 @@ fn shell_line(bin: &str, example: &Example) -> String {
 }
 
 /// Two columns: each row's label, padded to the longest, then its text.
-fn table(out: &mut String, rows: &[(String, &str)]) {
+fn table(out: &mut String, rows: &[(&str, &str)]) {
     let width = rows.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
     for (label, text) in rows {
         let _ = writeln!(out, "  {label:width$}  {text}");
@@ -844,8 +849,15 @@ mod tests {
                         screen.ends_with("  -h, --help             Print help\n"),
                         "{screen}"
                     );
-                    let more = format!("  {bin} {name} <command> --help  ");
+                    // Learn more is one table: its three rows start their text in one column.
+                    let more = format!(
+                        "\n\nLearn more:\n  A command's help  {bin} {name} <command> --help\n  \
+                         Guide             https://swarmops.cc/docs/guides/"
+                    );
                     assert!(screen.contains(&more), "{screen}");
+                    let reference =
+                        "\n  Reference         https://swarmops.cc/docs/reference/cli\n";
+                    assert!(screen.contains(reference), "{screen}");
                 }
             }
         }

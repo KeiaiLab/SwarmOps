@@ -13,10 +13,10 @@ Start here:
   whoami      Show the identity your changes carry
 
 Record and land changes:
-  ws          Work in a directory of your own: edit, commit, land
+  ws          Workspaces: edit in a directory of your own, commit, land
   commit      Record a changeset from a list of changes
   land        Merge a change onto a ref and publish it there
-  land-check  Say what landing changes would come to, writing nothing
+  land-check  Preview a land: clean or conflict, writing nothing
   land-group  Land several changes in order as one operation
   rebase      Merge a change onto a ref's head, moving no ref
   revert      Take back a changeset or a range by landing its inverse
@@ -31,7 +31,7 @@ Read history:
   history     List the changesets that changed a path
   ancestry    Compare two revisions' ancestry
   merge-base  Find where a revision forks from another
-  resolve     Name the changeset a revision names
+  resolve     Print the changeset id a revision names
 
 Refs and operations:
   ref         List refs, or move one by compare-and-swap
@@ -54,7 +54,7 @@ Store upkeep:
 Agents and servers:
   mcp         Serve the store's operations to an agent over MCP
   serve       Serve stores to stock git over ssh or HTTP
-  derive      Derive new changesets' derived values ahead of readers
+  derive      Fill the read cache for new changesets ahead of readers
   schema      Print the JSON Schema of the request and response types
 
 Examples:
@@ -68,15 +68,15 @@ Examples:
   $ so --human log
 
 Output:
-  Every command prints one JSON envelope on stdout, or with --human a short
-  text, and exits 0 or with its error's code. mcp, serve, derive --follow and
-  auth git-credential print something else there. At a terminal, a line that
-  names no command prints help like this instead of its usage error's envelope,
-  unless --json or SWARMOPS_FORMAT=json asks for the envelope; it exits 2 either
-  way.
+  Every command prints one JSON envelope on stdout, or a short text with --human
+  or SWARMOPS_FORMAT=human, and exits 0 or with its error's code. mcp, serve,
+  derive --follow and auth git-credential speak their own protocols there. The
+  program alone, or a command group alone (ws, auth, ...), is a usage error,
+  exit 2: at a terminal it prints its help instead of the envelope, unless
+  --json or SWARMOPS_FORMAT=json is given.
 
 Learn more:
-  so <command> --help   A command's arguments, options and long help
+  A command's help      so <command> --help
   Quick start           https://swarmops.cc/docs/guides/quick-start
   Every command         https://swarmops.cc/docs/reference/cli
   Envelope, exit codes  https://swarmops.cc/docs/develop/cli-scripting

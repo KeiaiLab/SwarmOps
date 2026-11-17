@@ -181,26 +181,7 @@ fn top_level_help() {
         .replace("Usage: so ", "Usage: swarmops ")
         .replace("  $ so ", "  $ swarmops ")
         .replace(" | so ", " | swarmops ")
-        .replace(
-            "  so <command> --help   A",
-            "  swarmops <command> --help  A",
-        )
-        .replace(
-            "\n  Quick start           ",
-            "\n  Quick start                ",
-        )
-        .replace(
-            "\n  Every command         ",
-            "\n  Every command              ",
-        )
-        .replace(
-            "\n  Envelope, exit codes  ",
-            "\n  Envelope, exit codes       ",
-        )
-        .replace(
-            "\n  Error codes           ",
-            "\n  Error codes                ",
-        );
+        .replace("  so <command> --help\n", "  swarmops <command> --help\n");
     assert_eq!(long, renamed);
 
     insta::assert_snapshot!(screen);
@@ -254,8 +235,8 @@ fn family_help() {
             .replace("Usage: so ", "Usage: swarmops ")
             .replace("  $ so ", "  $ swarmops ")
             .replace(
-                &format!("  so {family} <command>"),
-                &format!("  swarmops {family} <command>"),
+                &format!("  so {family} <command> --help\n"),
+                &format!("  swarmops {family} <command> --help\n"),
             );
         assert_eq!(help(BIN, &[family, "--help"]), renamed, "{family}");
 

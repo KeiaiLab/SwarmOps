@@ -26,16 +26,16 @@ Commands:
   list         List the store's workspaces
   info         Describe one workspace
   delete       Remove a workspace's directory, then its entry
-  hook         The agent hosts' hooks, on stdin and stdout
+  hook         Run by agent hosts: workspace hooks on stdin and stdout
 
 Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you):
   $ so ws create fix-1
   $ so --human ws status --ws fix-1
 
 Learn more:
-  so ws <command> --help  A command's arguments, options and long help
-  Guide      https://swarmops.cc/docs/guides/parallel-agents
-  Reference  https://swarmops.cc/docs/reference/cli
+  A command's help  so ws <command> --help
+  Guide             https://swarmops.cc/docs/guides/parallel-agents
+  Reference         https://swarmops.cc/docs/reference/cli
 
 Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
@@ -63,9 +63,9 @@ Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you):
   $ so blob put logo.png
 
 Learn more:
-  so blob <command> --help  A command's arguments, options and long help
-  Guide      https://swarmops.cc/docs/guides/commit-and-land
-  Reference  https://swarmops.cc/docs/reference/cli
+  A command's help  so blob <command> --help
+  Guide             https://swarmops.cc/docs/guides/commit-and-land
+  Reference         https://swarmops.cc/docs/reference/cli
 
 Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
@@ -95,9 +95,9 @@ Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you):
   $ so ref set release/1.0 main --create
 
 Learn more:
-  so ref <command> --help  A command's arguments, options and long help
-  Guide      https://swarmops.cc/docs/guides/history-and-undo
-  Reference  https://swarmops.cc/docs/reference/cli
+  A command's help  so ref <command> --help
+  Guide             https://swarmops.cc/docs/guides/history-and-undo
+  Reference         https://swarmops.cc/docs/reference/cli
 
 Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
@@ -123,9 +123,9 @@ Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you):
   $ so --human op log
 
 Learn more:
-  so op <command> --help  A command's arguments, options and long help
-  Guide      https://swarmops.cc/docs/guides/history-and-undo
-  Reference  https://swarmops.cc/docs/reference/cli
+  A command's help  so op <command> --help
+  Guide             https://swarmops.cc/docs/guides/history-and-undo
+  Reference         https://swarmops.cc/docs/reference/cli
 
 Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
@@ -153,9 +153,9 @@ Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you):
   $ so git import app.git --ref main --into from-git
 
 Learn more:
-  so git <command> --help  A command's arguments, options and long help
-  Guide      https://swarmops.cc/docs/guides/git-round-trip
-  Reference  https://swarmops.cc/docs/reference/cli
+  A command's help  so git <command> --help
+  Guide             https://swarmops.cc/docs/guides/git-round-trip
+  Reference         https://swarmops.cc/docs/reference/cli
 
 Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
@@ -183,9 +183,9 @@ Examples (SWARMOPS_REPO names the store, SWARMOPS_AGENT you):
   $ so --human remote list
 
 Learn more:
-  so remote <command> --help  A command's arguments, options and long help
-  Guide      https://swarmops.cc/docs/guides/github-remote
-  Reference  https://swarmops.cc/docs/reference/cli
+  A command's help  so remote <command> --help
+  Guide             https://swarmops.cc/docs/guides/github-remote
+  Reference         https://swarmops.cc/docs/reference/cli
 
 Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
@@ -215,9 +215,9 @@ Examples:
   $ so --human auth status
 
 Learn more:
-  so auth <command> --help  A command's arguments, options and long help
-  Guide      https://swarmops.cc/docs/guides/github-remote
-  Reference  https://swarmops.cc/docs/reference/cli
+  A command's help  so auth <command> --help
+  Guide             https://swarmops.cc/docs/guides/github-remote
+  Reference         https://swarmops.cc/docs/reference/cli
 
 Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
