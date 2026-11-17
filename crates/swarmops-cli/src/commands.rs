@@ -45,7 +45,7 @@ mod device_flow;
 pub(crate) mod prepare;
 mod run;
 mod serve;
-mod update;
+pub(crate) mod update;
 pub(crate) mod ws;
 
 pub use self::run::{Ctx, Used, failed, failed_after, failed_envelope, panicked, run, usage};

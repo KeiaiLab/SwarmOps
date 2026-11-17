@@ -1,6 +1,8 @@
 //! `update` through the binary: the program replaced by a newer release, the refusals, the
-//! switch of automatic update, and what `update --background` does where automatic update is
-//! on. No test reaches a release host, and none touches an install but its own.
+//! switch of automatic update, what `update --background` does where automatic update is on,
+//! and automatic update itself: the run in the background a command starts once its envelope is
+//! out, and the note the next command at a terminal prints. No test reaches a release host, and
+//! none touches an install but its own.
 //!
 //! ```text
 //!   <tmp>/an install/bin/{swarmops,so}   copies of the binaries under test, with a receipt
@@ -18,10 +20,16 @@
 //! shows a build without it ignoring them.
 //!
 //! Every proxy variable names a closed port of this host: a run that did reach for the network,
-//! against everything above, would be refused there.
+//! against everything above, would be refused there. A run in the background has its parent's
+//! variables, so all of this holds for it too; one that outlives its test finds its install
+//! gone, and ends.
 
 use std::fs::{self, File};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::path::Path;
+use std::sync::Barrier;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 use swarmops_testkit::curl::{CURL_ENV, FakeCurl};
@@ -80,6 +88,15 @@ impl Site {
     /// Runs the installed binary `name` with `args`, as a release's build, with `env` over the
     /// site's own variables. Whatever it does, it prints one envelope and nothing on stderr.
     fn run(&self, name: &str, args: &[&str], env: &[(&str, &str)]) -> Run {
+        let run = self.run_program(&self.install.bin(name), args, env);
+        assert_eq!(run.stderr, "", "nothing on stderr: {run}");
+        run.envelope();
+        run
+    }
+
+    /// Runs `program` with `args`, and with `env` over the site's own variables: the installed
+    /// binary on a line that prints no envelope, or a program that runs it.
+    fn run_program(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Run {
         let curl = self.curl.path();
         let mut vars = vec![
             (RELEASE_HOOK, "1"),
@@ -91,10 +108,32 @@ impl Site {
             vars.push((proxy, NO_PROXY_THERE));
         }
         vars.extend_from_slice(env);
-        let run = run_bin(&self.install.bin(name), args, &vars, "");
-        assert_eq!(run.stderr, "", "nothing on stderr: {run}");
-        run.envelope();
-        run
+        run_bin(program, args, &vars, "")
+    }
+
+    /// The lock file, made if there is none, as last claimed `ago` before now.
+    fn claimed(&self, ago: Duration) -> SystemTime {
+        let at = SystemTime::now() - ago;
+        self.claimed_at(at);
+        at
+    }
+
+    /// The lock file, made if there is none, as last claimed at `at`.
+    fn claimed_at(&self, at: SystemTime) {
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.install.file(LOCK_FILE))
+            .expect("the lock file");
+        file.set_modified(at).expect("set the lock file's time");
+    }
+
+    /// When the lock file was last claimed.
+    fn last_claim(&self) -> SystemTime {
+        fs::metadata(self.install.file(LOCK_FILE))
+            .and_then(|file| file.modified())
+            .expect("the lock file's time")
     }
 
     /// Queues the answer that the latest release is `version`.
@@ -874,6 +913,378 @@ fn background_does_nothing_where_automatic_update_is_off() {
     assert_eq!(site.release.downloads(), []);
     assert!(!site.install.file(NOTE_FILE).exists());
     assert_eq!(site.install.identity(), before);
+}
+
+/// An install that updates itself, as an old version: what a command runs with where automatic
+/// update follows it. `on` holds against a `CI` of the tests' own environment.
+const AUTOMATIC: [(&str, &str); 2] = [(VERSION_HOOK, OLD), (AUTO_UPDATE, "on")];
+
+/// How long a run in the background is waited for.
+const BACKGROUND_WAIT: Duration = Duration::from_mins(2);
+
+/// More than the day between two checks.
+const OVER_A_DAY: Duration = Duration::from_hours(25);
+
+/// Waits until `done` holds, for `what` a run in the background does: at most
+/// [`BACKGROUND_WAIT`].
+fn wait_for(what: &str, done: impl Fn() -> bool) {
+    let started = Instant::now();
+    while !done() {
+        assert!(started.elapsed() < BACKGROUND_WAIT, "waited for {what}");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `run`'s envelope without the time it took: the rest is the same for the same command.
+fn timeless(run: &Run) -> Value {
+    let mut envelope = run.envelope();
+    let elapsed = envelope["meta"]["elapsed_ms"].take();
+    assert!(elapsed.is_u64(), "{run}");
+    envelope
+}
+
+/// What a terminal shows of the installed `so whoami` run with `env`: all three of its streams
+/// are the terminal script(1) makes. `None`, said on stderr, where there is no script(1).
+fn at_a_terminal(site: &Site, env: &[(&str, &str)]) -> Option<String> {
+    const SCRIPT: &str = "/usr/bin/script";
+    if !Path::new(SCRIPT).is_file() {
+        eprintln!("skipped: no {SCRIPT} to make a terminal with");
+        return None;
+    }
+    let so = site.install.bin("so");
+    let run = if cfg!(target_os = "macos") {
+        site.run_program(SCRIPT, &["-q", "/dev/null", &so, "whoami"], env)
+    } else {
+        // util-linux's takes the command as one shell line.
+        let line = format!("'{so}' whoami");
+        site.run_program(SCRIPT, &["-qec", &line, "/dev/null"], env)
+    };
+    assert!(run.stdout.contains("\"ok\""), "an envelope: {run}");
+    Some(run.stdout)
+}
+
+#[test]
+fn a_command_starts_the_update_and_the_next_at_a_terminal_says_so() {
+    if !automatic_update_can_be_on() {
+        return;
+    }
+    let site = Site::new();
+    site.publish(REAL);
+    site.latest_is(REAL);
+    site.mark_is(true);
+    let before = site.install.identity();
+
+    // 1. The command prints what it prints with automatic update off, but for the time it
+    //    took, and nothing on stderr. It has claimed the check when it ends.
+    let off = site.run("so", &["whoami"], &[(VERSION_HOOK, OLD)]);
+    assert_eq!(site.install.names(), [RECEIPT_FILE, "so", "swarmops"]);
+    let first = site.run("so", &["whoami"], &AUTOMATIC);
+    assert_eq!(first.exit(), 0);
+    assert_eq!(timeless(&first), timeless(&off));
+    assert!(
+        site.install.file(LOCK_FILE).is_file(),
+        "the check is claimed"
+    );
+    let claim = site.last_claim();
+
+    // 2. The run it started installs the marked release, after the claim, and leaves a note.
+    wait_for("the note", || site.install.file(NOTE_FILE).exists());
+    let note = format!("updated {OLD} {REAL}\n");
+    assert_eq!(site.install.read(NOTE_FILE).as_deref(), Some(note.as_str()));
+    let after = site.install.identity();
+    assert_ne!((after[0].0, after[1].0), (before[0].0, before[1].0));
+    for name in ["swarmops", "so"] {
+        let version = run_bin(&site.install.bin(name), &["--version"], &[], "");
+        assert_eq!(version.stdout, format!("swarmops {REAL}\n"), "{name}");
+    }
+    let asked = site.curl.calls();
+    assert_eq!(asked.len(), 2, "the latest release, and its mark");
+    assert!(
+        asked[0]
+            .stdin
+            .contains(&format!("url = \"{RELEASES}/latest\"\n"))
+    );
+    assert_eq!(site.release.downloads().len(), 2);
+
+    // 3. A command whose stderr is no terminal neither prints the note nor removes it, and
+    //    --status gives it. No command looks again within the day.
+    let on = [(AUTO_UPDATE, "on")];
+    let piped = site.run("so", &["whoami"], &on);
+    assert_eq!(timeless(&piped), timeless(&off));
+    assert_eq!(site.install.read(NOTE_FILE).as_deref(), Some(note.as_str()));
+    let status = site.run("so", &["update", "--status"], &on).ok();
+    assert_eq!(
+        status["pending"],
+        json!({"kind": "updated", "from": OLD, "to": REAL})
+    );
+    assert_eq!(site.last_claim(), claim, "claimed once");
+
+    // 4. The next command at a terminal prints it, once, and removes it; the one after has
+    //    nothing to say.
+    let sentence =
+        format!("swarmops: updated from {OLD} to {REAL}. Notes: {RELEASES}/tag/v{REAL}.");
+    if let Some(shown) = at_a_terminal(&site, &on) {
+        assert_eq!(shown.matches(&sentence).count(), 1, "{shown}");
+        assert!(!site.install.file(NOTE_FILE).exists(), "the note is gone");
+        let again = at_a_terminal(&site, &on).expect("a terminal, as before");
+        assert!(!again.contains("swarmops:"), "{again}");
+        let status = site.run("so", &["update", "--status"], &on).ok();
+        assert!(status.get("pending").is_none(), "{status}");
+    }
+
+    assert_eq!(site.curl.calls().len(), 2, "nothing more was asked");
+    assert_eq!(site.install.identity(), after);
+}
+
+#[test]
+fn no_check_follows_where_automatic_update_is_off_or_the_run_is_no_command_s() {
+    let site = Site::new();
+    site.publish(REAL);
+    let before = site.install.identity();
+    let so = site.install.bin("so");
+    let untouched = |what: &str| {
+        assert_eq!(
+            site.install.names(),
+            [RECEIPT_FILE, "so", "swarmops"],
+            "no check was claimed: {what}"
+        );
+    };
+
+    // 1. Each thing that turns automatic update off, alone: the harness's variable, a value
+    //    that is no switch, CI, a build that is no release's, and the receipt.
+    let off: [&[(&str, &str)]; 5] = [
+        &[],
+        &[(AUTO_UPDATE, "off")],
+        &[(AUTO_UPDATE, "never")],
+        &[(AUTO_UPDATE, ""), ("CI", "true")],
+        &[(AUTO_UPDATE, "on"), (RELEASE_HOOK, "")],
+    ];
+    for env in off {
+        let env = [&[(VERSION_HOOK, OLD)][..], env].concat();
+        assert_eq!(site.run("so", &["whoami"], &env).exit(), 0);
+        untouched(&format!("{env:?}"));
+    }
+    site.install.write(RECEIPT_FILE, RECEIPT_OFF);
+    assert_eq!(site.run("so", &["whoami"], &AUTOMATIC).exit(), 0);
+    untouched("the receipt says false");
+    site.install.write(RECEIPT_FILE, RECEIPT_ON);
+
+    // 2. On, and the run is none that automatic update follows: text that is no envelope, a
+    //    refused line, a command that failed, `update` itself, and what a program runs for a
+    //    protocol.
+    for text in ["--version", "--help"] {
+        let run = site.run_program(&so, &[text], &AUTOMATIC);
+        assert_eq!((run.exit(), run.stderr.as_str()), (0, ""), "{run}");
+        untouched(text);
+    }
+    let version = site.run_program(&so, &["--version"], &AUTOMATIC);
+    assert_eq!(version.stdout, format!("swarmops {OLD}\n"));
+    let refused = site.run("so", &["frobnicate"], &AUTOMATIC);
+    assert_eq!(refused.exit(), 2);
+    untouched("a refused line");
+    let failed = site.run(
+        "so",
+        &["--repo", "/nonexistent/swarmops-test/store", "info"],
+        &AUTOMATIC,
+    );
+    assert_ne!(failed.exit(), 0);
+    untouched("a command that failed");
+    let status = site.run("so", &["update", "--status"], &AUTOMATIC).ok();
+    assert_eq!(status["auto_update"], on_for_this_user());
+    untouched("update --status");
+    let mcp = site.run_program(&so, &["mcp"], &AUTOMATIC);
+    assert_eq!((mcp.exit(), mcp.stdout.as_str()), (0, ""), "{mcp}");
+    untouched("mcp");
+    let helper = site.run_program(&so, &["auth", "git-credential", "get"], &AUTOMATIC);
+    assert_eq!(helper.stdout, "", "{helper}");
+    untouched("auth git-credential");
+
+    // 3. On, a command, and a directory this user cannot write: nothing to claim with.
+    if automatic_update_can_be_on() {
+        let mode = |mode| fs::set_permissions(site.install.dir(), fs::Permissions::from_mode(mode));
+        mode(0o555).expect("close the directory");
+        let closed = site.run("so", &["whoami"], &AUTOMATIC);
+        mode(0o755).expect("open the directory");
+        assert_eq!(closed.exit(), 0);
+        untouched("a directory that cannot be written");
+    }
+
+    // 4. On, a command, and a check claimed within the day, or an update running: the lock
+    //    file is left as it is.
+    let recent = site.claimed(Duration::from_hours(23));
+    assert_eq!(site.run("so", &["whoami"], &AUTOMATIC).exit(), 0);
+    assert_eq!(site.last_claim(), recent);
+    let old = site.claimed(OVER_A_DAY);
+    let lock = File::open(site.install.file(LOCK_FILE)).expect("open the lock file");
+    lock.lock().expect("hold the lock");
+    assert_eq!(site.run("so", &["whoami"], &AUTOMATIC).exit(), 0);
+    assert_eq!(site.last_claim(), old);
+    drop(lock);
+
+    // Not one request, and nothing replaced or said.
+    assert_eq!(site.curl.calls(), []);
+    assert_eq!(site.release.downloads(), []);
+    assert_eq!(site.install.identity(), before);
+    assert!(!site.install.file(NOTE_FILE).exists());
+    assert_eq!(site.install.read(LOCK_FILE).as_deref(), Some(""));
+}
+
+#[test]
+fn a_check_that_reaches_no_one_changes_nothing_a_command_prints() {
+    if !automatic_update_can_be_on() {
+        return;
+    }
+    let site = Site::new();
+    let before = site.install.identity();
+    let off = site.run("so", &["whoami"], &[(VERSION_HOOK, OLD)]);
+
+    // 1. A host that cannot be found, does not answer, or times out: the command's envelope and
+    //    exit code are what they are with automatic update off, and the run it started asked
+    //    once and left nothing.
+    for (n, exit) in [6, 7, 28].into_iter().enumerate() {
+        site.claimed(OVER_A_DAY);
+        site.curl.fail(exit);
+        let started = SystemTime::now();
+        let run = site.run("so", &["whoami"], &AUTOMATIC);
+        assert_eq!(run.exit(), off.exit());
+        assert_eq!(timeless(&run), timeless(&off));
+        assert!(site.last_claim() >= started, "claimed before any request");
+        wait_for("the request", || site.curl.calls().len() == n + 1);
+    }
+
+    // 2. A lock file of a time in the future, as a clock set back leaves, is no claim.
+    site.claimed_at(SystemTime::now() + 2 * OVER_A_DAY);
+    site.curl.fail(7);
+    assert_eq!(site.run("so", &["whoami"], &AUTOMATIC).exit(), 0);
+    assert!(site.last_claim() <= SystemTime::now());
+    wait_for("the request", || site.curl.calls().len() == 4);
+
+    // 3. The next command claims nothing: the day has just begun.
+    let claim = site.last_claim();
+    assert_eq!(site.run("so", &["whoami"], &AUTOMATIC).exit(), 0);
+    assert_eq!(site.last_claim(), claim);
+
+    // The runs in the background have ended once the lock is free; none left anything.
+    let lock = File::open(site.install.file(LOCK_FILE)).expect("open the lock file");
+    lock.lock().expect("the last run has ended");
+    assert_eq!(site.install.read(LOCK_FILE).as_deref(), Some(""));
+    assert!(!site.install.file(NOTE_FILE).exists());
+    assert_eq!(site.install.identity(), before);
+    assert_eq!(site.release.downloads(), []);
+    for call in site.curl.calls() {
+        assert!(
+            call.stdin
+                .contains(&format!("url = \"{RELEASES}/latest\"\n"))
+        );
+    }
+}
+
+/// Thirty commands that find the check due at once: one claims it, so one run in the background
+/// asks and installs; every command prints its one envelope, whichever binary it found, the
+/// commands run while the two names are replaced too.
+#[test]
+fn thirty_commands_at_once_start_one_update() {
+    const COMMANDS: usize = 30;
+    if !automatic_update_can_be_on() {
+        return;
+    }
+    // With the lock file still to be made, and with one a day old.
+    for made in [false, true] {
+        let site = Site::new();
+        site.publish(REAL);
+        site.latest_is(REAL);
+        site.mark_is(true);
+        let before = site.install.identity();
+        if made {
+            site.claimed(OVER_A_DAY);
+        }
+
+        // 1. All at once: each its envelope, and nothing on stderr (`Site::run`).
+        let start = Barrier::new(COMMANDS);
+        thread::scope(|scope| {
+            for n in 0..COMMANDS {
+                let (site, start) = (&site, &start);
+                scope.spawn(move || {
+                    let name = if n % 2 == 0 { "so" } else { "swarmops" };
+                    start.wait();
+                    let run = site.run(name, &["whoami"], &AUTOMATIC);
+                    assert_eq!(run.exit(), 0, "{run}");
+                });
+            }
+        });
+
+        // 2. While the release is installed, a command by either name runs whole.
+        let done = || site.install.file(NOTE_FILE).exists();
+        let started = Instant::now();
+        while !done() {
+            assert!(started.elapsed() < BACKGROUND_WAIT, "waited for the note");
+            for name in ["so", "swarmops"] {
+                let run = site.run(name, &["whoami"], &AUTOMATIC);
+                assert_eq!(run.exit(), 0, "{run}");
+            }
+        }
+
+        // 3. One run asked, once for the latest release and once for its mark, and installed
+        //    it. A second run in the background would have asked too, and been recorded: wait
+        //    as long as one waits for the lock, and more.
+        thread::sleep(Duration::from_secs(2));
+        let asked = site.curl.calls();
+        assert_eq!(asked.len(), 2, "lock file made before: {made}");
+        assert_eq!(site.release.downloads().len(), 2);
+        let note = format!("updated {OLD} {REAL}\n");
+        assert_eq!(site.install.read(NOTE_FILE).as_deref(), Some(note.as_str()));
+        let after = site.install.identity();
+        assert_ne!((after[0].0, after[1].0), (before[0].0, before[1].0));
+        assert_eq!(
+            site.install.names(),
+            [RECEIPT_FILE, LOCK_FILE, NOTE_FILE, "so", "swarmops"]
+        );
+        for name in ["swarmops", "so"] {
+            let version = run_bin(&site.install.bin(name), &["--version"], &[], "");
+            assert_eq!(version.stdout, format!("swarmops {REAL}\n"), "{name}");
+        }
+    }
+}
+
+/// A caller's descriptor a command inherited is not held by the run in the background it
+/// starts: a curl of the test's, which that run starts, says whether it has descriptor 3.
+#[test]
+fn the_run_in_the_background_holds_no_descriptor_of_its_caller() {
+    if !automatic_update_can_be_on() {
+        return;
+    }
+    let site = Site::new();
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let at = dir.path().to_str().expect("a UTF-8 temp dir");
+    let curl = dir.path().join("curl");
+    let script = format!(
+        "#!/bin/sh\n\
+         if (: >&3) 2>/dev/null; then echo open; else echo closed; fi > '{at}/seen.new'\n\
+         /bin/mv '{at}/seen.new' '{at}/seen'\n\
+         exit 7\n"
+    );
+    fs::write(&curl, script).expect("write the curl");
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).expect("set its mode");
+    let curl = curl.to_str().expect("a UTF-8 path");
+    let seen = dir.path().join("seen");
+    let held = format!("{at}/held");
+
+    // 1. The control: run with descriptor 3 open, the curl sees it.
+    let control = site.run_program("/bin/sh", &["-c", "\"$0\" 3>\"$1\"", curl, &held], &[]);
+    assert_eq!(control.status.code(), Some(7), "{control}");
+    assert_eq!(fs::read_to_string(&seen).expect("what it saw"), "open\n");
+    fs::remove_file(&seen).expect("forget the control");
+
+    // 2. A command with descriptor 3 open starts the run in the background, whose curl has
+    //    none.
+    let so = site.install.bin("so");
+    let env = [AUTOMATIC[0], AUTOMATIC[1], (CURL_ENV, curl)];
+    let line = "exec \"$0\" whoami 3>\"$1\"";
+    let run = site.run_program("/bin/sh", &["-c", line, &so, &held], &env);
+    assert_eq!((run.exit(), run.stderr.as_str()), (0, ""), "{run}");
+    run.envelope();
+    wait_for("the run in the background", || seen.is_file());
+    assert_eq!(fs::read_to_string(&seen).expect("what it saw"), "closed\n");
 }
 
 /// The test kit spells the names of the files beside the binaries itself, since it names no

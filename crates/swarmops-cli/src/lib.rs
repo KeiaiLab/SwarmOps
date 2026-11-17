@@ -17,7 +17,8 @@
 //!   `meta.repo` and `meta.resolved` as far as the command got; the panic's location goes to
 //!   stderr.
 //! - stdout carries the envelope, or with `--human` its text rendering, and nothing else;
-//!   diagnostics go to stderr, and there are none by default.
+//!   diagnostics go to stderr, and there are none by default, but for one line at a terminal
+//!   after an automatic update (below).
 //! - `mcp` prints no envelope on stdout: it serves the operations over MCP on stdin and stdout
 //!   until stdin ends, exiting 0 (the `mcp` module). Its stdout belongs
 //!   to the protocol, so what it would print before it serves (the envelope of a command line it
@@ -33,6 +34,14 @@
 //! - `auth login` without `--with-token` prints its envelope on stdout as every command does,
 //!   and before it two lines on stderr for the person at the terminal: the code to enter and its
 //!   page, then that it waits. A script reads stdout alone, as for every command.
+//! - Where the install updates itself (`update --status`), a command that went well looks for a
+//!   newer release once a day, after its envelope is out: it starts `update --background`,
+//!   detached, and waits for nothing, so its envelope, its exit code and `meta.elapsed_ms` are
+//!   what they are without it. What that run did is one line on stderr after the envelope of the
+//!   next such command whose stderr is a terminal, printed once; a command whose stderr is no
+//!   terminal prints nothing of it, and `update --status` gives it as `pending`. `mcp`, `serve`,
+//!   `serve --prepare`, `auth git-credential`, `ws hook` and `update` neither look nor print it,
+//!   nor does a line that is refused or a command that fails.
 //! - `derive --follow` prints one envelope a line for each run that derived something, and
 //!   nothing for a run that derived nothing (a follower that has caught up is silent), until it
 //!   is killed or a run fails, whose envelope is the last.

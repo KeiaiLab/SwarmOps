@@ -12,6 +12,8 @@ It runs the host's curl for the one request of its own (SWARMOPS\_CURL by an abs
 
 --auto off and --auto on write the receipt's auto\_update, and --status says whether the install updates itself (auto\_update: on, or what turned it off) and gives the note a run in the background left (pending). SWARMOPS\_AUTO\_UPDATE=off turns automatic update off for the processes that have it; CI and a container turn it off unless that variable is on; root's install, and one in another user's directory, never update themselves. --background does what automatic update does: with automatic update on, it installs the latest release only when that carries the mark for the installed minor line (auto-update-from-&lt;major&gt;.&lt;minor&gt;, a file of the release), and leaves a note beside the binaries; a release without the mark is noted at its second sighting, and a request that fails changes nothing and is no error.
 
+Where automatic update is on, a command that went well starts update --background once a day, after its envelope is out, and waits for nothing: its output and exit code do not change. The next such command whose stderr is a terminal prints the note, one line on stderr after its envelope, once. mcp, serve, auth git-credential, ws hook and update itself start no such run and print no note.
+
 ```yaml
 title: "swarmops update"
 description: "Replace this program, swarmops and so, with the latest release, or set automatic update. Touches no store and never runs upgrade."
@@ -102,7 +104,8 @@ has no MCP tool: a call would replace the program the server runs from.
 
 The forms are one at a time: no flag installs, `--check` looks, `--auto on|off` and `--status`
 are the switch ([Automatic update's switch](#automatic-updates-switch)), and `--background` is
-what automatic update runs ([In the background](#in-the-background)).
+what automatic update runs ([In the background](#in-the-background)) after a command
+([After a command](#after-a-command)).
 
 ### What it updates
 
@@ -242,9 +245,11 @@ background run left: its `kind` (`updated`, `available` or
 
 ### In the background
 
-`update --background` does what automatic update does, in one run. No command starts it after
-itself in this build: it runs when it is run. Unless `auto_update` is `on` it does nothing. Otherwise it takes the lock without waiting (another update running: nothing),
-asks for the latest release as above, and when that is newer than what is installed:
+`update --background` does what automatic update does, in one run: a command starts it
+([After a command](#after-a-command)), and it runs when you run it. Unless `auto_update` is `on`
+it does nothing. Otherwise it takes the lock, waiting half a second at most (another update
+running: nothing), asks for the latest release as above, and when that is newer than what is
+installed:
 
 1. A release that failed to install before is left alone, until an `update` you run goes well.
 2. One more HEAD request asks whether the release holds the file
@@ -263,12 +268,53 @@ It prints its envelope like every command, exit 0 unless the receipt is refused,
 error. Only the latest release is ever looked at: an install on an older line installs nothing
 automatically while the latest release carries no mark for that line.
 
+### After a command
+
+Where `auto_update` is `on`, every command that went well is followed by automatic update, once
+its envelope is out. The command's envelope, exit code and `meta.elapsed_ms` are what they are
+without it, and it waits for nothing.
+
+1. **The note.** If the command's stderr is a terminal and a background run left a note, the
+   command removes the note and prints it, one line on stderr after the envelope. Of several
+   commands at once, one prints it. A command whose stderr is no terminal (a script, an agent's
+   harness, `2>&1` into a pipe) prints nothing and leaves the note: `--status` gives it as
+   `pending`.
+2. **The check, once a day.** The lock file's modification time is when a check was last
+   claimed. Less than 24 hours ago, the command is done. Otherwise it claims the check (it
+   locks the file without waiting, looks at the time again, and sets it to now) and starts
+   `update --background`. Of several commands at once, one claims it. The claim comes before
+   any request, so a host without a network asks once a day and says nothing. A time in the
+   future, as a clock set back leaves, counts as long ago.
+3. **The run it starts** is this program again, detached: a process group of its own, `/` for
+   its directory, no stdin, stdout or stderr, and without the descriptors 3 to 9 the command
+   inherited (it is started through `/bin/sh`, which closes them), so that it does not hold a
+   lock or a pipe of the caller's for as long as a download takes. A descriptor numbered 10 or
+   more that the caller passed down without close-on-exec stays open in it. It has the command's
+   environment.
+
+The notes say what happened, and tell nobody to run anything:
+
+```text
+swarmops: updated from 0.12.0 to 0.13.0. Notes: https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.13.0. Running mcp servers keep 0.12.0 until restarted.
+swarmops: 0.13.0 is released and was not installed automatically. Notes: https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.13.0.
+swarmops: 0.13.0 could not be installed automatically: <the installer's last line>.
+```
+
+Their wording is no contract; `pending` is. A note is printed only where `auto_update` is `on`
+for the command that would print it.
+
+Automatic update follows no run that is not a command that went well: not `--help` or
+`--version`, not a line that is refused, not a command that fails. And it follows none of
+`mcp`, `serve`, `serve --prepare`, `auth git-credential`, `ws hook` and `update` itself: a host
+that uses SwarmOps only through `swarmops mcp` never looks for a release and never prints a
+note. A directory the caller cannot write is never claimed in, so nothing is started there.
+
 ### The files beside the binaries
 
 | File | What it is |
 | --- | --- |
 | `.swarmops-receipt` | The installer's receipt: `receipt = 1` and `auto_update = true` or `false`. |
-| `.swarmops-update.lock` | The lock, and what the background run remembers: a line each for the release last `seen` unmarked, `announced` and `failed`. |
+| `.swarmops-update.lock` | The lock, and what the background run remembers: a line each for the release last `seen` unmarked, `announced` and `failed`. Its modification time is when a check was last claimed. |
 | `.swarmops-update.note` | One line: the note a background run left, which `--status` gives as `pending`. |
 | `.swarmops-update.d` | The staging directory, there only while an update runs; one left behind is removed by the next. |
 

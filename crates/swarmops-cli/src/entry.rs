@@ -2,11 +2,14 @@
 //! `E_INTERNAL` envelope, and the envelope written to stdout with the exit code. After an
 //! operation that moved a ref, once the envelope is out, `serve.git` is prepared, detached
 //! (`commands::prepare`, the M17 design §4.3). After an operation that committed, once the
-//! envelope is out, the view work its commits left is stepped ([`finish`]).
+//! envelope is out, the view work its commits left is stepped ([`finish`]). After a command that
+//! went well, last of all, automatic update: the note an earlier one left, and once a day the
+//! look for a newer release, detached (`commands::update`).
 //!
 //! ```text
 //! run ─▶ guarded(respond) ─▶ gitlike::parse ─▶ answer ─▶ guarded(commands::run) ─▶ emit ─▶ spawn
-//!                                                                                      └──▶ step
+//!                                                                                      ├──▶ step
+//!                                                                                      └──▶ update
 //! ```
 
 use std::ffi::OsString;
@@ -22,7 +25,7 @@ use swarmops_ws::workspace::{self, Locate};
 
 use crate::cli::{Global, Parsed};
 use crate::commands::prepare::{self, After};
-use crate::commands::{Ctx, Used};
+use crate::commands::{Ctx, Used, update};
 use crate::gitlike::{self, Place};
 use crate::output::{Format, Printed, Stdout};
 use crate::{cli, commands, context, help};
@@ -34,6 +37,9 @@ struct Followup {
     prepare: Option<After>,
     /// The store whose view work an operation that committed left, as the user named it.
     step: Option<String>,
+    /// Whether automatic update follows: a command that went well, of an operation it follows
+    /// ([`updates_after`]).
+    update: bool,
 }
 
 /// Runs the command line the process was started with, and gives the code to exit with: the
@@ -63,31 +69,53 @@ pub fn run() -> ExitCode {
     );
 
     // 2. The envelope out, then what follows it.
-    finish(&printed, then, emit, Used::step_views, &mut io::stderr())
+    let terminal = io::stderr().is_terminal();
+    let update = |log: &mut dyn io::Write| {
+        update::after_command(&|name| std::env::var_os(name), terminal, log);
+    };
+    finish(
+        &printed,
+        then,
+        emit,
+        Used::step_views,
+        update,
+        &mut io::stderr(),
+    )
 }
 
-/// Writes `printed` with `write`, then runs what follows it: the preparation after a ref move,
-/// never waited for, and the step of the view work an operation that committed left. A step's
-/// error goes to `log` and nowhere else: what becomes of either changes neither the envelope
-/// nor the exit code.
+/// Writes `printed` with `write`, then runs what follows it, in this order: the preparation
+/// after a ref move, never waited for; the step of the view work an operation that committed
+/// left; and `update`, automatic update, after a command it follows. A step's error goes to
+/// `log` and nowhere else, and `update` writes there what it has to say: what becomes of any of
+/// the three changes neither the envelope nor the exit code.
 fn finish(
     printed: &Printed,
     then: Followup,
     write: impl FnOnce(&Printed) -> ExitCode,
     step: impl FnOnce(&str) -> Result<(), String>,
+    update: impl FnOnce(&mut dyn io::Write),
     log: &mut impl io::Write,
 ) -> ExitCode {
     let code = write(printed);
     if let Some(after) = then.prepare {
         let _ = prepare::spawn(&after);
     }
-    let Some(store) = then.step else {
-        return code;
-    };
-    if let Err(why) = step(&store) {
+    if let Some(store) = then.step
+        && let Err(why) = step(&store)
+    {
         let _ = writeln!(log, "swarmops: view work not stepped: {why}");
     }
+    if then.update {
+        update(log);
+    }
     code
+}
+
+/// Whether automatic update follows the run of operation `op` that printed `printed`: one that
+/// went well, of an operation it follows (`cli::update_follows`). So it follows no refused
+/// line, no failure and no panic, and nothing a program runs for a protocol.
+fn updates_after(op: &str, printed: &Printed) -> bool {
+    printed.exit == 0 && cli::update_follows(op)
 }
 
 /// What the command line asks for, done: the envelope to print, or nothing more for help or
@@ -176,6 +204,7 @@ fn answer(
                 let then = Followup {
                     prepare: ctx.used.take_after(),
                     step: ctx.used.take_step(),
+                    update: updates_after(op, &printed),
                 };
                 (printed, then)
             }
@@ -465,24 +494,27 @@ mod tests {
     }
 
     /// The envelope is written before the step runs, and a step's error goes to the log: the
-    /// exit code is the envelope's.
+    /// exit code is the envelope's. Automatic update comes last, and only where it follows.
     #[test]
-    fn the_reply_is_written_before_the_step() {
+    fn the_reply_is_written_before_the_step_and_the_update() {
         let order = std::cell::RefCell::new(Vec::new());
         let printed = Printed {
             stdout: "{}".to_owned(),
             exit: 0,
         };
-        let then = |store: &str| Followup {
+        let then = |store: &str, update: bool| Followup {
             prepare: None,
             step: Some(store.to_owned()),
+            update,
         };
+        let no_update = |_: &mut dyn io::Write| panic!("no automatic update follows");
 
-        // 1. A step that works: after the write, on the store the operation named.
+        // 1. A step that works: after the write, on the store the operation named; then the
+        //    update, which writes what it says to the log.
         let mut log = Vec::new();
         let code = finish(
             &printed,
-            then("store"),
+            then("store", true),
             |_| {
                 order.borrow_mut().push("write".to_owned());
                 ExitCode::SUCCESS
@@ -491,34 +523,111 @@ mod tests {
                 order.borrow_mut().push(format!("step {store}"));
                 Ok(())
             },
+            |log| {
+                order.borrow_mut().push("update".to_owned());
+                let _ = writeln!(log, "swarmops: a note");
+            },
             &mut log,
         );
-        assert_eq!(*order.borrow(), ["write", "step store"]);
+        assert_eq!(*order.borrow(), ["write", "step store", "update"]);
         assert_eq!(code, ExitCode::SUCCESS);
-        assert_eq!(log, Vec::<u8>::new());
+        assert_eq!(log, b"swarmops: a note\n");
 
-        // 2. A step that fails: logged, and the exit code stays the envelope's.
+        // 2. A step that fails: logged, the exit code stays the envelope's, and the update
+        //    still follows.
+        let mut log = Vec::new();
+        let mut updated = false;
         let code = finish(
             &printed,
-            then("store"),
+            then("store", true),
             |_| ExitCode::SUCCESS,
             |_| Err("the lock is held".to_owned()),
+            |_| updated = true,
             &mut log,
         );
         assert_eq!(code, ExitCode::SUCCESS);
         let logged = String::from_utf8(log).unwrap();
         assert!(logged.contains("the lock is held"), "{logged}");
+        assert!(updated);
 
-        // 3. No step noted, none run.
+        // 3. No step noted, none run; the update follows a command that read only, too.
         let mut log = Vec::new();
+        let mut updated = false;
+        let reads = Followup {
+            update: true,
+            ..Followup::default()
+        };
         let code = finish(
             &printed,
-            Followup::default(),
+            reads,
             |_| ExitCode::SUCCESS,
             |_| panic!("a read-only operation steps nothing"),
+            |_| updated = true,
             &mut log,
         );
         assert_eq!(code, ExitCode::SUCCESS);
         assert_eq!(log, Vec::<u8>::new());
+        assert!(updated);
+
+        // 4. No update noted, none run: the step alone, and nothing at all by default. The exit
+        //    code is the envelope's whatever follows.
+        let failed = Printed {
+            stdout: "{}".to_owned(),
+            exit: 4,
+        };
+        let mut stepped = false;
+        let code = finish(
+            &failed,
+            then("store", false),
+            |printed| ExitCode::from(printed.exit),
+            |_| {
+                stepped = true;
+                Ok(())
+            },
+            no_update,
+            &mut log,
+        );
+        assert_eq!(code, ExitCode::from(4));
+        assert!(stepped);
+        let code = finish(
+            &printed,
+            Followup::default(),
+            |_| ExitCode::SUCCESS,
+            |_| panic!("nothing is stepped"),
+            no_update,
+            &mut log,
+        );
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(log, Vec::<u8>::new());
+    }
+
+    /// Automatic update follows a command that went well, and no other run: not a failure
+    /// (a refused line and a panic are failures), and not what a program runs for a protocol,
+    /// the detached preparation, a harness's hook or `update` itself.
+    #[test]
+    fn automatic_update_follows_only_a_command_that_went_well() {
+        let ended = |exit: u8| Printed {
+            stdout: "{}".to_owned(),
+            exit,
+        };
+        for op in ["whoami", "commit", "repo_info", "derive", "auth_status"] {
+            assert!(updates_after(op, &ended(0)), "{op}");
+            for exit in [1, 2, 3, 4, 5, 6] {
+                assert!(!updates_after(op, &ended(exit)), "{op} exit {exit}");
+            }
+        }
+        for op in [
+            "mcp",
+            "serve",
+            "auth_git_credential",
+            cli::SERVE_PREPARE,
+            "ws_hook",
+            "update",
+        ] {
+            assert!(!updates_after(op, &ended(0)), "{op}");
+        }
+
+        // Help and the version, which clap prints, and a refused line note no update at all.
+        assert!(!Followup::default().update);
     }
 }

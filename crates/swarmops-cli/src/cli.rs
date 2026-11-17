@@ -33,6 +33,18 @@ const PROTOCOL_OPS: [&str; 3] = ["mcp", "serve", "auth_git_credential"];
 /// The operation `serve --prepare` names: no protocol on its stdout.
 pub const SERVE_PREPARE: &str = "serve_prepare";
 
+/// The operations besides [`PROTOCOL_OPS`] that automatic update never follows
+/// ([`update_follows`]): the detached run a ref move starts, what an agent harness runs on its
+/// own events, and `update` itself, which automatic update runs.
+const NO_UPDATE_AFTER: [&str; 3] = [SERVE_PREPARE, "ws_hook", "update"];
+
+/// Whether a run of operation `op` that went well is followed by automatic update's look for a
+/// newer release: every operation but those whose stdout carries a protocol, which a program
+/// starts and no person waits for, and those of [`NO_UPDATE_AFTER`].
+pub(crate) fn update_follows(op: &str) -> bool {
+    !PROTOCOL_OPS.contains(&op) && !NO_UPDATE_AFTER.contains(&op)
+}
+
 // The help of `--expect`, as `help` (`-h`) and `long_help` (`--help`) strings rather than doc
 // comments, which rustdoc would read `<actual>` in as HTML.
 
@@ -354,7 +366,13 @@ root's install, and one in another user's directory, never update themselves. --
 what automatic update does: with automatic update on, it installs the latest release only when \
 that carries the mark for the installed minor line (auto-update-from-<major>.<minor>, a file of \
 the release), and leaves a note beside the binaries; a release without the mark is noted at \
-its second sighting, and a request that fails changes nothing and is no error.";
+its second sighting, and a request that fails changes nothing and is no error.
+
+Where automatic update is on, a command that went well starts update --background once a day, \
+after its envelope is out, and waits for nothing: its output and exit code do not change. The \
+next such command whose stderr is a terminal prints the note, one line on stderr after its \
+envelope, once. mcp, serve, auth git-credential, ws hook and update itself start no such run and \
+print no note.";
 
 /// `serve --user-family`'s help.
 const SERVE_USER_FAMILY_HELP: &str = "With --cgi: name the caller <FAMILY>/$REMOTE_USER, the user \
@@ -2073,6 +2091,26 @@ mod tests {
         ops.sort_unstable();
         ops.dedup();
         assert_eq!(ops.len(), 65, "two subcommands name one op");
+
+        // Automatic update follows every operation but these, and not `serve --prepare`,
+        // which a flag names and no subcommand.
+        let skipped: Vec<&str> = ops
+            .iter()
+            .copied()
+            .filter(|op| !update_follows(op))
+            .collect();
+        assert_eq!(
+            skipped,
+            ["auth_git_credential", "mcp", "serve", "update", "ws_hook"]
+        );
+        assert!(!update_follows(SERVE_PREPARE));
+        for op in PROTOCOL_OPS.iter().chain(&NO_UPDATE_AFTER) {
+            assert!(
+                ops.contains(op) || *op == SERVE_PREPARE,
+                "{op} is an operation"
+            );
+        }
+        assert!(update_follows(NO_OP), "no command line names it");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["ws"]), None);

@@ -34,8 +34,7 @@ collects the changes on `stable` that no release holds yet, until the next relea
   gives a note still unprinted (`pending`); `--background` installs the latest release only when
   it holds the mark for the installed minor line (the file `auto-update-from-<major>.<minor>`,
   asked for by one more HEAD request), notes a release without the mark at its second sighting,
-  and does not try a release again that failed. Nothing starts `--background` after a command
-  yet. It works only on an install with the installer's receipt, in a release's build: otherwise
+  and does not try a release again that failed. It works only on an install with the installer's receipt, in a release's build: otherwise
   `E_INVALID_ARG` with `details.reason` `no_receipt` (a package, an archive unpacked by hand) or
   `not_a_release_build` (a clone); also `receipt`, `exe_unknown` and `curl_missing`. A second
   update of the same install is `E_BUSY` (`details.reason` `update_running`); a releases page
@@ -197,6 +196,23 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Changed
 
+- An install the installer made now updates itself, unless it is told not to: a behaviour
+  change for whoever runs SwarmOps on hosts of their own. Where `update --status` says
+  `auto_update` `on` (a release's build, a receipt that says `auto_update = true`, no
+  `SWARMOPS_AUTO_UPDATE=off`, no `CI`, no container, not root, the caller's own directory), a
+  command that went well is followed, once its envelope is out, by automatic update: at most
+  once in 24 hours, by the lock file's modification time, one command claims the check and starts
+  `update --background`, detached (its own process group, no stdio, `/` for its directory, and
+  without the caller's descriptors 3 to 9), and waits for nothing. The command's envelope, exit
+  code and `meta.elapsed_ms` do not change. What that run did (`updated`, `available`, `failed`)
+  is one line on stderr after the envelope of the next command whose stderr is a terminal,
+  printed once and worded as a statement; a command whose stderr is no terminal prints nothing
+  and leaves the note, which `update --status` gives as `pending`. Nothing follows `--help`,
+  `--version`, a refused line, a failed command, `mcp`, `serve`, `serve --prepare`,
+  `auth git-credential`, `ws hook` or `update`. Turn it off with `so update --auto off`, with
+  `SWARMOPS_AUTO_UPDATE=off`, or at install time with the installer's `--no-auto-update` or a
+  named `--version`. `update --background` now waits up to half a second for the lock, which a
+  command's claim holds for an instant.
 - `swarmops --help` (and `-h`, and `swarmops help`) is a screen of its own instead of clap's flat
   list: the commands in seven named groups, in the order a newcomer needs them, each with a
   summary of at most 60 characters, then examples, what a command prints, where to read more,

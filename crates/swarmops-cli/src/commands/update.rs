@@ -21,8 +21,24 @@
 //! (`swarmops_ops::update::auto_update`) and gives the note no command has printed yet;
 //! `--auto on|off` writes the receipt's `auto_update`, by a temporary file renamed over it.
 //!
-//! `--background` is what automatic update runs. It does nothing unless automatic update is on,
-//! takes the lock without waiting, and installs the latest release only when the release holds
+//! Automatic update is what follows a command that went well, once its envelope is out
+//! ([`after_command`]): where the install updates itself, the command prints the note an earlier
+//! run left, if its stderr is a terminal, and once a day starts `update --background`, detached,
+//! which nobody waits for.
+//!
+//! ```text
+//!   a command, exit 0 ── envelope out ── after_command
+//!        a release's build, a receipt that says true, no switch, CI or container, the owner
+//!        ├── stderr a terminal, a note: unlink it, and print it
+//!        ├── the lock file younger than 24 h: done
+//!        ├── claim: lock, look again, set its time to now, unlock
+//!        └── /bin/sh -c 'exec <program> update --background 3>&- … 9>&-'
+//!            (its own process group, no stdio, the caller's descriptors 3 to 9 closed)
+//! ```
+//!
+//! `--background` is that run. It does nothing unless automatic update is on, takes the lock,
+//! waiting no longer than a command's claim holds it, and installs the latest release only when
+//! the release holds
 //! the mark for the installed minor line: one more HEAD, which answers 302 for a file the
 //! release holds and 404 for one it does not. Any other answer, like every failure to look, is
 //! left for the next check and says nothing. What it did is one line in the note file, for the
@@ -38,14 +54,14 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Read, Seek as _, SeekFrom, Write as _};
+use std::io::{self, Read, Seek as _, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use rustix::process::{Pid, Signal};
 use serde_json::{Map, Value};
@@ -106,6 +122,16 @@ const MAX_QUOTED_CHARS: usize = 200;
 /// The mode of the files written beside the binaries: the installer's for its receipt.
 const FILE_MODE: u32 = 0o644;
 
+/// How long a run in the background waits for the lock: a command that claims the day's check
+/// ([`Install::claim`]) holds it for an instant, and may do so as the run it started begins.
+const CLAIM_WAIT: Duration = Duration::from_millis(500);
+
+/// The shell's line that becomes the run in the background: the program, `$0`, in place of the
+/// shell, without the descriptors 3 to 9 its parent's caller may have passed down. A lock a
+/// script holds on one (`flock 9`), or a pipe a harness reads to its end, is then not held for
+/// as long as a download takes. A descriptor that is not open is closed without complaint.
+const DETACHED: &str = r#"exec "$0" update --background 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-"#;
+
 /// What runs curl here, for the refusal where there is none.
 const UPDATE: Caller = Caller {
     what: "update",
@@ -155,6 +181,56 @@ fn update(env: Env<'_>, form: Form) -> Result<UpdateOut, OpError> {
         Form::Install => install(env, &found),
         Form::Background => Ok(background(env, &found)),
     }
+}
+
+/// What follows a command that went well, once its envelope is out: automatic update. Nothing
+/// it finds or does is an error, and nothing is waited for. `terminal` says whether stderr,
+/// which `log` writes to, is one.
+///
+/// 1. A build that is no release's stops here, before any file is looked at.
+/// 2. So does an install that does not update itself (`swarmops_ops::update::auto_update`, as
+///    `--status` says it), or whose receipt is refused.
+/// 3. At a terminal, the note an earlier run left is removed and printed, by the one command
+///    whose removal went through.
+/// 4. A check claimed less than a day ago ends it. Otherwise this command claims today's
+///    ([`Install::claim`]) and starts `update --background`, detached ([`spawn_background`]).
+pub(crate) fn after_command(env: Env<'_>, terminal: bool, log: &mut dyn Write) {
+    if !version::is_release() {
+        return;
+    }
+    let Ok(found) = Found::look(env) else {
+        return;
+    };
+    let (AutoUpdate::On, Some(install)) = (found.auto, &found.install) else {
+        return;
+    };
+    if terminal {
+        install.say_note(log);
+    }
+    if install.claim() {
+        let _ = spawn_background();
+    }
+}
+
+/// Starts `update --background` by this program, detached, and gives the child, which nobody
+/// waits for: a process group of its own, no stdio a reader could wait on, the root for its
+/// directory, so that it holds no directory of the caller's, and none of the caller's
+/// descriptors 3 to 9 ([`DETACHED`]). It has the caller's environment: what turned automatic
+/// update on here turns it on there. `None` when the program cannot name its own file, or
+/// there is no shell.
+fn spawn_background() -> Option<Child> {
+    let program = std::env::current_exe().ok()?;
+    Command::new(SHELL)
+        .arg("-c")
+        .arg(DETACHED)
+        .arg(program)
+        .current_dir("/")
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()
 }
 
 /// `update --auto on|off`: the receipt's `auto_update` written, where it says otherwise. Turning
@@ -229,7 +305,7 @@ fn background(env: Env<'_>, found: &Found) -> UpdateOut {
     let Ok(curl) = Curl::find(env, &UPDATE) else {
         return out;
     };
-    let Ok(mut lock) = install.lock() else {
+    let Ok(mut lock) = install.lock_within(CLAIM_WAIT) else {
         return out;
     };
 
@@ -519,6 +595,53 @@ impl Install {
         let _ = fs::remove_file(self.dir.join(NOTE_FILE));
     }
 
+    /// Prints the note an automatic update left on `log`, a terminal, and removes it: of the
+    /// commands that read it at once, the one whose removal went through prints it. A file
+    /// that holds no note is left, and says nothing.
+    fn say_note(&self, log: &mut dyn Write) {
+        let Some(note) = self.note() else {
+            return;
+        };
+        if fs::remove_file(self.dir.join(NOTE_FILE)).is_ok() {
+            let _ = writeln!(log, "{}", note.sentence());
+        }
+    }
+
+    /// Claims the check for a newer release that is due now, for the command that then starts
+    /// it: whether this command has it. A check is due a day after the last was claimed
+    /// (`swarmops_ops::update::check_due`), by the lock file's modification time.
+    ///
+    /// 1. A lock file younger than that: no. This is all most commands do.
+    /// 2. No lock file: the command that makes it has the claim, since making it sets its time,
+    ///    and of several only one makes it.
+    /// 3. Else the file is locked without waiting (held: an update is running, or another
+    ///    command claims), looked at again, and its time set to now. Now is read with the lock
+    ///    held, so that a claim made meanwhile is in its past, and not a time in the future.
+    ///
+    /// A directory or a file this user cannot write claims nothing, so nothing is started.
+    fn claim(&self) -> bool {
+        let path = self.dir.join(LOCK_FILE);
+        let last = |found: io::Result<fs::Metadata>| found.and_then(|file| file.modified()).ok();
+        if !update::check_due(SystemTime::now(), last(fs::metadata(&path))) {
+            return false;
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).mode(FILE_MODE);
+        match options.open(&path) {
+            Ok(file) => {
+                if file.try_lock().is_err() {
+                    return false;
+                }
+                let now = SystemTime::now();
+                update::check_due(now, last(file.metadata())) && file.set_modified(now).is_ok()
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                options.create_new(true).open(&path).is_ok()
+            }
+            Err(_) => false,
+        }
+    }
+
     /// The version installed: the lower of what the two names answer to `--version`, run with
     /// the caller's environment (`swarmops_ops::update::installed`).
     fn installed(&self) -> Option<Version> {
@@ -543,6 +666,18 @@ impl Install {
             Ok(()) => Ok(Lock { file }),
             Err(TryLockError::WouldBlock) => Err(NoLock::Held),
             Err(TryLockError::Error(e)) => Err(NoLock::Io(e)),
+        }
+    }
+
+    /// Takes the lock as [`Install::lock`] does, trying again for at most `wait` while it is
+    /// held.
+    fn lock_within(&self, wait: Duration) -> Result<Lock, NoLock> {
+        let started = Instant::now();
+        loop {
+            match self.lock() {
+                Err(NoLock::Held) if started.elapsed() < wait => thread::sleep(MAX_NAP / 5),
+                taken => return taken,
+            }
         }
     }
 
@@ -1321,6 +1456,217 @@ mod tests {
         assert_eq!(error.code, ErrorCode::Io.as_str());
         assert_eq!(error.details["step"], "lock");
         assert!(error.details["path"].is_string());
+    }
+
+    /// The lock file of `install`, made if there is none, as last claimed `ago` before now, or
+    /// that long after it.
+    fn claimed(install: &Install, ago: Duration, future: bool) -> SystemTime {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(install.dir.join(LOCK_FILE))
+            .expect("the lock file");
+        let now = SystemTime::now();
+        let at = if future { now + ago } else { now - ago };
+        file.set_modified(at).expect("set its time");
+        at
+    }
+
+    /// When the lock file of `install` was last claimed.
+    fn last_claim(install: &Install) -> SystemTime {
+        fs::metadata(install.dir.join(LOCK_FILE))
+            .and_then(|file| file.modified())
+            .expect("the lock file's time")
+    }
+
+    #[test]
+    fn a_check_is_claimed_once_a_day_by_one_command() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let install = Install {
+            dir: dir.path().to_path_buf(),
+        };
+        let hour = Duration::from_hours(1);
+        // Whether the file's time is that of a claim made since `before`.
+        let claimed_since = |before: SystemTime| {
+            let at = last_claim(&install);
+            before <= at && at <= SystemTime::now()
+        };
+
+        // 1. No lock file: the command that makes it has the claim, and the next has none.
+        assert!(install.claim());
+        assert!(install.dir.join(LOCK_FILE).is_file());
+        assert!(!install.claim());
+
+        // 2. Claimed less than a day ago: nothing, and the file's time stays.
+        let at = claimed(&install, 23 * hour, false);
+        assert!(!install.claim());
+        assert_eq!(last_claim(&install), at);
+
+        // 3. A day ago or more: claimed, once, and the time is the claim's.
+        claimed(&install, 25 * hour, false);
+        let before = SystemTime::now();
+        assert!(install.claim());
+        assert!(claimed_since(before));
+        assert!(!install.claim());
+
+        // 4. A time in the future, as a clock set back leaves: long ago.
+        claimed(&install, 48 * hour, true);
+        let before = SystemTime::now();
+        assert!(install.claim());
+        assert!(claimed_since(before));
+
+        // 5. Due, but an update holds the lock: nothing, and the time stays.
+        let at = claimed(&install, 25 * hour, false);
+        let lock = install.lock().ok().expect("take the lock");
+        assert!(!install.claim());
+        assert_eq!(last_claim(&install), at);
+        drop(lock);
+
+        // 6. What the file remembers is kept by a claim.
+        let mut lock = install.lock().ok().expect("take the lock");
+        let mut state = State::default();
+        state.record_failure(&Version::parse("1.2.3").expect("a version"));
+        lock.write(&state).expect("write the state");
+        drop(lock);
+        claimed(&install, 25 * hour, false);
+        assert!(install.claim());
+        let mut lock = install.lock().ok().expect("take the lock");
+        assert_eq!(lock.state(), state);
+        drop(lock);
+
+        // 7. Nowhere to claim: a directory that is not there, and one that cannot be written.
+        let nowhere = Install {
+            dir: dir.path().join("missing"),
+        };
+        assert!(!nowhere.claim());
+        if !rustix::process::geteuid().is_root() {
+            let closed = Install {
+                dir: dir.path().join("closed"),
+            };
+            fs::create_dir(&closed.dir).expect("a directory");
+            let mode = |mode| fs::set_permissions(&closed.dir, fs::Permissions::from_mode(mode));
+            mode(0o555).expect("close the directory");
+            assert!(!closed.claim());
+            mode(0o755).expect("open the directory");
+            assert!(!closed.dir.join(LOCK_FILE).exists());
+        }
+    }
+
+    /// Of many commands that find a check due at once, one has the claim: whether the lock file
+    /// is there, old, or has yet to be made.
+    #[test]
+    fn of_commands_at_once_one_claims_the_check() {
+        const COMMANDS: usize = 32;
+        for made in [false, true] {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let install = Install {
+                dir: dir.path().to_path_buf(),
+            };
+            if made {
+                claimed(&install, Duration::from_hours(25), false);
+            }
+            let start = std::sync::Barrier::new(COMMANDS);
+            let claims = thread::scope(|scope| {
+                let commands: Vec<_> = (0..COMMANDS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            start.wait();
+                            install.claim()
+                        })
+                    })
+                    .collect();
+                commands
+                    .into_iter()
+                    .map(|command| command.join().expect("a command"))
+                    .filter(|claimed| *claimed)
+                    .count()
+            });
+            assert_eq!(claims, 1, "lock file made before: {made}");
+        }
+    }
+
+    #[test]
+    fn a_note_is_printed_once_and_removed() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let install = Install {
+            dir: dir.path().to_path_buf(),
+        };
+        let path = install.dir.join(NOTE_FILE);
+
+        // No note, nothing said.
+        let mut log = Vec::new();
+        install.say_note(&mut log);
+        assert_eq!(log, b"");
+
+        // A note: its sentence on one line, and the file is gone, so the next says nothing.
+        let note = Note::parse("updated 1.2.3 1.3.0\n").expect("a note");
+        install.leave(&note).expect("leave the note");
+        install.say_note(&mut log);
+        let said = String::from_utf8(log).expect("UTF-8");
+        assert_eq!(said, format!("{}\n", note.sentence()));
+        assert!(said.starts_with("swarmops: updated from 1.2.3 to 1.3.0. "));
+        assert!(!path.exists());
+        let mut log = Vec::new();
+        install.say_note(&mut log);
+        assert_eq!(log, b"");
+
+        // A file that holds no note is left, and says nothing.
+        fs::write(&path, "nothing this build knows\n").expect("write a file");
+        install.say_note(&mut log);
+        assert_eq!(log, b"");
+        assert!(path.exists());
+    }
+
+    /// The line the run in the background is started by gives the program the two words, and
+    /// none of the descriptors 3 to 9 its parent had.
+    #[test]
+    fn the_background_run_is_started_without_its_parent_s_descriptors() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let seen = dir.path().join("seen");
+        let probe = dir.path().join("a probe");
+        let script = "#!/bin/sh\n\
+                      out=$1; shift\n\
+                      open=\n\
+                      for n in 3 4 5 6 7 8 9; do\n\
+                      \x20 if (eval \": >&$n\") 2>/dev/null; then open=\"$open $n\"; fi\n\
+                      done\n\
+                      echo \"$*:$open\" > \"$out\"\n";
+        fs::write(&probe, script).expect("write the probe");
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).expect("set its mode");
+
+        // 1. The probe sees what it is given: the control.
+        let held = "3>/dev/null 5>/dev/null 9>/dev/null";
+        let line = format!("\"$0\" \"$1\" update --background {held}");
+        let status = Command::new(SHELL)
+            .args(["-c", &line])
+            .args([&probe, &seen])
+            .status()
+            .expect("run a shell");
+        assert!(status.success());
+        let open = fs::read_to_string(&seen).expect("what the probe saw");
+        assert_eq!(open, "update --background: 3 5 9\n");
+
+        // 2. Started by the line, from a shell that holds the same three, it has none. The
+        //    line gives its program no argument to say where to write, so a wrapper does.
+        assert!(!DETACHED.contains('\''), "it is quoted whole below");
+        let wrapper = dir.path().join("wrapper");
+        let starts_probe = format!(
+            "#!/bin/sh\nexec \"{}\" \"{}\" \"$@\"\n",
+            probe.display(),
+            seen.display()
+        );
+        fs::write(&wrapper, starts_probe).expect("write the wrapper");
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("set its mode");
+        let line = format!("{SHELL} -c '{DETACHED}' \"$0\" {held}");
+        let status = Command::new(SHELL)
+            .args(["-c", &line])
+            .arg(&wrapper)
+            .status()
+            .expect("run a shell");
+        assert!(status.success());
+        let open = fs::read_to_string(&seen).expect("what the probe saw");
+        assert_eq!(open, "update --background:\n");
     }
 
     #[test]
