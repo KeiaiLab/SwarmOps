@@ -517,10 +517,11 @@ fn history(changesets: usize) -> Store {
 }
 
 /// The store of `changesets` changesets and files under `SWARMOPS_BENCH_DIR`, built once and
-/// reused while its record matches: the build puts every object durably, minutes at 50,000, so
-/// each test works on a clone ([`clone_of`]). Two tests that need it build it one after the
-/// other, under a lock beside it. Its directory names the format: a checkout whose `init` makes
-/// another format builds its own, and does not remove this one under a clone being made.
+/// reused while its record matches: the build puts every object durably, minutes at 50,000 (on
+/// macOS it flushes nothing until its end and takes about one: [`create`], [`flushed`]), so each
+/// test works on a clone ([`clone_of`]). Two tests that need it build it one after the other,
+/// under a lock beside it. Its directory names the format: a checkout whose `init` makes another
+/// format builds its own, and does not remove this one under a clone being made.
 fn built(changesets: usize) -> Utf8PathBuf {
     let base = base_dir();
     let name = format!(
@@ -550,6 +551,7 @@ fn built(changesets: usize) -> Utf8PathBuf {
     }
     fs::create_dir_all(&dir).expect("create the store's directory");
     generate(&store, changesets);
+    flushed();
     fs::write(dir.join(MADE), record).expect("write the record");
     store
 }
@@ -557,7 +559,7 @@ fn built(changesets: usize) -> Utf8PathBuf {
 /// Makes at `root` a store of `changesets` changesets and files, `main` on its head: the tree
 /// `data/dNNN/fNNN.txt`, and a history that alternates `hist.txt` beside it.
 fn generate(root: &Utf8Path, changesets: usize) {
-    let repo = LocalRepo::create(root, "counted").expect("create the store");
+    let repo = create(root);
 
     // 1. The tree, and two roots that differ in `hist.txt` alone.
     let mut objects = Vec::new();
@@ -606,6 +608,44 @@ fn generate(root: &Utf8Path, changesets: usize) {
     repo.cas_ref(MAIN, None, parent, "counted")
         .expect("move main");
     repo.flush_metadata().expect("flush the metadata");
+}
+
+/// The new store at `root` that [`generate`] fills, every object and journal frame of it durable
+/// as the product writes them.
+#[cfg(not(target_os = "macos"))]
+fn create(root: &Utf8Path) -> LocalRepo {
+    LocalRepo::create(root, "counted").expect("create the store")
+}
+
+/// The new store at `root` that [`generate`] fills, on macOS written through the test kit's
+/// [`NoSyncFs`]: the same calls and the same files, with no flush to stable storage. A flush there
+/// is an `F_FULLFSYNC` a file, and the large store's 100,055 object files took 8 to 16.5 minutes
+/// with them, at or past the kill of `just check`'s profile, where a killed build starts again
+/// from nothing; without them the build took 66 s (an M-series laptop, the volume otherwise
+/// quiet). The gates count what an operation does on a clone of the store, opened on the real
+/// filesystem, and never the build. A small store built each way held the same files with the
+/// same bytes, but for the three that differ between any two builds (`REPO`, the store's id, and
+/// `meta/journal2.log` and `.off`). What the build no longer has is its own durability:
+/// [`flushed`] asks for it once, before the record is written.
+#[cfg(target_os = "macos")]
+fn create(root: &Utf8Path) -> LocalRepo {
+    let fs = Arc::new(swarmops_testkit::fs::NoSyncFs);
+    LocalRepo::create_with_fs(root, "counted", fs).expect("create the store")
+}
+
+/// Called once a store is generated, before its record says it is whole: nothing to do where the
+/// build wrote every file durably.
+#[cfg(not(target_os = "macos"))]
+fn flushed() {}
+
+/// Called once a store is generated, before its record says it is whole: on macOS, where the
+/// build flushed nothing ([`create`]), one `sync(2)`, which asks the system to write every
+/// volume's dirty buffers out. It is not the product's flush to stable storage: a power loss just
+/// after it can still leave a record beside a store that is not whole, and such a store is built
+/// again once its directory is removed.
+#[cfg(target_os = "macos")]
+fn flushed() {
+    rustix::fs::sync();
 }
 
 /// A copy of the store at `from` in a directory of its own beside it, its tree's deep directory
