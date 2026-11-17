@@ -246,16 +246,17 @@ installs the same tool versions as `ci.yml`'s: move them together.
    `### Changed (breaking, no automatic update)`: `just release-marks` reads the headings
    ([step 9](#checklist)). It takes the words wherever a `###` heading has them, however they
    are spaced, cased and punctuated, and stops at a heading of another depth that says them,
-   so a heading written to withhold a release never gives it a mark. Two things call for it, and nothing else does: the release changes
-   what stores older builds can open (`init`, or a writer by default, starts to make a store
-   that an older release refuses), or it needs a step by hand before or after the binaries are
-   replaced. A group that says `(breaking)` alone does not withhold a release: its changes are
-   in the notes that the update's line links. The first release also brings up to
-   date what says nothing is released yet: README's status badge, status line, maturity row and
-   install section, the README's documentation table, `docs/operations.md`'s install section,
-   SECURITY.md's "Which versions get fixes?" section, CHANGELOG.md's introduction, the
-   versioning policy's first paragraph, this file's first line, the Maturity row of `web/content/product/vs-git.md`
-   and the issue template's contact text (`.github/ISSUE_TEMPLATE/config.yml`).
+   so a heading written to withhold a release never gives it a mark. Two things call for it,
+   and nothing else does: the release changes what stores older builds can open (`init`, or a
+   writer by default, starts to make a store that an older release refuses), or it needs a step
+   by hand before or after the binaries are replaced. A group that says `(breaking)` alone does
+   not withhold a release: its changes are in the notes that the update's line links. The first
+   release also brings up to date what says nothing is released yet: README's status badge,
+   status line, maturity row and install section, the README's documentation table,
+   `docs/operations.md`'s install section, SECURITY.md's "Which versions get fixes?" section,
+   CHANGELOG.md's introduction, the versioning policy's first paragraph, this file's first line,
+   the Maturity row of `web/content/product/vs-git.md` and the issue template's contact text
+   (`.github/ISSUE_TEMPLATE/config.yml`).
 5. **Bump the version** in `[workspace.package]` of `Cargo.toml` and in the
    `version = "X.Y.Z"` of every internal dependency in `crates/*/Cargo.toml`,
    `fuzz/Cargo.toml` and `bench/compare/Cargo.toml`; let `cargo check` update `Cargo.lock`.
