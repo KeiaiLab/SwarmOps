@@ -197,8 +197,18 @@ const CUT_BLOCK: usize = 64 << 10;
 /// a read for each whole block of `bytes`, then one read of the rest. A short read counts as
 /// its block, so the filter may end before `bytes`, never after: what GNU's
 /// `count=<bytes> iflag=count_bytes` does in one run, which BSD's `dd` does not know.
+///
+/// BSD's `dd` writes a short read at once only where no `count` is given; with one it holds
+/// them until a block is full or it ends, and a peer waiting for the bytes it holds waits
+/// forever. Off Linux the whole blocks are therefore a run of `dd` for each read ([`reads`]).
 fn cutter(bytes: usize) -> String {
-    let whole = |blocks: usize| format!("dd bs={CUT_BLOCK} count={blocks} 2>/dev/null");
+    let whole = |blocks: usize| {
+        if cfg!(target_os = "linux") || blocks == 1 {
+            format!("dd bs={CUT_BLOCK} count={blocks} 2>/dev/null")
+        } else {
+            reads(blocks)
+        }
+    };
     let last = |rest: usize| format!("dd bs={rest} count=1 2>/dev/null");
     match (bytes / CUT_BLOCK, bytes % CUT_BLOCK) {
         (0, 0) => ":".to_owned(),
@@ -206,6 +216,24 @@ fn cutter(bytes: usize) -> String {
         (blocks, 0) => whole(blocks),
         (blocks, rest) => format!("{{ {}; {}; }}", whole(blocks), last(rest)),
     }
+}
+
+/// A filter that passes up to `blocks` reads of [`CUT_BLOCK`] bytes at most on, each as it
+/// comes, and exits: a `dd` of one read for each, which writes what it read as it ends. A run
+/// that reads the end of file says `0+0 records in`, and is the last; so is one that fails,
+/// and its status is the filter's. Its stdout is the filter's through fd 3, as its report is
+/// read from its own.
+///
+/// The filter is a group around the one that opens fd 3, so that redirections a caller
+/// appends are made before it: [`SshFault::CutSend`]'s `<&3 3<&-` would otherwise be made
+/// after it, on the fd 3 the loop writes to.
+fn reads(blocks: usize) -> String {
+    format!(
+        "{{ {{ cut_n=0; cut_status=0; while [ $cut_n -lt {blocks} ]; do \
+         cut_said=$(dd bs={CUT_BLOCK} count=1 2>&1 >&3 3>&-) || {{ cut_status=$?; break; }}; \
+         case $cut_said in '0+0 records in'*) break;; esac; \
+         cut_n=$((cut_n+1)); done; (exit $cut_status); }} 3>&1; }}"
+    )
 }
 
 /// The stand-in's tail that runs `service`, a shell command line that serves the connection
@@ -2586,6 +2614,104 @@ mod tests {
         // 2. Uncut, the same clone succeeds.
         let serve = server.ssh_command(SshMode::Serve);
         cloned(&server, &url, &[("GIT_SSH_COMMAND", &serve)]);
+    }
+
+    /// A cut of several blocks passes each read on as it comes, short as it is: a peer that
+    /// writes on only once its first bytes arrived is not kept waiting. (BSD's `dd` with a
+    /// `count` holds short reads until it ends.)
+    #[test]
+    fn a_cutter_passes_a_short_read_on_at_once() {
+        use std::io::Read as _;
+        use std::sync::mpsc;
+
+        // 1. A writer of one byte, then of a second once the mark is there, through the cutter.
+        let work = tempfile::tempdir().expect("a temp dir");
+        let mark = work.path().join("arrived");
+        let script = format!(
+            "{{ printf a; until [ -e \"$1\" ]; do sleep 0.01; done; printf b; }} | {cut}\n",
+            cut = super::cutter(3 * super::CUT_BLOCK + 1),
+        );
+        let mut filter = Command::new("sh")
+            .args(["-c", &script, "sh"])
+            .arg(&mark)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("run sh");
+        let mut answer = filter.stdout.take().expect("a piped stdout");
+
+        // 2. The first byte arrives while the writer still holds its end; then the second.
+        let (send, arrived) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut first = [0; 1];
+            let read = answer.read_exact(&mut first).map(|()| first[0]);
+            send.send(read).expect("the test waits");
+            let mut rest = Vec::new();
+            answer.read_to_end(&mut rest).expect("read the rest");
+            rest
+        });
+        let first = arrived.recv_timeout(CHILD_TIMEOUT);
+        std::fs::write(&mark, "").expect("write the mark");
+        let rest = reader.join().expect("the reader ended");
+        assert!(filter.wait().expect("sh ran").success());
+        let first = first.expect("the cutter held its first read");
+        assert_eq!(first.expect("read a byte"), b'a');
+        assert_eq!(rest, b"b");
+    }
+
+    /// A cut of the client's stream at whole blocks, two and more, passes the stream on: the
+    /// cutter's own descriptors do not meet the ones [`SshFault::CutSend`] hands it its
+    /// input by. A short stream arrives whole, and of a long one its start, two reads at most.
+    #[test]
+    fn a_cut_send_at_whole_blocks_passes_the_stream_on() {
+        use std::io::Write as _;
+
+        const CUT: usize = 2 * super::CUT_BLOCK;
+        let script = super::faulted("cat", SshFault::CutSend(CUT));
+        let through = |sent: Vec<u8>| {
+            let mut stand_in = Command::new("sh")
+                .args(["-c", &script])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("run sh");
+            let mut stdin = stand_in.stdin.take().expect("a piped stdin");
+            // Past the cut the write finds no reader, which is the cut.
+            let writer = std::thread::spawn(move || drop(stdin.write_all(&sent)));
+            let output = stand_in.wait_with_output().expect("sh ran");
+            writer.join().expect("the writer ended");
+            assert!(output.status.success(), "{:?}", output.status);
+            output.stdout
+        };
+
+        // 1. A stream of less than a read: all of it.
+        assert_eq!(through(b"hello".to_vec()), b"hello");
+
+        // 2. A stream longer than the cut: its start, and no more than the cut.
+        let long: Vec<u8> = (b'a'..=b'w').cycle().take(3 * CUT).collect();
+        let passed = through(long.clone());
+        assert!(
+            !passed.is_empty() && passed.len() <= CUT,
+            "{}",
+            passed.len()
+        );
+        assert_eq!(passed, long[..passed.len()]);
+    }
+
+    /// A cutter whose `dd` fails ends at once with that failure, at one block and at more.
+    /// (Its input is a directory, which opens and does not read.)
+    #[test]
+    fn a_cutter_whose_read_fails_fails() {
+        for blocks in [1, 2] {
+            let script = format!("{} </\n", super::cutter(blocks * super::CUT_BLOCK));
+            let output = Command::new("sh")
+                .args(["-c", &script])
+                .stdin(Stdio::null())
+                .output()
+                .expect("run sh");
+            assert!(!output.status.success(), "{blocks}: {:?}", output.status);
+            assert_eq!(output.stdout, b"", "{blocks}");
+        }
     }
 
     #[test]
