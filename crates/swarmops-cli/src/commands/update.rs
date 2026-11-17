@@ -32,7 +32,7 @@
 //!        ├── stderr a terminal, a note: unlink it, and print it
 //!        ├── the lock file younger than 24 h: done
 //!        ├── claim: lock, look again, set its time to now, unlock
-//!        └── /bin/sh -c 'exec <program> update --background 3>&- … 9>&-'
+//!        └── /bin/sh -c 'exec 3>&- … 9>&-; exec <program> update --background'
 //!            (its own process group, no stdio, the caller's descriptors 3 to 9 closed)
 //! ```
 //!
@@ -130,7 +130,12 @@ const CLAIM_WAIT: Duration = Duration::from_millis(500);
 /// shell, without the descriptors 3 to 9 its parent's caller may have passed down. A lock a
 /// script holds on one (`flock 9`), or a pipe a harness reads to its end, is then not held for
 /// as long as a download takes. A descriptor that is not open is closed without complaint.
-const DETACHED: &str = r#"exec "$0" update --background 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-"#;
+///
+/// They are closed by a statement of their own, which the shell does not undo. Closed on the
+/// line that starts the program, bash 3.2, which is macOS's `/bin/sh`, first keeps a copy of
+/// each at 10 or above, to put it back should the program not start, and the program gets the
+/// copies.
+const DETACHED: &str = r#"exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-; exec "$0" update --background"#;
 
 /// What runs curl here, for the refusal where there is none.
 const UPDATE: Caller = Caller {
@@ -1628,55 +1633,79 @@ mod tests {
         assert!(path.exists());
     }
 
+    /// A program for [`held_until`]: it writes its arguments to `started`, then stays until
+    /// the file `release` is there, a minute at most, holding what it was started with.
+    fn stays(dir: &Path) -> PathBuf {
+        let program = dir.join("a program");
+        let script = format!(
+            "#!/bin/sh\n\
+             echo \"$*\" > '{at}/started.new'\n\
+             /bin/mv '{at}/started.new' '{at}/started'\n\
+             n=0\n\
+             while [ ! -e '{at}/release' ] && [ $n -lt 600 ]; do sleep 0.1; n=$((n + 1)); done\n",
+            at = dir.display()
+        );
+        fs::write(&program, script).expect("write the program");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("set its mode");
+        program
+    }
+
+    /// Starts [`stays`]' program of `dir` by `line`, a shell's, from a shell that holds one
+    /// pipe as its descriptors 3, 5 and 9, and waits until the program runs. Gives the
+    /// program's arguments, and whether it holds the pipe: the pipe's reader, this test, is at
+    /// its end only when no process has it open for writing, whatever number it has there.
+    /// Then lets the program go, and waits for the pipe's end.
+    fn held_until(dir: &Path, line: &str, wait: Duration) -> (String, bool) {
+        let program = stays(dir);
+        let from_a_shell = format!("{line} 3>&1 5>&1 9>&1 >/dev/null &");
+        let mut shell = Command::new(SHELL)
+            .args(["-c", &from_a_shell])
+            .arg(&program)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("run a shell");
+        let ended = drain(shell.stdout.take(), Keep::Head);
+        assert!(shell.wait().expect("the shell").success(), "{line}");
+
+        let started = dir.join("started");
+        let begun = Instant::now();
+        while !started.is_file() {
+            assert!(begun.elapsed() < Duration::from_secs(60), "{line}: started");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let held = ended.recv_timeout(wait).is_err();
+        fs::write(dir.join("release"), "").expect("let the program go");
+        if held {
+            ended
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the program ends, and the pipe with it");
+        }
+        let arguments = fs::read_to_string(&started).expect("what the program was given");
+        (arguments, held)
+    }
+
     /// The line the run in the background is started by gives the program the two words, and
-    /// none of the descriptors 3 to 9 its parent had.
+    /// no open file its parent had as a descriptor 3 to 9: not under that number, and not
+    /// under another the shell moved it to.
     #[test]
     fn the_background_run_is_started_without_its_parent_s_descriptors() {
+        // 1. The control: a program started with the descriptors holds the pipe until it ends.
         let dir = tempfile::tempdir().expect("a temp dir");
-        let seen = dir.path().join("seen");
-        let probe = dir.path().join("a probe");
-        let script = "#!/bin/sh\n\
-                      out=$1; shift\n\
-                      open=\n\
-                      for n in 3 4 5 6 7 8 9; do\n\
-                      \x20 if (eval \": >&$n\") 2>/dev/null; then open=\"$open $n\"; fi\n\
-                      done\n\
-                      echo \"$*:$open\" > \"$out\"\n";
-        fs::write(&probe, script).expect("write the probe");
-        fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).expect("set its mode");
+        let line = "\"$0\" update --background";
+        let (arguments, held) = held_until(dir.path(), line, Duration::from_millis(500));
+        assert_eq!(arguments, "update --background\n");
+        assert!(held, "the control holds the pipe");
 
-        // 1. The probe sees what it is given: the control.
-        let held = "3>/dev/null 5>/dev/null 9>/dev/null";
-        let line = format!("\"$0\" \"$1\" update --background {held}");
-        let status = Command::new(SHELL)
-            .args(["-c", &line])
-            .args([&probe, &seen])
-            .status()
-            .expect("run a shell");
-        assert!(status.success());
-        let open = fs::read_to_string(&seen).expect("what the probe saw");
-        assert_eq!(open, "update --background: 3 5 9\n");
-
-        // 2. Started by the line, from a shell that holds the same three, it has none. The
-        //    line gives its program no argument to say where to write, so a wrapper does.
+        // 2. Started by the line, it runs with the pipe closed: the reader is at its end
+        //    while the program still runs.
         assert!(!DETACHED.contains('\''), "it is quoted whole below");
-        let wrapper = dir.path().join("wrapper");
-        let starts_probe = format!(
-            "#!/bin/sh\nexec \"{}\" \"{}\" \"$@\"\n",
-            probe.display(),
-            seen.display()
-        );
-        fs::write(&wrapper, starts_probe).expect("write the wrapper");
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("set its mode");
-        let line = format!("{SHELL} -c '{DETACHED}' \"$0\" {held}");
-        let status = Command::new(SHELL)
-            .args(["-c", &line])
-            .arg(&wrapper)
-            .status()
-            .expect("run a shell");
-        assert!(status.success());
-        let open = fs::read_to_string(&seen).expect("what the probe saw");
-        assert_eq!(open, "update --background:\n");
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let line = format!("{SHELL} -c '{DETACHED}' \"$0\"");
+        let (arguments, held) = held_until(dir.path(), &line, Duration::from_secs(30));
+        assert_eq!(arguments, "update --background\n");
+        assert!(!held, "the pipe is closed in the run in the background");
     }
 
     #[test]

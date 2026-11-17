@@ -25,6 +25,7 @@
 //! gone, and ends.
 
 use std::fs::{self, File};
+use std::io::Read as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::Path;
 use std::sync::Barrier;
@@ -1372,8 +1373,10 @@ fn thirty_commands_at_once_start_one_update() {
     }
 }
 
-/// A caller's descriptor a command inherited is not held by the run in the background it
-/// starts: a curl of the test's, which that run starts, says whether it has descriptor 3.
+/// A caller's open file a command inherited as descriptor 3 is not held by the run in the
+/// background it starts, under that number or any other: the file is a named pipe, whose
+/// reader, this test, is at its end only when no process has it open for writing. The run in
+/// the background is kept running meanwhile by a curl of the test's, which stays until told.
 #[test]
 fn the_run_in_the_background_holds_no_descriptor_of_its_caller() {
     if !automatic_update_can_be_on() {
@@ -1385,32 +1388,60 @@ fn the_run_in_the_background_holds_no_descriptor_of_its_caller() {
     let curl = dir.path().join("curl");
     let script = format!(
         "#!/bin/sh\n\
-         if (: >&3) 2>/dev/null; then echo open; else echo closed; fi > '{at}/seen.new'\n\
-         /bin/mv '{at}/seen.new' '{at}/seen'\n\
+         : > '{at}/started'\n\
+         n=0\n\
+         while [ ! -e '{at}/release' ] && [ $n -lt 600 ]; do sleep 0.1; n=$((n + 1)); done\n\
          exit 7\n"
     );
     fs::write(&curl, script).expect("write the curl");
     fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).expect("set its mode");
     let curl = curl.to_str().expect("a UTF-8 path");
-    let seen = dir.path().join("seen");
-    let held = format!("{at}/held");
+    let (started, release) = (dir.path().join("started"), dir.path().join("release"));
 
-    // 1. The control: run with descriptor 3 open, the curl sees it.
-    let control = site.run_program("/bin/sh", &["-c", "\"$0\" 3>\"$1\"", curl, &held], &[]);
-    assert_eq!(control.status.code(), Some(7), "{control}");
-    assert_eq!(fs::read_to_string(&seen).expect("what it saw"), "open\n");
-    fs::remove_file(&seen).expect("forget the control");
+    // A named pipe, and a reader that says when every writer has closed it.
+    let pipe = |name: &str| {
+        let path = format!("{at}/{name}");
+        let made = site.run_program("/usr/bin/mkfifo", &[&path], &[]);
+        assert!(made.status.success(), "{made}");
+        let (done, ended) = std::sync::mpsc::channel();
+        let read = path.clone();
+        thread::spawn(move || {
+            let mut all = Vec::new();
+            let read = File::open(read).and_then(|mut pipe| pipe.read_to_end(&mut all));
+            let _ = done.send(read.is_ok());
+        });
+        (path, ended)
+    };
 
-    // 2. A command with descriptor 3 open starts the run in the background, whose curl has
-    //    none.
+    // 1. The control: the curl, run with the pipe as its descriptor 3, holds it until it ends.
+    let (held, ended) = pipe("control");
+    let line = "\"$0\" 3>\"$1\" </dev/null >/dev/null 2>&1 &";
+    let control = site.run_program("/bin/sh", &["-c", line, curl, &held], &[]);
+    assert!(control.status.success(), "{control}");
+    wait_for("the control", || started.is_file());
+    assert!(
+        ended.recv_timeout(Duration::from_millis(500)).is_err(),
+        "the control holds the pipe"
+    );
+    fs::write(&release, "").expect("let the control go");
+    assert_eq!(ended.recv_timeout(BACKGROUND_WAIT), Ok(true));
+    fs::remove_file(&started).expect("forget the control");
+    fs::remove_file(&release).expect("forget the control");
+
+    // 2. A command with the pipe as its descriptor 3 starts the run in the background. The
+    //    command ends, and the pipe is at its end while that run still waits for its curl.
+    let (held, ended) = pipe("held");
     let so = site.install.bin("so");
     let env = [AUTOMATIC[0], AUTOMATIC[1], (CURL_ENV, curl)];
     let line = "exec \"$0\" whoami 3>\"$1\"";
     let run = site.run_program("/bin/sh", &["-c", line, &so, &held], &env);
     assert_eq!((run.exit(), run.stderr.as_str()), (0, ""), "{run}");
     run.envelope();
-    wait_for("the run in the background", || seen.is_file());
-    assert_eq!(fs::read_to_string(&seen).expect("what it saw"), "closed\n");
+    wait_for("the run in the background", || started.is_file());
+    let closed = ended.recv_timeout(Duration::from_secs(30));
+    assert!(!release.exists(), "the run in the background still runs");
+    fs::write(&release, "").expect("let the run in the background go");
+    assert_eq!(closed, Ok(true), "the run in the background holds the pipe");
 }
 
 /// The test kit spells the names of the files beside the binaries itself, since it names no

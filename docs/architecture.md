@@ -767,9 +767,11 @@ SwarmOps' own network code:
   anyone. If a note is waiting and stderr is a terminal, the command prints it and removes it.
   If the lock file's time is more than 24 hours old, the command claims the check (it locks the
   file without waiting, looks again, sets the time) and starts `update --background` through
-  `/bin/sh -c 'exec "$0" update --background 3>&- … 9>&-'`: a process group of its own, null
-  stdio, `/` for its directory, without the caller's descriptors 3 to 9, never waited for.
-  `unsafe` is forbidden, so the shell closes them. That run waits up to half a second for the
+  `/bin/sh -c 'exec 3>&- … 9>&-; exec "$0" update --background'`: a process group of its own,
+  null stdio, `/` for its directory, without the caller's descriptors 3 to 9, never waited for.
+  `unsafe` is forbidden, so the shell closes them, in a statement of their own: closed on the
+  line that starts the program, macOS's `/bin/sh` keeps a copy of each at 10 or above, which
+  the program would hold. That run waits up to half a second for the
   lock, which a command's claim holds for an instant.
 - **What a background run leaves** is the note, one line (`updated <from> <to>`,
   `available <to>`, `failed <to> <why>`), and in the lock file a line each for the release
