@@ -5586,7 +5586,10 @@ impl Serialize for Json {
 /// `swarmops derive` (operations spec §1, storage spec §5's eager mode): the skip lists of new
 /// changesets derived ahead of any reader, once or, with `--follow`, as they are committed.
 mod derive {
+    use std::io::{BufRead as _, BufReader};
     use std::path::Path;
+    use std::process::{self, Stdio};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -5615,6 +5618,18 @@ mod derive {
                 return false;
             }
             thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A child that is killed, if it still runs, and reaped when dropped: a follower whose
+    /// stdout the test reads as it comes, which [`Child`]'s readers would keep to the end.
+    struct Reaped(process::Child);
+
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            // An error is a child reaped already.
+            let _ = self.0.kill();
+            let _ = self.0.wait();
         }
     }
 
@@ -5783,7 +5798,31 @@ mod derive {
         let c0 = store.commit(WRITER, "f", "0", None);
         let c1 = store.commit(WRITER, "f", "1", Some(&c0));
         assert_eq!(store.read(&["derive"]).ok()["derived"], 2, "all stored");
-        let mut child = follower(&store, &["--from-start", "--interval-ms", "20"]);
+        let mut child = Reaped(
+            support::swarmops(
+                &["--repo", store.path(), "derive", "--follow", "--from-start"],
+                &[],
+            )
+            .args(["--interval-ms", "20"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            // The test's own stderr, so that a follower that fails says why.
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn a follower"),
+        );
+        let stdout = BufReader::new(child.0.stdout.take().expect("a piped stdout"));
+        let (send, lines) = mpsc::channel();
+        thread::spawn(move || {
+            for line in stdout.lines() {
+                // A line that failed to read is the test's to fail on, and the last one read.
+                // A send that fails is a test that ended already.
+                let failed = line.is_err();
+                if send.send(line).is_err() || failed {
+                    break;
+                }
+            }
+        });
 
         // 1. Rounds of nothing to derive, then one commit.
         thread::sleep(Duration::from_secs(1));
@@ -5791,16 +5830,21 @@ mod derive {
         let by = Instant::now() + Duration::from_secs(60);
         assert!(listed_by(&store, &c2, by), "the new commit's list");
 
-        // 2. One line: the commit's round, none for the empty ones before it.
-        let (output, killed) = child.finish(Instant::now());
-        assert!(killed, "it follows until killed: {:?}", output.status);
-        let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
-        let lines: Vec<Value> = (stdout.lines())
-            .map(|line| serde_json::from_str(line).expect("one envelope a line"))
+        // 2. One line: the commit's round, none for the empty ones before it. A run stores its
+        //    lists before it prints, so the follower is killed once the line is there, not
+        //    once the list is.
+        let left = by.saturating_duration_since(Instant::now());
+        let only = lines.recv_timeout(left).expect("the commit's line");
+        let only = only.expect("UTF-8 stdout");
+        let running = child.0.try_wait().expect("look whether it ended");
+        assert_eq!(running, None, "it follows until killed");
+        child.0.kill().expect("kill the follower");
+        child.0.wait().expect("reap the follower");
+        let more: Vec<String> = (lines.iter())
+            .map(|line| line.expect("UTF-8 stdout"))
             .collect();
-        let [only] = &lines[..] else {
-            panic!("one line, the commit's: {stdout}");
-        };
+        assert!(more.is_empty(), "one line, the commit's: {only}\n{more:?}");
+        let only: Value = serde_json::from_str(&only).expect("one envelope a line");
         assert_eq!(only["result"]["derived"], 1, "{only}");
 
         // 3. The help says what silence is.
