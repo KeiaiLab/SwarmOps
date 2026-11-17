@@ -44,8 +44,8 @@ const POLL: Duration = Duration::from_millis(1);
 pub const BUSY_RETRIES: usize = 5;
 
 /// The variable that names the directory of the stores' memo keys (`swarmops-cli`'s
-/// `context::MEMO_KEY_DIR_ENV`, which this crate cannot name): every run of the binary sets it,
-/// so that no test makes a key in the user's state directory.
+/// `context::MEMO_KEY_DIR_ENV`, which this crate cannot name): every run of the binary sets it
+/// ([`isolate`]), so that no test makes a key in the user's state directory.
 const MEMO_KEY_DIR_ENV: &str = "SWARMOPS_MEMO_KEY_DIR";
 
 /// The memo keys' directory of every run, under the system's temp directory: one for all, so
@@ -101,35 +101,44 @@ pub fn swarmops_vars() -> impl Iterator<Item = OsString> {
         .filter(|name| name.to_string_lossy().starts_with("SWARMOPS_"))
 }
 
-/// What keeps a run of the binary away from the user's login, from the network and from the
-/// binary's own file: the login file's variable (`SWARMOPS_AUTH_FILE`) and curl's
-/// (`SWARMOPS_CURL`), each naming an absolute path under the system's temp directory where
-/// nothing is and nothing is made, and `SWARMOPS_AUTO_UPDATE=off`. The run then finds no login
-/// and no curl, whatever the developer's home directory and `PATH` hold, and neither looks for
-/// a newer release nor installs one. A test of a login names a file of its own, one of the
-/// device flow a stand-in for curl, and one of automatic update turns it on for a copy of the
-/// binary in a directory of its own.
-pub fn isolation() -> [(&'static str, OsString); 3] {
-    let nowhere = std::env::temp_dir().join(NO_LOGIN);
+/// What keeps a run of the binary away from the user's login, from the network, from the
+/// binary's own file and from the user's state directory: the login file's variable
+/// (`SWARMOPS_AUTH_FILE`) and curl's (`SWARMOPS_CURL`), each naming an absolute path under the
+/// system's temp directory where nothing is and nothing is made, `SWARMOPS_AUTO_UPDATE=off`,
+/// and the memo keys' directory (`SWARMOPS_MEMO_KEY_DIR`), the one under the system's temp
+/// directory that every run shares. The run then finds no login and no curl, whatever the
+/// developer's home directory and `PATH` hold, neither looks for a newer release nor installs
+/// one, and makes a store's memo key there, not in the developer's state directory. A test of
+/// a login names a file of its own, one of the device flow a stand-in for curl, one of
+/// automatic update turns it on for a copy of the binary in a directory of its own, and one of
+/// the memo keys names a directory of its own or none.
+pub fn isolation() -> [(&'static str, OsString); 4] {
+    let temp = std::env::temp_dir();
+    let nowhere = temp.join(NO_LOGIN);
     [
         (AUTH_FILE_ENV, nowhere.join("auth.toml").into_os_string()),
         (CURL_ENV, nowhere.join("curl").into_os_string()),
         (AUTO_UPDATE_ENV, OsString::from(AUTO_UPDATE_OFF)),
+        (
+            MEMO_KEY_DIR_ENV,
+            temp.join(SHARED_MEMO_KEYS).into_os_string(),
+        ),
     ]
 }
 
 /// Sets [`isolation`] on `command`, a run of the binary. Every place that spawns the binary
 /// calls this, or sets [`isolation`] itself: after it has removed this process's `SWARMOPS_*`
 /// variables ([`swarmops_vars`]), which would unset these again, and before the test's own
-/// variables, which may name a login file or a curl of the test's, or turn automatic update on.
+/// variables, which may name a login file, a curl or a memo keys' directory of the test's, or
+/// turn automatic update on.
 pub fn isolate(command: &mut Command) {
     command.envs(isolation());
 }
 
 /// Gives `command` the environment of this process without its `SWARMOPS_*` variables, then
-/// `SWARMOPS_TEST_ORDER_CHECK=1`, a memo keys' directory under the system's temp directory
-/// (`SWARMOPS_MEMO_KEY_DIR`) and no login, curl or automatic update ([`isolate`]), then `env`;
-/// and pipes for its output.
+/// `SWARMOPS_TEST_ORDER_CHECK=1` and no login, curl or automatic update, with a memo keys'
+/// directory under the system's temp directory ([`isolate`]), then `env`; and pipes for its
+/// output.
 fn with_env(command: &mut Command, env: &[(&str, &str)]) {
     for name in swarmops_vars() {
         command.env_remove(name);
@@ -137,10 +146,6 @@ fn with_env(command: &mut Command, env: &[(&str, &str)]) {
     isolate(command);
     command
         .env(ORDER_CHECK_ENV, "1")
-        .env(
-            MEMO_KEY_DIR_ENV,
-            std::env::temp_dir().join(SHARED_MEMO_KEYS),
-        )
         .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -712,19 +717,32 @@ mod tests {
         );
     }
 
-    /// The three names, spelled out: a variable dropped from [`isolation`], or renamed there
-    /// and not in the binary, fails here.
+    /// The four names, spelled out: a variable dropped from [`isolation`], or renamed there
+    /// and not in the binary, fails here. A run that [`isolate`] alone prepares, as the CLI's
+    /// tests of the help's examples and of the error codes do, then makes no memo key in the
+    /// developer's state directory.
     #[test]
-    fn isolation_names_the_login_file_curl_and_automatic_update() {
-        let names = isolation().map(|(name, _)| name);
+    fn isolation_names_the_login_file_curl_automatic_update_and_the_memo_keys() {
+        let named = isolation();
 
         assert_eq!(
-            names,
+            named.clone().map(|(name, _)| name),
             [
                 "SWARMOPS_AUTH_FILE",
                 "SWARMOPS_CURL",
-                "SWARMOPS_AUTO_UPDATE"
+                "SWARMOPS_AUTO_UPDATE",
+                "SWARMOPS_MEMO_KEY_DIR"
             ]
+        );
+        let keys = std::env::temp_dir().join(SHARED_MEMO_KEYS);
+        assert_eq!(named[3].1, keys.clone().into_os_string());
+        assert!(keys.is_absolute(), "{}", keys.display());
+
+        // Every run of the kit's reads the same key as one that is only isolated.
+        let command = swarmops::<Any, &str>(&["info"], &[]);
+        assert_eq!(
+            set(&command, "SWARMOPS_MEMO_KEY_DIR"),
+            Some(keys.into_os_string())
         );
     }
 
