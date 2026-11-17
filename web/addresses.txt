@@ -16,6 +16,7 @@
 /docs/guides/install
 /docs/guides/parallel-agents
 /docs/guides/quick-start
+/docs/guides/store-remote
 /docs/known-limitations
 /docs/operate/agents
 /docs/operate/backup-and-restore
@@ -38,7 +39,12 @@
 /docs/policies/msrv-and-platforms
 /docs/policies/versioning-and-stability
 /docs/reference/cli
+/docs/reference/coming-from-git
 /docs/reference/commands/ancestry
+/docs/reference/commands/auth-git-credential
+/docs/reference/commands/auth-login
+/docs/reference/commands/auth-logout
+/docs/reference/commands/auth-status
 /docs/reference/commands/blob-get
 /docs/reference/commands/blob-has
 /docs/reference/commands/blob-put
@@ -81,6 +87,7 @@
 /docs/reference/commands/show
 /docs/reference/commands/sync
 /docs/reference/commands/sync-status
+/docs/reference/commands/update
 /docs/reference/commands/upgrade
 /docs/reference/commands/verify
 /docs/reference/commands/whoami
