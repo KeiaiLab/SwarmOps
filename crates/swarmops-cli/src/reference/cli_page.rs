@@ -42,11 +42,11 @@ pub(super) fn render() -> String {
         "`{BIN} --help` lists the commands in groups, with examples; `{BIN} <command> --help` \
          gives one command's arguments and long help, and for a command that only groups \
          subcommands (`ws`, `ref`, `op`, `blob`, `git`, `remote`, `auth`) its subcommands, with \
-         examples. A line that names no command, `{BIN}` alone or such a command alone, is a \
-         usage error: `E_INVALID_ARG`, exit code 2, in an envelope. At a terminal it prints \
-         that help on stdout instead of the envelope, with the same exit code, unless `--json` \
-         or, without `--human`, `SWARMOPS_FORMAT=json` asks for the envelope; a pipe or a file \
-         always gets the envelope. `{BIN} remote` alone lists the remotes.\n"
+         examples. A line that names no command, `{BIN}` alone or such a command alone (but for \
+         `remote`, which alone lists the remotes), is a usage error: `E_INVALID_ARG`, exit \
+         code 2, in an envelope. At a terminal it prints that help on stdout instead of the \
+         envelope, with the same exit code, unless `--json` or `SWARMOPS_FORMAT=json` is \
+         given; a pipe or a file always gets the envelope.\n"
     );
     let _ = writeln!(
         out,

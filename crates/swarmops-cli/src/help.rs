@@ -430,29 +430,14 @@ fn refilled(cmd: Command) -> Command {
     }
 }
 
-/// The format flag a line settles on: of `--json` and `--human`, the one given last.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Flag {
-    /// `--json`: the envelope was asked for.
-    Json,
-    /// `--human`: text was asked for.
-    Human,
-    /// Neither flag: the variable decides.
-    Neither,
-}
-
 /// Whether a line that names no command (the program alone, or a family alone) prints its help
-/// instead of its usage error's envelope: when `stdout` is a terminal and nothing asks for the
-/// envelope, neither `--json` nor, without `--human`, a `SWARMOPS_FORMAT` (`format`) of
-/// `json`. A flag outranks the variable, as for every command's format. Whatever is not a
-/// person at a terminal gets the envelope, as every command gives one.
-pub(crate) fn bare(stdout: Stdout, flag: Flag, format: Option<&OsStr>) -> bool {
-    let envelope_asked = match flag {
-        Flag::Json => true,
-        Flag::Human => false,
-        Flag::Neither => format == Some(OsStr::new(JSON)),
-    };
-    stdout == Stdout::Terminal && !envelope_asked
+/// instead of its usage error: when `stdout` is a terminal and no format is forced, neither by
+/// `--json` (`json`: the line settles on it, the last of `--json` and `--human`) nor by a
+/// `SWARMOPS_FORMAT` (`format`) of `json`, whatever flag is given with it. Whatever is not a
+/// person at a terminal gets what it got before there were screens to print: the envelope, or
+/// with `--human` the error as text.
+pub(crate) fn bare(stdout: Stdout, json: bool, format: Option<&OsStr>) -> bool {
+    stdout == Stdout::Terminal && !json && format != Some(OsStr::new(JSON))
 }
 
 /// The program's help template: clap fills in the about and the usage, the rest is text.
@@ -970,7 +955,7 @@ mod tests {
         }
     }
 
-    /// The help only for a terminal that nothing asked the envelope of; the envelope for a
+    /// The help only for a terminal where no format is forced; what it printed before for a
     /// pipe or a file, whatever else is set.
     #[test]
     fn a_bare_line_reads_help_at_a_terminal_alone() {
@@ -979,19 +964,16 @@ mod tests {
         let other = Some(OsStr::new("JSON"));
         let empty = Some(OsStr::new(""));
         for (flag, format, at_a_terminal) in [
-            (Flag::Neither, None, true),
-            (Flag::Neither, human, true),
-            (Flag::Neither, other, true),
-            (Flag::Neither, empty, true),
-            (Flag::Neither, json, false),
-            (Flag::Human, None, true),
-            (Flag::Human, human, true),
-            (Flag::Human, json, true),
-            (Flag::Json, None, false),
-            (Flag::Json, human, false),
-            (Flag::Json, json, false),
+            (false, None, true),
+            (false, human, true),
+            (false, other, true),
+            (false, empty, true),
+            (false, json, false),
+            (true, None, false),
+            (true, human, false),
+            (true, json, false),
         ] {
-            let said = format!("{flag:?} {format:?}");
+            let said = format!("--json: {flag}, {format:?}");
             assert_eq!(
                 bare(Stdout::Terminal, flag, format),
                 at_a_terminal,

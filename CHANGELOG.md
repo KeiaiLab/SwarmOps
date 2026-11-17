@@ -150,10 +150,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   reference pages' text of any command. Help text stays outside the contract.
 - A line that names no command, `swarmops` alone or one of `ws`, `ref`, `op`, `blob`, `git` and
   `auth` alone, prints its help screen on stdout when stdout is a terminal, instead of its usage
-  error's envelope; the exit code stays 2. `--json`, or `SWARMOPS_FORMAT=json` without
-  `--human`, asks for the envelope at a terminal too. Where stdout is a pipe or a file nothing
-  changes: the same `E_INVALID_ARG` envelope, byte for byte, so no script or agent sees a
-  difference unless it runs under a pseudo-terminal without either.
+  error's envelope; the exit code stays 2. With `--json` or `SWARMOPS_FORMAT=json` nothing
+  changes at a terminal either, and where stdout is a pipe or a file nothing changes at all: the
+  same `E_INVALID_ARG` envelope, byte for byte, so no script or agent sees a difference unless
+  it runs under a pseudo-terminal with neither.
 - `clone`, `fetch`, `push`, `sync` and `remote add` send the token of the login kept for a
   remote's host (`auth login`) to an https remote (or an http one at a loopback address) that
   names no `--token-env`. A remote that names a variable goes with the variable alone, set or

@@ -24,7 +24,6 @@ use crate::cli::{Global, Parsed};
 use crate::commands::prepare::{self, After};
 use crate::commands::{Ctx, Used};
 use crate::gitlike::{self, Place};
-use crate::help::Flag;
 use crate::output::{Format, Printed, Stdout};
 use crate::{cli, commands, context, help};
 
@@ -193,23 +192,18 @@ fn answer(
 
 /// Whether the line clap refused with `error` is answered with a help screen and not with the
 /// usage error's envelope: a line that names no command, the program alone or a command
-/// family alone (clap's missing subcommand), at a terminal where neither `--json` nor, without
-/// `--human`, `SWARMOPS_FORMAT=json` asks for the envelope (`help::bare`). Every other refused line, and
-/// every line whose stdout is no terminal, keeps its envelope.
+/// family alone (clap's missing subcommand), at a terminal where no format is forced, neither
+/// by `--json` nor by `SWARMOPS_FORMAT=json` (`help::bare`). Every other refused line, and
+/// every line whose stdout is no terminal, prints what it printed before.
 fn reads_help(
     error: &clap::Error,
     global: &Global,
     env: &dyn Fn(&str) -> Option<OsString>,
     stdout: Stdout,
 ) -> bool {
-    // Of the two flags the line keeps the one given last (`cli::parse` settles them).
-    let flag = match (global.json, global.human) {
-        (true, _) => Flag::Json,
-        (false, true) => Flag::Human,
-        (false, false) => Flag::Neither,
-    };
+    // Of `--json` and `--human` the line keeps the one given last (`cli::parse` settles them).
     error.kind() == ErrorKind::MissingSubcommand
-        && help::bare(stdout, flag, env(context::FORMAT_ENV).as_deref())
+        && help::bare(stdout, global.json, env(context::FORMAT_ENV).as_deref())
 }
 
 /// `printed`, with what it holds for stdout written to stderr instead: what `swarmops mcp` prints
@@ -381,9 +375,9 @@ mod tests {
     }
 
     /// The bare-command rule, in both directions: at a terminal a line that names no command
-    /// reads its help, unless `--json` (the last of `--json` and `--human`) or, without
-    /// `--human`, `SWARMOPS_FORMAT=json` asks for the envelope; a pipe always gets the envelope; and a line
-    /// refused for anything else gets it everywhere.
+    /// reads its help, unless `--json` (the last of `--json` and `--human`) or
+    /// `SWARMOPS_FORMAT=json` forces a format; a pipe never reads it; and a line refused for
+    /// anything else reads it nowhere.
     #[test]
     fn a_bare_line_reads_help_only_at_a_terminal_that_asked_for_no_envelope() {
         let bare: [&[&str]; 9] = [
@@ -434,8 +428,15 @@ mod tests {
             Stdout::Terminal,
             None
         ));
-        // A flag outranks the variable.
-        assert!(help_for(&["--human"], Stdout::Terminal, Some("json")));
+        // The variable's json forces the format whatever the flag: with `--human` the line
+        // prints its error as text, as it did before.
+        assert!(!help_for(&["--human"], Stdout::Terminal, Some("json")));
+        assert!(!help_for(
+            &["ws", "--human"],
+            Stdout::Terminal,
+            Some("json")
+        ));
+        assert!(help_for(&["--human"], Stdout::Terminal, Some("human")));
         assert!(!help_for(&["--json"], Stdout::Terminal, Some("human")));
 
         // A line refused for anything else keeps its envelope, at a terminal too.

@@ -329,9 +329,9 @@ the web server authenticated";
 /// Source control for coding-agent swarms.
 ///
 /// Every command but mcp, serve, derive --follow and auth git-credential prints one JSON
-/// envelope on stdout; at a terminal, a line that names no command prints its help screen
-/// instead of its usage error's envelope, unless --json or SWARMOPS_FORMAT=json asks for the
-/// envelope. The program's own help screen is laid out by the `help` module, which shows the
+/// envelope on stdout; at a terminal, the program alone or a command group alone prints its
+/// help screen instead of its usage error's envelope, unless --json or SWARMOPS_FORMAT=json
+/// is given. The program's own help screen is laid out by the `help` module, which shows the
 /// first line of this and says the rest under its own headings.
 #[derive(Parser, Debug)]
 #[command(name = "swarmops", version = crate::version::version())]
