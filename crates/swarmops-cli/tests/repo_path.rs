@@ -9,12 +9,15 @@
 //!   <tmp>/cwd-\xff/   working directory, not UTF-8
 //!     store           init store, --repo store info  ──  E_IO {fs_op: resolve}, no host path
 //! ```
+//!
+//! A macOS volume that refuses a name that is not UTF-8, as APFS does, leaves the second case
+//! no working directory to run in: it is skipped on such a volume, and says so.
 
 use std::path::{Path, PathBuf};
 
 use swarmops_testkit::remote::{GitServer, HttpAuth};
 
-use crate::support::{Run, Store, swarmops};
+use crate::support::{Run, Store, made_non_utf8_dir, swarmops};
 
 /// The agent the commands that need an identity run as.
 const AGENT: &str = "agent/worker-17";
@@ -120,7 +123,8 @@ fn a_relative_repo_pushes_and_syncs() {
 /// A relative store path below a working directory whose name is not UTF-8: `init` and a command
 /// that opens the store fail at working out where the path leads, `E_IO` with `fs_op` `resolve`
 /// and no store file, not as damage (`E_STORE_CORRUPT`), and nothing printed names the working
-/// directory. Nothing is made there.
+/// directory. Nothing is made there. Run where the volume holds such a directory, skipped on a
+/// macOS volume that does not ([`made_non_utf8_dir`]).
 #[cfg(unix)]
 #[test]
 fn a_non_utf8_store_path_names_no_host_path() {
@@ -130,7 +134,9 @@ fn a_non_utf8_store_path_names_no_host_path() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let base = dir.path().canonicalize().expect("the temp dir");
     let cwd = base.join(std::ffi::OsStr::from_bytes(b"cwd-\xff"));
-    std::fs::create_dir(&cwd).expect("make the working directory");
+    if !made_non_utf8_dir(&cwd) {
+        return;
+    }
     let base = base.to_str().expect("UTF-8 temp paths");
 
     // 2. Both refuse the relative path, by no path.

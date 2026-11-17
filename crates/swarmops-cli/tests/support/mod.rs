@@ -5,6 +5,7 @@
 
 #![allow(dead_code, unused_imports)] // Each test binary uses the part it needs.
 
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -48,6 +49,25 @@ pub type Racers = cli::Racers<Swarmops>;
 /// variables of this process's environment.
 pub fn swarmops<S: AsRef<str>>(args: &[S], env: &[(&str, &str)]) -> Command {
     cli::swarmops::<Swarmops, S>(args, env)
+}
+
+/// Makes the directory `path`, whose name is not UTF-8, for a test that runs [`BIN`] in it.
+/// False on macOS when the volume refuses the name (`EILSEQ`, as APFS does): on such a volume
+/// the test has no working directory to run in, and says on stderr that it was skipped. Any
+/// other failure, and every failure on another OS, fails the test.
+pub fn made_non_utf8_dir(path: &Path) -> bool {
+    /// macOS's `EILSEQ`, "Illegal byte sequence".
+    #[cfg(target_os = "macos")]
+    const EILSEQ: i32 = 92;
+
+    let made = std::fs::create_dir(path);
+    #[cfg(target_os = "macos")]
+    if matches!(&made, Err(e) if e.raw_os_error() == Some(EILSEQ)) {
+        eprintln!("skipped: this volume refuses a name that is not UTF-8 (EILSEQ)");
+        return false;
+    }
+    made.expect("make a directory whose name is not UTF-8");
+    true
 }
 
 /// Runs [`BIN`] with `args` and `env` to its end, within [`RUN_TIMEOUT`].

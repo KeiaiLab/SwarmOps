@@ -4286,7 +4286,9 @@ fn blob_put_stats_a_regular_file_stdin() {
 }
 
 /// `ws create NAME` with no `--path`, run in a working directory whose path is not UTF-8, is
-/// refused (`E_INVALID_ARG`) naming the workspace as a name, not as a relative path.
+/// refused (`E_INVALID_ARG`) naming the workspace as a name, not as a relative path. Run where
+/// the volume holds such a directory, skipped on a macOS volume that does not
+/// ([`support::made_non_utf8_dir`]).
 #[test]
 fn ws_create_in_a_non_utf8_directory_names_the_name() {
     use std::os::unix::ffi::OsStrExt as _;
@@ -4296,7 +4298,9 @@ fn ws_create_in_a_non_utf8_directory_names_the_name() {
     let init = Session::run_raw(&[], &["init", &store], None);
     assert_eq!(init.exit, 0, "{}", init.stderr);
     let here = std::path::Path::new(&s.tmp()).join(std::ffi::OsStr::from_bytes(b"not-\xff"));
-    fs::create_dir(&here).unwrap();
+    if !support::made_non_utf8_dir(&here) {
+        return;
+    }
 
     let output = support::swarmops(
         &["--repo", &store, "--as", AGENT, "ws", "create", "w1"],
