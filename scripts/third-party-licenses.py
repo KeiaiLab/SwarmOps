@@ -362,8 +362,8 @@ def render(crates, targets, texts):
         f" compiles for {' or '.join(targets)}, without the `test-hooks` feature:",
         command,
         "(build) marks a crate that only runs while the binaries are built: a build script's"
-        " dependency, or a procedural macro. (<target> only) marks one that only that target"
-        " compiles. Each crate's source is on crates.io, at"
+        " dependency, or a procedural macro. (<targets> only) marks one that only the targets"
+        " it names compile. Each crate's source is on crates.io, at"
         " https://crates.io/crates/<name>/<version>.",
         "Each crate is listed with the license expression its package declares and the license"
         " it is used under, which the [licenses] allow list of deny.toml accepts: where the"

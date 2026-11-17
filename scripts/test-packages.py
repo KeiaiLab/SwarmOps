@@ -47,7 +47,7 @@ DOCS = ("CHANGELOG.md", "LICENSE", "README.md", "THIRD-PARTY-LICENSES")
 WEAK = 0x2
 
 # THIRD-PARTY-LICENSES in its generator's line format: a (build) crate is not in the binaries,
-# and a (<target> only) crate is in that target's alone.
+# and a (<targets> only) crate is in the binaries of the targets it names alone.
 NOTICES = """Crates (4)
 ----------
 
@@ -472,6 +472,37 @@ def aarch64(scratch: Path) -> None:
         f"swarmops-server_{VERSION}_arm64.deb", f"swarmops_{VERSION}_arm64.deb"]
 
 
+# A release of three targets: THIRD-PARTY-LICENSES names every target that compiles a crate not
+# all of them do, separated by `, `. `c` is in both Linux targets' binaries and not the macOS
+# one's, `e` in the macOS one's alone, `f` in one Linux target's and the macOS one's, and `g`,
+# a build crate of the Linux targets, in no binary.
+MAC = "aarch64-apple-darwin"
+NOTICES_OF_THREE = f"""Crates (7)
+----------
+
+a 1.0.0: MIT OR Apache-2.0; used under MIT [1]
+b 2.0.0 (build): Apache-2.0; used under Apache-2.0 [2]
+c 3.0.0 ({ARM}, {X86} only): Zlib; used under Zlib [3]
+d 4.0.0: BSD-3-Clause; used under BSD-3-Clause [4]
+e 5.0.0 ({MAC} only): ISC; used under ISC [5]
+f 6.0.0 ({MAC}, {ARM} only): BSL-1.0; used under BSL-1.0 [6]
+g 7.0.0 (build) ({ARM}, {X86} only): X11; used under X11 [7]
+"""
+LICENSE_OF_THREE = {X86: "BSD-3-Clause AND MIT AND Zlib",
+                    ARM: "BSD-3-Clause AND BSL-1.0 AND MIT AND Zlib"}
+
+
+def crates_of_several_targets(scratch: Path) -> None:
+    """A crate marked for several targets is in the License of each target it names, and of no
+    other: the release's macOS target makes a crate of both Linux targets carry such a mark."""
+    notices = put("THIRD-PARTY-LICENSES", NOTICES_OF_THREE.encode())
+    for target in (X86, ARM):
+        path = archive(scratch / target, target=target, change=notices)
+        _, rpm = built(path, scratch / f"out-{target}")
+        found = value(read_rpm(rpm)["header"], 1014)
+        assert found == LICENSE_OF_THREE[target], f"{target}: {found}"
+
+
 def deterministic(scratch: Path) -> None:
     """The same entries give the same packages, byte for byte, however the archive was gzip'd."""
     first = built(archive(scratch / "a"), scratch / "out-a")
@@ -790,6 +821,7 @@ CASES: tuple[tuple[str, Callable[[Path], None]], ...] = (
     ("the .deb's layout", deb_layout),
     ("the .rpm's layout and digests", rpm_layout),
     ("aarch64", aarch64),
+    ("crates_of_several_targets", crates_of_several_targets),
     ("byte for byte", deterministic),
     ("a pre-release", prerelease),
     (f"{len(REFUSALS)} refusals", refusals),
