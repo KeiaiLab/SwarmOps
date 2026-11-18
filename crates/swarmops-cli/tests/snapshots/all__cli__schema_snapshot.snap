@@ -3549,6 +3549,11 @@ expression: s.redact(&all)
           "const": "E_STORE_TOO_NEW",
           "description": "The store is of a later format than this build reads, or lists a feature it lacks\n(`details.format`, and `details.features`, the features it lacks, none for a later\nformat). Nothing was written; a newer swarmops reads the store.",
           "type": "string"
+        },
+        {
+          "const": "E_CHECK_FILE",
+          "description": "A check file does not read: `.swarmops/checks.toml` (or, in a tree without one,\n`.swarmops/workspaces.json`) is too large, not text, not a file, not TOML (JSON), not\nversion 1, or holds a key, a name or a value version 1 does not take (`details.file`,\n`details.reason`, `details.vouched`, and `details.line` and `details.key` when known).\nNothing was listed; the hint says what the file takes.",
+          "type": "string"
         }
       ],
       "title": "ErrorCode"
@@ -11430,6 +11435,11 @@ expression: s.redact(&all)
             {
               "const": "E_STORE_TOO_NEW",
               "description": "The store is of a later format than this build reads, or lists a feature it lacks\n(`details.format`, and `details.features`, the features it lacks, none for a later\nformat). Nothing was written; a newer swarmops reads the store.",
+              "type": "string"
+            },
+            {
+              "const": "E_CHECK_FILE",
+              "description": "A check file does not read: `.swarmops/checks.toml` (or, in a tree without one,\n`.swarmops/workspaces.json`) is too large, not text, not a file, not TOML (JSON), not\nversion 1, or holds a key, a name or a value version 1 does not take (`details.file`,\n`details.reason`, `details.vouched`, and `details.line` and `details.key` when known).\nNothing was listed; the hint says what the file takes.",
               "type": "string"
             }
           ]

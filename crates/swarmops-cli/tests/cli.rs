@@ -2079,7 +2079,7 @@ fn cat_truncates_to_max_bytes() {
 }
 
 /// The codes of [`NOT_RAISED`] no golden pins: no operation raises them yet.
-const UNPINNED: &[&str] = &[];
+const UNPINNED: &[&str] = &["E_CHECK_FILE"];
 
 /// Codes [`error_codes_reach_the_cli`] does not raise, and why: each names the test whose golden
 /// pins it, but those of [`UNPINNED`].
@@ -2139,6 +2139,10 @@ const NOT_RAISED: &[(&str, &str)] = &[
     (
         "E_STORE_TOO_NEW",
         "needs a store of a later format: too_new_maps_to_its_code_and_hint pins it",
+    ),
+    (
+        "E_CHECK_FILE",
+        "no command reads a check file yet: check list, which comes next, raises it",
     ),
 ];
 
@@ -2279,19 +2283,20 @@ fn serve_refusals(s: &mut Session, store: &str) -> Vec<&'static str> {
     raised
 }
 
-/// The table grows by exactly one code, `E_STORE_TOO_NEW`: exit 1, not retryable.
+/// The table grows by one code at a time: `E_STORE_TOO_NEW` (FORMAT 3), then `E_CHECK_FILE`
+/// (M30), each exit 1, not retryable.
 #[test]
 fn error_codes_count_grows_by_one() {
     assert_eq!(
         ErrorCode::ALL.len(),
         CODE_COUNT,
-        "55 codes before FORMAT 3, and one more"
+        "55 codes before FORMAT 3, one more for it and one for the check file"
     );
-    let code = ErrorCode::ALL
-        .iter()
-        .find(|code| code.as_str() == "E_STORE_TOO_NEW");
-    let code = code.expect("E_STORE_TOO_NEW is a code");
-    assert_eq!((code.exit(), code.retryable()), (1, false));
+    for name in ["E_STORE_TOO_NEW", "E_CHECK_FILE"] {
+        let code = ErrorCode::ALL.iter().find(|code| code.as_str() == name);
+        let code = code.unwrap_or_else(|| panic!("{name} is a code"));
+        assert_eq!((code.exit(), code.retryable()), (1, false), "{name}");
+    }
 }
 
 /// A store of a later format, and a FORMAT 3 store that lists a feature this build lacks, are
@@ -2387,7 +2392,7 @@ fn init_format_1_and_2_still_create_their_layouts() {
 
 /// How many error codes there are, and how many goldens pin: the counts the known limitations,
 /// the changelog and the goals state, which [`check_doc_counts`] reads.
-const CODE_COUNT: usize = 56;
+const CODE_COUNT: usize = 57;
 const PINNED_COUNT: usize = 56;
 
 /// The documents that state [`CODE_COUNT`] and [`PINNED_COUNT`], from the repository's root.

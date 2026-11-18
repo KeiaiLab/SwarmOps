@@ -322,6 +322,13 @@ error_codes! {
     /// (`details.format`, and `details.features`, the features it lacks, none for a later
     /// format). Nothing was written; a newer swarmops reads the store.
     StoreTooNew => "E_STORE_TOO_NEW", EXIT_ERROR, false;
+    // Checks (M30).
+    /// A check file does not read: `.swarmops/checks.toml` (or, in a tree without one,
+    /// `.swarmops/workspaces.json`) is too large, not text, not a file, not TOML (JSON), not
+    /// version 1, or holds a key, a name or a value version 1 does not take (`details.file`,
+    /// `details.reason`, `details.vouched`, and `details.line` and `details.key` when known).
+    /// Nothing was listed; the hint says what the file takes.
+    CheckFile => "E_CHECK_FILE", EXIT_ERROR, false;
 }
 
 impl ErrorCode {

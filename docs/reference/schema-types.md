@@ -840,6 +840,7 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_WS_STALE"` | `ws status`, `ws diff`, `ws commit`, `ws materialize`, `ws land` (onto any target) or `ws rebase --continue` found the workspace's base gone from its target's history (`details.target`, `base`, `head`; `base_op`, the operation that moved the target to the base; `moved_op`, the latest that moved it to `head`, or null when not found). Nothing changed; the hint names `swarmops ws rebase` (after a continue, `swarmops ws rebase --abort` first). |
 | `"E_CHECK_FAILED"` | A workspace's check or bootstrap command failed or ran past its time (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`). Nothing was landed. |
 | `"E_STORE_TOO_NEW"` | The store is of a later format than this build reads, or lists a feature it lacks (`details.format`, and `details.features`, the features it lacks, none for a later format). Nothing was written; a newer swarmops reads the store. |
+| `"E_CHECK_FILE"` | A check file does not read: `.swarmops/checks.toml` (or, in a tree without one, `.swarmops/workspaces.json`) is too large, not text, not a file, not TOML (JSON), not version 1, or holds a key, a name or a value version 1 does not take (`details.file`, `details.reason`, `details.vouched`, and `details.line` and `details.key` when known). Nothing was listed; the hint says what the file takes. |
 
 ## FetchReq
 

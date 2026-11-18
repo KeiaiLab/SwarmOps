@@ -20,6 +20,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ## [Unreleased]
 
+### Added
+
+- `E_CHECK_FILE` (exit 1, not retryable): a check file that does not read, `.swarmops/checks.toml`
+  or, in a tree without one, `.swarmops/workspaces.json`; `details` name the `file`, the `reason`,
+  whether the caller `vouched` for it, and its `line` and `key` when known. No command raises it
+  yet. Golden envelopes now pin 56 of the 57 error codes.
+
 ### Changed
 
 - Docs: the roadmap gains a section, "Checks and delivery": a role beside the three topologies in

@@ -1434,7 +1434,7 @@ These do not change what SwarmOps does, only how well the tests can see it.
   allocations (the decoder's context and window) can fail there, and the zstd crate reports those
   as `ErrorKind::Other`: the read comes back as `E_STORE_CORRUPT`, not as a failed read.
   *Unscheduled. Found: issue #4 item 14.*
-- **Golden envelopes cover 56 of the 56 error codes.** `error_codes_reach_the_cli` pins the envelope
+- **Golden envelopes cover 56 of the 57 error codes.** `error_codes_reach_the_cli` pins the envelope
   of 43, the nine workspace codes (M5), `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` (M15),
   `E_FORMAT_REQUIRED` (M6), `E_AUTH` and `E_POLICY_DENIED` (M14) and `E_REF_NOT_FOUND` (`ref log`
   of a name that never moved, M18) among them; `remote_error_codes_golden` the four `E_REMOTE_*`
@@ -1443,8 +1443,9 @@ These do not change what SwarmOps does, only how well the tests can see it.
   of their own six the first test cannot raise (M15):
   `E_AMBIGUOUS_ID`, `E_IO_TRANSIENT`, `E_INTERNAL`, `E_CAS_RETRY_EXHAUSTED`, `E_BUSY` in the slow
   `op_log_behind_a_held_lock_is_e_busy`, and `E_UNKNOWN_PARENT` as an error object, since every
-  operation resolves a parent first. What remains: a code a later milestone adds joins the same
-  test, which fails until it is pinned or listed. *Closed for today's codes in M18 (the M18 design
+  operation resolves a parent first. `E_CHECK_FILE` (M30) is listed and pinned by none: no
+  command reads a check file until `check list`. What remains: a code a later milestone adds joins
+  the same test, which fails until it is pinned or listed. *Closed for today's codes in M18 (the M18 design
   §3.2; `E_IO` joined in M1.6, the six `E_GIT_*` codes in M3, `E_WS_OUTSIDE_PREFIXES` and
   `E_WS_STALE` in M15). Found: the 2026-10-16 comparison.*
 - **The git remotes' reference pages have no recorded example.** The pages of `clone`,
