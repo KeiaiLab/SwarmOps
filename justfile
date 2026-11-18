@@ -83,6 +83,14 @@ default: check
 # CI (.github/workflows/ci.yml) runs this recipe with `NEXTEST_PROFILE=ci`; the release run
 # keeps the default profile, so that its one-test report does not replace the JUnit report of
 # the workspace run in target/nextest/ci/.
+# .swarmops/checks.toml declares the report target/nextest/ci/junit.xml, below the tree, which
+# `check run` reads into findings only if this run wrote it, so that a report a failed build left
+# from before reads as stale. nextest 0.9.151 writes it there whatever `CARGO_TARGET_DIR` says;
+# for a nextest that writes it below a `CARGO_TARGET_DIR` elsewhere instead (ci.yml's "Collect
+# the JUnit report" step copies it from there), the workspace run, pass or fail, copies its
+# profile's report from there into the tree when it is newer than the tree's, its times kept
+# (`cp -p`), and then exits with nextest's status. A target directory set in cargo's own
+# configuration is not looked in, and the default profile writes no report.
 # scripts/check-stamped.py builds swarmops-cli with `SWARMOPS_BUILD_COMMIT` set, and again with
 # `SWARMOPS_BUILD_CHANNEL=release`, which no other step does: the `version` tests and each
 # `--version` pin with a fixed commit and as a release's build, every filter required to match a
@@ -116,7 +124,14 @@ check:
     cargo check --locked --workspace --all-targets
     cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
     cargo metadata --locked --format-version 1 --manifest-path bench/compare/Cargo.toml >/dev/null
-    cargo nextest run --locked --workspace --all-features --no-tests=warn
+    status=0; cargo nextest run --locked --workspace --all-features --no-tests=warn || status=$?; \
+        profile="${NEXTEST_PROFILE:-default}"; \
+        made="${CARGO_TARGET_DIR:-target}/nextest/$profile/junit.xml"; \
+        kept="target/nextest/$profile/junit.xml"; \
+        if [ -f "$made" ] && ! [ "$made" -ef "$kept" ] && [ "$made" -nt "$kept" ]; then \
+            mkdir -p "${kept%/*}" && cp -p "$made" "$kept" \
+            || echo "check: the JUnit report could not be copied to $kept" >&2; fi; \
+        exit "$status"
     cargo nextest run --locked --profile default --release -p swarmops-cli --test test_hooks \
         --no-tests=fail
     python3 -I scripts/check-stamped.py

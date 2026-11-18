@@ -306,6 +306,74 @@ fn this_repository_s_checks_are_its_recipes() {
         assert_eq!(check["dir"], ".", "{name}");
         assert!(recipes.contains(&name), "{name}: no recipe in {recipes:?}");
     }
+
+    // 4. The gate's check alone declares a report: the JUnit file of nextest's `ci` profile
+    //    (M31-5, step 3).
+    let reports: Vec<(&str, &Value)> = (checks.iter())
+        .filter_map(|c| Some((c["name"].as_str().unwrap(), c.get("reports")?)))
+        .collect();
+    let junit = json!([{"format": "junit", "path": "target/nextest/ci/junit.xml"}]);
+    assert_eq!(reports, [("check", &junit)]);
+}
+
+/// The JUnit report the gate's check declares is where its test run leaves it: nextest's `ci`
+/// profile writes `junit.xml` below `target/nextest/ci/`; ci.yml's `check` job runs the gate with
+/// that profile and still uploads that file; the `check` recipe copies the report there from a
+/// target directory elsewhere when it is newer, keeping its times, and exits with nextest's
+/// status.
+#[test]
+fn this_repository_s_junit_report_is_where_its_check_reads_it() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |path: &str| fs::read_to_string(root.join(path)).unwrap();
+
+    // 1. The profile's report.
+    let nextest = read(".config/nextest.toml");
+    let junit = nextest
+        .split("[profile.ci.junit]")
+        .nth(1)
+        .expect("nextest.toml has [profile.ci.junit]");
+    let path = (junit.lines())
+        .take_while(|line| !line.starts_with('['))
+        .find_map(|line| line.trim().strip_prefix("path = "));
+    assert_eq!(path, Some("\"junit.xml\""));
+    let declared = "target/nextest/ci/junit.xml";
+    let checks = read(".swarmops/checks.toml");
+    assert!(
+        checks.contains(&format!(
+            "reports = [{{ format = \"junit\", path = \"{declared}\" }}]"
+        )),
+        "the check file declares {declared}"
+    );
+
+    // 2. CI's check job: the profile, and the upload of the same file, which stays.
+    let ci = read(".github/workflows/ci.yml");
+    let job = job_text(&ci, "check");
+    assert!(
+        job.contains("NEXTEST_PROFILE: ci"),
+        "the check job sets the ci profile"
+    );
+    assert!(
+        job.contains(&format!("path: {declared}")),
+        "the check job uploads {declared}"
+    );
+
+    // 3. The recipe's copy into the tree.
+    let justfile = read("justfile");
+    let (_, commands) = recipe_commands(&justfile, "check");
+    let run = (commands.iter())
+        .find(|command| command.contains("cargo nextest run --locked --workspace"))
+        .expect("the check recipe runs the workspace's tests");
+    for part in [
+        "|| status=$?",
+        "profile=\"${NEXTEST_PROFILE:-default}\"",
+        "made=\"${CARGO_TARGET_DIR:-target}/nextest/$profile/junit.xml\"",
+        "kept=\"target/nextest/$profile/junit.xml\"",
+        "[ \"$made\" -nt \"$kept\" ]",
+        "cp -p \"$made\" \"$kept\"",
+        "exit \"$status\"",
+    ] {
+        assert!(run.contains(part), "{part} in {run}");
+    }
 }
 
 /// The gate's checks, the `before-land` ones, run one after the other inside ci.yml's `check` job:
