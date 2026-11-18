@@ -1933,6 +1933,7 @@ fn queue_runner_sigkilled_mid_check_resumes() {
     let mut runner = Child::spawn(&mut swarmops(&run, &[]));
     let first = check_pids(&runs, 1)[0];
     let _leftover = Leftover(first);
+    recorded_group(&store, first);
     let (output, killed) = runner.finish(Instant::now());
     assert!(killed, "the runner ended before its check: {output:?}");
     assert_eq!(output.status.signal(), Some(SIGKILL), "{output:?}");
@@ -1962,6 +1963,28 @@ fn queue_runner_sigkilled_mid_check_resumes() {
     );
     landed_once(&store, &base, &entries, "after the takeover");
     store.assert_clean("after the takeover");
+}
+
+/// Waits until a lane's `.groups` file (`meta/lanes/`) names `pid`'s group: the runner
+/// records a check's group only after it started it, and a runner killed before that leaves a
+/// group no takeover knows of.
+fn recorded_group(store: &Store, pid: u32) {
+    let lanes = Path::new(store.path()).join("meta/lanes");
+    let deadline = Instant::now() + CHECK_WITHIN;
+    loop {
+        let files = fs::read_dir(&lanes).into_iter().flatten().flatten();
+        let texts: Vec<String> = (files.map(|file| file.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "groups"))
+            .filter_map(|path| fs::read_to_string(path).ok())
+            .collect();
+        let named = (texts.iter().flat_map(|text| text.lines()))
+            .any(|line| line.split_whitespace().next() == Some(pid.to_string().as_str()));
+        if named {
+            return;
+        }
+        assert!(Instant::now() < deadline, "no lane records group {pid}");
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// The pids the check recorded in `runs`, once it holds at least `at_least` of them.
