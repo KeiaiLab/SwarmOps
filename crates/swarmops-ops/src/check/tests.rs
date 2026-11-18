@@ -512,11 +512,55 @@ fn a_legacy_file_that_does_not_read_is_refused() {
     refuses("\u{0}", Reason::Syntax, Some(1));
     let big = format!("{{\"x\": \"{}\"}}", "y".repeat(64 * 1024));
     refuses(&big, Reason::TooLarge, None);
+    let big = format!(
+        "{{\"check\": {{\"argv\": \"{}\"}}}}",
+        "\\u001b".repeat(9_000)
+    );
+    refuses(&big, Reason::Value, Some(1));
     let refusal = parse_legacy(b"{\"x\": \"\xff\"}").unwrap_err();
     assert_eq!(refusal.reason, Reason::NotText);
     let error = refusal.into_error(false);
     assert_eq!(error.details["file"], ".swarmops/workspaces.json");
     assert!(error.hint.unwrap().contains("check.argv"));
+}
+
+/// A legacy file that does not read is named by where it fails, never by repeating what it
+/// holds: serde's wording quotes the string at fault whole.
+#[test]
+fn a_legacy_refusal_repeats_nothing_of_the_file() {
+    let message = |text: &str| {
+        parse_legacy(text.as_bytes())
+            .unwrap_err()
+            .into_error(true)
+            .message
+    };
+    let long = format!(
+        "{{\"check\": {{\"argv\": \"\\u001b[31m{}\"}}}}",
+        "A".repeat(60_000)
+    );
+    assert_eq!(
+        message(&long),
+        ".swarmops/workspaces.json has a value of the wrong type or lacks a key, at column \
+         60031 (line 1)"
+    );
+    assert_eq!(
+        message("{\n\"check\": {\"argv\": [\"x\"], \"timeout_s\": \"60\"}}"),
+        ".swarmops/workspaces.json has a value of the wrong type or lacks a key, at column 42 \
+         (line 2)"
+    );
+    assert_eq!(
+        message("{\"check\": {}}"),
+        ".swarmops/workspaces.json has a value of the wrong type or lacks a key, at column 12 \
+         (line 1)"
+    );
+    assert_eq!(
+        message("{\n  \"check\" 1}"),
+        ".swarmops/workspaces.json is not JSON, at column 11 (line 2)"
+    );
+    assert_eq!(
+        message("{\"check\": "),
+        ".swarmops/workspaces.json is not JSON: it ends before its last value (line 1)"
+    );
 }
 
 // The digest.

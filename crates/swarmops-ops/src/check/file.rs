@@ -311,18 +311,7 @@ pub fn parse(bytes: &[u8]) -> Result<CheckFile, Refusal> {
 pub fn parse_legacy(bytes: &[u8]) -> Result<Option<Check>, Refusal> {
     // 1. Bounded, text, JSON of the shape a workspace reads (unknown keys taken).
     let text = text_of(LEGACY_FILE, bytes, MAX_LEGACY_BYTES)?;
-    let config: LegacyConfig = serde_json::from_str(text).map_err(|e| {
-        let reason = if e.is_data() {
-            Reason::Value
-        } else {
-            Reason::Syntax
-        };
-        let refusal = Refusal::new(LEGACY_FILE, reason, format!("does not read: {e}"));
-        match e.line() {
-            0 => refusal,
-            line => refusal.at(u64::try_from(line).unwrap_or(u64::MAX)),
-        }
-    })?;
+    let config: LegacyConfig = serde_json::from_str(text).map_err(|e| legacy_refusal(&e))?;
 
     // 2. The check, if any, under version 1's rules for argv and timeout_s.
     let Some(argv) = (config.check.map(|check| (check.argv, check.timeout_s)))
@@ -348,6 +337,30 @@ pub fn parse_legacy(bytes: &[u8]) -> Result<Option<Check>, Refusal> {
         timeout_s,
         line: None,
     }))
+}
+
+/// The refusal of a legacy file that JSON `e` did not read: what kind of fault and where, in
+/// words of its own. serde's wording would repeat the string at fault whole, up to the file's
+/// 64 KiB, and its line twice.
+fn legacy_refusal(e: &serde_json::Error) -> Refusal {
+    use serde_json::error::Category;
+    let (reason, what) = match e.classify() {
+        Category::Data => (
+            Reason::Value,
+            "has a value of the wrong type or lacks a key, at column",
+        ),
+        Category::Eof => (Reason::Syntax, "is not JSON: it ends before its last value"),
+        Category::Syntax | Category::Io => (Reason::Syntax, "is not JSON, at column"),
+    };
+    let what = match e.classify() {
+        Category::Eof => what.to_owned(),
+        _ => format!("{what} {}", e.column()),
+    };
+    let refusal = Refusal::new(LEGACY_FILE, reason, what);
+    match e.line() {
+        0 => refusal,
+        line => refusal.at(u64::try_from(line).unwrap_or(u64::MAX)),
+    }
 }
 
 /// The shape a workspace reads `.swarmops/workspaces.json` in (`swarmops-ws`'s `RepoConfig`), so
