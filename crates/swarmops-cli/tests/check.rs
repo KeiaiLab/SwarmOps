@@ -308,6 +308,51 @@ fn this_repository_s_checks_are_its_recipes() {
     }
 }
 
+/// The gate's checks, the `before-land` ones, run one after the other inside ci.yml's `check` job:
+/// their timeouts together leave the job a minute of its `timeout-minutes` for its checkout and
+/// tool steps, so that a hung check ends with its own timeout, not with the job's kill.
+#[test]
+fn this_repository_s_gate_fits_its_job() {
+    // 1. The job's limit.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    let job = job_text(&ci, "check");
+    let minutes: Vec<u64> = (job.lines())
+        .filter_map(|line| line.trim().strip_prefix("timeout-minutes:"))
+        .map(|value| value.trim().parse().unwrap())
+        .collect();
+    assert_eq!(
+        minutes.len(),
+        1,
+        "one timeout-minutes in the check job: {minutes:?}"
+    );
+    let job_s = minutes[0] * 60;
+
+    // 2. The before-land checks' timeouts, together, a minute under it.
+    let lab = Lab::new();
+    let listed = list_dir(&lab, &root).ok();
+    let gate: Vec<(&str, u64)> = (listed["checks"].as_array().unwrap().iter())
+        .filter(|c| {
+            c["stages"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("before-land"))
+        })
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap(),
+                c["timeout_s"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(gate, [("check", 1440), ("check-compare", 300)]);
+    let total: u64 = gate.iter().map(|(_, s)| s).sum();
+    assert!(
+        total + 60 <= job_s,
+        "the gate's checks take up to {total} s, the job {job_s} s, less 60 for its steps"
+    );
+}
+
 /// The four recipes that stand for a workflow job of several steps run the job's own commands, so
 /// that `.swarmops/checks.toml` names what GitHub runs: a change to one side alone fails here.
 /// The differences are the ones the justfile's comment names, and nothing else: a temporary

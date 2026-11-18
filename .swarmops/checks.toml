@@ -1,23 +1,27 @@
 # This repository's checks (M30): the commands its gate runs, one argv each, run with no shell.
 # `just check` lists them with the build under test (`check list --dir .`), so a file that does not
-# parse fails the gate. Each timeout is its job's `timeout-minutes` in the workflow file; no run
-# was measured.
+# parse fails the gate. Each timeout is its job's `timeout-minutes` in the workflow file, the two
+# `before-land` checks sharing the check job's; no run was measured.
 #
 # Stages: `before-land` is the gate, what ci.yml's `check` job runs. The `manual` checks run on
 # GitHub, in their own jobs, as before; later steps of M30 and M31 give them stages of their own.
 # Every check writes its stages out, the default too.
 version = 1
 
-# ci.yml, job `check`: the definition of done.
+# ci.yml, job `check`: the definition of done. Both before-land checks run one after the other in
+# that job's 30 minutes, after its checkout and tool steps: 24 + 5 minutes, one left for those
+# steps, so that a hung check ends with its own timeout, its log and its tails, not with the job's
+# kill. Not measured: if the gate outgrows 24 minutes, this moves, or the job's limit does. The
+# test `check::this_repository_s_gate_fits_its_job` holds the sum to the job.
 [check.check]
 argv = ["just", "check"]
-timeout_s = 1800
+timeout_s = 1440
 stages = ["before-land"]
 
 # ci.yml, job `check`, after it: bench/compare still compiles against the store's API.
 [check.check-compare]
 argv = ["just", "check-compare"]
-timeout_s = 1800
+timeout_s = 300
 stages = ["before-land"]
 
 # ci.yml, job `zizmor`: actionlint over every workflow, and tests-pass needing every other job.
