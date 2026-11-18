@@ -18,10 +18,13 @@
 //!
 //! `check run` (M31, [`mod@run`]) runs one stage's checks of a directory or of a workspace held
 //! clean, each with the environment of [`mod@env`], its output in a log of [`mod@log`]'s format.
+//! Once a check has ended, what it reported is read as findings: its report file
+//! ([`mod@findings`]).
 
 mod digest;
 pub mod env;
 mod file;
+pub mod findings;
 pub mod follow;
 pub mod log;
 pub mod run;
@@ -70,6 +73,32 @@ pub const MAX_ARGV_BYTES: u64 = 64 * 1024;
 
 /// The most seconds a check's `timeout_s` may give: 24 hours.
 pub const MAX_CHECK_TIMEOUT_S: u64 = 86_400;
+
+/// The most findings a run of `check run` returns, its checks' together; the rest are counted.
+pub const MAX_RUN_FINDINGS: usize = 10_000;
+
+/// The most bytes of the findings' text a run returns (their titles, groups, messages and
+/// paths together): 4 MiB. The findings past it are counted.
+pub const MAX_RUN_FINDING_BYTES: u64 = 4 << 20;
+
+/// The most bytes of a report read: 64 MiB. A check's report file past it is read to it, its last
+/// partial line left out.
+pub const MAX_REPORT_BYTES: u64 = 64 << 20;
+
+/// The most bytes of a line of a check's report file: 64 KiB. A longer line is invalid.
+pub const MAX_FINDING_LINE_BYTES: usize = 64 * 1024;
+
+/// The most bytes of a finding's title: longer ones are cut with `…`.
+pub const MAX_FINDING_TITLE_BYTES: usize = 200;
+
+/// The most bytes of a finding's group: longer ones are cut with `…`.
+pub const MAX_FINDING_GROUP_BYTES: usize = 200;
+
+/// The most bytes of a finding's message: 4 KiB; longer ones are cut with `…`.
+pub const MAX_FINDING_MESSAGE_BYTES: usize = 4 * 1024;
+
+/// The most bytes of a finding's path: 4 KiB.
+pub const MAX_FINDING_PATH_BYTES: usize = 4 * 1024;
 
 /// The most bytes of [`LEGACY_FILE`] read, as a workspace reads it.
 pub(crate) const MAX_LEGACY_BYTES: u64 = 64 * 1024;
@@ -238,19 +267,50 @@ fn stored(
     }
 }
 
-/// The bytes of `<dir>/<name>`, at most `limit` of them, read on a handle of its own; none when
-/// nothing is there. A link, a directory or anything but a file there is `not_a_file`, a file
-/// over `limit` `too_large`.
+/// The bytes of `<dir>/<name>`, at most `limit` of them, read on a handle of its own
+/// ([`open_bounded`]); none when nothing is there. A link, a directory or anything but a file
+/// there is `not_a_file`, a file over `limit` `too_large`.
 fn on_host(dir: &Utf8Path, name: &'static str, limit: u64) -> Result<Option<Vec<u8>>, OpError> {
-    let path = dir.join(name);
-    let failed = |e: &std::io::Error| host_failed(name, e);
+    match open_bounded(&dir.join(name), limit) {
+        Ok(Opened::Missing) => Ok(None),
+        Ok(Opened::NotAFile) => Err(Refusal::not_a_file(name).into_error(true)),
+        Ok(Opened::File { bytes, size }) => {
+            let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if read > limit {
+                return Err(Refusal::too_large(name, size.max(read), limit).into_error(true));
+            }
+            Ok(Some(bytes))
+        }
+        Err(e) => Err(host_failed(name, &e)),
+    }
+}
 
+/// What [`open_bounded`] found at a path.
+#[derive(Debug)]
+pub(crate) enum Opened {
+    /// Nothing.
+    Missing,
+    /// A symbolic link, a directory, a FIFO or another kind of entry: nothing behind it read.
+    NotAFile,
+    /// A regular file: its first bytes, at most one past the limit (so that more than the limit
+    /// tells a file over it), and its size as opened.
+    File {
+        /// Its bytes, from the start.
+        bytes: Vec<u8>,
+        /// Its size when it was opened.
+        size: u64,
+    },
+}
+
+/// Opens the file at `path` and reads at most one byte past `limit` of it, on a handle of its
+/// own. The check file and a check's report file are opened this way.
+pub(crate) fn open_bounded(path: &Utf8Path, limit: u64) -> std::io::Result<Opened> {
     // 1. A file, not followed if it is a link.
-    let seen = match std::fs::symlink_metadata(&path) {
+    let seen = match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.is_file() => meta,
-        Ok(_) => return Err(Refusal::not_a_file(name).into_error(true)),
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(failed(&e)),
+        Ok(_) => return Ok(Opened::NotAFile),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Opened::Missing),
+        Err(e) => return Err(e),
     };
 
     // 2. The same file opened: a link put there since fails the open (`O_NOFOLLOW`), a FIFO
@@ -258,31 +318,25 @@ fn on_host(dir: &Utf8Path, name: &'static str, limit: u64) -> Result<Option<Vec<
     //    is refused by what was opened.
     let file = match (OpenOptions::new().read(true))
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)
+        .open(path)
     {
         Ok(file) => file,
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
-            return Err(Refusal::not_a_file(name).into_error(true));
-        }
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(failed(&e)),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Ok(Opened::NotAFile),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Opened::Missing),
+        Err(e) => return Err(e),
     };
-    let opened = file.metadata().map_err(|e| failed(&e))?;
+    let opened = file.metadata()?;
     if !opened.is_file() || (opened.dev(), opened.ino()) != (seen.dev(), seen.ino()) {
-        return Err(Refusal::not_a_file(name).into_error(true));
+        return Ok(Opened::NotAFile);
     }
 
     // 3. At most one byte past the limit, which tells a file over it.
     let mut bytes = Vec::new();
-    (file.take(limit.saturating_add(1)))
-        .read_to_end(&mut bytes)
-        .map_err(|e| failed(&e))?;
-    let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if read > limit {
-        let size = opened.len().max(read);
-        return Err(Refusal::too_large(name, size, limit).into_error(true));
-    }
-    Ok(Some(bytes))
+    (file.take(limit.saturating_add(1))).read_to_end(&mut bytes)?;
+    Ok(Opened::File {
+        bytes,
+        size: opened.len(),
+    })
 }
 
 /// `E_IO` for `name`, below the directory the caller named, that could not be read: the
