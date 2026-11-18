@@ -11,7 +11,9 @@ fixture_switches := 'not test(regenerate_golden) and not test(regenerate_git_fix
 # 11 minutes in all), and the continuous-sync lane (`sync_load::sync_keeps_pace_with_landing`, 50
 # agents for 10 minutes beside a syncer), past half the ci-slow kill; and the M19 design §8.4's
 # four large workspace cases (the sparse workspace of a 1,000,000-file tree, the status of 500,000
-# files, 50 creates at once, the update across 1,000 lands), each sized under half the ci-perf kill.
+# files, 50 creates at once, the update across 1,000 lands), each sized under half the ci-perf kill;
+# and A22's landing queue (`queue_perf::perf::fifty_entries_with_thirty_second_checks`, 50
+# processes each enqueuing and waiting, a check of 30 s, about 2 minutes).
 # `check-ci-slow` leaves them out, `check-ci-perf` runs them, `check-slow` runs them optimized.
 # swarmops-core's `supply_chain` tests fail a case `check-ci-slow` leaves out that no scheduled
 # job runs optimized and one at a time.
@@ -32,6 +34,7 @@ ci_perf_cases := \
     'test(=ws_processes::perf::perf_status_of_500000_files) | ' + \
     'test(=ws_processes::perf::perf_fifty_creates_at_once) | ' + \
     'test(=ws_processes::perf::perf_update_across_1000_lands) | ' + \
+    'test(=queue_perf::perf::fifty_entries_with_thirty_second_checks) | ' + \
     'test(=format3_perf::commits_1m_next_decile) | ' + \
     'test(=scale_perf::fixture_next_part)'
 
@@ -188,7 +191,8 @@ check-ci-slow:
 
 # `ci_perf_cases` optimized and one at a time (`--no-capture`), as `perf` runs them, printing their
 # `remote-perf: `, `serve-perf: `, `intake-perf: `, `serve-load: `, `landing-perf: `, `sync-load: `
-# and `ws-perf: ` lines. They assert what they ran, never its time.
+# `ws-perf: ` and `queue-perf: ` lines. They assert what they ran, never its time, but for the
+# queue's bound on a hold of `meta/lock` (1 s: a hold that long would span a check).
 # Measured optimized on this host: the clone cost 850.5 s and `serve_perf`'s three 1,599.3 to
 # 1,650.0 s (docs/perf.md, "v0.7.0"), the other four `remote_perf` cases 346.0 to 389.5 s in the
 # same window, the checked land 313.5 s in v0.5.0's; 7,541.4 s in all before the M17 cases, whose
@@ -294,6 +298,8 @@ quiet-window load1="6" load5="inf" hold="60" wait="1800":
 # and against git's own server, 10 minutes each) print `serve-load: ` lines.
 # The intake cases (`intake_perf::*`: the import beside 8 committers, the committers alone,
 # the import's memory alone) print `intake-perf: ` lines.
+# The landing queue's case (`queue_perf::perf::fifty_entries_with_thirty_second_checks`: 50
+# processes each enqueue and wait, the check 30 s) prints `queue-perf: ` lines.
 # The continuous-sync lane (`sync_load::sync_keeps_pace_with_landing`: 50 agents at 20 lands/s
 # for 10 minutes beside one syncer, the remote's lag read every second) prints `sync-load: `
 # lines.
@@ -365,6 +371,13 @@ perf:
     cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
         -E 'test(/^ws_processes::perf::/)' --no-capture 2>&1 | tee target/perf/ws.log \
         | grep --line-buffered '^ws-perf: '
+    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+    load between
+    # A22's landing queue: 50 processes, a check of 30 s, the store under the bench directory.
+    TMPDIR="$bench_dir" cargo nextest run --locked --release -p swarmops-cli --all-features \
+        --run-ignored ignored-only \
+        -E 'test(=queue_perf::perf::fifty_entries_with_thirty_second_checks)' --no-capture 2>&1 \
+        | tee target/perf/queue.log | grep --line-buffered '^queue-perf: '
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load between
     # M20's FORMAT 3 cases (`format3_perf::*`): the scale fixture's parts until its line says
