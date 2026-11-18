@@ -60,6 +60,10 @@ pub const RUN_FILE: &str = "run.json";
 /// The file a run's lock is held on, in its directory.
 pub const RUN_LOCK: &str = "lock";
 
+/// The mode of each directory a run makes: the runs root, a directory's key directory, a run's
+/// directory and those in it, which only their owner reads, as `.swarmws/` is.
+pub const RUNS_DIR_MODE: u32 = 0o700;
+
 /// The file below a directory's runs that names the directory they are of.
 const DIR_FILE: &str = "dir";
 
@@ -489,7 +493,7 @@ fn start_log(
         .and_then(|file| LineLog::start(file, &start, now_ms()))
         .map_err(|e| (path.to_owned(), e))?;
     let artifacts = own.join("artifacts");
-    std::fs::create_dir_all(&artifacts).map_err(|e| (artifacts, e))?;
+    private_dirs(&artifacts).map_err(|e| (artifacts, e))?;
     Ok(log)
 }
 
@@ -700,9 +704,19 @@ fn canonical(dir: &Utf8Path) -> Result<Utf8PathBuf, OpError> {
     })
 }
 
-/// Makes `dir` and its parents.
+/// Makes `dir` and its parents ([`private_dirs`]), or `E_IO`.
 fn make_dir(dir: &Utf8Path) -> Result<(), OpError> {
-    std::fs::create_dir_all(dir).map_err(|e| io_failed(dir, &e))
+    private_dirs(dir).map_err(|e| io_failed(dir, &e))
+}
+
+/// Makes `dir` and its parents, each made here readable by its owner alone ([`RUNS_DIR_MODE`]):
+/// a check's log can hold whatever it printed, secrets among them.
+fn private_dirs(dir: &Utf8Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    (std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(RUNS_DIR_MODE))
+    .create(dir)
 }
 
 /// `E_INVALID_ARG` saying `what`, with `details.reason`.

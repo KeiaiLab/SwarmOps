@@ -93,6 +93,9 @@ The one check `default` of `.swarmops/workspaces.json` keeps the caller's whole 
 
 A run's `dir` holds `run.json` (its `state`, `running` then `ended`, and the `result`), `lock`
 (held while it runs), `logs/<check>.log` and `checks/<check>/`, the paths the environment names.
+Each directory a run makes, the runs root and a directory's key directory among them, is its
+owner's alone (mode `0700`), as a workspace's `.swarmws/` is: a log holds whatever its check
+printed, secrets among them.
 Each log holds both streams, a time on every line, and the sections a check opens; `check log`
 reads one, and its page has the format. The newest 20 runs of a directory or a workspace are
 kept, and a run whose lock is held, or cannot be tried, is never removed. Nothing there is

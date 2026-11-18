@@ -375,3 +375,26 @@ fn a_lock_that_cannot_be_written_is_still_held() {
     }
     mode(0o644);
 }
+
+/// The directories a run makes are its owner's alone: the runs root, the directory's key
+/// directory and the run's own, as a workspace's `.swarmws/` is, since a log holds whatever a
+/// check printed.
+#[test]
+fn a_run_s_directories_are_its_owner_s_alone() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_tmp, dir, runs) = tree("[check.a]\nargv = [\"/usr/bin/true\"]\n");
+    let ran = run(&dir, &runs, &[], &[]).unwrap();
+    let run_dir = Utf8Path::new(&ran.dir);
+    let key = run_dir.parent().unwrap();
+    for made in [
+        &runs,
+        key,
+        run_dir,
+        &run_dir.join("logs"),
+        &run_dir.join("checks/a"),
+    ] {
+        let mode = std::fs::metadata(made).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, RUNS_DIR_MODE, "{made}: {mode:o}");
+    }
+}
