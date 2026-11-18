@@ -2222,6 +2222,7 @@ dependencies = [
  "base64",
  "blake3",
  "camino",
+ "proptest",
  "schemars",
  "serde",
  "serde_json",

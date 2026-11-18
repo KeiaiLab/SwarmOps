@@ -20,6 +20,10 @@
 //! - [`serve`] (M14): a directory of stores served to stock git over ssh and smart HTTP, its
 //!   pushes decided by a `proc-receive` hook.
 //!
+//! - [`check`] (M30) reads a tree's checks: `.swarmops/checks.toml`, or `check.argv` of
+//!   `.swarmops/workspaces.json`, from the store at a changeset or from a directory the caller
+//!   names, for `check list`.
+//!
 //! - [`userdir`] names the host's per-user directory for what is kept outside every store.
 //! - [`auth`] keeps the user's logins, a token per host, in one file under that directory:
 //!   `auth login`, `auth status` and `auth logout`, client-side operations on no store.
@@ -37,6 +41,7 @@
 pub mod auth;
 mod authors;
 mod blob_get;
+pub mod check;
 mod conflict;
 pub mod content;
 mod error;
