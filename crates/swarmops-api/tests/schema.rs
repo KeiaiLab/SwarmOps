@@ -81,6 +81,14 @@ const REQUESTS: &[&str] = &[
     "WsResolveReq",
     "WsSnapshotReq",
     "WsStatusReq",
+    "QueueEnqueueReq",
+    "QueuePublishReq",
+    "QueueRemovalIn",
+    "QueueRoundReq",
+    "QueueStatusReq",
+    "QueueVerdictReq",
+    "QueueWaitReq",
+    "QueueWithdrawReq",
 ];
 
 /// Responses and the output types inside them.
@@ -186,6 +194,12 @@ const RESPONSES: &[&str] = &[
     "WsResolveResp",
     "WsSnapshotResp",
     "WsStatus",
+    "QueueEnqueueResp",
+    "QueueEntryOut",
+    "QueuePublishResp",
+    "QueueRoundItem",
+    "QueueRoundResp",
+    "QueueStatusResp",
 ];
 
 /// Enums and newtypes, which have no object fields of their own.
@@ -224,6 +238,10 @@ const SCALARS: &[&str] = &[
     "WsChangeKind",
     "WsRebaseAction",
     "WsState",
+    "QueueEntryState",
+    "QueuePublishStatus",
+    "RemovalReason",
+    "VerdictState",
 ];
 
 #[test]
@@ -329,6 +347,18 @@ fn store_ops_signatures<S: StoreOps + ?Sized>() {
         S::rebase;
     let _: fn(&S, swarmops_api::BlobGetReq) -> Result<swarmops_api::BlobGetResp, OpError> =
         S::blob_get;
+    let _: fn(
+        &S,
+        &Identity,
+        swarmops_api::QueueEnqueueReq,
+    ) -> Result<swarmops_api::QueueEnqueueResp, OpError> = S::queue_enqueue;
+    let _: fn(&S, swarmops_api::QueueStatusReq) -> Result<swarmops_api::QueueStatusResp, OpError> =
+        S::queue_status;
+    let _: fn(
+        &S,
+        &Identity,
+        swarmops_api::QueueWithdrawReq,
+    ) -> Result<swarmops_api::QueueEntryOut, OpError> = S::queue_withdraw;
 }
 
 #[test]
@@ -432,6 +462,7 @@ const ROWS: &[(ErrorCode, &str, i32, bool)] = &[
     (ErrorCode::WsStale, "E_WS_STALE", 1, false),
     (ErrorCode::CheckFailed, "E_CHECK_FAILED", 1, false),
     (ErrorCode::StoreTooNew, "E_STORE_TOO_NEW", 1, false),
+    (ErrorCode::QueueWaitTimeout, "E_QUEUE_WAIT_TIMEOUT", 4, true),
 ];
 
 #[test]

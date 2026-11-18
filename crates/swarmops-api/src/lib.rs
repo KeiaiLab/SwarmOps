@@ -13,6 +13,7 @@ pub mod error;
 pub mod health;
 pub mod identity;
 pub mod ops;
+pub mod queue;
 pub mod remote;
 pub mod rev;
 mod schema;
@@ -68,6 +69,12 @@ pub use ops::{ResolutionInput, ResolutionsInput, Side};
 pub use ops::{ResolveRevReq, ResolvedRev, RevKind};
 pub use ops::{RevertReq, RevertResp};
 pub use ops::{SnapshotWrite, WsSnapshotReq, WsSnapshotResp};
+pub use queue::{
+    QueueEnqueueReq, QueueEnqueueResp, QueueEntryOut, QueueEntryState, QueuePublishReq,
+    QueuePublishResp, QueuePublishStatus, QueueRemovalIn, QueueRoundItem, QueueRoundReq,
+    QueueRoundResp, QueueStatusReq, QueueStatusResp, QueueVerdictReq, QueueWaitReq,
+    QueueWithdrawReq, RemovalReason, VerdictState,
+};
 pub use remote::{
     BranchUpdate, CloneReq, CloneResp, DropReason, DroppedChange, FetchReq, FetchResp, HeadMove,
     PublishedChange, PushReq, PushResp, PushStatus, RemoteAddReq, RemoteHead, RemoteInfo,

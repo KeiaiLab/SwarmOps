@@ -34,6 +34,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::OpError;
 use crate::identity::Identity;
+use crate::queue::{
+    QueueEnqueueReq, QueueEnqueueResp, QueueEntryOut, QueueStatusReq, QueueStatusResp,
+    QueueWithdrawReq,
+};
 use crate::rev::Rev;
 
 /// The default [`ReadFileReq::max_bytes`]: 1 MiB.
@@ -5103,6 +5107,35 @@ pub trait StoreOps {
     fn merge_base(&self, req: MergeBaseReq) -> Result<MergeBaseResp, OpError> {
         let _ = req;
         Err(not_built("merge_base"))
+    }
+
+    /// Puts a change in a target's landing queue, answering once the entry is durable (CLI
+    /// `queue enqueue`). A store that does not have it answers `E_INVALID_ARG`.
+    fn queue_enqueue(
+        &self,
+        who: &Identity,
+        req: QueueEnqueueReq,
+    ) -> Result<QueueEnqueueResp, OpError> {
+        let _ = (who, req);
+        Err(not_built("queue_enqueue"))
+    }
+
+    /// The landing queue's entries (CLI `queue status`). A read of the store. A store that does
+    /// not have it answers `E_INVALID_ARG`.
+    fn queue_status(&self, req: QueueStatusReq) -> Result<QueueStatusResp, OpError> {
+        let _ = req;
+        Err(not_built("queue_status"))
+    }
+
+    /// Takes an open entry out of its landing queue (CLI `queue withdraw`). A store that does
+    /// not have it answers `E_INVALID_ARG`.
+    fn queue_withdraw(
+        &self,
+        who: &Identity,
+        req: QueueWithdrawReq,
+    ) -> Result<QueueEntryOut, OpError> {
+        let _ = (who, req);
+        Err(not_built("queue_withdraw"))
     }
 }
 

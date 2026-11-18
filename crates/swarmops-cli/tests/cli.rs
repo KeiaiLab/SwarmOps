@@ -2079,7 +2079,7 @@ fn cat_truncates_to_max_bytes() {
 }
 
 /// The codes of [`NOT_RAISED`] no golden pins: no operation raises them yet.
-const UNPINNED: &[&str] = &[];
+const UNPINNED: &[&str] = &["E_QUEUE_WAIT_TIMEOUT"];
 
 /// Codes [`error_codes_reach_the_cli`] does not raise, and why: each names the test whose golden
 /// pins it, but those of [`UNPINNED`].
@@ -2139,6 +2139,10 @@ const NOT_RAISED: &[(&str, &str)] = &[
     (
         "E_STORE_TOO_NEW",
         "needs a store of a later format: too_new_maps_to_its_code_and_hint pins it",
+    ),
+    (
+        "E_QUEUE_WAIT_TIMEOUT",
+        "no command raises it yet: `queue wait` comes with the queue's commands",
     ),
 ];
 
@@ -2387,7 +2391,7 @@ fn init_format_1_and_2_still_create_their_layouts() {
 
 /// How many error codes there are, and how many goldens pin: the counts the known limitations,
 /// the changelog and the goals state, which [`check_doc_counts`] reads.
-const CODE_COUNT: usize = 56;
+const CODE_COUNT: usize = 57;
 const PINNED_COUNT: usize = 56;
 
 /// The documents that state [`CODE_COUNT`] and [`PINNED_COUNT`], from the repository's root.

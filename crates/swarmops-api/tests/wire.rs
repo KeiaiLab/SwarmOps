@@ -16,10 +16,7 @@ use swarmops_api::wire::{
     WireLandReq, WireList, WireListReq, WireMove, WireMoveMode, WireMoveReq, WirePut, WirePutReq,
     WireRef, WireRefs, WireRefsReq, WireRequest,
 };
-use swarmops_api::{
-    ConflictKindOut, ConflictReport, Envelope, ErrorCode, FileConflictOut, LandResp, LandStatus,
-    Meta, OpError,
-};
+use swarmops_api::*;
 
 /// The directory of the golden files.
 fn golden_dir() -> PathBuf {
@@ -145,7 +142,7 @@ fn goldens() -> Vec<Golden> {
 /// golden file is left without a message.
 #[test]
 fn every_wire_message_matches_its_golden() {
-    let goldens = goldens();
+    let goldens: Vec<Golden> = goldens().into_iter().chain(queue_goldens()).collect();
     for golden in &goldens {
         let path = golden_dir().join(format!("{}.json", golden.name));
         let file = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", golden.name));
@@ -194,7 +191,7 @@ fn renamed(value: &Value, path: &[String]) -> Value {
 /// the line refused or decode to another value, so a golden can pin no field by accident.
 #[test]
 fn a_flipped_field_in_any_golden_is_refused_or_differs() {
-    for golden in goldens() {
+    for golden in goldens().into_iter().chain(queue_goldens()) {
         let value: Value = serde_json::from_str(&golden.encoded).unwrap();
         let mut paths = Vec::new();
         key_paths(&value, &[], &mut paths);
@@ -290,8 +287,170 @@ fn regenerate_wire_golden() {
         return;
     }
     fs::create_dir_all(golden_dir()).unwrap();
-    for golden in goldens() {
+    for golden in goldens().into_iter().chain(queue_goldens()) {
         let path = golden_dir().join(format!("{}.json", golden.name));
         fs::write(path, format!("{}\n", golden.encoded)).unwrap();
+    }
+}
+
+/// The queue's requests and responses (M22 core design §6), as a client and a store exchange
+/// them: each field set to a value other than its default.
+fn queue_goldens() -> Vec<Golden> {
+    // 1. Requests.
+    let mut enqueue = QueueEnqueueReq::new("main", Rev::from(id('a')));
+    enqueue.base = Some(Rev::from(id('b')));
+    enqueue.key = Some("lq-7".into());
+    let mut status = QueueStatusReq::new();
+    status.target = Some("main".into());
+    status.entry = Some(id('e'));
+    let mut wait = QueueWaitReq::new(id('e'));
+    wait.timeout_s = Some(60);
+
+    // 2. Responses: one entry still checking, one removed by its check, one withdrawn.
+    let mut checking =
+        QueueEntryOut::new(id('e'), "main", id('a'), id('b'), QueueEntryState::Checking);
+    checking.key = Some("lq-7".into());
+    checking.position = Some(1);
+    checking.candidate = Some(id('c'));
+    checking.tree = Some(id('d'));
+    checking.verdict = Some(VerdictState::Passed);
+    let mut removed =
+        QueueEntryOut::new(id('f'), "main", id('a'), id('b'), QueueEntryState::Removed);
+    removed.key = Some("lq-8".into());
+    removed.removal = Some(RemovalReason::CheckFailed);
+    removed.check = Some("just check".into());
+    removed.tree = Some(id('d'));
+    removed.report = Some(id('8'));
+    let mut withdrawn =
+        QueueEntryOut::new(id('9'), "main", id('a'), id('b'), QueueEntryState::Removed);
+    withdrawn.removal = Some(RemovalReason::Withdrawn);
+
+    vec![
+        golden("queue_enqueue_req", enqueue),
+        golden(
+            "queue_enqueue",
+            QueueEnqueueResp::new(checking.clone(), true),
+        ),
+        golden("queue_status_req", status),
+        golden(
+            "queue_status",
+            QueueStatusResp::new(vec![checking, removed.clone()]),
+        ),
+        golden("queue_withdraw_req", QueueWithdrawReq::new(id('9'))),
+        golden("queue_withdraw", withdrawn),
+        golden("queue_wait_req", wait),
+    ]
+}
+
+/// A store written before the queue: every required operation, none of the queue's; no test
+/// calls the former.
+struct NoQueue;
+
+impl StoreOps for NoQueue {
+    fn repo_info(&self, _: InfoReq) -> Result<RepoInfo, OpError> {
+        unreachable!("not called")
+    }
+    fn commit(&self, _: &Identity, _: CommitReq) -> Result<CommitResp, OpError> {
+        unreachable!("not called")
+    }
+    fn land(&self, _: &Identity, _: LandReq) -> Result<LandResp, OpError> {
+        unreachable!("not called")
+    }
+    fn rebase(&self, _: &Identity, _: RebaseReq) -> Result<RebaseResp, OpError> {
+        unreachable!("not called")
+    }
+    fn resolve_rev(&self, _: ResolveRevReq) -> Result<ResolvedRev, OpError> {
+        unreachable!("not called")
+    }
+    fn blob_put(&self, _: &Identity, _: BlobPutReq) -> Result<BlobPutResp, OpError> {
+        unreachable!("not called")
+    }
+    fn blob_has(&self, _: BlobHasReq) -> Result<BlobHasResp, OpError> {
+        unreachable!("not called")
+    }
+    fn blob_get(&self, _: BlobGetReq) -> Result<BlobGetResp, OpError> {
+        unreachable!("not called")
+    }
+    fn read_file(&self, _: ReadFileReq) -> Result<FileContent, OpError> {
+        unreachable!("not called")
+    }
+    fn read_tree(&self, _: ReadTreeReq) -> Result<TreeListing, OpError> {
+        unreachable!("not called")
+    }
+    fn show(&self, _: ShowReq) -> Result<ChangesetDetail, OpError> {
+        unreachable!("not called")
+    }
+    fn log(&self, _: LogReq) -> Result<LogPage, OpError> {
+        unreachable!("not called")
+    }
+    fn ancestry(&self, _: AncestryReq) -> Result<AncestryResp, OpError> {
+        unreachable!("not called")
+    }
+    fn path_history(&self, _: PathHistoryReq) -> Result<PathHistoryPage, OpError> {
+        unreachable!("not called")
+    }
+    fn diff(&self, _: DiffReq) -> Result<Diff, OpError> {
+        unreachable!("not called")
+    }
+    fn ref_list(&self, _: RefListReq) -> Result<RefListResp, OpError> {
+        unreachable!("not called")
+    }
+    fn ref_set(&self, _: &Identity, _: RefSetReq) -> Result<RefSetResp, OpError> {
+        unreachable!("not called")
+    }
+    fn ref_delete(&self, _: &Identity, _: RefDeleteReq) -> Result<RefSetResp, OpError> {
+        unreachable!("not called")
+    }
+    fn op_log(&self, _: OpLogReq) -> Result<OpLogPage, OpError> {
+        unreachable!("not called")
+    }
+    fn undo(&self, _: &Identity, _: UndoReq) -> Result<UndoResp, OpError> {
+        unreachable!("not called")
+    }
+    fn verify(&self, _: VerifyReq) -> Result<VerifyReport, OpError> {
+        unreachable!("not called")
+    }
+    fn derive(&self, _: DeriveReq) -> Result<DeriveResp, OpError> {
+        unreachable!("not called")
+    }
+}
+
+/// K10: the queue's requests and responses round-trip against their goldens;
+/// `E_QUEUE_WAIT_TIMEOUT` is retryable with exit 4; a store without the queue answers each
+/// `queue_*` operation `E_INVALID_ARG`, naming it.
+#[test]
+fn queue_wire_goldens() {
+    // 1. Each golden is the encoding of its value and decodes back to it.
+    for golden in queue_goldens() {
+        let path = golden_dir().join(format!("{}.json", golden.name));
+        let file = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", golden.name));
+        assert_eq!(file, format!("{}\n", golden.encoded), "{}", golden.name);
+        assert_eq!((golden.same)(&file), Decoded::Same, "{}", golden.name);
+    }
+
+    // 2. The wait's timeout: retryable, exit 4.
+    let code = ErrorCode::QueueWaitTimeout;
+    assert_eq!(
+        (code.as_str(), code.exit(), code.retryable()),
+        ("E_QUEUE_WAIT_TIMEOUT", 4, true)
+    );
+
+    // 3. A store without the queue refuses each operation as not built.
+    let who = Identity::parse("agent/runner").unwrap();
+    let store = NoQueue;
+    let refused = [
+        store
+            .queue_enqueue(&who, QueueEnqueueReq::new("main", Rev::from(id('a'))))
+            .unwrap_err(),
+        store.queue_status(QueueStatusReq::new()).unwrap_err(),
+        store
+            .queue_withdraw(&who, QueueWithdrawReq::new(id('e')))
+            .unwrap_err(),
+    ];
+    let ops = ["queue_enqueue", "queue_status", "queue_withdraw"];
+    for (error, op) in refused.iter().zip(ops) {
+        assert_eq!(error.code, "E_INVALID_ARG", "{op}: {error:?}");
+        assert!(!error.retryable, "{op}");
+        assert!(error.message.contains(op), "{op}: {}", error.message);
     }
 }
