@@ -115,7 +115,7 @@ pub fn run_dir(
     // 1. The request, then the checks, read from the directory.
     env::check_pass(&opts.pass)?;
     let listed = list_dir(dir, None).map_err(rehint_dir)?;
-    let selected = select(&listed, stage, names, dir.as_str())?;
+    let selected = select(&listed, stage, names, dir.as_str(), &format!("--dir {dir}"))?;
     let root = canonical(dir)?;
 
     // 2. Where its runs go: below the runs root, by the directory's key.
@@ -164,7 +164,7 @@ pub fn run_ws(
     env::check_pass(&opts.pass)?;
     let held = swarmops_ws::check::hold_for_run(ctx, &Locate::Name(workspace))?;
     let listed = list(ctx.store, CheckListReq::new(held.changeset.as_str()))?;
-    let selected = select(&listed, stage, &checks, &held.name)?;
+    let selected = select(&listed, stage, &checks, &held.name, &held.changeset)?;
 
     // 2. The run, in the workspace's private state, the lock held throughout.
     let runs = held.dir.join(WS_RUNS_DIR);
@@ -217,12 +217,14 @@ impl Subject {
 
 /// The checks of `listed` to run: those of `stage`, or of them those `names` names (each once),
 /// by name. `E_INVALID_ARG` for a name the file does not define (`check`), one not of the stage
-/// (`stage`), or nothing selected (`no_checks`); `at` names the directory or workspace.
+/// (`stage`), or nothing selected (`no_checks`); `at` names the directory or workspace, and
+/// `list_at` is what `check list` takes to list the same file: `--dir DIR`, or the changeset.
 fn select(
     listed: &CheckListResp,
     stage: CheckStage,
     names: &[String],
     at: &str,
+    list_at: &str,
 ) -> Result<Vec<CheckOut>, OpError> {
     // 1. Each name, defined and of the stage.
     let wanted: BTreeSet<&str> = names.iter().map(String::as_str).collect();
@@ -230,7 +232,7 @@ fn select(
         let Some(check) = listed.checks.iter().find(|c| c.name == *name) else {
             let mut error = invalid(format!("no check is named {name:?} in {at}"), "check");
             error.details.insert("check".to_owned(), (*name).into());
-            return Err(error.with_hint(format!("swarmops check list --stage {stage}")));
+            return Err(error.with_hint(format!("swarmops check list {list_at} --stage {stage}")));
         };
         if !check.stages.contains(&stage) {
             let mut error = invalid(
@@ -270,7 +272,9 @@ fn select(
                 .details
                 .insert("file".to_owned(), file.as_str().into());
         }
-        return Err(error.with_hint("swarmops check list shows each check's stages"));
+        return Err(error.with_hint(format!(
+            "swarmops check list {list_at} shows each check's stages"
+        )));
     }
     Ok(selected)
 }

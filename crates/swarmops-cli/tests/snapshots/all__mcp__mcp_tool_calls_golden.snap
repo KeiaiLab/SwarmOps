@@ -2372,7 +2372,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"error\":{\"code\":\"E_INVALID_ARG\",\"details\":{\"reason\":\"no_checks\",\"stage\":\"before-land\"},\"exit\":2,\"hint\":\"swarmops check list shows each check's stages\",\"message\":\"ws1 has no .swarmops/checks.toml, and no check.argv in .swarmops/workspaces.json: nothing to run\",\"retryable\":false},\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id15]\":\"[id15]\",\"main\":\"[id15]\"}},\"ok\":false,\"op\":\"check_run\"}",
+              "text": "{\"api\":1,\"error\":{\"code\":\"E_INVALID_ARG\",\"details\":{\"reason\":\"no_checks\",\"stage\":\"before-land\"},\"exit\":2,\"hint\":\"swarmops check list [id15] shows each check's stages\",\"message\":\"ws1 has no .swarmops/checks.toml, and no check.argv in .swarmops/workspaces.json: nothing to run\",\"retryable\":false},\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id15]\":\"[id15]\",\"main\":\"[id15]\"}},\"ok\":false,\"op\":\"check_run\"}",
               "type": "text"
             }
           ],
@@ -2386,7 +2386,7 @@ expression: transcript
                 "stage": "before-land"
               },
               "exit": 2,
-              "hint": "swarmops check list shows each check's stages",
+              "hint": "swarmops check list [id15] shows each check's stages",
               "message": "ws1 has no .swarmops/checks.toml, and no check.argv in .swarmops/workspaces.json: nothing to run",
               "retryable": false
             },
@@ -2424,7 +2424,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"error\":{\"code\":\"E_INVALID_ARG\",\"details\":{\"check\":\"unit\",\"reason\":\"run\"},\"exit\":2,\"hint\":\"swarmops check run starts one\",\"message\":\"no run here ran the check unit\",\"retryable\":false},\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":false,\"op\":\"check_log\"}",
+              "text": "{\"api\":1,\"error\":{\"code\":\"E_INVALID_ARG\",\"details\":{\"check\":\"unit\",\"reason\":\"run\"},\"exit\":2,\"hint\":\"start one: swarmops check run --ws ws1\",\"message\":\"no run here ran the check unit\",\"retryable\":false},\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":false,\"op\":\"check_log\"}",
               "type": "text"
             }
           ],
@@ -2438,7 +2438,7 @@ expression: transcript
                 "reason": "run"
               },
               "exit": 2,
-              "hint": "swarmops check run starts one",
+              "hint": "start one: swarmops check run --ws ws1",
               "message": "no run here ran the check unit",
               "retryable": false
             },

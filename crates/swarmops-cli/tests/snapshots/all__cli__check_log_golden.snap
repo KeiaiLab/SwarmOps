@@ -133,7 +133,7 @@ expression: s.transcript()
           "check": "lint",
           "reason": "run"
         },
-        "hint": "swarmops check run starts one"
+        "hint": "start one: swarmops check run --dir [tmp]/tree"
       },
       "meta": {
         "elapsed_ms": "[elapsed_ms]",

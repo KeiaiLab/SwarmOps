@@ -49,7 +49,7 @@ fn a_finished_log_reads_whole_with_its_end() {
         tree("[check.a]\nargv = [\"/bin/sh\", \"-c\", \"echo one; echo two >&2; exit 4\"]\n");
     let first = ran(&dir, &runs);
     let second = ran(&dir, &runs);
-    let (_, resp) = Follower::start(&runs, "a", None, 1_000, false).unwrap();
+    let (_, resp) = Follower::start(&runs, "--dir .", "a", None, 1_000, false).unwrap();
     assert_eq!(resp.run, second);
     assert!(resp.ended);
     assert_eq!(
@@ -62,7 +62,7 @@ fn a_finished_log_reads_whole_with_its_end() {
     assert!(streams.contains(&CheckLogStream::Out) && streams.contains(&CheckLogStream::Err));
     assert_eq!((resp.first_line, resp.total_lines), (1, 4));
 
-    let (_, named) = Follower::start(&runs, "a", Some(&first), 2, false).unwrap();
+    let (_, named) = Follower::start(&runs, "--dir .", "a", Some(&first), 2, false).unwrap();
     assert_eq!(named.run, first);
     assert_eq!((named.first_line, named.lines.len()), (3, 2));
     assert_eq!(named.lines[1].n, 4);
@@ -72,16 +72,17 @@ fn a_finished_log_reads_whole_with_its_end() {
 #[test]
 fn a_run_that_is_not_there_is_refused() {
     let (_tmp, dir, runs) = tree("[check.a]\nargv = [\"/usr/bin/true\"]\n");
-    let none = Follower::start(&runs, "a", None, 10, false).unwrap_err();
+    let none = Follower::start(&runs, "--dir .", "a", None, 10, false).unwrap_err();
     assert_eq!(
         (none.code.as_str(), &none.details["reason"]),
         ("E_INVALID_ARG", &"run".into())
     );
     ran(&dir, &runs);
-    let other = Follower::start(&runs, "b", None, 10, false).unwrap_err();
+    let other = Follower::start(&runs, "--dir .", "b", None, 10, false).unwrap_err();
     assert_eq!(other.details["check"], "b");
     let gone = Follower::start(
         &runs,
+        "--dir .",
         "a",
         Some("0193f1e2-0000-7000-8000-000000000000"),
         10,
@@ -91,7 +92,7 @@ fn a_run_that_is_not_there_is_refused() {
     assert_eq!(gone.details["reason"], "run");
     for tail in [0, MAX_CHECK_LOG_TAIL + 1] {
         assert_eq!(
-            Follower::start(&runs, "a", None, tail, false)
+            Follower::start(&runs, "--dir .", "a", None, tail, false)
                 .unwrap_err()
                 .details["reason"],
             "tail"
@@ -110,7 +111,7 @@ fn a_log_ends_by_its_runner_going_or_its_record() {
     let text = std::fs::read_to_string(&log).unwrap();
     let cut: Vec<&str> = text.lines().filter(|l| !l.contains(" run end ")).collect();
     std::fs::write(&log, format!("{}\n", cut.join("\n"))).unwrap();
-    let (_, resp) = Follower::start(&runs, "a", None, 10, false).unwrap();
+    let (_, resp) = Follower::start(&runs, "--dir .", "a", None, 10, false).unwrap();
     assert_eq!(
         (resp.ended, resp.ended_by, resp.outcome),
         (true, Some(CheckLogEnd::RunnerGone), None)
@@ -122,7 +123,7 @@ fn a_log_ends_by_its_runner_going_or_its_record() {
     record["result"]["checks"][0]["name"] = "b".into();
     record["result"]["checks"][0]["outcome"] = "not_run".into();
     std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
-    let (_, resp) = Follower::start(&runs, "b", None, 10, false).unwrap();
+    let (_, resp) = Follower::start(&runs, "--dir .", "b", None, 10, false).unwrap();
     assert_eq!(
         (resp.ended_by, resp.outcome, &resp.log),
         (Some(CheckLogEnd::End), Some(CheckOutcome::NotRun), &None)
@@ -160,7 +161,7 @@ fn a_follower_gives_what_was_written_since() {
         .unwrap();
 
     // 2. Started: the whole lines; a look then: nothing new.
-    let (mut follower, first) = Follower::start(&runs, "a", None, 1_000, true).unwrap();
+    let (mut follower, first) = Follower::start(&runs, "--dir .", "a", None, 1_000, true).unwrap();
     assert_eq!((first.lines.len(), first.ended), (2, false));
     assert!(follower.look().unwrap().is_none());
 
@@ -202,7 +203,7 @@ fn a_log_is_read_no_further_than_its_limit() {
         file.write_all(block.as_bytes()).unwrap();
     }
     drop(file);
-    let (_, resp) = Follower::start(&runs, "a", None, 5, false).unwrap();
+    let (_, resp) = Follower::start(&runs, "--dir .", "a", None, 5, false).unwrap();
     assert_eq!(resp.total_lines, u64::try_from(within).unwrap());
     assert_eq!(resp.lines.len(), 5);
     assert_eq!(resp.lines[4].n, resp.total_lines);
@@ -218,7 +219,7 @@ fn a_log_that_is_not_a_regular_file_is_refused() {
     let log = runs.join(&id).join("logs/a.log");
     std::fs::remove_file(&log).unwrap();
     std::os::unix::fs::symlink("/dev/zero", &log).unwrap();
-    let linked = Follower::start(&runs, "a", None, 5, false).unwrap_err();
+    let linked = Follower::start(&runs, "--dir .", "a", None, 5, false).unwrap_err();
     assert_eq!(linked.code, "E_IO", "{linked:?}");
     std::fs::remove_file(&log).unwrap();
     let made = std::process::Command::new("mkfifo")
@@ -226,6 +227,6 @@ fn a_log_that_is_not_a_regular_file_is_refused() {
         .status()
         .unwrap();
     assert!(made.success());
-    let fifo = Follower::start(&runs, "a", None, 5, false).unwrap_err();
+    let fifo = Follower::start(&runs, "--dir .", "a", None, 5, false).unwrap_err();
     assert_eq!(fifo.code, "E_IO", "{fifo:?}");
 }

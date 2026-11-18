@@ -539,7 +539,28 @@ fn a_check_of_two_stages_runs_in_both() {
         .err("E_INVALID_ARG", 2);
     assert_eq!(none["details"]["reason"], "no_checks");
 
-    // 3. An unknown stage in the file: refused at the item's line.
+    // 3. Each hint names the directory, and the command it gives answers there; so does
+    //    `check log`'s for a check no run ran.
+    let dir = tree.dir();
+    let dir = dir.to_str().unwrap();
+    let list = format!("swarmops check list --dir {dir} --stage before-land");
+    assert_eq!(unknown["hint"], list);
+    assert_eq!(
+        none["hint"],
+        format!("swarmops check list --dir {dir} shows each check's stages")
+    );
+    let hinted = ["check", "list", "--dir", dir, "--stage", "before-land"];
+    run_in(tree.tmp(), &[], &hinted, None).ok();
+    let runs = tree.runs();
+    let env = [("SWARMOPS_CHECK_RUNS_DIR", runs.to_str().unwrap())];
+    let log = ["check", "log", "nope", "--dir", dir];
+    let never = run_in(tree.tmp(), &env, &log, None).err("E_INVALID_ARG", 2);
+    assert_eq!(
+        never["hint"],
+        format!("start one: swarmops check run --dir {dir}")
+    );
+
+    // 4. An unknown stage in the file: refused at the item's line.
     let refused = include_str!("fixtures/check/refused-stage.toml");
     write(&tree.dir(), ".swarmops/checks.toml", refused);
     let error = tree.run(&[], &[]).err("E_CHECK_FILE", 1);

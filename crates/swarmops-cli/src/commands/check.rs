@@ -137,8 +137,10 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Pri
             };
 
             // 2. The log's last lines; with --follow, the rest as it comes.
-            let started =
-                runs.and_then(|runs| Follower::start(&runs, &check, run.as_deref(), tail, follow));
+            let named = named_at(dir.as_deref(), &at);
+            let started = runs.and_then(|runs| {
+                Follower::start(&runs, &named, &check, run.as_deref(), tail, follow)
+            });
             let (follower, first) = match started {
                 Ok(started) => started,
                 Err(e) => return ctx.finish(op, ctx.used.meta(), Err::<(), _>(e)),
@@ -154,6 +156,17 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Pri
                 Duration::from_millis(interval_ms),
             )
         }
+    }
+}
+
+/// How the command line named the runs' directory or workspace, as `check run` takes it: `--dir
+/// DIR`, `--ws NAME`, `--ws-path DIR`, or nothing for the workspace around the working directory.
+fn named_at(dir: Option<&Utf8Path>, at: &WsAt) -> String {
+    match (dir, &at.name, &at.ws_path) {
+        (Some(dir), _, _) => format!("--dir {dir}"),
+        (None, Some(name), _) => format!("--ws {name}"),
+        (None, None, Some(path)) => format!("--ws-path {path}"),
+        (None, None, None) => String::new(),
     }
 }
 

@@ -96,9 +96,10 @@ pub fn log_ws(ctx: &swarmops_ws::Ctx<'_>, req: CheckLogReq) -> Result<CheckLogRe
         ..
     } = req;
     let registry = Registry::open(&ctx.store_root, ctx.fs.clone());
+    let at = format!("--ws {workspace}");
     let found = workspace::find(&Locate::Name(workspace), Some(&registry), ctx.fs.as_ref())?;
     let runs = found.dir.join(WS_RUNS_DIR);
-    let (_, resp) = Follower::start(&runs, &check, run.as_deref(), tail, false)?;
+    let (_, resp) = Follower::start(&runs, &at, &check, run.as_deref(), tail, false)?;
     Ok(resp)
 }
 
@@ -147,6 +148,8 @@ struct Ended {
 impl Follower {
     /// The log of `check` in the runs in `runs` (`run`, else the newest that lists `check`,
     /// with `following` the newest of them still running first), and its last `tail` lines.
+    /// `at` is how `check run` names the runs' directory or workspace (`--dir DIR`, `--ws NAME`,
+    /// or nothing for the one around the working directory), for a hint.
     ///
     /// # Errors
     ///
@@ -155,6 +158,7 @@ impl Follower {
     /// that cannot be read.
     pub fn start(
         runs: &Utf8Path,
+        at: &str,
         check: &str,
         run: Option<&str>,
         tail: usize,
@@ -169,7 +173,7 @@ impl Follower {
             error.details.insert("tail".to_owned(), tail.into());
             return Err(error);
         }
-        let found = find_run(runs, check, run, following)?;
+        let found = find_run(runs, at, check, run, following)?;
         let log = found.dir.join("logs").join(format!("{check}.log"));
         let mut follower = Follower {
             run: found,
@@ -335,7 +339,8 @@ impl Follower {
 }
 
 /// The run in `runs` to read `check`'s log of: `run` if given, else the newest whose record lists
-/// `check`, with `running_first` the newest of those still running before any other.
+/// `check`, with `running_first` the newest of those still running before any other. `at` is
+/// how `check run` names where the runs are, for the hint.
 ///
 /// # Errors
 ///
@@ -343,6 +348,7 @@ impl Follower {
 /// `check` (`details.check`).
 pub fn find_run(
     runs: &Utf8Path,
+    at: &str,
     check: &str,
     run: Option<&str>,
     running_first: bool,
@@ -386,7 +392,12 @@ pub fn find_run(
     newest.ok_or_else(|| {
         let mut error = invalid(format!("no run here ran the check {check}"), "run");
         error.details.insert("check".to_owned(), check.into());
-        error.with_hint("swarmops check run starts one")
+        let at = if at.is_empty() {
+            String::new()
+        } else {
+            format!(" {at}")
+        };
+        error.with_hint(format!("start one: swarmops check run{at}"))
     })
 }
 
