@@ -2236,6 +2236,7 @@ dependencies = [
  "swarmops-ws",
  "tempfile",
  "toml",
+ "uuid",
 ]
 
 [[package]]

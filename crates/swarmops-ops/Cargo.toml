@@ -51,6 +51,8 @@ serde_json.workspace = true
 # The store's TOML files, `remotes.toml` and `authors.toml` (M13), the user's login file, and
 # the check file (M30), walked with its spans.
 toml.workspace = true
+# A run of `check run` (M31) is named by a uuid v7, so that runs sort by their start.
+uuid.workspace = true
 
 [dev-dependencies]
 # The check file's round trip: definitions written by `toml`, read back (M30).
