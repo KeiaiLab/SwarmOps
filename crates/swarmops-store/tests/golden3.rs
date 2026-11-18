@@ -298,6 +298,83 @@ fn nonce_frame_matches_its_golden() {
     assert_eq!(Frame::new_in(StoreFormat::V3, 3, 0, records, None).crc, 0);
 }
 
+/// The Queue bodies as the M22 core design §3 edits them in place, still provisional: Enqueue
+/// carries its key, type 2 is Verdict with 4 states, Removed has 6 reasons. Only the bodies
+/// change: the envelope around them and the entity id stay as pinned.
+#[test]
+fn queue_bodies_match_their_goldens() {
+    // 1. Every type, filled then empty, encodes as its golden and decodes back.
+    for ty in 0..=4 {
+        let name = fact_file(FactKind::Queue, ty);
+        assert!(is_provisional(&name), "{name} is still provisional");
+        let lines = read_golden(&name);
+        let facts = [
+            fact(FactKind::Queue, ty, Fill::Full),
+            fact(FactKind::Queue, ty, Fill::Empty),
+        ];
+        assert_eq!(lines.len(), facts.len(), "{name}");
+        for (line, fact) in lines.iter().zip(facts) {
+            let record = Record::Fact(fact);
+            let mut bytes = Vec::new();
+            record.encode(&mut bytes).unwrap();
+            assert_eq!(&bytes, line, "{name}");
+            let decoded = Record::decode_in(StoreFormat::V3, Base::After, &FactKind::ALL, line);
+            assert_eq!(decoded, Ok((record, line.len())), "{name}");
+        }
+    }
+
+    // 2. The edited fields' bounds: a key of up to 128 bytes, 4 verdict states, 6 reasons.
+    let queue = |ty: u8, body: &mut Body| {
+        Fact::new(
+            FactKind::Queue,
+            ty,
+            id(8),
+            id(9),
+            TS,
+            String::new(),
+            std::mem::take(&mut body.0),
+        )
+    };
+    let enqueue = |key: &str| {
+        let mut b = Body::default();
+        b.u32(0).str("main").id(id(1)).id(id(2)).str(key);
+        queue(0, &mut b)
+    };
+    assert!(enqueue(&"k".repeat(128)).is_ok(), "a 128-byte key");
+    assert!(enqueue(&"k".repeat(129)).is_err(), "a 129-byte key");
+    let verdict = |state: u8| {
+        let mut b = Body::default();
+        b.u32(2).id(id(1)).u8(state).str("ci/test").id(id(2));
+        queue(2, &mut b)
+    };
+    assert!((0..4).all(|state| verdict(state).is_ok()), "4 states");
+    assert!(verdict(4).is_err(), "no fifth state");
+    let removed = |reason: u8| {
+        let mut b = Body::default();
+        b.u32(4).u8(reason).str("ci/test").id(id(1)).id(id(2));
+        queue(4, &mut b)
+    };
+    assert!((0..6).all(|reason| removed(reason).is_ok()), "6 reasons");
+    assert!(removed(6).is_err(), "no seventh reason");
+
+    // 3. The envelope is the confirmed one around the new body, and the entity id's recipe
+    //    is unchanged.
+    let full = fact(FactKind::Queue, 0, Fill::Full);
+    let mut bytes = Vec::new();
+    Record::Fact(full.clone()).encode(&mut bytes).unwrap();
+    let wrapped = envelope(7, 0, id(8), id(9), "agent/one", full.body());
+    assert_eq!(bytes, wrapped);
+    let mut input = b"swarmops:entity:v1\0".to_vec();
+    input.push(7);
+    input.extend_from_slice(&SEQ.to_le_bytes());
+    input.extend_from_slice(&NONCE.to_le_bytes());
+    input.extend_from_slice(&2u16.to_le_bytes());
+    assert_eq!(
+        FactKind::Queue.entity_id(SEQ, NONCE, 2),
+        *blake3::hash(&input).as_bytes()
+    );
+}
+
 #[test]
 fn entity_id_matches_its_golden() {
     let lines = read_golden("entity_id");
@@ -457,11 +534,18 @@ fn fact(kind: FactKind, ty: u8, fill: Fill) -> Fact {
             .id(some(1))
             .id(some(2))
             .str(text("ok")),
-        (Queue, 0) => b.u32(0).str(text("main")).id(some(1)).id(some(2)),
+        // The M22 core design §3 table: Enqueue's key, Verdict (type 2) with state 3
+        // cancelled, Removed with reason 5 cancelled.
+        (Queue, 0) => b
+            .u32(0)
+            .str(text("main"))
+            .id(some(1))
+            .id(some(2))
+            .str(text("lq-42")),
         (Queue, 1) => b.u32(1).id(some(1)).id(some(2)).id(some(3)).u16(4),
-        (Queue, 2) => b.u32(2).str(text("ci/test")),
+        (Queue, 2) => b.u32(2).id(some(1)).u8(3).str(text("ci/test")).id(some(2)),
         (Queue, 3) => b.u32(3).id(some(1)),
-        (Queue, 4) => b.u32(4).u8(1).str(text("ci/test")).id(some(1)).id(some(2)),
+        (Queue, 4) => b.u32(4).u8(5).str(text("ci/test")).id(some(1)).id(some(2)),
         (Withdrawal, 0) => b
             .i64(if filled { 1_700_000_000 } else { 0 })
             .bytes16(b"leak"),
