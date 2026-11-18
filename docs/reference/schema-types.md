@@ -690,7 +690,7 @@ Kind: object. `swarmops schema CheckRunResp` prints its JSON Schema.
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
-| `cancelled` | `boolean` | yes | Whether a signal stopped the run: the check running then is `cancelled`, those after it `not_run`. |
+| `cancelled` | `boolean` | yes | Whether a signal stopped the run before its checks ended: the check running then is `cancelled`, those after it `not_run`. A signal once the last check has exited stops nothing: the run ends as its checks did. |
 | `changeset` | `string` or `null` | no | The changeset the workspace's files stood for. Omitted in the directory form. |
 | `checks` | array of [`CheckRunOut`](#checkrunout) | yes | One per selected check, in the order they ran (by name). |
 | `dir` | `string` | yes | The run's directory on the host it ran on, absolute: `run.json`, the logs and each check's own directory. |

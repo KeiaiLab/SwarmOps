@@ -316,21 +316,22 @@ fn run_checks(
     write_record(&dir, "running", &resp)?;
     prune(&subject.runs, &id);
 
-    // 3. Each check in turn, until the run is stopped.
+    // 3. Each check in turn, until the run is stopped. It was stopped only if that cancelled a
+    //    check or left one not run: a stop once the last check has exited changes nothing.
     let started = Instant::now();
     for (at, check) in selected.iter().enumerate() {
         if opts.stopped() {
-            resp.cancelled = true;
             break;
         }
         let out = run_one(subject, &id, &dir, check, &inherited, legacy, opts)?;
         let cancelled = out.outcome == CheckOutcome::Cancelled;
         resp.checks[at] = out;
-        if cancelled || opts.stopped() {
-            resp.cancelled = true;
+        if cancelled {
             break;
         }
     }
+    resp.cancelled = (resp.checks.iter())
+        .any(|c| matches!(c.outcome, CheckOutcome::Cancelled | CheckOutcome::NotRun));
     resp.duration_ms = millis(started.elapsed());
     resp.failed = (resp.checks.iter())
         .filter(|c| c.outcome != CheckOutcome::Passed)

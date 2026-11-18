@@ -292,8 +292,9 @@ pub struct CheckRunResp {
     /// Whether the checks got the caller's whole environment: only the check `default` of
     /// `.swarmops/workspaces.json`, which keeps what `ws land --check` gives it.
     pub inherited_all: bool,
-    /// Whether a signal stopped the run: the check running then is `cancelled`, those after it
-    /// `not_run`.
+    /// Whether a signal stopped the run before its checks ended: the check running then is
+    /// `cancelled`, those after it `not_run`. A signal once the last check has exited stops
+    /// nothing: the run ends as its checks did.
     pub cancelled: bool,
     /// The checks that did not pass, in run order; empty when every one passed.
     pub failed: Vec<String>,

@@ -196,8 +196,10 @@ below, and whose hint names `check log` for the first. A check that did not pass
 
 SIGINT, SIGTERM and SIGHUP stop the run: the running check's process group is killed, that check
 is `cancelled`, the checks after it are `not_run`, and the answer is `E_CHECK_FAILED` with
-`details.run.cancelled: true`. A second signal changes nothing. A process that left its check's
-group, and a check left running when `swarmops` itself is killed with SIGKILL, are not stopped.
+`details.run.cancelled: true`. A signal once the last check has exited stops nothing but what
+that check left in its group: the run ends as its checks did. A second signal changes nothing.
+A process that left its check's group, and a check left running when `swarmops` itself is killed
+with SIGKILL, are not stopped.
 
 ### The environment
 
@@ -252,7 +254,7 @@ timeout, and no signal stops it. A check that did not pass makes the call's resu
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `cancelled` | `boolean` | yes | Whether a signal stopped the run: the check running then is `cancelled`, those after it `not_run`. |
+| `cancelled` | `boolean` | yes | Whether a signal stopped the run before its checks ended: the check running then is `cancelled`, those after it `not_run`. A signal once the last check has exited stops nothing: the run ends as its checks did. |
 | `changeset` | `string or null` | no | The changeset the workspace's files stood for. Omitted in the directory form. |
 | `checks` | `array of CheckRunOut` | yes | One per selected check, in the order they ran (by name). |
 | `dir` | `string` | yes | The run's directory on the host it ran on, absolute: `run.json`, the logs and each check's own directory. |

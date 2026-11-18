@@ -404,6 +404,24 @@ fn a_signal_stops_the_run() {
     }
 }
 
+/// A signal that comes once the last check has exited, while a process it left still holds its
+/// output, stops nothing: the check passed and the run passes, not `cancelled`. The signal cuts
+/// the second's grace short: the group is killed at once, not a second after the exit.
+#[test]
+fn a_signal_after_the_last_check_exited_stops_nothing() {
+    // The check exits at once; a subshell it leaves, holding stdout, signals swarmops later.
+    let tree = Tree::new(
+        "[check.last]\nargv = [\"sh\", \"-c\", \"(sleep 0.5; kill -INT $PPID; sleep 600) & \
+         exit 0\"]\n",
+    );
+    let run = tree.run(&[], &[]).ok();
+    assert_eq!(check(&run, "last")["outcome"], "passed", "{run}");
+    assert_eq!(run["cancelled"], false, "{run}");
+    assert_eq!(run["failed"], json!([]), "{run}");
+    let ms = run["duration_ms"].as_u64().unwrap();
+    assert!(ms < 1_000, "the grace was waited out: {ms} ms");
+}
+
 /// Stages (M30-6): a check of two stages runs under each; a check of one runs under that one
 /// only; names select; a name not defined, a name of another stage and a stage with no check
 /// are refused, and nothing runs; an unknown stage in the file is refused at its line.

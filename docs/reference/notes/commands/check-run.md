@@ -58,8 +58,10 @@ below, and whose hint names `check log` for the first. A check that did not pass
 
 SIGINT, SIGTERM and SIGHUP stop the run: the running check's process group is killed, that check
 is `cancelled`, the checks after it are `not_run`, and the answer is `E_CHECK_FAILED` with
-`details.run.cancelled: true`. A second signal changes nothing. A process that left its check's
-group, and a check left running when `swarmops` itself is killed with SIGKILL, are not stopped.
+`details.run.cancelled: true`. A signal once the last check has exited stops nothing but what
+that check left in its group: the run ends as its checks did. A second signal changes nothing.
+A process that left its check's group, and a check left running when `swarmops` itself is killed
+with SIGKILL, are not stopped.
 
 ### The environment
 

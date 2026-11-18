@@ -233,12 +233,13 @@ pub fn run_with(
     let end =
         wait(&mut child, deadline, spec.stop).map_err(|e| host_failed("waiting for", shown, &e))?;
 
-    // 5. The output to its end within the grace; then the group killed, whatever is left in it,
-    //    the readers given the drain if they had not finished, and only then the command reaped.
-    let quiet = drained(&finished, GRACE);
+    // 5. The output to its end within the grace (cut short by the stop flag); then the group
+    //    killed, whatever is left in it, the readers given the drain if they had not finished,
+    //    and only then the command reaped.
+    let quiet = drained(&finished, GRACE, spec.stop);
     kill(&mut child);
     if !quiet {
-        drained(&finished, DRAIN);
+        drained(&finished, DRAIN, None);
     }
     let reaped = child.wait();
     let status = reaped.map_err(|e| host_failed("waiting for", shown, &e))?;
@@ -309,16 +310,24 @@ fn wait(child: &mut Child, deadline: Instant, stop: Option<&AtomicBool>) -> io::
     }
 }
 
-/// Whether both readers finished within `limit`.
-fn drained(finished: &Receiver<()>, limit: Duration) -> bool {
+/// Whether both readers finished within `limit`, and before `stop` was set: a set flag ends the
+/// wait at the next look, at most [`POLL_MAX`] later.
+fn drained(finished: &Receiver<()>, limit: Duration, stop: Option<&AtomicBool>) -> bool {
     let deadline = Instant::now() + limit;
-    for _ in 0..2 {
+    let mut ended = 0;
+    while ended < 2 {
+        if stop.is_some_and(|stop| stop.load(Ordering::SeqCst)) {
+            return false;
+        }
         let left = deadline.saturating_duration_since(Instant::now());
-        match finished.recv_timeout(left) {
-            Ok(()) => {}
+        if left.is_zero() {
+            return false;
+        }
+        match finished.recv_timeout(left.min(POLL_MAX)) {
+            Ok(()) => ended += 1,
             // Both senders gone: every reader has finished.
             Err(mpsc::RecvTimeoutError::Disconnected) => return true,
-            Err(mpsc::RecvTimeoutError::Timeout) => return false,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
     true
