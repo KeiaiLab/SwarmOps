@@ -19,7 +19,9 @@ Until a review is part of SwarmOps (M7), a person reviews what agents landed bef
 trunk that deploys. Pushes therefore go to a *review branch*, `review` in the examples, where CI
 and the reviewer see them, and the trunk moves when the pull request from it is merged
 ([step 5](#5-review-then-move-the-trunk)). Nothing in SwarmOps stops a push to the trunk
-(`swarmops sync origin` makes one); the loop below never makes one.
+(`swarmops sync origin` makes one); the loop below never makes one. CI stays on the remote too:
+checks that a store records, and a gate on them, are planned
+([roadmap](../roadmap.md#checks-and-delivery)).
 
 Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages).

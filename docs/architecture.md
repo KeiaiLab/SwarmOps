@@ -36,7 +36,8 @@ Since M1, SwarmOps is usable by one agent: its store takes commits from many pro
 safely. Since M4, `land` merges an agent's change three-way onto a ref and publishes it, not yet
 measured under a swarm's load. Since M13, a store clones, fetches, pushes and syncs a git remote
 such as GitHub itself. Since M5, an agent builds and tests its change in a workspace on disk and
-lands the tree it tested. Review (M7) comes later, in the order of umbrella §13.
+lands the tree it tested. Review (M7) comes later, in the order of umbrella §13. Checks and
+delivery (M30 to M40) are planned and not built ([roadmap](roadmap.md#checks-and-delivery)).
 [known-limitations.md](known-limitations.md) lists what M1, M1.5, M1.6, M2, M3, M4, M8, M13 and M5
 leave open.
 
