@@ -33,6 +33,8 @@ swarmops-core = { path = "../swarmops-core", version = "0.12.0" }
 swarmops-git = { path = "../swarmops-git", version = "0.12.0" }
 swarmops-repo = { path = "../swarmops-repo", version = "0.12.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.12.0" }
+# The landing queue's `QueueDriver`, which `LocalOps` implements for the runner (M22).
+swarmops-ws = { path = "../swarmops-ws", version = "0.12.0" }
 base64.workspace = true
 # Native sync's land keys (`native::key`), hashed as `serve`'s are.
 blake3.workspace = true

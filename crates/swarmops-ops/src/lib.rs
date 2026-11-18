@@ -28,6 +28,9 @@
 //!   order of versions, the installer's receipt, whether an install updates itself, and what an
 //!   automatic update remembers and says. The CLI reads the files and runs the children.
 //!
+//! - The landing queue (M22): `queue_enqueue`, `queue_status` and `queue_withdraw`, and the
+//!   runner's [`QueueDriver`](swarmops_ws::QueueDriver), which [`LocalOps`] implements.
+//!
 //! - Maintenance (M6): `gc`, `repair` and `upgrade`, [`StoreOps`](swarmops_api::StoreOps) methods
 //!   that record nothing, so they take no identity.
 //!
@@ -49,6 +52,7 @@ mod local;
 pub mod native;
 mod phase;
 mod push;
+mod queue;
 mod rebase;
 mod records;
 mod remote;
