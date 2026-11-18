@@ -4047,8 +4047,7 @@ mod queue_loss {
     /// store verifies clean and holds a prefix of the enqueues with every acknowledged one in
     /// it; the runner then lands each entry it holds exactly once, none missing and none twice,
     /// and the store verifies clean again.
-    #[test]
-    fn a_queue_of_32_survives_power_loss() {
+    pub(super) fn sampled() {
         let (_dir, run) = record_run();
         let marks = (run.acked.iter())
             .chain([&run.published])
@@ -4060,11 +4059,17 @@ mod queue_loss {
         sweep_queue(&run, cuts.into_iter(), "sampled");
     }
 
-    /// [`a_queue_of_32_survives_power_loss`] at every cut from the first enqueue's start.
+    /// [`sampled`] at every cut from the first enqueue's start.
     #[test]
     #[ignore = "slow, ~175 s: 988 images of every cut of 32 enqueues and a publish through the binary"]
     fn a_queue_of_32_survives_power_loss_at_every_cut() {
         let (_dir, run) = record_run();
         sweep_queue(&run, run.from..=run.timeline.steps(), "every cut");
     }
+}
+
+/// K28: a queue of 32 survives power loss ([`queue_loss::sampled`]).
+#[test]
+fn a_queue_of_32_survives_power_loss() {
+    queue_loss::sampled();
 }
