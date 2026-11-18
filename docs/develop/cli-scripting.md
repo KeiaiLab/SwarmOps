@@ -300,6 +300,7 @@ E_PATH_NOT_FOUND retryable=false exit=6
 | The id `op undo` takes, of the newest operation | `swarmops op log -n 1 \| jq -r '.result.ops[0].id'` |
 | Branch on the failure | `jq -r '.error.code // empty'` on the envelope, after a non-zero exit |
 | The checks of a `check run` that did not pass | `jq -r '.error.details.run.failed[]'` after `E_CHECK_FAILED`; each check's `outcome`, `log` and tails are in `.error.details.run.checks` |
+| The findings of a failed `check run` | `jq -r '.error.details.run.checks[] \| .name as $c \| .findings[]? \| "\($c) \(.level) \(.path // "-"):\(.line // "-") \(.title)"'` after `E_CHECK_FAILED` |
 
 A read cut short says so: `cat` gives `truncated` and `next_offset` (read on with `--offset`), and
 `log`, `ls`, `history`, `diff` give a `cursor` while there is more. This loop pages through the
