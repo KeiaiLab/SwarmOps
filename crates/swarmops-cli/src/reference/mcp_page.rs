@@ -95,6 +95,15 @@ const TAKE_BACK_TOOLS: [&str; 6] = [
 ];
 const TAKE_BACK_SINCE: &str = "0.11.0";
 
+/// The landing queue's tools (M22), and the release they first ship in.
+const QUEUE_TOOLS: [&str; 4] = [
+    "queue_enqueue",
+    "queue_status",
+    "queue_withdraw",
+    "queue_wait",
+];
+const QUEUE_SINCE: &str = "0.13.0";
+
 /// The tools with no recorded call yet: the git remotes' (M13), whose operations answer
 /// `E_INTERNAL` until their tasks land, the M13 plan's task C10 recording their calls; and the
 /// maintenance's (M6), which answer `E_INVALID_ARG` until the M6 plan's tasks build them.
@@ -124,6 +133,10 @@ const NOT_A_TOOL: &[(&str, &str)] = &[
     (
         "schema",
         "`tools/list` gives each tool's input schema; the whole contract is for a client's code",
+    ),
+    (
+        "queue run",
+        "Every queue tool starts it, detached, when a queue has work and no runner",
     ),
     (
         "blob get",
@@ -211,6 +224,9 @@ fn since(name: &str) -> &'static str {
     if TAKE_BACK_TOOLS.contains(&name) {
         return TAKE_BACK_SINCE;
     }
+    if QUEUE_TOOLS.contains(&name) {
+        return QUEUE_SINCE;
+    }
     SINCE
 }
 
@@ -220,6 +236,10 @@ const SNAPSHOTS: &str = "tests/snapshots";
 /// The MCP transcript with one `tools/call` per tool, and the one that opens a session.
 const TOOL_CALLS: &str = "all__mcp__mcp_tool_calls_golden.snap";
 const SESSION: &str = "all__mcp__mcp_session_golden.snap";
+
+/// The MCP transcript of the landing queue's tools, on a store whose `main` names a check: its
+/// calls join the tool calls'.
+const QUEUE_CALLS: &str = "all__mcp__mcp_queue_tools_golden.snap";
 
 /// The JSON-RPC method that calls a tool, and the one that opens a session.
 const TOOLS_CALL: &str = "tools/call";
@@ -358,9 +378,11 @@ struct Golden {
 }
 
 impl Golden {
-    /// Both transcripts, read once.
+    /// The transcripts, read once: the queue's calls after the other tools'.
     fn read() -> Self {
-        let (args, calls) = transcript(TOOL_CALLS);
+        let (args, mut calls) = transcript(TOOL_CALLS);
+        let (_, queue) = transcript(QUEUE_CALLS);
+        calls.extend(queue);
         let (_, session) = transcript(SESSION);
         Self {
             args,
@@ -1358,6 +1380,19 @@ fn identity_follows_operate() {
     let source = fs::read_to_string(&path).unwrap();
     for spec in &TOOLS {
         let (mutates, reads) = match spec.tool {
+            // A queue tool passes the server's identity to its command's function exactly when
+            // it needs one.
+            Tool::Queue(tool) => {
+                let function = format!("{tool:?}").to_lowercase();
+                let passes = format!("commands::queue::{function}(ops, root, who,");
+                assert_eq!(
+                    source.contains(&passes),
+                    needs_identity(spec.effect),
+                    "{}: operate_queue's arm against its effect",
+                    spec.name
+                );
+                continue;
+            }
             Tool::Local(tool) => (
                 format!("LocalTool::{tool:?} => how.mutate_local("),
                 format!("LocalTool::{tool:?} => how.read_local("),

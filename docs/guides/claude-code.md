@@ -122,7 +122,7 @@ SwarmOps records an identity and does not verify it: every envelope's `meta.auth
 treats every agent that runs against a store as a trusted local user acting for the same owner, and
 the store directory's permissions are the access boundary.
 
-## The 46 MCP tools
+## The 50 MCP tools
 
 A changeset is what a commit records, and a ref, such as `main`, is a name that points at one.
 `swarmops mcp` lists one tool for each store operation but `derive`, which `swarmops derive` runs

@@ -61,7 +61,7 @@ matters. Give the store's path absolute, as above.
 
 ## The tools agents get
 
-The server lists 46 tools, one per operation, each taking the operation's request as its
+The server lists 50 tools, one per operation, each taking the operation's request as its
 arguments and returning the envelope the CLI prints for it:
 
 | Reads | Writes | Workspaces |

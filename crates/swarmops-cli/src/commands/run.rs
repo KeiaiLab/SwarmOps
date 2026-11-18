@@ -48,7 +48,7 @@ use swarmops_ops::{LocalOps, Recording, Resolved};
 use swarmops_ws::workspace::Locate;
 
 use super::prepare::{self, After};
-use super::{auth, serve, update, ws};
+use super::{auth, queue, serve, update, ws};
 use crate::cli::{
     self, BlobCommand, Command, DiffArgs, DiffFormatArg, GitCommand, Global, OpCommand, RefCommand,
     RemoteCommand, SyncCommand,
@@ -328,7 +328,7 @@ fn dispatch(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         Command::Serve(args) => serve::run(ctx, op, args),
         derive @ Command::Derive { .. } => run_derive(ctx, op, &derive),
         own @ (Command::Auth(_) | Command::Update { .. }) => run_own(ctx, op, own),
-        // The rest: the git remotes' commands (M13).
+        // The rest: the git remotes' commands (M13), and the landing queue's (M22).
         remotes => run_remotes(ctx, op, remotes),
     }
 }
@@ -1204,7 +1204,8 @@ fn run_git(ctx: &Ctx<'_>, op: &'static str, command: GitCommand) -> Printed {
     }
 }
 
-/// Runs one of the git remotes' commands (M13), which names operation `op`.
+/// Runs one of the git remotes' commands (M13), or a landing queue's (M22), which names
+/// operation `op`.
 fn run_remotes(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
     match command {
         clone @ Command::Clone { .. } => run_clone(ctx, op, clone),
@@ -1212,6 +1213,7 @@ fn run_remotes(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         Command::Fetch { remote } => fetch(ctx, op, remote),
         Command::Push { remote, target } => push(ctx, op, remote, target.as_deref()),
         sync @ Command::Sync { .. } => run_sync(ctx, op, sync),
+        Command::Queue(command) => queue::run(ctx, op, command),
         other => unreachable!("run passes the remotes' commands alone, not {other:?}"),
     }
 }

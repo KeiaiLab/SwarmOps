@@ -19,6 +19,7 @@ use swarmops_api::{
 use swarmops_api::{DEFAULT_BLOB_GET_MAX_BYTES, DEFAULT_CHECK_TIMEOUT_S, DEFAULT_WS_STATUS_LIMIT};
 use swarmops_api::{DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_CONFLICT_BYTES};
 use swarmops_api::{RefTxnMoveIn, Rev};
+use swarmops_ws::queue::QUEUE_INFLIGHT_DEFAULT;
 
 use crate::{help, output};
 
@@ -561,6 +562,14 @@ pub enum Command {
         #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_CONFLICT_BYTES)]
         max_conflict_bytes: u64,
     },
+    /// Queue changes to land on a ref once a check of them passes.
+    ///
+    /// A queue's runner, one per ref, builds the open entries into a chain on the ref's head,
+    /// checks prefixes of it with the repository's check (.swarmops/workspaces.json's
+    /// check.argv) and moves the ref, in queue order, only to a checked tree. An entry whose
+    /// check fails is removed, with its reason; the others land. enqueue starts the runner.
+    #[command(subcommand)]
+    Queue(QueueCommand),
     /// Merge a change three-way onto a ref's head and record the result there as one changeset,
     /// moving no ref.
     ///
@@ -855,7 +864,8 @@ pub enum Command {
     /// path_history, diff, merge_base, op_log, ref_list, ref_set, ref_delete, ref_log, ref_txn,
     /// undo, commit, land, revert, land_check, land_group, rebase, blob_put, blob_has, verify,
     /// the maintenance's gc, repair and upgrade, the git remotes' remote_list, fetch, push, sync
-    /// and sync_status, and the workspaces' ws_create, ws_status, ws_diff, ws_commit, ws_rebase,
+    /// and sync_status, the landing queue's queue_enqueue, queue_status, queue_withdraw and
+    /// queue_wait, and the workspaces' ws_create, ws_status, ws_diff, ws_commit, ws_rebase,
     /// ws_resolve, ws_land, ws_materialize, ws_discard, ws_snapshot, ws_list and ws_info), each
     /// taking the operation's request as its arguments and returning the envelope the other
     /// commands print. The store and the identity are the server's, --repo and --as or their
@@ -1465,6 +1475,78 @@ pub enum RefCommand {
     },
 }
 
+/// `queue`'s operations (the M22 core design §6).
+#[derive(Subcommand, Debug)]
+pub enum QueueCommand {
+    /// Put a change in REF's landing queue, and start its runner.
+    ///
+    /// The change is HEAD with its first-parent chain since --base. The entry is durable when
+    /// this answers; a runner then checks and lands it, with no other command. A store before
+    /// format 3 is E_FORMAT_REQUIRED, a change REF holds already E_NOTHING_TO_LAND, and a REF
+    /// whose head names no check E_INVALID_ARG (details.missing: check).
+    Enqueue {
+        /// The ref to land on, which must exist.
+        #[arg(value_name = "REF")]
+        target: String,
+        /// The change's head.
+        #[arg(long, value_name = "REV")]
+        head: String,
+        /// Where the change starts: a first-parent ancestor of --head (default: the merge base
+        /// of --head and REF's head).
+        #[arg(long, value_name = "REV")]
+        base: Option<String>,
+        /// Make a retry safe, at most 128 bytes: the same key with the same change answers the
+        /// entry it made (replayed); with another change, E_INVALID_ARG (key_reused).
+        #[arg(long, value_name = "KEY")]
+        key: Option<String>,
+    },
+    /// List the queue's entries: REF's, or every ref's, open ones in queue order first.
+    Status {
+        /// Only this ref's queue.
+        #[arg(value_name = "REF")]
+        target: Option<String>,
+        /// Only this entry, by its id.
+        #[arg(long, value_name = "ID")]
+        entry: Option<String>,
+    },
+    /// Take entry ID out of its queue (reason withdrawn). One that landed is E_INVALID_ARG
+    /// (already_landed), and nothing is written.
+    Withdraw {
+        /// The entry's id.
+        #[arg(value_name = "ID")]
+        entry: String,
+    },
+    /// Wait for entry ID to land, starting its runner when none runs.
+    ///
+    /// A landed entry answers; a removed one is its removal's error (details.reason): a failed
+    /// or timed-out check is E_CHECK_FAILED, a conflict E_CONFLICT, a deleted ref
+    /// E_REF_NOT_FOUND, a withdrawal E_NOTHING_TO_LAND. An entry still open at --timeout is
+    /// E_QUEUE_WAIT_TIMEOUT (exit 4): it stays queued.
+    Wait {
+        /// The entry's id.
+        #[arg(value_name = "ID")]
+        entry: String,
+        /// The most seconds to wait (default: until it lands or is removed).
+        #[arg(long, value_name = "S")]
+        timeout: Option<u64>,
+    },
+    /// Run REF's queue until it holds no open entry; exit 0 at once when another runner does.
+    ///
+    /// enqueue, wait and the other queue commands start this when a queue has work and no
+    /// runner: it needs no other driver. It answers the queue as it left it.
+    Run {
+        /// The ref whose queue it runs.
+        #[arg(value_name = "REF")]
+        target: String,
+        /// How many candidates it checks at once: 1 to 32.
+        #[arg(long, value_name = "N", default_value_t = QUEUE_INFLIGHT_DEFAULT)]
+        inflight: u32,
+        /// How long one check may run, in seconds.
+        #[arg(long, value_name = "S", default_value_t = DEFAULT_CHECK_TIMEOUT_S)]
+        check_timeout: u64,
+    },
+}
+
 /// What `ref txn --move` takes for an EXPECT of a ref to create.
 const TXN_CREATE: &str = "new";
 
@@ -1889,6 +1971,11 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["land"] => "land",
         ["land-check"] => "land_check",
         ["land-group"] => "land_group",
+        ["queue", "enqueue"] => "queue_enqueue",
+        ["queue", "status"] => "queue_status",
+        ["queue", "withdraw"] => "queue_withdraw",
+        ["queue", "wait"] => "queue_wait",
+        ["queue", "run"] => "queue_run",
         ["rebase"] => "rebase",
         ["revert"] => "revert",
         ["resolve"] => "resolve_rev",
@@ -2006,6 +2093,7 @@ pub(crate) fn command() -> clap::Command {
         .mut_subcommand("op", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("remote", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("auth", |cmd| cmd.arg_required_else_help(false))
+        .mut_subcommand("queue", |cmd| cmd.arg_required_else_help(false))
 }
 
 /// Of `--json` and `--human`, keeps the one given last: clap's `overrides_with` settles them
@@ -2087,10 +2175,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 65);
+        assert_eq!(ops.len(), 70);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 65, "two subcommands name one op");
+        assert_eq!(ops.len(), 70, "two subcommands name one op");
 
         // Automatic update follows every operation but these, and not `serve --prepare`,
         // which a flag names and no subcommand.

@@ -93,6 +93,7 @@ pub(crate) const GROUPS: [Group; 7] = [
                 "land-group",
                 "Land several changes in order as one operation",
             ),
+            entry("queue", "Queue changes to land once their check passes"),
             entry("rebase", "Merge a change onto a ref's head, moving no ref"),
             entry(
                 "revert",
@@ -267,7 +268,7 @@ pub(crate) struct Family {
 }
 
 /// Every command family, with a summary of each of its subcommands.
-pub(crate) const FAMILIES: [Family; 7] = [
+pub(crate) const FAMILIES: [Family; 8] = [
     Family {
         name: "ws",
         commands: &[
@@ -393,6 +394,19 @@ pub(crate) const FAMILIES: [Family; 7] = [
         ],
         needs: Needs::Nothing,
         guide: "https://swarmops.cc/docs/guides/github-remote",
+    },
+    Family {
+        name: "queue",
+        commands: &[
+            entry("enqueue", "Queue a change to land once its check passes"),
+            entry("status", "List the queue's entries, open ones first"),
+            entry("withdraw", "Take an entry out of its queue"),
+            entry("wait", "Wait for an entry to land or be removed"),
+            entry("run", "Run a ref's queue until it holds no open entry"),
+        ],
+        examples: &[run(&["--human", "queue", "status"])],
+        needs: Needs::Store,
+        guide: "https://swarmops.cc/docs/guides/commit-and-land",
     },
 ];
 

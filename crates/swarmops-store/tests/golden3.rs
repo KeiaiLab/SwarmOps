@@ -209,16 +209,17 @@ fn a_flipped_byte_in_any_golden_is_refused() {
         CONFIRMED_COUNT + CELLS.len(),
         "the design §6 table, with 37 fact cells, and the envelope"
     );
-    // The cells of a supported feature are confirmed: tag_object's, kind 12's two.
+    // The cells of a supported feature are confirmed: tag_object's, kind 12's two, and
+    // queue's, kind 7's five.
     let provisional = names.iter().filter(|name| is_provisional(name)).count();
     let released = CELLS
         .iter()
-        .filter(|(kind, _)| *kind == FactKind::Tag)
+        .filter(|(kind, _)| matches!(kind, FactKind::Tag | FactKind::Queue))
         .count();
     assert_eq!(
         provisional,
         CELLS.len() - released,
-        "35 of 37 fact cells provisional"
+        "30 of 37 fact cells provisional"
     );
     for name in &names {
         let lines = read_golden(name);
@@ -298,15 +299,15 @@ fn nonce_frame_matches_its_golden() {
     assert_eq!(Frame::new_in(StoreFormat::V3, 3, 0, records, None).crc, 0);
 }
 
-/// The Queue bodies as the M22 core design §3 edits them in place, still provisional: Enqueue
-/// carries its key, type 2 is Verdict with 4 states, Removed has 6 reasons. Only the bodies
-/// change: the envelope around them and the entity id stay as pinned.
+/// The Queue bodies as the M22 core design §3 edits them in place, released with feature
+/// `queue`: Enqueue carries its key, type 2 is Verdict with 4 states, Removed has 6 reasons. Only
+/// the bodies changed: the envelope around them and the entity id stay as pinned.
 #[test]
 fn queue_bodies_match_their_goldens() {
     // 1. Every type, filled then empty, encodes as its golden and decodes back.
     for ty in 0..=4 {
         let name = fact_file(FactKind::Queue, ty);
-        assert!(is_provisional(&name), "{name} is still provisional");
+        assert!(!is_provisional(&name), "{name} is released");
         let lines = read_golden(&name);
         let facts = [
             fact(FactKind::Queue, ty, Fill::Full),

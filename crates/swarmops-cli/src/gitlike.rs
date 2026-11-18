@@ -1875,6 +1875,7 @@ mod tests {
     /// its subcommand, or a leaf that needs one flag of a group, or a value other than `x`.
     const SKIPPED: &[&str] = &[
         "",
+        "queue",
         "blob",
         "ws",
         "ws resolve",

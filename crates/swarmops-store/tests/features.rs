@@ -174,25 +174,18 @@ fn a_lead_checks_features_too() {
     assert_eq!(files(&layout), before, "nothing written, no request left");
 }
 
-/// The release build supports `tag_object` alone, so it opens no store that lists another
-/// feature: the seams that widen the set and fix the nonces exist only in a build with the test
+/// The release build supports `queue` and `tag_object` alone, so it opens no store that lists
+/// another feature: the seams that widen the set and fix the nonces exist only in a build with the test
 /// hooks (a release build that named them would not compile; the CLI's release proof builds this
 /// crate without them).
 #[test]
 fn release_build_has_no_feature_or_nonce_seam() {
-    assert_eq!(SUPPORTED_FEATURES, ["tag_object"]);
+    assert_eq!(SUPPORTED_FEATURES, ["queue", "tag_object"]);
     assert_eq!(MAX_FEATURES, 32);
 
-    // With no seam held, every fact kind's feature but tag_object is unknown here.
+    // With no seam held, every fact kind's feature but queue and tag_object is unknown here.
     let (_dir, layout, store) = v3_store();
-    for name in [
-        "review",
-        "annotation",
-        "check",
-        "queue",
-        "withdrawal",
-        "lineage",
-    ] {
+    for name in ["review", "annotation", "check", "withdrawal", "lineage"] {
         let mut names = [name, "provenance"];
         names.sort_unstable();
         list(&layout, &names);
@@ -274,6 +267,60 @@ fn a_feature_is_durable_before_its_first_record() {
     );
     append_lineage(&layout, fs).unwrap();
     assert!(!calls().iter().any(|call| call.ends_with(" features")));
+}
+
+/// A queue Enqueue fact (the M22 core design §3): `main`'s entry, keyless.
+#[cfg(feature = "test-hooks")]
+fn enqueue() -> Record {
+    // Zero32, str target, id head, id base, str key.
+    let mut body = vec![0; 4];
+    body.push(4);
+    body.extend_from_slice(b"main");
+    body.extend_from_slice(&[1; 32]);
+    body.extend_from_slice(&[2; 32]);
+    body.push(0);
+    let fact = Fact::new(
+        FactKind::Queue,
+        0,
+        [3; 32],
+        [4; 32],
+        1_700_000_000,
+        ACTOR.to_owned(),
+        body,
+    );
+    Record::Fact(fact.unwrap())
+}
+
+/// The first Queue fact enables `queue` with no seam held (K30): the list is replaced under the
+/// lock before the frame's append, and names `queue`.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn queue_enables_its_feature() {
+    // 1. A frame of one Enqueue fact, appended under the lock.
+    let (_dir, layout, _store) = v3_store();
+    let (fs, calls) = RecordingFs::new();
+    let lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
+    let journal = Journal::open(&layout, Arc::new(fs)).unwrap();
+    journal.repair_tail().unwrap();
+    journal.append_frame(&[enqueue()]).unwrap();
+    drop(lock);
+
+    // 2. Listed first, then the frame.
+    let made = calls();
+    let listed = made
+        .iter()
+        .position(|call| call == "atomic_replace features");
+    let framed = made
+        .iter()
+        .position(|call| call == "append_durable journal2.log");
+    assert!(
+        matches!((listed, framed), (Some(l), Some(f)) if l < f),
+        "{made:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(layout.features_file()).unwrap(),
+        format!("{HEADER}queue\n")
+    );
 }
 
 /// Decoding takes the build's kinds, never the store's list (judgement H2): readers racing a

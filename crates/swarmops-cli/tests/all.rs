@@ -35,6 +35,7 @@ mod merge_table;
 mod multiprocess;
 mod pilot_ws;
 mod power_loss;
+mod queue;
 mod remote_acceptance;
 mod remote_fetch;
 mod remote_matrix;

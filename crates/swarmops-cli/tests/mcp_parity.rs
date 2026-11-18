@@ -56,6 +56,7 @@ const PARITY: &[&str] = &[
     "repair",
     "remote_list",
     "sync_status",
+    "queue_status",
     "ws_status",
     "ws_diff",
     "ws_list",
@@ -65,6 +66,10 @@ const PARITY: &[&str] = &[
 /// Why a mutation is not compared: the second request is another one.
 const MUTATES: &str = "it changes the store, so the second of two runs is another request: new \
                        ids, a replay, or nothing left to do";
+
+/// Why `queue_wait` is not compared: it ends when the entry the first run waited for is gone.
+const WAITS: &str = "it waits for an entry to land or be removed, and the first run waited \
+                     until it did";
 
 /// The tools [`every_tool_answers_as_the_cli_does`] does not compare, each with its reason.
 const PARITY_EXEMPT: &[(&str, &str)] = &[
@@ -82,6 +87,9 @@ const PARITY_EXEMPT: &[(&str, &str)] = &[
     ("fetch", MUTATES),
     ("push", MUTATES),
     ("sync", MUTATES),
+    ("queue_enqueue", MUTATES),
+    ("queue_withdraw", MUTATES),
+    ("queue_wait", WAITS),
     ("ws_create", MUTATES),
     ("ws_commit", MUTATES),
     ("ws_rebase", MUTATES),
@@ -215,6 +223,7 @@ fn case(tool: &str, fixture: &Fixture) -> (Value, Vec<String>) {
         "repair" => (json!({"dry_run": true}), &["repair", "--dry-run"]),
         "remote_list" => (json!({}), &["remote", "list"]),
         "sync_status" => (json!({"remote": "origin"}), &["sync", "status", "origin"]),
+        "queue_status" => (json!({"target": "main"}), &["queue", "status", "main"]),
         "ws_status" => (
             json!({"workspace": WORKSPACE}),
             &["ws", "status", "--ws", WORKSPACE],

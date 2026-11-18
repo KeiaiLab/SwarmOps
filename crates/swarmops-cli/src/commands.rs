@@ -35,6 +35,10 @@
 //! `auth git-credential` reads that file for git, and prints no envelope on stdout, which
 //! carries git's credential protocol: its envelope, when it fails, goes to stderr.
 //!
+//! `queue` (M22) runs on the store's root as the workspace commands do: an enqueue is refused
+//! by the workspace layer when the target names no check, and every queue command that finds
+//! work and no runner starts `queue run`, detached (the `queue` module).
+//!
 //! `update` uses no store either: it reads and writes what is beside the binaries, in the
 //! directory the running program is installed in (the `update` module), and its envelope has no
 //! `meta.repo`. It runs the host's curl for the latest release, and the installer built into the
@@ -43,6 +47,7 @@
 mod auth;
 mod device_flow;
 pub(crate) mod prepare;
+pub(crate) mod queue;
 mod run;
 mod serve;
 pub(crate) mod update;

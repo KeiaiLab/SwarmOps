@@ -35,6 +35,7 @@ use swarmops_testkit::schema_check;
 use tempfile::TempDir;
 
 use crate::support::{self, Store};
+use crate::ws::Lab;
 
 /// The agent the servers act as.
 const AGENT: &str = "agent/worker-17";
@@ -56,11 +57,11 @@ const SUPPORTED: [&str; 3] = [LATEST, PREVIOUS, EARLIEST];
 /// A command line that runs `swarmops mcp`: its arguments, and the variables it sets.
 type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 
-/// The tools, one per `StoreOps` operation and then one per client-side operation of the git
-/// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
+/// The tools, one per `StoreOps` operation, then one per client-side operation of the git
+/// remotes (M13), then the landing queue's (M22), in the order `tools/list` gives them, each with the request type its arguments
 /// are and the response type its envelope's `result` is. A task that adds a tool adds its line
 /// here and in `mcp_parity.rs`' `PARITY` or `PARITY_EXEMPT`, in the same commit.
-pub(crate) const TOOLS: [(&str, &str, &str); 46] = [
+pub(crate) const TOOLS: [(&str, &str, &str); 50] = [
     ("repo_info", "InfoReq", "RepoInfo"),
     ("resolve_rev", "ResolveRevReq", "ResolvedRev"),
     ("read_file", "ReadFileReq", "FileContent"),
@@ -95,6 +96,10 @@ pub(crate) const TOOLS: [(&str, &str, &str); 46] = [
     ("push", "PushReq", "PushResp"),
     ("sync", "SyncReq", "SyncResp"),
     ("sync_status", "SyncStatusReq", "SyncStatus"),
+    ("queue_enqueue", "QueueEnqueueReq", "QueueEnqueueResp"),
+    ("queue_status", "QueueStatusReq", "QueueStatusResp"),
+    ("queue_withdraw", "QueueWithdrawReq", "QueueEntryOut"),
+    ("queue_wait", "QueueWaitReq", "QueueEntryOut"),
     ("ws_create", "WsCreateReq", "WsInfo"),
     ("ws_status", "WsStatusReq", "WsStatus"),
     ("ws_diff", "WsDiffReq", "Diff"),
@@ -111,9 +116,10 @@ pub(crate) const TOOLS: [(&str, &str, &str); 46] = [
 
 /// The tools [`mcp_tool_calls_golden`] does not call: the git remotes' (M13), whose operations
 /// answer `E_INTERNAL` until their tasks land, the M13 plan's task C10 recording their calls;
-/// and the maintenance's (M6), which answer `E_INVALID_ARG` until the M6 plan's tasks build
-/// them.
-const UNCALLED: [&str; 8] = [
+/// the maintenance's (M6), which answer `E_INVALID_ARG` until the M6 plan's tasks build them;
+/// and the landing queue's (M22), which need a store whose `main` names a check:
+/// [`mcp_queue_tools_golden`] records their calls.
+const UNCALLED: [&str; 12] = [
     "remote_list",
     "fetch",
     "push",
@@ -122,6 +128,10 @@ const UNCALLED: [&str; 8] = [
     "gc",
     "repair",
     "upgrade",
+    "queue_enqueue",
+    "queue_status",
+    "queue_withdraw",
+    "queue_wait",
 ];
 
 /// How long a test waits for one reply, or for the server to exit once its stdin is closed.
@@ -372,6 +382,46 @@ fn mcp_tool_calls_golden() {
     insta::assert_json_snapshot!(transcript);
 }
 
+/// The landing queue's four tools (K25): listed with their schemas, each call's envelope
+/// pinned. An entry queued with a key, a second queued and withdrawn while the first is
+/// checked, the first waited for until it lands, then the queue listed.
+#[test]
+fn mcp_queue_tools_golden() {
+    let lab = crate::queue::checked_lab();
+    let mut golden = Golden::start(&lab.store);
+    golden.initialize();
+    call_the_queue_tools(&mut golden, &lab);
+    insta::assert_json_snapshot!(golden.transcript());
+}
+
+/// [`mcp_queue_tools_golden`]'s calls, each succeeding, on `lab`, which `golden` serves.
+fn call_the_queue_tools(golden: &mut Golden, lab: &Lab) {
+    // 1. Two changes on main, the first slow to check.
+    let main = lab.so(&["resolve", "main"]).ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    golden.names.add(&main, "[main]");
+    let first = crate::queue::change(lab, "slow", "1\n");
+    let second = crate::queue::change(lab, "second.txt", "2\n");
+    golden.names.add(&first, "[first]");
+    golden.names.add(&second, "[second]");
+
+    // 2. The first queued with a key; once it is checked, the second queued and withdrawn.
+    let args = json!({"target": "main", "head": first, "key": "k-1"});
+    let queued = golden.ok("queue_enqueue", args);
+    let entry = golden.name_at(&queued, "/result/entry/id", "entry1");
+    crate::queue::wait_for_state(lab, &entry, "checking");
+    let other = golden.ok("queue_enqueue", json!({"target": "main", "head": second}));
+    let other = golden.name_at(&other, "/result/entry/id", "entry2");
+    golden.ok("queue_withdraw", json!({"entry": other}));
+
+    // 3. The first waited for until it lands, then the queue listed.
+    let waited = golden.ok("queue_wait", json!({"entry": entry, "timeout_s": 60}));
+    golden.name_at(&waited, "/result/landed", "landed");
+    golden.ok("queue_status", json!({"target": "main"}));
+}
+
 /// [`mcp_tool_calls_golden`]'s calls, each succeeding, on `store`, which `golden` serves: every
 /// tool but those of [`UNCALLED`].
 fn call_the_store_tools(golden: &mut Golden, store: &Store) {
@@ -515,7 +565,14 @@ fn every_tool_result_goes_through_the_check() {
     );
     server.finish_clean();
 
-    // 3. Each tool had a checked call.
+    // 3. The landing queue's, on a store whose main names a check.
+    let lab = crate::queue::checked_lab();
+    let mut golden = Golden::start(&lab.store);
+    golden.initialize();
+    call_the_queue_tools(&mut golden, &lab);
+    golden.transcript();
+
+    // 4. Each tool had a checked call.
     let names = TOOLS.map(|(name, _, _)| name);
     let missing = unchecked(&names, &CHECKED.lock().unwrap());
     assert!(missing.is_empty(), "no checked call of {missing:?}");
@@ -2962,15 +3019,18 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
     assert_eq!(fields(schema), fields(original), "{name}");
     assert_no_references(name, schema);
     let (read_only, destructive, idempotent, open_world) = match name {
-        "commit" | "rebase" | "blob_put" | "ws_commit" => (false, false, false, false),
+        "commit" | "rebase" | "blob_put" | "ws_commit" | "queue_enqueue" => {
+            (false, false, false, false)
+        }
         // A land, a revert and a group land, and the workspaces' that find their work done when
         // run again (M5).
         "land" | "revert" | "land_group" | "ws_create" | "ws_rebase" | "ws_resolve" | "ws_land"
         | "ws_materialize" | "ws_snapshot" => (false, false, true, false),
         // A workspace's discard (M5) overwrites edits as these overwrite refs, and the
         // maintenance (M6) removes or replaces store files; run again, each finds its work done.
+        // A queue's withdraw removes an entry; run again, it finds it removed.
         "ref_set" | "ref_delete" | "ref_txn" | "undo" | "ws_discard" | "gc" | "repair"
-        | "upgrade" => (false, true, true, false),
+        | "upgrade" | "queue_withdraw" => (false, true, true, false),
         // The git remotes' (M13): a fetch or a push run again moves nothing new; a sync run
         // again after the remote moved lands again; all three reach the remote.
         "fetch" | "push" => (false, false, true, true),
@@ -3180,7 +3240,7 @@ fn sort_result_texts(steps: &mut Value) {
 /// What changes from run to run, and the stable names that replace it in snapshots, as the CLI
 /// tests' transcripts name it.
 #[derive(Default)]
-struct Names {
+pub(crate) struct Names {
     /// Each value a test named, and its name.
     named: Vec<(String, String)>,
     /// Hex runs of 32 or more digits no test named, in the order they were met: `[id<n>]`.
@@ -3188,7 +3248,8 @@ struct Names {
 }
 
 impl Names {
-    fn add(&mut self, value: &str, name: &str) {
+    /// Names `value` `name` wherever it is met.
+    pub(crate) fn add(&mut self, value: &str, name: &str) {
         assert!(!value.is_empty(), "name {name} stands for nothing");
         self.named.push((value.to_owned(), name.to_owned()));
 
@@ -3199,7 +3260,7 @@ impl Names {
 
     /// `json` with each string and key redacted ([`Names::redact_str`]) and each time key's
     /// number replaced by `[<key>]`.
-    fn redact(&mut self, json: Value) -> Value {
+    pub(crate) fn redact(&mut self, json: Value) -> Value {
         match json {
             Value::String(text) => Value::String(self.redact_str(&text)),
             Value::Array(items) => {
