@@ -882,6 +882,20 @@ proptest! {
     }
 }
 
+proptest! {
+    /// The line index, found once, gives every offset the line a count from the file's start
+    /// gives, an offset past the end included.
+    #[test]
+    fn the_line_index_counts_as_line_of(
+        bytes in proptest::collection::vec(prop_oneof![Just(b'\n'), any::<u8>()], 0..64)
+    ) {
+        let lines = file::Lines::of(&bytes);
+        for at in 0..=bytes.len() + 1 {
+            prop_assert_eq!(lines.line(at), crate::error::line_of(&bytes, at), "at {}", at);
+        }
+    }
+}
+
 /// Nesting past the reader's depth is a syntax refusal, never a crash.
 #[test]
 fn deep_nesting_is_refused() {

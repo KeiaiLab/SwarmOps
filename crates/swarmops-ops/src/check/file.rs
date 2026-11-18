@@ -269,7 +269,8 @@ pub fn parse(bytes: &[u8]) -> Result<CheckFile, Refusal> {
         }
     })?;
     let document = document.get_ref();
-    let line = |span: std::ops::Range<usize>| line_of(bytes, span.start);
+    let lines = Lines::of(bytes);
+    let line = |span: std::ops::Range<usize>| lines.line(span.start);
 
     // 2. The version, before any other key: a later version's keys are not this one's to judge.
     let entries = in_file_order(document);
@@ -294,7 +295,7 @@ pub fn parse(bytes: &[u8]) -> Result<CheckFile, Refusal> {
                     let refusal = Refusal::new(CHECK_FILE, Reason::Value, what);
                     return Err(refusal.at(line(key.span())).key(CHECKS_KEY.to_owned()));
                 };
-                checks = checks_of(bytes, table)?;
+                checks = checks_of(&lines, table)?;
             }
             other => return Err(unknown_key(dotted(&[other]), line(key.span()))),
         }
@@ -393,6 +394,32 @@ struct LegacyCommand {
     timeout_s: Option<u64>,
 }
 
+/// Where a file's lines start, found in one pass, so that the line of each key and value is a
+/// search, not a count from the file's start: a file of 1,000 checks would otherwise be read
+/// 1,000 times.
+pub(super) struct Lines {
+    /// The offset of every `\n`, ascending.
+    newlines: Vec<usize>,
+}
+
+impl Lines {
+    /// The lines of `bytes`.
+    pub(super) fn of(bytes: &[u8]) -> Lines {
+        let newlines = (bytes.iter().enumerate())
+            .filter(|(_, b)| **b == b'\n')
+            .map(|(at, _)| at)
+            .collect();
+        Lines { newlines }
+    }
+
+    /// The 1-based line of the byte at `at`: one more than the `\n`s before it, as
+    /// [`line_of`] counts.
+    pub(super) fn line(&self, at: usize) -> u64 {
+        let before = self.newlines.partition_point(|&newline| newline < at);
+        u64::try_from(before).map_or(u64::MAX, |n| n.saturating_add(1))
+    }
+}
+
 /// `bytes` as text, at most `limit` of them.
 fn text_of<'b>(file: &'static str, bytes: &'b [u8], limit: u64) -> Result<&'b str, Refusal> {
     let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -406,8 +433,8 @@ fn text_of<'b>(file: &'static str, bytes: &'b [u8], limit: u64) -> Result<&'b st
 }
 
 /// The checks of the table `check`, sorted by name.
-fn checks_of(bytes: &[u8], table: &DeTable<'_>) -> Result<Vec<Check>, Refusal> {
-    let line = |span: std::ops::Range<usize>| line_of(bytes, span.start);
+fn checks_of(lines: &Lines, table: &DeTable<'_>) -> Result<Vec<Check>, Refusal> {
+    let line = |span: std::ops::Range<usize>| lines.line(span.start);
     let mut checks = Vec::new();
     for (key, value) in in_file_order(table) {
         // 1. Within the count, a name of the grammar, a table.
@@ -436,15 +463,15 @@ fn checks_of(bytes: &[u8], table: &DeTable<'_>) -> Result<Vec<Check>, Refusal> {
         };
 
         // 2. Its keys, in file order.
-        checks.push(check_of(bytes, name, at, fields)?);
+        checks.push(check_of(lines, name, at, fields)?);
     }
     checks.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(checks)
 }
 
 /// The check `name`, whose table starts at line `at` and holds `fields`.
-fn check_of(bytes: &[u8], name: &str, at: u64, fields: &DeTable<'_>) -> Result<Check, Refusal> {
-    let line = |span: std::ops::Range<usize>| line_of(bytes, span.start);
+fn check_of(lines: &Lines, name: &str, at: u64, fields: &DeTable<'_>) -> Result<Check, Refusal> {
+    let line = |span: std::ops::Range<usize>| lines.line(span.start);
     let mut argv = None;
     let mut dir = None;
     let mut timeout_s = None;
