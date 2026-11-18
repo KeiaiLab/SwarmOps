@@ -3,7 +3,7 @@
 //!
 //! ```text
 //!   bytes ─ size ─ UTF-8 ─ TOML (spans kept) ─ version = 1 ─ [check.<name>] each:
-//!                                                               name, argv, dir, timeout_s
+//!                                                      name, argv, dir, timeout_s, stages
 //!   any key but those ─▶ unknown_key at its line (a later key fails closed here)
 //! ```
 //!
@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use swarmops_api::{CheckOut, DEFAULT_CHECK_TIMEOUT_S, ErrorCode, OpError};
+use swarmops_api::{CheckOut, CheckStage, DEFAULT_CHECK_TIMEOUT_S, ErrorCode, OpError};
 use swarmops_core::RepoPath;
 use toml::Spanned;
 use toml::de::{DeTable, DeValue};
@@ -42,11 +42,11 @@ const VERSION_KEY: &str = "version";
 
 /// What the hint of a refused check file says it takes.
 const CHECK_FILE_HINT: &str = "version 1 of .swarmops/checks.toml takes version = 1, then one \
-[check.<name>] table a check, with argv (required), dir and timeout_s";
+[check.<name>] table a check, with argv (required), dir, timeout_s and stages";
 
 /// What the hint of a key version 1 does not take says.
 const UNKNOWN_KEY_HINT: &str = "version 1 of .swarmops/checks.toml takes version and \
-[check.<name>] tables of argv, dir and timeout_s; a newer swarmops may read this key";
+[check.<name>] tables of argv, dir, timeout_s and stages; a newer swarmops may read this key";
 
 /// What the hint of a refused `workspaces.json` says it takes.
 const LEGACY_HINT: &str = "check.argv of .swarmops/workspaces.json is an array of strings, the \
@@ -63,7 +63,8 @@ pub struct CheckFile {
     pub checks: Vec<Check>,
 }
 
-/// One check, its defaults filled in: its definition is `argv`, `dir` and `timeout_s`.
+/// One check, its defaults filled in: its definition is `argv`, `dir` and `timeout_s`; its
+/// `stages` say when its answer is wanted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Check {
@@ -75,6 +76,9 @@ pub struct Check {
     pub dir: String,
     /// The most seconds it may run.
     pub timeout_s: u64,
+    /// When its answer is wanted: one to six stages, none twice, in their own order (that of
+    /// [`CheckStage::ALL`]); `before-land` when the file names none.
+    pub stages: Vec<CheckStage>,
     /// The line its table starts at; none for [`LEGACY_CHECK`].
     pub line: Option<u64>,
 }
@@ -95,8 +99,14 @@ impl Check {
             self.timeout_s,
             self.definition_digest(),
         );
+        out.stages.clone_from(&self.stages);
         out.line = self.line;
         out
+    }
+
+    /// Whether it is of `stage`.
+    pub fn is_of(&self, stage: CheckStage) -> bool {
+        self.stages.contains(&stage)
     }
 }
 
@@ -353,6 +363,7 @@ pub fn parse_legacy(bytes: &[u8]) -> Result<Option<Check>, Refusal> {
         argv,
         dir: ROOT_DIR.to_owned(),
         timeout_s,
+        stages: vec![CheckStage::BeforeLand],
         line: None,
     }))
 }
@@ -492,6 +503,7 @@ fn check_of(lines: &Lines, name: &str, at: u64, fields: &DeTable<'_>) -> Result<
     let mut argv = None;
     let mut dir = None;
     let mut timeout_s = None;
+    let mut stages = None;
     for (key, value) in in_file_order(fields) {
         let field: &str = key.get_ref();
         let path = dotted(&[CHECKS_KEY, name, field]);
@@ -508,6 +520,9 @@ fn check_of(lines: &Lines, name: &str, at: u64, fields: &DeTable<'_>) -> Result<
                 let seconds = timeout_of(value).map_err(|what| refused(what, value.span()))?;
                 timeout_s = Some(seconds);
             }
+            "stages" => {
+                stages = Some(stages_of(value).map_err(|(what, span)| refused(what, span))?);
+            }
             _ => return Err(unknown_key(path, line(key.span()))),
         }
     }
@@ -523,8 +538,47 @@ fn check_of(lines: &Lines, name: &str, at: u64, fields: &DeTable<'_>) -> Result<
         argv,
         dir: dir.unwrap_or_else(|| ROOT_DIR.to_owned()),
         timeout_s: timeout_s.unwrap_or(DEFAULT_CHECK_TIMEOUT_S),
+        stages: stages.unwrap_or_else(|| vec![CheckStage::BeforeLand]),
         line: Some(at),
     })
+}
+
+/// `stages`' stages, in their own order, or what is wrong with them and where: not an array,
+/// empty, an item that is not a string or not a stage, or a stage given twice (at the second).
+fn stages_of(
+    value: &Spanned<DeValue<'_>>,
+) -> Result<Vec<CheckStage>, (String, std::ops::Range<usize>)> {
+    let DeValue::Array(items) = value.get_ref() else {
+        let what = format!("{}, not an array of stages", shown(value.get_ref()));
+        return Err((what, value.span()));
+    };
+    if items.is_empty() {
+        let what = "empty: a check names at least one stage".to_owned();
+        return Err((what, value.span()));
+    }
+    let mut stages = Vec::with_capacity(CheckStage::ALL.len());
+    for item in items {
+        let DeValue::String(text) = item.get_ref() else {
+            let what = format!("holds {}, not a string", shown(item.get_ref()));
+            return Err((what, item.span()));
+        };
+        let Some(stage) = CheckStage::parse(text) else {
+            let known: Vec<&str> = CheckStage::ALL.iter().map(|s| s.as_str()).collect();
+            let what = format!(
+                "holds {}, not a stage: one of {}",
+                quoted(text),
+                known.join(", ")
+            );
+            return Err((what, item.span()));
+        };
+        if stages.contains(&stage) {
+            let what = format!("holds {} twice", quoted(text));
+            return Err((what, item.span()));
+        }
+        stages.push(stage);
+    }
+    stages.sort();
+    Ok(stages)
 }
 
 /// `argv`'s strings, or what is wrong with them and where.

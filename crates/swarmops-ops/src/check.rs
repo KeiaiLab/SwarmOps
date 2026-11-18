@@ -5,7 +5,8 @@
 //!   store:  rev ─ resolve once ─ show: root tree ─ read_file .swarmops/checks.toml
 //!   --dir:  DIR ─ <DIR>/.swarmops/checks.toml (no link followed) ───────┤
 //!                                                                       ▼
-//!          the file ─▶ file::parse: version 1, [check.<name>] ─▶ sorted, each digested
+//!          the file ─▶ file::parse: version 1, [check.<name>] ─▶ sorted, each digested,
+//!                                                              of the stage asked for
 //!          no file  ─▶ .swarmops/workspaces.json ─▶ file::parse_legacy: check.argv as default
 //!          neither  ─▶ no check; `.swarmops` a symbolic link ─▶ not_a_file, in both forms
 //! ```
@@ -27,8 +28,8 @@ use base64::engine::general_purpose::STANDARD;
 use camino::Utf8Path;
 use serde_json::Value;
 use swarmops_api::{
-    CheckListReq, CheckListResp, ContentEncoding, ErrorCode, FileKind, OpError, ReadFileReq,
-    ResolveRevReq, ShowReq, StoreOps,
+    CheckListReq, CheckListResp, CheckStage, ContentEncoding, ErrorCode, FileKind, OpError,
+    ReadFileReq, ResolveRevReq, ShowReq, StoreOps,
 };
 
 pub use self::file::{Check, CheckFile, LEGACY_CHECK, ROOT_DIR, Reason, Refusal};
@@ -69,8 +70,9 @@ pub(crate) const MAX_LEGACY_BYTES: u64 = 64 * 1024;
 /// The directory the check files are in, below a tree's root.
 const SWARMOPS_DIR: &str = ".swarmops";
 
-/// `check list`: the checks the tree of `req.rev` describes, read from the store. The revision
-/// is resolved once, and both files are read at that changeset.
+/// `check list`: the checks the tree of `req.rev` describes, read from the store, those of
+/// `req.stage` only when it names one. The revision is resolved once, and both files are read
+/// at that changeset.
 pub fn list(store: &dyn StoreOps, req: CheckListReq) -> Result<CheckListResp, OpError> {
     // 1. The changeset, once, and its root tree.
     let id = store.resolve_rev(ResolveRevReq::new(req.rev))?.id;
@@ -93,15 +95,16 @@ pub fn list(store: &dyn StoreOps, req: CheckListReq) -> Result<CheckListResp, Op
             None => (None, None, Vec::new()),
         },
     };
-    let mut resp = answer(false, file, version, &checks);
+    let mut resp = answer(false, file, version, &checks, req.stage);
     resp.tree = Some(tree);
     Ok(resp)
 }
 
 /// `check list --dir`: the checks the files below `dir`, a directory of the caller's host,
-/// describe. The answer is `vouched`: only the caller stands behind them. Neither
-/// `.swarmops` nor a file in it is followed if it is a symbolic link.
-pub fn list_dir(dir: &Utf8Path) -> Result<CheckListResp, OpError> {
+/// describe, those of `stage` only when it is given. The answer is `vouched`: only the caller
+/// stands behind them. Neither `.swarmops` nor a file in it is followed if it is a symbolic
+/// link.
+pub fn list_dir(dir: &Utf8Path, stage: Option<CheckStage>) -> Result<CheckListResp, OpError> {
     // 1. A directory.
     if !std::fs::metadata(dir).is_ok_and(|meta| meta.is_dir()) {
         let mut error = error::error(
@@ -141,7 +144,7 @@ pub fn list_dir(dir: &Utf8Path) -> Result<CheckListResp, OpError> {
             None => (None, None, Vec::new()),
         },
     };
-    Ok(answer(true, file, version, &checks))
+    Ok(answer(true, file, version, &checks, stage))
 }
 
 /// What a file and its version gave: the file's name, its version, its checks.
@@ -156,16 +159,20 @@ fn legacy(bytes: &[u8], vouched: bool) -> Result<Listed, OpError> {
     })
 }
 
-/// The answer: `checks` from `file` at `version`, each with its digest.
+/// The answer: `checks` from `file` at `version`, each with its digest; those of `stage` only
+/// when it is given.
 fn answer(
     vouched: bool,
     file: Option<&str>,
     version: Option<u32>,
     checks: &[Check],
+    stage: Option<CheckStage>,
 ) -> CheckListResp {
-    let mut resp = CheckListResp::new(vouched, checks.iter().map(Check::out).collect());
+    let of_stage = (checks.iter()).filter(|check| stage.is_none_or(|stage| check.is_of(stage)));
+    let mut resp = CheckListResp::new(vouched, of_stage.map(Check::out).collect());
     resp.file = file.map(str::to_owned);
     resp.version = version;
+    resp.stage = stage;
     resp
 }
 

@@ -2185,7 +2185,10 @@ mod check {
         assert!(serde_json::from_str::<CheckStage>(r#""nightly""#).is_err());
         let all = schema_for_all();
         let alts = all["CheckStage"]["oneOf"].as_array().unwrap();
-        let one_of: Vec<&str> = alts.iter().filter_map(|alt| alt["const"].as_str()).collect();
+        let one_of: Vec<&str> = alts
+            .iter()
+            .filter_map(|alt| alt["const"].as_str())
+            .collect();
         assert_eq!(one_of, names);
     }
 

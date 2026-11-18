@@ -24,13 +24,16 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 - `check list` and the MCP tool `check_list`: the checks a tree names, from the store at a
   changeset (`main` by default) or, with `check list --dir DIR`, from a directory of this host,
-  which opens no store. Each check comes with its argv, its directory, its timeout and the digest
-  of its definition, sorted by name; the directory form's answer says `vouched: true`, since only
+  which opens no store. Each check comes with its argv, its directory, its timeout, the digest
+  of its definition and its stages, sorted by name; the directory form's answer says `vouched: true`, since only
   the caller stands behind the files. The digest's recipe is provisional and may change in a later
   release. Nothing runs the checks yet: `ws land --check` still runs `check.argv` of
   `.swarmops/workspaces.json`.
 - The check file, `.swarmops/checks.toml`, version 1: `version = 1`, then one `[check.<name>]`
-  table a check, with `argv` (one command, run with no shell), `dir` and `timeout_s`. Any other
+  table a check, with `argv` (one command, run with no shell), `dir`, `timeout_s` and `stages`
+  (when its answer is wanted: one or more of `before-land`, the default, `after-land`,
+  `scheduled`, `release`, `manual` and `deploy`; an unknown stage is refused at its line; the
+  stages are not part of the definition's digest). Any other
   key is refused at its line, so a build refuses a file whose keys it does not know instead of
   reading less of it. In a tree without it, `check.argv` of `.swarmops/workspaces.json` reads as
   the one check `default`.

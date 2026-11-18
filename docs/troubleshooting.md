@@ -1530,7 +1530,7 @@ Exit 1, not retryable. The tree's check file does not read, so `check list` list
 command line was right, the file is not.
 
 ```text
-{"ok":false,"op":"check_list","api":1,"error":{"code":"E_CHECK_FILE","message":".swarmops/checks.toml has an unknown key check.lint.stage (line 11)","retryable":false,"exit":1,"details":{"file":".swarmops/checks.toml","key":"check.lint.stage","line":11,"reason":"unknown_key","vouched":true},"hint":"version 1 of .swarmops/checks.toml takes version and [check.<name>] tables of argv, dir and timeout_s; a newer swarmops may read this key"},"meta":{"elapsed_ms":0,"resolved":{},"auth":"trust"}}
+{"ok":false,"op":"check_list","api":1,"error":{"code":"E_CHECK_FILE","message":".swarmops/checks.toml has an unknown key check.lint.stage (line 11)","retryable":false,"exit":1,"details":{"file":".swarmops/checks.toml","key":"check.lint.stage","line":11,"reason":"unknown_key","vouched":true},"hint":"version 1 of .swarmops/checks.toml takes version and [check.<name>] tables of argv, dir, timeout_s and stages; a newer swarmops may read this key"},"meta":{"elapsed_ms":0,"resolved":{},"auth":"trust"}}
 ```
  `details.file` names the file, `details.reason` what is wrong,
 `details.line` the line (1 is the first) when the fault has one, and `details.key` the key at

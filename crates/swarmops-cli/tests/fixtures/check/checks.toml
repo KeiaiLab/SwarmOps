@@ -12,3 +12,4 @@ timeout_s = 600
 [check.docs]
 argv = ["python3", "-I", "scripts/check-docs.py"]
 timeout_s = 900
+stages = ["before-land", "after-land"]

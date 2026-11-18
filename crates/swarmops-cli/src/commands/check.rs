@@ -16,7 +16,7 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Pri
     match command {
         CheckCommand::List { dir: Some(dir), .. } => {
             let no_store = (None, BTreeMap::new(), None);
-            ctx.finish(op, no_store, swarmops_ops::check::list_dir(&dir))
+            ctx.finish(op, no_store, swarmops_ops::check::list_dir(&dir, None))
         }
         CheckCommand::List { rev, dir: None } => ctx.on_store(
             op,
