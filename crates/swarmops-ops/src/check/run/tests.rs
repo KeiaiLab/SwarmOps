@@ -341,3 +341,37 @@ fn a_directory_keeps_20_runs() {
     let nowhere = run_dir(&dir, CheckStage::BeforeLand, &[], &opts).unwrap_err();
     assert!(nowhere.message.contains(CHECK_RUNS_DIR_ENV), "{nowhere:?}");
 }
+
+/// A lock that cannot be opened to write (another account's run, a read-only copy) is still tried
+/// for the run that holds it, and one that cannot be opened at all is taken as held: either way
+/// the run is not pruned. Running as root, which opens any file, the second half is passed over.
+#[test]
+fn a_lock_that_cannot_be_written_is_still_held() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_tmp, dir, runs) = tree("[check.a]\nargv = [\"/usr/bin/true\"]\n");
+    let first = run(&dir, &runs, &[], &[]).unwrap();
+    let lock_path = Utf8Path::new(&first.dir).join(RUN_LOCK);
+    let held_lock = File::open(&lock_path).unwrap();
+    held_lock.lock().unwrap();
+    let mode = |bits: u32| {
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(bits)).unwrap();
+    };
+
+    // 1. Read-only: held, as it is.
+    mode(0o444);
+    assert!(held(&lock_path));
+    held_lock.unlock().unwrap();
+    assert!(!held(&lock_path));
+
+    // 2. Unreadable: taken as held, and the run outlives the pruning of 20 runs after it.
+    mode(0o000);
+    if File::open(&lock_path).is_err() {
+        assert!(held(&lock_path));
+        for _ in 0..20 {
+            run(&dir, &runs, &[], &[]).unwrap();
+        }
+        assert!(Utf8Path::new(&first.dir).exists());
+    }
+    mode(0o644);
+}

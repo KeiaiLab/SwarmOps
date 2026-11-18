@@ -95,10 +95,10 @@ A run's `dir` holds `run.json` (its `state`, `running` then `ended`, and the `re
 (held while it runs), `logs/<check>.log` and `checks/<check>/`, the paths the environment names.
 Each log holds both streams, a time on every line, and the sections a check opens; `check log`
 reads one, and its page has the format. The newest 20 runs of a directory or a workspace are
-kept, and a run whose lock is held is never removed. Nothing there is synced: the logs and
-records are diagnostics, which nothing decides from. A log that cannot be written is its check's
-outcome, and the run goes on; only a record that cannot be written makes the run `E_IO`, with the
-outcomes so far in `details.run` and a hint naming the run's directory.
+kept, and a run whose lock is held, or cannot be tried, is never removed. Nothing there is
+synced: the logs and records are diagnostics, which nothing decides from. A log that cannot be
+written is its check's outcome, and the run goes on; only a record that cannot be written makes
+the run `E_IO`, with the outcomes so far in `details.run` and a hint naming the run's directory.
 
 `duration_ms` is the run's, from its first check's start to its last's end, and each check's its
 own; neither is a measured figure of any check.

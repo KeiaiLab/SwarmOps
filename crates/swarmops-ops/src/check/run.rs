@@ -670,18 +670,22 @@ fn prune(runs: &Utf8Path, current: &str) {
     }
 }
 
-/// Whether the lock on `path` is held by a running run.
+/// Whether the lock on `path` may be held by a running run: false only when it is not there or
+/// is taken and let go at once. It is opened to read, which a lock needs no more than (the
+/// file may be another account's, or read-only); a lock that cannot be opened or tried is
+/// taken as held, so that a follower keeps following and the run is never pruned.
 pub(crate) fn held(path: &Utf8Path) -> bool {
-    let Ok(file) = OpenOptions::new().write(true).open(path) else {
-        return false;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
     };
     match file.try_lock() {
         Ok(()) => {
             let _ = file.unlock();
             false
         }
-        Err(TryLockError::WouldBlock) => true,
-        Err(TryLockError::Error(_)) => false,
+        Err(TryLockError::WouldBlock | TryLockError::Error(_)) => true,
     }
 }
 

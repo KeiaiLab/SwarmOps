@@ -163,7 +163,8 @@ No recorded example yet.
 
 `check log` reads one check's log of a run of `check run`, on the host the run ran on, once or as
 it grows. It reads only: nothing is written, no store operation is called, and the run's lock is
-only tried, for an instant, to tell a running run from one whose runner is gone.
+only tried, for an instant, on a descriptor opened to read, to tell a running run from one whose
+runner is gone; a lock it cannot open or try (another account's run) is taken as held.
 
 ### Which run
 
