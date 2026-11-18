@@ -432,12 +432,12 @@ fn a_missing_program_is_not_started() {
     );
 }
 
-/// SIGINT, then SIGTERM, to `swarmops check run` while its first check sleeps: that check's
+/// SIGINT, SIGTERM, then SIGHUP, to `swarmops check run` while its first check sleeps: that check's
 /// group is killed and it is `cancelled`, the second is `not_run` with no log, the run is
 /// `E_CHECK_FAILED` with `cancelled`.
 #[test]
 fn a_signal_stops_the_run() {
-    for signal in [Signal::INT, Signal::TERM] {
+    for signal in [Signal::INT, Signal::TERM, Signal::HUP] {
         // 1. Two checks, the first a sleeper writing its group.
         let tree = Tree::new(
             "[check.a]\nargv = [\"sh\", \"-c\", \"echo $$ > group; sleep 600\"]\n\
