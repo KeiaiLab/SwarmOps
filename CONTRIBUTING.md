@@ -143,8 +143,8 @@ A change is done when `just check` passes on it. It runs, in order:
     crafted changelog the marks its rules say, and uploads and withdraws them as it should,
     against a stand-in for `gh` and with no network.
 
-The same gate starts through SwarmOps, using an installed build of 0.13.0 or later, never the
-build under test:
+The same gate starts through SwarmOps, using a build of a `stable` commit that holds
+`check run` (0.13.0 or later once it is released), never the build under test:
 
 ```sh
 so check run --dir . --stage before-land --pass CARGO_HOME --pass RUSTUP_HOME \
