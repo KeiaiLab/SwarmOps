@@ -140,6 +140,9 @@ lock and needs no identity. Nothing in SwarmOps runs these checks yet: `ws land 
   directory holds, so no gate accepts such an answer. `.swarmops` and the file are never followed
   if they are symbolic links. `REV` and `--dir` together are a usage error.
 
+In both forms a `.swarmops` that is a symbolic link is refused, `not_a_file`, and the message
+names it: the store follows no link either, and such a tree is not listed as one without checks.
+
 ### The check file, version 1
 
 `.swarmops/checks.toml` at the tree's root, in TOML:

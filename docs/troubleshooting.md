@@ -1541,7 +1541,7 @@ read from a directory the caller named, not from the store.
 | --- | --- | --- |
 | `too_large` | More than the file's limit (`details.bytes`, `details.limit`). | Shorten the file. |
 | `not_text` | Not UTF-8, from the line named. | Save it as UTF-8. |
-| `not_a_file` | A symbolic link, a directory or another kind of entry at the path. | Make it a file. |
+| `not_a_file` | A symbolic link, a directory or another kind of entry at the path, or `.swarmops` itself a symbolic link. | Make it a file in a directory `.swarmops`. |
 | `syntax` | Not TOML (JSON for `workspaces.json`), or a key or table given twice. | Fix the line named. |
 | `version` | No `version`, or one that is not the integer `1`. | Write `version = 1`. |
 | `unknown_key` | A key version 1 does not take. | Remove it, or use a build that reads it. |

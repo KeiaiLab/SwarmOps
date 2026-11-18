@@ -7,7 +7,7 @@
 //!                                                                       ▼
 //!          the file ─▶ file::parse: version 1, [check.<name>] ─▶ sorted, each digested
 //!          no file  ─▶ .swarmops/workspaces.json ─▶ file::parse_legacy: check.argv as default
-//!          neither  ─▶ no check
+//!          neither  ─▶ no check; `.swarmops` a symbolic link ─▶ not_a_file, in both forms
 //! ```
 //!
 //! Both forms answer [`CheckListResp`]: the store's `vouched: false` at its `tree`, a
@@ -77,7 +77,8 @@ pub fn list(store: &dyn StoreOps, req: CheckListReq) -> Result<CheckListResp, Op
     show.max_changes = 1;
     let tree = store.show(show)?.root;
 
-    // 2. The check file, or else the legacy one.
+    // 2. The check file, or else the legacy one; with neither, a `.swarmops` that is a link,
+    //    through which neither path is found, is refused as the directory form refuses it.
     let (file, version, checks) = match stored(store, &id, CHECK_FILE, MAX_CHECK_FILE_BYTES)? {
         Some(bytes) => {
             let read = parse(&bytes).map_err(|refusal| refusal.into_error(false))?;
@@ -85,6 +86,9 @@ pub fn list(store: &dyn StoreOps, req: CheckListReq) -> Result<CheckListResp, Op
         }
         None => match stored(store, &id, LEGACY_FILE, MAX_LEGACY_BYTES)? {
             Some(bytes) => legacy(&bytes, false)?,
+            None if linked_in_store(store, &id)? => {
+                return Err(Refusal::linked_dir(CHECK_FILE).into_error(false));
+            }
             None => (None, None, Vec::new()),
         },
     };
@@ -113,7 +117,7 @@ pub fn list_dir(dir: &Utf8Path) -> Result<CheckListResp, OpError> {
     let swarmops = dir.join(SWARMOPS_DIR);
     let held = match std::fs::symlink_metadata(&swarmops) {
         Ok(meta) if meta.file_type().is_symlink() => {
-            return Err(Refusal::not_a_file(CHECK_FILE).into_error(true));
+            return Err(Refusal::linked_dir(CHECK_FILE).into_error(true));
         }
         Ok(meta) => meta.is_dir(),
         Err(e) if e.kind() == ErrorKind::NotFound => false,
@@ -162,6 +166,23 @@ fn answer(
     resp.file = file.map(str::to_owned);
     resp.version = version;
     resp
+}
+
+/// Whether `.swarmops` at changeset `id` is a symbolic link: a path below it reads as missing
+/// then, since the store follows no link.
+fn linked_in_store(store: &dyn StoreOps, id: &str) -> Result<bool, OpError> {
+    let mut req = ReadFileReq::new(id, SWARMOPS_DIR);
+    req.max_bytes = 1;
+    match store.read_file(req) {
+        Ok(read) => Ok(read.kind == FileKind::Symlink),
+        Err(e)
+            if e.code == ErrorCode::PathNotFound.as_str()
+                || e.code == ErrorCode::IsDir.as_str() =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// The bytes of `path` at changeset `id`, at most `limit` of them; none when the tree holds no

@@ -216,6 +216,16 @@ impl Refusal {
         )
     }
 
+    /// A refusal of `file`: `.swarmops`, the directory it would be in, is a symbolic link,
+    /// which neither form of `check list` follows.
+    pub(crate) fn linked_dir(file: &'static str) -> Refusal {
+        Refusal::new(
+            file,
+            Reason::NotAFile,
+            "cannot be read: .swarmops is a symbolic link, which is not followed",
+        )
+    }
+
     /// `E_CHECK_FILE`: exit 1, not retryable; `details` `file`, `reason`, `vouched`, and
     /// `line`, `key`, `bytes` and `limit` where they apply. `vouched` says whether only the
     /// caller stands behind the file.

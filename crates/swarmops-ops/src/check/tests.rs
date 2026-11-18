@@ -741,6 +741,34 @@ fn the_store_form_refuses_a_link_or_a_bad_file() {
     assert_eq!(error.code, ErrorCode::RevNotFound.as_str());
 }
 
+/// `.swarmops` as a symbolic link is refused in both forms alike, by a message that names it:
+/// neither follows it, and neither lists the tree as one without checks.
+#[test]
+fn both_forms_refuse_swarmops_as_a_link() {
+    let said = ".swarmops/checks.toml cannot be read: .swarmops is a symbolic link, which is not \
+                followed";
+    let (_dir, ops) = store_with(&[
+        ("real/checks.toml", FIXTURE, ModeInput::File),
+        (".swarmops", "real", ModeInput::Symlink),
+    ]);
+    let error = error_of(list(&ops, CheckListReq::default()));
+    assert_eq!(error.code, ErrorCode::CheckFile.as_str());
+    assert_eq!(error.message, said);
+    assert_eq!(
+        Value::Object(error.details),
+        json!({"file": ".swarmops/checks.toml", "reason": "not_a_file", "vouched": false})
+    );
+
+    let (_dir, root) = dir_with(&[("real/checks.toml", FIXTURE.as_bytes())]);
+    std::os::unix::fs::symlink("real", root.join(".swarmops")).unwrap();
+    let error = error_of(list_dir(&root));
+    assert_eq!(error.message, said);
+    assert_eq!(
+        Value::Object(error.details),
+        json!({"file": ".swarmops/checks.toml", "reason": "not_a_file", "vouched": true})
+    );
+}
+
 /// A file over the limit is refused by its size, never read whole.
 #[test]
 fn the_store_form_refuses_a_file_over_the_limit() {
