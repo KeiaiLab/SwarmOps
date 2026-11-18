@@ -31,6 +31,10 @@ use swarmops_api::{ItemOutcome, LandCheckItemOut, LandCheckReq, LandCheckResp, P
 use swarmops_api::{LandGroupItemOut, LandGroupReq, LandGroupResp};
 use swarmops_api::{LandReq, LandResp, LandStatus, MAX_LAND_ATTEMPTS};
 use swarmops_api::{MAX_REF_TXN_MOVES, RefTxnReq, RefTxnResp};
+use swarmops_api::{
+    QueueEnqueueReq, QueueEnqueueResp, QueueEntryOut, QueueStatusReq, QueueStatusResp,
+    QueueWithdrawReq,
+};
 use swarmops_api::{RefLogEntryOut, RefLogPage, RefLogReq};
 use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
 use swarmops_api::{RevertReq, RevertResp};
@@ -2444,6 +2448,26 @@ impl StoreOps for Recording<'_> {
         Ok(MergeBaseResp::new(base, head, theirs, diff))
     }
 
+    fn queue_enqueue(
+        &self,
+        who: &Identity,
+        req: QueueEnqueueReq,
+    ) -> Result<QueueEnqueueResp, OpError> {
+        crate::queue::enqueue(self, who, req)
+    }
+
+    fn queue_status(&self, req: QueueStatusReq) -> Result<QueueStatusResp, OpError> {
+        crate::queue::status(self, req)
+    }
+
+    fn queue_withdraw(
+        &self,
+        who: &Identity,
+        req: QueueWithdrawReq,
+    ) -> Result<QueueEntryOut, OpError> {
+        crate::queue::withdraw(self, who, &req)
+    }
+
     fn ref_list(&self, req: RefListReq) -> Result<RefListResp, OpError> {
         let prefix = req.prefix.unwrap_or_default();
         let refs = self.ops.repo.list_refs().map_err(error::op)?;
@@ -2884,6 +2908,27 @@ impl StoreOps for LocalOps {
 
     fn merge_base(&self, req: MergeBaseReq) -> Result<MergeBaseResp, OpError> {
         self.recording(&Resolved::default()).merge_base(req)
+    }
+
+    fn queue_enqueue(
+        &self,
+        who: &Identity,
+        req: QueueEnqueueReq,
+    ) -> Result<QueueEnqueueResp, OpError> {
+        self.recording(&Resolved::default()).queue_enqueue(who, req)
+    }
+
+    fn queue_status(&self, req: QueueStatusReq) -> Result<QueueStatusResp, OpError> {
+        self.recording(&Resolved::default()).queue_status(req)
+    }
+
+    fn queue_withdraw(
+        &self,
+        who: &Identity,
+        req: QueueWithdrawReq,
+    ) -> Result<QueueEntryOut, OpError> {
+        self.recording(&Resolved::default())
+            .queue_withdraw(who, req)
     }
 }
 

@@ -55,7 +55,9 @@ leave open.
 | `swarmops-cli` | The `swarmops` binary and `so`, its short form (the same program): one subcommand per operation, exactly one envelope per run on stdout, but for `mcp`, `serve`, `derive --follow` and `auth git-credential`. |
 | `swarmops-testkit` | The support the tests share: `FsOps` doubles, power-loss images, the child-process runner with deadlines, builders of stores, repositories and runs of the binary, from M13, git remotes without the network: git's own `http-backend` served on loopback and a stand-in for ssh; and, from M5, a synthetic workspace tree and its edit driver. A dev-dependency of the store, the repository, the operations, the CLI, the git crate and the workspaces, and a dependency of the fuzz targets, which take it without its default features `cli`, `git` and `repo` (the runs of the binary, the git fixtures and the repository builders); no product build includes it. |
 
-Dependencies point one way, from the binary down to the codec, the test kit's dev edges aside:
+Dependencies point one way, from the binary down to the codec, the test kit's dev edges aside,
+and one more: `swarmops-ops` takes `swarmops-ws` for the landing queue's `QueueDriver`, which
+`LocalOps` implements (M22); `swarmops-ws` takes `swarmops-ops` only as a dev-dependency:
 
 ```text
 swarmops-core    depends on no SwarmOps crate
@@ -64,7 +66,7 @@ swarmops-store   core
 swarmops-merge   core
 swarmops-repo    core, merge, store
 swarmops-git     core, repo, store
-swarmops-ops     api, core, git, repo, store
+swarmops-ops     api, core, git, repo, store, ws (QueueDriver only)
 swarmops-ws      api, core, merge, store (FsOps only)
 swarmops-cli     api, ops, ws        (its tests also use core, repo, store and testkit)
 swarmops-testkit core, store, repo   (repo behind its default feature `repo`; a dev-dependency

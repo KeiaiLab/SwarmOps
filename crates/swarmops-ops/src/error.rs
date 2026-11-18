@@ -134,6 +134,11 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             corrupt(message, during, "swarmops verify").with_details(object(id))
         }
         RepoError::Codec(_) => corrupt(message, during, "swarmops verify"),
+        // The landing queue's (M22).
+        e @ (RepoError::QueueKeyReused { .. }
+        | RepoError::QueueAlreadyLanded { .. }
+        | RepoError::QueueContended { .. }
+        | RepoError::QueueProbe { .. }) => queue_error(e, message),
         e @ (RepoError::Derived { .. }
         | RepoError::DerivedCorrupt { .. }
         | RepoError::PastJournalEnd { .. }) => derive_error(e, message, during),
@@ -172,6 +177,39 @@ fn undo_error(e: RepoError, message: String) -> OpError {
             op: undone,
             ..
         } => history_protected(name, head, target, undone, message),
+        _ => unmapped(message),
+    }
+}
+
+/// The operations-spec error for a landing queue's error `e`, whose message is `message`:
+/// [`repo_error`]'s table, the queue's rows (the M22 core design §6). Any other error is
+/// unmapped.
+fn queue_error(e: RepoError, message: String) -> OpError {
+    match e {
+        RepoError::QueueKeyReused { key, entry } => error(ErrorCode::InvalidArg, message)
+            .with_details(details([
+                ("reason", "key_reused".into()),
+                ("key", key.into()),
+                ("entry", entry.to_string().into()),
+            ])),
+        RepoError::QueueAlreadyLanded { entry } => error(ErrorCode::InvalidArg, message)
+            .with_details(details([
+                ("reason", "already_landed".into()),
+                ("entry", entry.to_string().into()),
+            ])),
+        RepoError::QueueContended { target, attempts } => {
+            error(ErrorCode::CasRetryExhausted, message)
+                .with_details(details([
+                    ("target", target.into()),
+                    ("attempts", attempts.into()),
+                ]))
+                .with_hint("run it again: nothing of this round was recorded")
+        }
+        RepoError::QueueProbe { probe, chain } => error(ErrorCode::InvalidArg, message)
+            .with_details(details([
+                ("probe", bytes::to_u64(probe).into()),
+                ("chain", bytes::to_u64(chain).into()),
+            ])),
         _ => unmapped(message),
     }
 }

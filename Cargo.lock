@@ -2231,6 +2231,7 @@ dependencies = [
  "swarmops-repo",
  "swarmops-store",
  "swarmops-testkit",
+ "swarmops-ws",
  "tempfile",
  "toml",
 ]
