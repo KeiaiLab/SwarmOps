@@ -5,7 +5,7 @@
 """Makes the .deb and .rpm packages of a SwarmOps release archive, and installs them in containers.
 
     python3 -I scripts/packages.py build <archive> <out dir> [--kit <dir>]
-    python3 -I scripts/packages.py smoke <version> <package>...
+    python3 -I scripts/packages.py smoke <version> <package>... [--kit <dir>]
 
 `build` reads `swarmops-<version>-<target>.tar.gz`, as the release workflow packs it, and writes
 `swarmops_<version>_<arch>.deb` and `swarmops-<version>-1.<arch>.rpm` into the out directory from
@@ -1367,6 +1367,7 @@ def main() -> int:
     test = commands.add_parser("smoke", help="install one target's packages in containers")
     test.add_argument("version")
     test.add_argument("packages", type=Path, nargs="+")
+    test.add_argument("--kit", type=Path, default=KIT, help="the server kit (packaging/server)")
     args = parser.parse_args()
 
     try:
