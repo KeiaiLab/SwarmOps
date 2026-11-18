@@ -108,7 +108,7 @@ Native sync is M11, planned.
 | Remotes, remote state and `sync` | 2, 3 | Built for git remotes (M13): `remotes.toml`, the mirror's refs, `so sync` | M13 (done), M11 (store remotes) |
 | Ref names beyond `main` and `release/<name>`, and tags | 1, 3 | Built (M6): free-form branches, `tags/<path>` and `remote/<remote>/<path>` in a `FORMAT 2` store; the git side maps them (M14): `git import`, `git export` and `serve` take branches and lightweight tags | M6 (done), M14 (done) |
 | Access control and identities for remote callers | 1, 3 | Built (M14): the store's `access.toml`, the caller named by the key line or the web server, `E_AUTH` and `E_POLICY_DENIED` | M14 (done), M11 |
-| Checks: a description of what runs for a tree | — | `.swarmops/checks.toml` with stages, `check list`, `check run` and `check log` (M30-1, M30-2, M30-6, M31-1 to M31-3); a checked land runs one command, the `check.argv` of `.swarmops/workspaces.json` | M30, M31 |
+| Checks: a description of what runs for a tree | — | `.swarmops/checks.toml` with stages, `check list`, `check run` with findings and JUnit and SARIF reports, and `check log` (M30-1, M30-2, M30-6, M31-1 to M31-5); a checked land runs one command, the `check.argv` of `.swarmops/workspaces.json` | M30, M31 |
 | Checks: results on a tree | — | Not built | M7, M32 |
 | Checks: triggers | — | Not built | M33 |
 | Checks: runners | — | Not built | M34 |
@@ -176,9 +176,10 @@ against 1 s and 1.5× (49.6 s in v0.7.0;
 v0.11.0; G9's update and commit rows wait for a quiet run, and the commit row stays missed until a
 change feed exists. The benchmark gate (condition 3) runs in the weekly Scheduled run.
 [Checks and delivery](#checks-and-delivery) (M30 to M40) is planned; of it, the check file and
-`check list` (M30-1 and M30-2, step 1 of the first steps) and a check's stages, `check run`, the
-environment a check gets and its log with `check log` (M30-6 and M31-1 to M31-3, step 2) are on
-`stable` and in no release yet, and nothing else is built. Step 2's CI half, the `check` job
+`check list` (M30-1 and M30-2, step 1 of the first steps), a check's stages, `check run`, the
+environment a check gets and its log with `check log` (M30-6 and M31-1 to M31-3, step 2), and a
+check's findings with its JUnit and SARIF reports (M31-4 and M31-5, step 3) are on `stable` and in
+no release yet, and nothing else is built. Step 2's CI half, the `check` job
 starting the gate with `check run` and a pinned build, waits for the first release that holds
 `check run`. It
 is deferred past usable but for the units of M30 and M31 behind steps 1 to 8 of its
@@ -891,8 +892,8 @@ land --check`. 22 units.
 | M31-1 | `check run`: runs the checks of a stage (all of them, or a plan's once M30-4 exists) in a workspace or, in the directory form, in a directory, each with no shell and no stdin, in its own process group, under its timeout; one envelope names every check's outcome | M30-1, M30-6, M19 | on stable |
 | M31-2 | The environment a check gets: the check's name, tree, stage and attempt, the paths for its report, outputs, summary and artifacts, a file listing the changed paths of its plan, and the values it declared; nothing else is inherited unless listed; the older `check.argv` form keeps the inherited environment it has today | M31-1 | on stable |
 | M31-3 | The captured log: both streams with a time per line, and sections a check opens with a marker line; `check log --follow` on the same host reads it while it grows; the envelope keeps the existing tails | M31-1 | on stable |
-| M31-4 | Findings: a check writes path, line range, level, title and message as JSON lines to its report file; the envelope returns them, bounded, in `details.findings` | M31-2 | planned |
-| M31-5 | Intake of test and scanner reports: a check declares a JUnit or SARIF file, and its failed cases and results become findings and counts | M31-4 | planned |
+| M31-4 | Findings: a check writes path, line range, level, title and message as JSON lines to its report file; the envelope returns them, bounded, in `details.findings` | M31-2 | on stable |
+| M31-5 | Intake of test and scanner reports: a check declares a JUnit or SARIF file, and its failed cases and results become findings and counts | M31-4 | on stable |
 | M31-6 | Outputs: a check writes key and value pairs to its outputs file; a dependant reads its needs' outputs as environment variables; sizes bounded | M30-7, M31-2 | planned |
 | M31-7 | `check run --jobs N`: independent checks run at once; variants honour their cap and their stop switch | M30-8, M31-1 | planned |
 | M31-8 | Exclusive groups on a host: a check names a group with the scope `host`; one check of a group runs on the host at a time, the others wait up to a bound; the lock's directory is an operator's setting, so that it can span several accounts of one machine | M31-1 | planned |
@@ -1193,7 +1194,10 @@ lock. This repository is not developed in a SwarmOps store: the repository on Gi
 source of truth ([pilot.md](pilot.md)); its `.swarmops/` directory holds step 1's check file
 alone, which names each check's stage since step 2: maintainers and agents start the gate with
 `check run --dir . --stage before-land`, and the `check` job of `ci.yml` still runs `just check`
-until a release holds `check run`, built to CD-D18's text, which awaits the maintainer.
+until a release holds `check run`, built to CD-D18's text, which awaits the maintainer. Since
+step 3 its `check` check declares the gate's JUnit report, so that `check run`, started with
+nextest's `ci` profile, answers a red gate with the failed tests as findings, while CI's `check`
+job still runs `just check` and uploads the same report.
 
 **Two tracks.** Track A, steps 1 to 8, runs inside the jobs GitHub starts, with no store: it uses
 the directory form, writes nothing to any store, needs no new record kind and freezes nothing in

@@ -1,0 +1,1 @@
+A check declares its JUnit and SARIF reports in .swarmops/checks.toml; check run reads those its run wrote into findings and counts.
