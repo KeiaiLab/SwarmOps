@@ -107,6 +107,7 @@ mod publish;
 mod resolve;
 
 pub use detached::{DetachedLand, DetachedOutcome};
+pub(crate) use group::link;
 pub use group::{GroupItem, GroupLanded, LandGroup, LandGroupRequest};
 pub use landing::{
     Gated, LandOutcome, LandRequest, LandStatus, MAX_TOUCHES_PER_FILE, MergeConflicts, More,
@@ -114,6 +115,7 @@ pub use landing::{
 };
 use landing::{LAND_KEY, SQUASHED_FROM};
 pub(crate) use landing::{Prep, Prepared};
+pub(crate) use plan::plan as plan_chain;
 pub use plan::{
     CleanPlan, LandCheck, LandCheckRequest, MAX_CHECK_PATHS, MAX_GROUP_CHANGES, PathChange,
     PlanItem, PlanOutcome, Planned,

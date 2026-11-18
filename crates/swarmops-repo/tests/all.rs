@@ -22,6 +22,9 @@ mod merge;
 mod oplog;
 mod path_history;
 mod protected;
+// Its stores enable the feature `queue` with the test hooks' `supported_for_tests`.
+#[cfg(feature = "test-hooks")]
+mod queue;
 mod raw;
 mod read;
 mod rebase;

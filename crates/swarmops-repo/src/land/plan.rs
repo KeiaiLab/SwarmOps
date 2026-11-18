@@ -211,7 +211,7 @@ struct Change {
 /// Plans `items`, in order, onto `onto`, the head of `target` in `read` (the
 /// [module documentation](self)): each clean item's tree and merged blobs kept in `staged`,
 /// which the caller drops (a check) or writes.
-pub(super) fn plan<O: ObjectStore>(
+pub(crate) fn plan<O: ObjectStore>(
     repo: &Repo<O>,
     read: &RepoRead<'_, O>,
     target: &str,

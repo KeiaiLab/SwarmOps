@@ -8,6 +8,7 @@ use thiserror::Error;
 
 use crate::land::{MergeConflicts, NothingToLandReason};
 use crate::oplog::{OpId, OpNotFoundReason};
+use crate::queue::EntryId;
 
 /// Why a repository operation failed.
 #[derive(Debug, Error)]
@@ -355,6 +356,41 @@ pub enum RepoError {
     PastJournalEnd {
         /// The frame given.
         after: u64,
+    },
+    /// An enqueue's key names an entry of the target's queue for another head or base
+    /// ([`crate::Repo::queue_enqueue`]): nothing was written. Another change takes a key of its
+    /// own.
+    #[error("queue key {key:?} names entry {entry}, of another change")]
+    QueueKeyReused {
+        /// The key.
+        key: String,
+        /// The entry it names.
+        entry: EntryId,
+    },
+    /// A withdraw of an entry that landed already ([`crate::Repo::queue_withdraw`]): nothing
+    /// was written.
+    #[error("queue entry {entry} landed already")]
+    QueueAlreadyLanded {
+        /// The entry.
+        entry: EntryId,
+    },
+    /// Every round of a target's queue lost to a write that moved the target or passed an
+    /// entry's version ([`crate::Repo::queue_round`]): nothing was recorded. Retryable.
+    #[error("{attempts} rounds of the queue of {target} each lost to another write")]
+    QueueContended {
+        /// The target.
+        target: String,
+        /// The rounds built.
+        attempts: u32,
+    },
+    /// A round's probe names no place of its chain ([`crate::Repo::queue_round`]): places run
+    /// from 1 to the chain's length. Nothing was recorded.
+    #[error("probe {probe} is outside the round's chain of {chain}")]
+    QueueProbe {
+        /// The probe.
+        probe: usize,
+        /// The chain's length.
+        chain: usize,
     },
     /// A value of a non-exhaustive enum of the store's, the core's or the merge's that this
     /// build does not handle: the fail-closed value of a wildcard arm, which a variant added
