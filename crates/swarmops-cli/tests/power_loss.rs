@@ -55,6 +55,11 @@
 //! every image the chain's three inserts and main's move are all there or none of them, never
 //! gone once the group land had returned.
 //!
+//! A run of its own (`queue_loss`, the M22 core design §5) enqueues 32 changes onto `main` and
+//! lands the first four in between by one round of the queue: in every image the entries are a
+//! prefix of the enqueues, none gone once its enqueue had returned, and `queue run` through the
+//! binary lands each of them exactly once.
+//!
 //! One more run, of its own (`committed_read`), checks that a committed snapshot
 //! (`MetaStore::read_committed`, storage spec §3) holds nothing a power loss after it can take
 //! back, where a lock-free snapshot may; its images are read with the library, as the snapshot
@@ -3693,5 +3698,373 @@ mod group_loss {
             run.returned
         );
     }
+    }
+}
+
+mod queue_loss {
+    //! Power loss in a landing queue (the M22 core design §5, C8): main at `t0`, whose tree
+    //! names a passing check, and 32 changes on it enqueued one by one, the first four landed in
+    //! between by one round of the queue (their candidates, a passed verdict on the fourth's
+    //! tree, and the exact publish of the four), all recorded call by call. Every image verifies
+    //! clean and holds a prefix of the enqueues, every one whose enqueue had returned among
+    //! them; `queue run` through the binary then lands each entry it holds exactly once, and
+    //! the store verifies clean again.
+
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::thread;
+
+    use camino::Utf8PathBuf;
+    use serde_json::{Value, json};
+    use swarmops_core::{ChangesetId, LeafKind, RepoPath, Signature};
+    use swarmops_repo::land::{ExactPublish, ExactPublished};
+    use swarmops_repo::queue::{
+        EnqueueRequest, EntryId, RoundRequest, VerdictRequest, VerdictState,
+    };
+    use swarmops_repo::{CasResult, Change, ChangeOp, CommitRequest, LocalRepo};
+    use swarmops_store::{FsOps, StoreFormat};
+    use swarmops_testkit::power::{ImageRecordingFs, Seeded, Timeline};
+
+    use super::{AGENT, AT_ONCE, ask, clean, log, signature};
+
+    /// The seeds each cut is checked with: 0 the least the disk can hold, 1 the most, the rest
+    /// at random ([`Seeded`]).
+    const SEEDS: [u64; 4] = [0, 1, 2, 3];
+
+    /// Who writes the run's facts.
+    const ACTOR: &str = "test-power/queue-1";
+
+    /// The queue's target.
+    const TARGET: &str = "main";
+
+    /// How many entries the queue holds.
+    const ENTRIES: usize = 32;
+
+    /// How many entries are enqueued before the round that lands some.
+    const BEFORE_ROUND: usize = 16;
+
+    /// How many entries the round lands: its probe's place in the chain.
+    const LANDED: usize = 4;
+
+    /// The check `t0` names: it passes.
+    const CHECK: &str = "exit 0";
+
+    /// Every how many steps the default test checks a cut ([`a_queue_of_32_survives_power_loss`]);
+    /// the cuts at the marks are checked too.
+    const STRIDE: usize = 7;
+
+    /// The signature a queue runner builds its chains with: the store's own runner, at the
+    /// time of the head it builds on (`t0`'s, [`signature`]'s). The round recorded here signs
+    /// as the runner would, so that the runner that resumes the queue builds the same chain, as
+    /// a runner that takes over from a dead one does.
+    fn runner_signature() -> Signature {
+        Signature::new(
+            b"swarmops/queue-runner".to_vec(),
+            b"queue-runner@swarmops.swarmops.local".to_vec(),
+            1_700_000_000,
+            0,
+            false,
+        )
+        .expect("a signature")
+    }
+
+    /// What the run recorded.
+    struct Run {
+        timeline: Timeline,
+        /// Main's head before the queue, in hex.
+        t0: String,
+        /// The entries, in enqueue order, in hex.
+        entries: Vec<String>,
+        /// The step the first enqueue starts at.
+        from: usize,
+        /// The step at which each enqueue had returned.
+        acked: Vec<usize>,
+        /// The step at which the round's publish had returned.
+        published: usize,
+    }
+
+    /// A one-file commit of `content` at `path` on `parent`.
+    fn one_file(path: &str, content: &str, parent: Option<ChangesetId>) -> CommitRequest {
+        let change = Change::new(
+            RepoPath::new(path).expect("a repo path"),
+            ChangeOp::Put {
+                kind: LeafKind::File,
+                content: content.as_bytes().to_vec(),
+            },
+        );
+        CommitRequest::new(
+            parent.into_iter().collect(),
+            vec![change],
+            signature(),
+            signature(),
+            path.as_bytes().to_vec(),
+            Vec::new(),
+            false,
+            None,
+        )
+    }
+
+    /// Enqueues `head` onto [`TARGET`]: its entry.
+    fn enqueue(repo: &LocalRepo, head: ChangesetId) -> EntryId {
+        let req = EnqueueRequest::new(TARGET, head, ACTOR);
+        repo.queue_enqueue(&req).expect("queue_enqueue").entry.id
+    }
+
+    /// One round of the queue, on `t0`, landing its first [`LANDED`] entries: their candidates,
+    /// a passed verdict on the last one's tree, then the exact publish.
+    fn land_prefix(repo: &LocalRepo, t0: ChangesetId) {
+        // 1. The chain, its candidates up to the probe.
+        let mut round = RoundRequest::new(TARGET, runner_signature(), ACTOR);
+        round.expect_head = Some(t0);
+        round.probes = vec![LANDED];
+        let built = repo.queue_round(&round).expect("queue_round");
+        let tip = &built.items[LANDED - 1];
+
+        // 2. The probe's verdict, as a runner's check would record it.
+        let verdict = VerdictRequest::new(
+            TARGET,
+            tip.entry,
+            tip.tree,
+            VerdictState::Passed,
+            CHECK,
+            ACTOR,
+        );
+        repo.queue_verdict(&verdict).expect("queue_verdict");
+
+        // 3. The prefix published, each entry at the version the queue holds now.
+        let fold = repo.queue_fold(TARGET).expect("queue_fold");
+        let mut publish = ExactPublish::new(TARGET, t0, tip.candidate, ACTOR);
+        publish.landed = (built.items[..LANDED].iter())
+            .map(|item| {
+                (
+                    item.entry,
+                    fold.entry(item.entry).expect("an entry").version,
+                )
+            })
+            .collect();
+        let published = repo.publish_exact(&publish).expect("publish_exact");
+        assert!(
+            matches!(published, ExactPublished::Published { .. }),
+            "{published:?}"
+        );
+    }
+
+    /// Records the run (the module documentation) on one thread.
+    fn record_run() -> (tempfile::TempDir, Run) {
+        let dir = tempfile::tempdir().expect("make a temp dir");
+        let base = dir.path().canonicalize().expect("the temp dir's path");
+        let root = Utf8PathBuf::from_path_buf(base.join("store")).expect("UTF-8 temp paths");
+        let fs = Arc::new(ImageRecordingFs::new());
+        let shared = Arc::clone(&fs) as Arc<dyn FsOps>;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("a one-thread pool");
+
+        // 1. The store, main at t0 naming the check, the changes; then the enqueues, the round
+        //    among them, each return marked.
+        let (t0, entries) = pool.install(|| {
+            let repo = LocalRepo::create_with_fs_as(&root, "power", StoreFormat::V3, shared)
+                .expect("init");
+            let config = json!({"check": {"argv": ["sh", "-c", CHECK], "timeout_s": 60}});
+            let config = one_file(".swarmops/workspaces.json", &config.to_string(), None);
+            let t0 = repo.commit(config).expect("commit").id;
+            let moved = repo
+                .cas_ref(TARGET, None, Some(t0), ACTOR)
+                .expect("cas_ref");
+            assert!(
+                matches!(moved.result, CasResult::Applied { .. }),
+                "{moved:?}"
+            );
+            let heads: Vec<ChangesetId> = (0..ENTRIES)
+                .map(|i| {
+                    let path = format!("change-{i}.txt");
+                    repo.commit(one_file(&path, &format!("{i}\n"), Some(t0)))
+                        .expect("commit")
+                        .id
+                })
+                .collect();
+            fs.mark("before");
+            let mut entries = Vec::with_capacity(ENTRIES);
+            for (i, &head) in heads.iter().enumerate() {
+                if i == BEFORE_ROUND {
+                    land_prefix(&repo, t0);
+                    fs.mark("published");
+                }
+                entries.push(enqueue(&repo, head));
+                fs.mark(&format!("acked {i}"));
+            }
+            (t0, entries)
+        });
+
+        // 2. The timeline of the calls.
+        let calls = fs.calls();
+        let timeline = Timeline::new(&base, &calls);
+        let run = Run {
+            from: timeline.mark("before"),
+            acked: (0..ENTRIES)
+                .map(|i| timeline.mark(&format!("acked {i}")))
+                .collect(),
+            published: timeline.mark("published"),
+            timeline,
+            t0: t0.to_string(),
+            entries: entries.iter().map(ToString::to_string).collect(),
+        };
+        (dir, run)
+    }
+
+    /// The entries `queue status` lists in the store at `store`.
+    fn listed(store: &str) -> Result<Vec<Value>, String> {
+        let asked = ask(&["--repo", store, "queue", "status", TARGET])?;
+        let entries = asked.ok()?["entries"].as_array().cloned();
+        entries.ok_or_else(|| format!("queue status: no entries: {}", asked.run))
+    }
+
+    /// How many entries the store in the image of `cut`, `seed` held, once `verify --deep`
+    /// found it clean: a prefix of the enqueues, holding every one that had returned. Then
+    /// `queue run` lands each of them exactly once: each listed landed on a changeset of its
+    /// own, main `t0` and one changeset per entry, and the store clean again.
+    fn queue_in(run: &Run, cut: usize, seed: u64) -> Result<usize, String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let image = run.timeline.image(cut, &mut Seeded::new(seed, cut));
+        image.materialize(dir.path()).map_err(|e| e.to_string())?;
+        let store = dir.path().join("store");
+        let store = store.to_str().expect("a UTF-8 path");
+        clean(store, "after the power loss")?;
+
+        // 1. The runner: the queue resumed.
+        let drained = ask(&["--repo", store, "--as", AGENT, "queue", "run", TARGET])?;
+        drained.ok()?;
+
+        // 2. A prefix of the enqueues, every acknowledged one in it.
+        let entries = listed(store)?;
+        let ids: Vec<&str> = (entries.iter())
+            .map(|entry| entry["id"].as_str().unwrap_or("?"))
+            .collect();
+        let held = ids.len();
+        if run
+            .entries
+            .get(..held)
+            .is_none_or(|prefix| prefix != ids.as_slice())
+        {
+            return Err(format!("not a prefix of the enqueues: {ids:?}"));
+        }
+        let acked = run.acked.iter().filter(|&&at| at <= cut).count();
+        if held < acked {
+            return Err(format!("{acked} enqueues had returned, {held} held"));
+        }
+
+        // 3. Each landed once: a changeset of its own, main t0 and one per entry.
+        let mut landed: Vec<&str> = Vec::with_capacity(held);
+        for entry in &entries {
+            match (entry["state"].as_str(), entry["landed"].as_str()) {
+                (Some("landed"), Some(id)) => landed.push(id),
+                _ => return Err(format!("not landed: {entry}")),
+            }
+        }
+        let on_main = log(store, TARGET)?;
+        let mut distinct = landed.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        let whole = on_main.len() == held + 1 && on_main.last() == Some(&run.t0);
+        if distinct.len() != held
+            || !whole
+            || landed.iter().any(|id| !on_main.iter().any(|m| m == id))
+        {
+            return Err(format!("landed {landed:?}, main {on_main:?}"));
+        }
+        clean(store, "after the queue ran")?;
+        Ok(held)
+    }
+
+    /// Checks each of `images` (a cut and a seed), [`AT_ONCE`] at a time; how many entries each
+    /// held, and fails with the first failures.
+    fn check_images(run: &Run, images: &[(usize, u64)]) -> Vec<usize> {
+        let (mut held, mut failures) = (Vec::new(), Vec::new());
+        for batch in images.chunks(AT_ONCE) {
+            thread::scope(|scope| {
+                let checks: Vec<_> = (batch.iter())
+                    .map(|&(cut, seed)| {
+                        scope.spawn(move || {
+                            let found = queue_in(run, cut, seed);
+                            found.map_err(|why| format!("cut {cut}, seed {seed}: {why}"))
+                        })
+                    })
+                    .collect();
+                for check in checks {
+                    match check
+                        .join()
+                        .unwrap_or_else(|p| std::panic::resume_unwind(p))
+                    {
+                        Ok(found) => held.push(found),
+                        Err(why) => failures.push(why),
+                    }
+                }
+            });
+        }
+        assert!(
+            failures.is_empty(),
+            "{} images failed; the first ones:\n{}",
+            failures.len(),
+            failures[..failures.len().min(5)].join("\n")
+        );
+        held
+    }
+
+    /// The distinct images of `cuts` and [`SEEDS`], each once: a cut and a seed that make it.
+    fn distinct(run: &Run, cuts: impl Iterator<Item = usize>) -> Vec<(usize, u64)> {
+        let mut found: HashMap<u64, (usize, u64)> = HashMap::new();
+        for cut in cuts {
+            for seed in SEEDS {
+                let image = run.timeline.image(cut, &mut Seeded::new(seed, cut));
+                found.entry(image.digest()).or_insert((cut, seed));
+            }
+        }
+        let mut images: Vec<(usize, u64)> = found.into_values().collect();
+        images.sort_unstable();
+        images
+    }
+
+    /// Asserts what the images of `cuts` must show, and that they reach an empty queue, a whole
+    /// one, and every count of entries between them that some acknowledged enqueue makes.
+    fn sweep_queue(run: &Run, cuts: impl Iterator<Item = usize>, what: &str) {
+        let images = distinct(run, cuts);
+        let held = check_images(run, &images);
+        assert!(held.contains(&0), "{what}: no image without an entry");
+        assert!(held.contains(&ENTRIES), "{what}: no image with every entry");
+        println!(
+            "queue loss {what}: {} steps from the first enqueue, {} distinct images, \
+             published at step {}",
+            run.timeline.steps() - run.from,
+            images.len(),
+            run.published
+        );
+    }
+
+    /// A queue of 32 survives power loss (the M22 core design §5, C8): over every
+    /// [`STRIDE`]-th cut from the first enqueue's start, the cut at each enqueue's and the
+    /// publish's return and the one before it, and [`SEEDS`], each distinct image once, the
+    /// store verifies clean and holds a prefix of the enqueues with every acknowledged one in
+    /// it; the runner then lands each entry it holds exactly once, none missing and none twice,
+    /// and the store verifies clean again.
+    #[test]
+    fn a_queue_of_32_survives_power_loss() {
+        let (_dir, run) = record_run();
+        let marks = (run.acked.iter())
+            .chain([&run.published])
+            .flat_map(|&at| [at.saturating_sub(1), at]);
+        let strided = (run.from..=run.timeline.steps()).step_by(STRIDE);
+        let mut cuts: Vec<usize> = strided.chain(marks).collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+        sweep_queue(&run, cuts.into_iter(), "sampled");
+    }
+
+    /// [`a_queue_of_32_survives_power_loss`] at every cut from the first enqueue's start.
+    #[test]
+    #[ignore = "slow, ~175 s: 988 images of every cut of 32 enqueues and a publish through the binary"]
+    fn a_queue_of_32_survives_power_loss_at_every_cut() {
+        let (_dir, run) = record_run();
+        sweep_queue(&run, run.from..=run.timeline.steps(), "every cut");
     }
 }
