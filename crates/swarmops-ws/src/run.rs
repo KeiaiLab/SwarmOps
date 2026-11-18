@@ -76,7 +76,7 @@ pub fn run(
 
 /// [`run`], telling `started` the command's pid once it runs: on Unix its process group's id
 /// too, which a queue runner records so that the next one can kill what it left running.
-pub fn run_started(
+pub(crate) fn run_started(
     argv: &[String],
     cwd: &Utf8Path,
     env: &[(&str, &str)],
