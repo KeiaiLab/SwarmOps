@@ -44,6 +44,10 @@ In `tools/list`'s order.
 | [`push`](push.md) | Push to a git remote | [`swarmops push`](../commands/push.md) | adds what a git remote holds, or sends it there | no |
 | [`sync`](sync.md) | Sync with a git remote | [`swarmops sync`](../commands/sync.md) | lands onto a git remote's head, moves main and pushes | yes |
 | [`sync_status`](sync-status.md) | Show sync status | [`swarmops sync status`](../commands/sync-status.md) | no | no |
+| [`queue_enqueue`](queue-enqueue.md) | Queue a change to land | [`swarmops queue enqueue`](../commands/queue-enqueue.md) | adds to it | yes |
+| [`queue_status`](queue-status.md) | Show the landing queue | [`swarmops queue status`](../commands/queue-status.md) | no | no |
+| [`queue_withdraw`](queue-withdraw.md) | Withdraw a queued change | [`swarmops queue withdraw`](../commands/queue-withdraw.md) | moves refs | yes |
+| [`queue_wait`](queue-wait.md) | Wait for a queued change | [`swarmops queue wait`](../commands/queue-wait.md) | no | no |
 
 These commands have no tool; an operator or a script runs them as commands.
 
@@ -52,6 +56,7 @@ These commands have no tool; an operator or a script runs them as commands.
 | [`swarmops init`](../commands/init.md) | It makes a store, and a server serves the one it was started on. |
 | [`swarmops whoami`](../commands/whoami.md) | The server's identity is fixed when it starts, so a call would answer the same each time. |
 | [`swarmops schema`](../commands/schema.md) | `tools/list` gives each tool's input schema; the whole contract is for a client's code. |
+| [`swarmops queue run`](../commands/queue-run.md) | Every queue tool starts it, detached, when a queue has work and no runner. |
 | [`swarmops blob get`](../commands/blob-get.md) | An agent reads content by revision and path with `read_file`. |
 | [`swarmops ws delete`](../commands/ws-delete.md) | It removes a directory on the caller's host, an operator's step; `ws_discard` drops edits. |
 | [`swarmops ws hook`](../commands/ws-hook.md) | An agent harness runs it as a command on its own events. |
@@ -133,8 +138,8 @@ Both are the server's, never a call's; no tool argument names either.
 
 - The store is `--repo`, else `SWARMOPS_REPO`, opened anew for each call, so that a call sees what other processes committed. A store that is not there is each call's `E_NOT_A_REPO`, and the server serves on.
 - The identity is `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`, as for the CLI. Every change is recorded for it.
-- These tools need it, and without one fail with `E_IDENTITY_REQUIRED`: `ref_set`, `ref_delete`, `ref_txn`, `undo`, `commit`, `land`, `revert`, `land_group`, `rebase`, `blob_put`, `sync`.
-- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `merge_base`, `op_log`, `ref_list`, `ref_log`, `land_check`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`, `fetch`, `push`, `sync_status`.
+- These tools need it, and without one fail with `E_IDENTITY_REQUIRED`: `ref_set`, `ref_delete`, `ref_txn`, `undo`, `commit`, `land`, `revert`, `land_group`, `rebase`, `blob_put`, `sync`, `queue_enqueue`, `queue_withdraw`.
+- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `merge_base`, `op_log`, `ref_list`, `ref_log`, `land_check`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`, `fetch`, `push`, `sync_status`, `queue_status`, `queue_wait`.
 - The output flags (`--json`, `--human`, `--pretty`) do not apply.
 
 ## Result size limits

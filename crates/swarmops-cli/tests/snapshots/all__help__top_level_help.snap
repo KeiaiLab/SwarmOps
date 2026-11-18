@@ -19,6 +19,7 @@ Record and land changes:
   land        Merge a change onto a ref and publish it there
   land-check  Preview a land: clean or conflict, writing nothing
   land-group  Land several changes in order as one operation
+  queue       Queue changes to land once their check passes
   rebase      Merge a change onto a ref's head, moving no ref
   revert      Take back a changeset or a range by landing its inverse
   blob        Store content as a blob for a commit to name

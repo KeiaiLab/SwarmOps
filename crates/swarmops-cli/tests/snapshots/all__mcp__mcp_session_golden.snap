@@ -2220,6 +2220,150 @@ expression: golden.transcript()
             {
               "annotations": {
                 "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Puts a change (head, with its first-parent chain since base) in target's landing queue and starts its runner: the entry lands once a check of it on the target's head passes (the repository's check, .swarmops/workspaces.json), with no other call. Pass a key to make a retry safe; wait for it with queue_wait.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`queue_enqueue`: put a change in a target's queue. The answer comes once the entry is\ndurable. A store before `FORMAT 3` is `E_FORMAT_REQUIRED`; a change the target holds already\nis `E_NOTHING_TO_LAND`.",
+                "properties": {
+                  "base": {
+                    "anyOf": [
+                      {
+                        "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Where the change starts: a first-parent ancestor of `head`. When omitted, the merge base\nof `head` and the target's head."
+                  },
+                  "head": {
+                    "description": "The change's head. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                    "type": "string"
+                  },
+                  "key": {
+                    "description": "Makes a retry safe: at most 128 bytes. The same key with the same target, head and base\nanswers the entry it made; with another, `E_INVALID_ARG` (`details.reason`\n`key_reused`). When omitted, each enqueue makes a new entry.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "target": {
+                    "description": "The ref to land on, which must exist.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target",
+                  "head"
+                ],
+                "title": "QueueEnqueueReq",
+                "type": "object"
+              },
+              "name": "queue_enqueue",
+              "title": "Queue a change to land"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "The landing queue's entries, one target's or every target's or one entry, open ones in queue order first: each one's state, candidate, verdict and removal reason.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`queue_status`: the entries of one target, or of every target, or one entry.",
+                "properties": {
+                  "entry": {
+                    "description": "Only this entry, by its id.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "target": {
+                    "description": "Only this target's entries; every target's when omitted.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "title": "QueueStatusReq",
+                "type": "object"
+              },
+              "name": "queue_status",
+              "title": "Show the landing queue"
+            },
+            {
+              "annotations": {
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Takes an open entry out of its landing queue (reason withdrawn); it is never published. One that landed is E_INVALID_ARG (already_landed).",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`queue_withdraw`: take an open entry out of its queue (reason `withdrawn`). One that landed\nis `E_INVALID_ARG` (`details.reason` `already_landed`), and nothing is written. The answer\nis the entry.",
+                "properties": {
+                  "entry": {
+                    "description": "The entry's id.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "entry"
+                ],
+                "title": "QueueWithdrawReq",
+                "type": "object"
+              },
+              "name": "queue_withdraw",
+              "title": "Withdraw a queued change"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "Waits for an entry to land and answers it; a removed entry is its removal's error (details.reason), and one still open after timeout_s is E_QUEUE_WAIT_TIMEOUT, retryable: pass a timeout_s of 600 or less and call again.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`queue_wait`: wait for an entry to land. The answer is the landed entry; a removed one is\nan error naming its removal, and one still open at the timeout is `E_QUEUE_WAIT_TIMEOUT`.",
+                "properties": {
+                  "entry": {
+                    "description": "The entry's id.",
+                    "type": "string"
+                  },
+                  "timeout_s": {
+                    "description": "The most seconds to wait; without limit when omitted.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "entry"
+                ],
+                "title": "QueueWaitReq",
+                "type": "object"
+              },
+              "name": "queue_wait",
+              "title": "Wait for a queued change"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
                 "idempotentHint": true,
                 "openWorldHint": false,
                 "readOnlyHint": false

@@ -70,7 +70,10 @@
 //! `verify` and the maintenance's `gc`, `repair` and `upgrade` (M6), in `tools/list`'s order; then the git remotes' client-side operations (M13), which
 //! no [`StoreOps`] has: `remote_list`, `fetch`, `push`, `sync` and `sync_status`, run on the
 //! store's own operations ([`operate_local`]) and taking a remote by its name only, never a URL
-//! or a path. `clone` and `remote add|remove` have no tool, so that an agent cannot point the
+//! or a path; then the landing queue's (M22): `queue_enqueue`, `queue_status`, `queue_withdraw`
+//! and `queue_wait`, each running as its `queue` command does on the store's root
+//! ([`operate_queue`]), so that an enqueue, and any of them that finds work with no runner,
+//! starts a detached `queue run`. `clone` and `remote add|remove` have no tool, so that an agent cannot point the
 //! store at a URL of its choosing. A tool's `inputSchema` is its request type's JSON Schema, as
 //! `swarmops schema <type>` prints it, with each `$ref` replaced by the definition it names so that
 //! the schema stands alone: a keyword beside the reference wins over the definition's, but for
@@ -285,7 +288,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 34] = [
+static TOOLS: [Spec; 38] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -716,6 +719,52 @@ static TOOLS: [Spec; 34] = [
         description: "How main and a git remote's followed branch stand, as the last fetch saw \
                       the remote: how many changes are unpublished and how far behind main is, \
                       offline; pass a limit of 100 or less.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Queue(QueueTool::Enqueue),
+        name: "queue_enqueue",
+        request: "QueueEnqueueReq",
+        title: "Queue a change to land",
+        description: "Puts a change (head, with its first-parent chain since base) in target's \
+                      landing queue and starts its runner: the entry lands once a check of it \
+                      on the target's head passes (the repository's check, \
+                      .swarmops/workspaces.json), with no other call. Pass a key to make a \
+                      retry safe; wait for it with queue_wait.",
+        effect: Effect::Adds,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Queue(QueueTool::Status),
+        name: "queue_status",
+        request: "QueueStatusReq",
+        title: "Show the landing queue",
+        description: "The landing queue's entries, one target's or every target's or one \
+                      entry, open ones in queue order first: each one's state, candidate, \
+                      verdict and removal reason.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Queue(QueueTool::Withdraw),
+        name: "queue_withdraw",
+        request: "QueueWithdrawReq",
+        title: "Withdraw a queued change",
+        description: "Takes an open entry out of its landing queue (reason withdrawn); it is \
+                      never published. One that landed is E_INVALID_ARG (already_landed).",
+        effect: Effect::Moves,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Queue(QueueTool::Wait),
+        name: "queue_wait",
+        request: "QueueWaitReq",
+        title: "Wait for a queued change",
+        description: "Waits for an entry to land and answers it; a removed entry is its \
+                      removal's error (details.reason), and one still open after timeout_s is \
+                      E_QUEUE_WAIT_TIMEOUT, retryable: pass a timeout_s of 600 or less and call \
+                      again.",
         effect: Effect::Reads,
         result_chars: None,
     },
@@ -1568,6 +1617,27 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::Repair => how.read(|ops, req| ops.repair(req)),
         Tool::Upgrade => how.read(|ops, req| ops.upgrade(req)),
         Tool::Local(tool) => operate_local(tool, how),
+        Tool::Queue(tool) => operate_queue(tool, how),
+    }
+}
+
+/// Runs the landing queue's `tool` as `how` runs operations: each through the `queue` command's
+/// function of its name, on the store and the root it was opened at, as the server's identity
+/// if it has one (an enqueue and a withdraw need one).
+fn operate_queue<O: Operate>(tool: QueueTool, how: O) -> O::Done {
+    match tool {
+        QueueTool::Enqueue => {
+            how.workspace(|ops, root, who, _, req| commands::queue::enqueue(ops, root, who, req))
+        }
+        QueueTool::Status => {
+            how.workspace(|ops, root, _, _, req| commands::queue::status(ops, root, req))
+        }
+        QueueTool::Withdraw => {
+            how.workspace(|ops, root, who, _, req| commands::queue::withdraw(ops, root, who, req))
+        }
+        QueueTool::Wait => {
+            how.workspace(|ops, root, _, _, req| commands::queue::wait(ops, root, req))
+        }
     }
 }
 
@@ -1894,6 +1964,10 @@ impl Refuse for FetchReq {}
 impl Refuse for PushReq {}
 impl Refuse for SyncReq {}
 impl Refuse for SyncStatusReq {}
+impl Refuse for swarmops_api::QueueEnqueueReq {}
+impl Refuse for swarmops_api::QueueStatusReq {}
+impl Refuse for swarmops_api::QueueWithdrawReq {}
+impl Refuse for swarmops_api::QueueWaitReq {}
 
 /// A commit that advances a ref names its parent by its full id ([`full_parent`]). A change's
 /// client file is read by this server, so its path must be absolute (the agent
@@ -2510,6 +2584,18 @@ enum Tool {
     Upgrade,
     /// A client-side operation, on the store's own operations ([`operate_local`]).
     Local(LocalTool),
+    /// A landing queue's operation (M22), on the store's root ([`operate_queue`]).
+    Queue(QueueTool),
+}
+
+/// The landing queue's operations, one tool each (M22): each runs as its `queue` command does,
+/// on the store and its root, since an enqueue reads the check and starts a runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueTool {
+    Enqueue,
+    Status,
+    Withdraw,
+    Wait,
 }
 
 /// The client-side operations, one tool each: the git remotes' (M13).
@@ -2780,6 +2866,8 @@ pub(crate) mod probe {
             "workspace": "probe",
             "paths": [],
             "moves": [],
+            "target": "main",
+            "entry": "0".repeat(64),
         })
     }
 
@@ -3063,17 +3151,9 @@ mod tests {
         let no_tool = ["DeriveReq", "BlobGetReq"];
 
         // The landing queue's runner exchanges its round with the store, not with an agent, so
-        // its three requests have no tool; the queue's own four tools come with its commands
-        // (the M22 core design §6), and until then it has none.
-        let queue = [
-            "QueueRoundReq",
-            "QueueVerdictReq",
-            "QueuePublishReq",
-            "QueueEnqueueReq",
-            "QueueStatusReq",
-            "QueueWithdrawReq",
-            "QueueWaitReq",
-        ];
+        // its three requests have no tool; the queue's own four have theirs (the M22 core
+        // design §6).
+        let queue = ["QueueRoundReq", "QueueVerdictReq", "QueuePublishReq"];
         let all = swarmops_api::schema_for_all();
         let requests: Vec<&str> = all
             .as_object()
@@ -3096,8 +3176,15 @@ mod tests {
         );
 
         for spec in &TOOLS {
-            let called = RefCell::new(Vec::new());
-            operate(spec.tool, Probe::new(&called, &RefCell::new(Vec::new())));
+            let (called, outcome) = (RefCell::new(Vec::new()), RefCell::new(Vec::new()));
+            operate(spec.tool, Probe::new(&called, &outcome));
+
+            // A queue tool runs its command's function on the store's root, as a workspace
+            // tool does: it reaches the store through that function, once it ran.
+            if let Tool::Queue(_) = spec.tool {
+                assert_eq!(outcome.into_inner().len(), 1, "the {} tool", spec.name);
+                continue;
+            }
             assert_eq!(
                 called.into_inner(),
                 [(spec.name, spec.request)],

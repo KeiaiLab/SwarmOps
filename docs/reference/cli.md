@@ -147,6 +147,18 @@ Work in a directory of your own: a workspace holds a sparse copy of a changeset'
 - [`swarmops ws delete`](commands/ws-delete.md): Remove a workspace's directory, then its entry.
 - [`swarmops ws hook`](commands/ws-hook.md): The agent hosts' hooks: read the hook's JSON on stdin, print what the hook expects.
 
+## Landing queue
+
+### swarmops queue
+
+Queue changes to land on a ref once a check of them passes.
+
+- [`swarmops queue enqueue`](commands/queue-enqueue.md): Put a change in REF's landing queue, and start its runner.
+- [`swarmops queue status`](commands/queue-status.md): List the queue's entries: REF's, or every ref's, open ones in queue order first.
+- [`swarmops queue withdraw`](commands/queue-withdraw.md): Take entry ID out of its queue (reason withdrawn). One that landed is E\_INVALID\_ARG (already\_landed), and nothing is written.
+- [`swarmops queue wait`](commands/queue-wait.md): Wait for entry ID to land, starting its runner when none runs.
+- [`swarmops queue run`](commands/queue-run.md): Run REF's queue until it holds no open entry; exit 0 at once when another runner does.
+
 ## Server
 
 - [`swarmops mcp`](commands/mcp.md): Serve the store's operations to an agent as an MCP server on stdin and stdout.

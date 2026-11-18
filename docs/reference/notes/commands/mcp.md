@@ -45,7 +45,7 @@ are not served. The results of `server/discover` and `tools/list` may be kept fo
 
 ### Tools
 
-`tools/list` gives 46 tools, one per operation, named as the envelope's `op` is: the 34 store
+`tools/list` gives 50 tools, one per operation, named as the envelope's `op` is: the 38 store
 operations `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`,
 `path_history`, `diff`, `merge_base`, `op_log`, `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `ref_txn`, `undo`, `commit`,
 `land`, `revert`, `land_check`, `land_group`, `rebase`, `blob_put`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`,

@@ -296,6 +296,8 @@ static CONTRACT: [Limit; 18] = [
             "commit",
             "land",
             "land-group",
+            "queue enqueue",
+            "queue withdraw",
             "rebase",
             "revert",
             "blob put",

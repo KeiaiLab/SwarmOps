@@ -112,6 +112,16 @@ const TAKE_BACK_COMMANDS: [&str; 7] = [
 ];
 const TAKE_BACK_SINCE: &str = "0.11.0";
 
+/// The landing queue's commands (M22), and the release they first ship in.
+const QUEUE_COMMANDS: [&str; 5] = [
+    "queue enqueue",
+    "queue status",
+    "queue withdraw",
+    "queue wait",
+    "queue run",
+];
+const QUEUE_SINCE: &str = "0.13.0";
+
 /// The command git runs as a credential helper: its stdout is git's, not an envelope's.
 const HELPER_COMMAND: &str = "auth git-credential";
 
@@ -142,6 +152,9 @@ fn since(path: &str) -> &'static str {
     }
     if TAKE_BACK_COMMANDS.contains(&path) {
         return TAKE_BACK_SINCE;
+    }
+    if QUEUE_COMMANDS.contains(&path) {
+        return QUEUE_SINCE;
     }
     if AUTH_COMMANDS.contains(&path) {
         return AUTH_SINCE;
@@ -185,13 +198,14 @@ pub(super) enum Group {
     Git,
     Remotes,
     Workspaces,
+    Queue,
     Server,
     Auth,
 }
 
 impl Group {
     /// Every group, in the index's order.
-    pub(super) const ALL: [Group; 11] = [
+    pub(super) const ALL: [Group; 12] = [
         Group::Store,
         Group::Write,
         Group::Read,
@@ -201,6 +215,7 @@ impl Group {
         Group::Git,
         Group::Remotes,
         Group::Workspaces,
+        Group::Queue,
         Group::Server,
         Group::Auth,
     ];
@@ -217,6 +232,7 @@ impl Group {
             Group::Git => "git",
             Group::Remotes => "remotes",
             Group::Workspaces => "workspaces",
+            Group::Queue => "queue",
             Group::Server => "server",
             Group::Auth => "auth",
         }
@@ -234,6 +250,7 @@ impl Group {
             Group::Git => "Git",
             Group::Remotes => "Git remotes",
             Group::Workspaces => "Workspaces",
+            Group::Queue => "Landing queue",
             Group::Server => "Server",
             Group::Auth => "Logins",
         }
@@ -265,7 +282,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 65] = [
+const META: [Meta; 70] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -303,6 +320,41 @@ const META: [Meta; 65] = [
         true,
         true,
         Returns::Type("LandGroupResp"),
+    ),
+    meta(
+        "queue enqueue",
+        Group::Queue,
+        true,
+        true,
+        Returns::Type("QueueEnqueueResp"),
+    ),
+    meta(
+        "queue status",
+        Group::Queue,
+        false,
+        false,
+        Returns::Type("QueueStatusResp"),
+    ),
+    meta(
+        "queue withdraw",
+        Group::Queue,
+        true,
+        true,
+        Returns::Type("QueueEntryOut"),
+    ),
+    meta(
+        "queue wait",
+        Group::Queue,
+        false,
+        false,
+        Returns::Type("QueueEntryOut"),
+    ),
+    meta(
+        "queue run",
+        Group::Queue,
+        true,
+        false,
+        Returns::Type("QueueStatusResp"),
     ),
     meta(
         "rebase",
@@ -1471,7 +1523,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 60] = [
+const RETURN_SITES: [(&str, &str, &str); 65] = [
     ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1546,6 +1598,23 @@ const RETURN_SITES: [(&str, &str, &str); 60] = [
     ("history", "../swarmops-api/src/ops.rs", "fn path_history("),
     ("diff", "../swarmops-api/src/ops.rs", "fn diff("),
     ("merge-base", "../swarmops-api/src/ops.rs", "fn merge_base("),
+    (
+        "queue enqueue",
+        "src/commands/queue.rs",
+        "pub(crate) fn enqueue(",
+    ),
+    (
+        "queue status",
+        "src/commands/queue.rs",
+        "pub(crate) fn status(",
+    ),
+    (
+        "queue withdraw",
+        "src/commands/queue.rs",
+        "pub(crate) fn withdraw(",
+    ),
+    ("queue wait", "src/commands/queue.rs", "pub(crate) fn wait("),
+    ("queue run", "src/commands/queue.rs", "fn drain("),
     ("ref list", "../swarmops-api/src/ops.rs", "fn ref_list("),
     ("ref set", "../swarmops-api/src/ops.rs", "fn ref_set("),
     ("ref delete", "../swarmops-api/src/ops.rs", "fn ref_delete("),
@@ -1631,8 +1700,9 @@ const CACHE_ONLY_SOURCE: &str = "../swarmops-ops/src/local.rs";
 /// operation's file, and the phrase of its doc comment that says why it needs none. They are
 /// exceptions to [`CHANGE_RULE`]: a fetch's import moves no ref and records no agent, a push is
 /// an export, and `remote add|remove` write the remote configuration and the mirror. The
-/// maintenance (M6) is too: `gc`, `repair` and `upgrade` record no journal frame.
-const NO_IDENTITY: [(&str, &str, &str); 7] = [
+/// maintenance (M6) is too: `gc`, `repair` and `upgrade` record no journal frame; and so is
+/// `queue run` (M22), whose runner acts as the store's own.
+const NO_IDENTITY: [(&str, &str, &str); 8] = [
     (
         "fetch",
         "../swarmops-ops/src/remote.rs",
@@ -1667,6 +1737,11 @@ const NO_IDENTITY: [(&str, &str, &str); 7] = [
         "upgrade",
         "../swarmops-ops/src/upgrade.rs",
         "It needs no identity: it records nothing",
+    ),
+    (
+        "queue run",
+        "src/commands/queue.rs",
+        "no identity: its runner acts as the store's own",
     ),
 ];
 
@@ -1734,7 +1809,10 @@ fn meta_matches_the_code() {
     // 3. The identity column: one mutator call per command that needs one, and every
     //    command a step shows refused for want of one.
     let calls = source("src/commands/run.rs").matches(IDENTITY_CALL).count()
-        + source("src/commands/ws.rs").matches(IDENTITY_CALL).count();
+        + source("src/commands/ws.rs").matches(IDENTITY_CALL).count()
+        + source("src/commands/queue.rs")
+            .matches(IDENTITY_CALL)
+            .count();
     let needs = META.iter().filter(|meta| meta.identity).count();
     assert_eq!(calls, needs, "{IDENTITY_CALL} calls against identity rows");
     for step in &golden.steps {

@@ -1,0 +1,136 @@
+---
+source: crates/swarmops-cli/tests/queue.rs
+expression: steps
+---
+[
+  {
+    "api": 1,
+    "meta": {
+      "auth": "trust",
+      "elapsed_ms": "[elapsed_ms]",
+      "repo": "[tmp]/store",
+      "resolved": {
+        "[first]": "[first]",
+        "main": "[main]"
+      }
+    },
+    "ok": true,
+    "op": "queue_enqueue",
+    "result": {
+      "entry": {
+        "base": "[main]",
+        "head": "[first]",
+        "id": "[entry1]",
+        "key": "k-1",
+        "position": 1,
+        "state": "waiting",
+        "target": "main"
+      },
+      "replayed": false
+    }
+  },
+  {
+    "api": 1,
+    "meta": {
+      "auth": "trust",
+      "elapsed_ms": "[elapsed_ms]",
+      "repo": "[tmp]/store",
+      "resolved": {
+        "[second]": "[second]",
+        "main": "[main]"
+      }
+    },
+    "ok": true,
+    "op": "queue_enqueue",
+    "result": {
+      "entry": {
+        "base": "[main]",
+        "head": "[second]",
+        "id": "[entry2]",
+        "position": 2,
+        "state": "waiting",
+        "target": "main"
+      },
+      "replayed": false
+    }
+  },
+  {
+    "api": 1,
+    "meta": {
+      "auth": "trust",
+      "elapsed_ms": "[elapsed_ms]",
+      "repo": "[tmp]/store",
+      "resolved": {}
+    },
+    "ok": true,
+    "op": "queue_withdraw",
+    "result": {
+      "base": "[main]",
+      "head": "[second]",
+      "id": "[entry2]",
+      "removal": "withdrawn",
+      "state": "removed",
+      "target": "main"
+    }
+  },
+  {
+    "api": 1,
+    "meta": {
+      "auth": "trust",
+      "elapsed_ms": "[elapsed_ms]",
+      "repo": "[tmp]/store",
+      "resolved": {}
+    },
+    "ok": true,
+    "op": "queue_wait",
+    "result": {
+      "base": "[main]",
+      "candidate": "[landed]",
+      "check": "sh -c if [ -e slow ]; then sleep 3; fi; if [ -e bad ]; then exit 1; fi; exit 0",
+      "head": "[first]",
+      "id": "[entry1]",
+      "key": "k-1",
+      "landed": "[landed]",
+      "state": "landed",
+      "target": "main",
+      "tree": "[id1]",
+      "verdict": "passed"
+    }
+  },
+  {
+    "api": 1,
+    "meta": {
+      "auth": "trust",
+      "elapsed_ms": "[elapsed_ms]",
+      "repo": "[tmp]/store",
+      "resolved": {}
+    },
+    "ok": true,
+    "op": "queue_status",
+    "result": {
+      "entries": [
+        {
+          "base": "[main]",
+          "candidate": "[landed]",
+          "check": "sh -c if [ -e slow ]; then sleep 3; fi; if [ -e bad ]; then exit 1; fi; exit 0",
+          "head": "[first]",
+          "id": "[entry1]",
+          "key": "k-1",
+          "landed": "[landed]",
+          "state": "landed",
+          "target": "main",
+          "tree": "[id1]",
+          "verdict": "passed"
+        },
+        {
+          "base": "[main]",
+          "head": "[second]",
+          "id": "[entry2]",
+          "removal": "withdrawn",
+          "state": "removed",
+          "target": "main"
+        }
+      ]
+    }
+  }
+]

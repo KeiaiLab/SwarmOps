@@ -48,7 +48,7 @@ use swarmops_ops::{LocalOps, Recording, Resolved};
 use swarmops_ws::workspace::Locate;
 
 use super::prepare::{self, After};
-use super::{auth, serve, update, ws};
+use super::{auth, queue, serve, update, ws};
 use crate::cli::{
     self, BlobCommand, Command, DiffArgs, DiffFormatArg, GitCommand, Global, OpCommand, RefCommand,
     RemoteCommand, SyncCommand,
@@ -269,6 +269,7 @@ fn dispatch(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         revert @ Command::Revert { .. } => run_revert(ctx, op, revert),
         Command::Blob(command) => run_blob(ctx, op, command),
         Command::Ws(command) => ws::run(ctx, op, command),
+        Command::Queue(command) => queue::run(ctx, op, command),
         Command::Resolve { rev } => resolve_rev(ctx, op, rev),
         Command::Cat {
             target,
