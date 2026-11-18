@@ -104,6 +104,107 @@ pub mod sweep {
     }
 }
 
+/// What the queue's crash, power-loss and SIGKILL tests share (the M22 core design §5, C8): a
+/// store whose `main` names a check, and changes queued on it while no runner can take them.
+pub mod queue {
+    use serde_json::{Value, json};
+    use swarmops_store::LaneLock;
+
+    use super::{Store, agent};
+
+    /// The target every queue test lands on.
+    pub const TARGET: &str = "main";
+
+    /// A store whose `main` holds only `.swarmops/workspaces.json`, naming `sh -c <check>` as
+    /// the repository's check: `main`'s head.
+    pub fn checked(store: &Store, check: &str) -> String {
+        let config = json!({"check": {"argv": ["sh", "-c", check], "timeout_s": 600}});
+        let base = store.commit(
+            &agent(0),
+            ".swarmops/workspaces.json",
+            &config.to_string(),
+            None,
+        );
+        let create = ["ref", "set", TARGET, base.as_str(), "--create"];
+        store.run_as(&agent(0), &create, &[]).ok();
+        base
+    }
+
+    /// `n` changes on `base`, each adding `change-<i>.txt`, enqueued onto [`TARGET`] in order
+    /// while this process holds the target's lane, so that no enqueue starts a runner: their
+    /// entry ids.
+    pub fn enqueued(store: &Store, base: &str, n: usize) -> Vec<String> {
+        // 1. The lane, held until every entry is durable.
+        let lane = LaneLock::try_acquire(&store.layout(), TARGET).expect("take the lane");
+        assert!(lane.is_some(), "no runner holds a fresh store's lane");
+
+        // 2. Each change, then its entry.
+        let mut entries = Vec::with_capacity(n);
+        for i in 0..n {
+            let path = format!("change-{i}.txt");
+            let head = store.commit(&agent(1), &path, &format!("{i}\n"), Some(base));
+            let args = ["queue", "enqueue", TARGET, "--head", head.as_str()];
+            let queued = store.run_as(&agent(1), &args, &[]).ok();
+            entries.push(queued["entry"]["id"].as_str().expect("an id").to_owned());
+        }
+        entries
+    }
+
+    /// Blocks until no runner holds [`TARGET`]'s lane, then frees it again: a runner a queue
+    /// command started has ended.
+    pub fn runner_gone(store: &Store) {
+        let deadline = std::time::Instant::now() + super::RUN_TIMEOUT;
+        loop {
+            let lane = LaneLock::try_acquire(&store.layout(), TARGET).expect("try the lane");
+            if lane.is_some() {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "a runner never ended");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// `queue status <TARGET>`'s entries.
+    pub fn listed(store: &Store) -> Vec<Value> {
+        let status = store.read(&["queue", "status", TARGET]).ok();
+        status["entries"].as_array().expect("entries").clone()
+    }
+
+    /// Asserts that every entry of `entries` landed once: each listed as landed, the landed
+    /// changesets distinct, and `main`'s history `base` and one changeset per entry. `what`
+    /// says when.
+    #[track_caller]
+    pub fn landed_once(store: &Store, base: &str, entries: &[String], what: &str) {
+        // 1. Each entry landed, on a changeset of its own.
+        let listed = listed(store);
+        let mut landed = Vec::new();
+        for entry in entries {
+            let found = listed.iter().find(|e| e["id"] == entry.as_str());
+            let found = found.unwrap_or_else(|| panic!("{what}: {entry} not queued: {listed:?}"));
+            assert_eq!(found["state"], "landed", "{what}: {found}");
+            landed.push(found["landed"].as_str().expect("a landed id").to_owned());
+        }
+        let mut distinct = landed.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), landed.len(), "{what}: {landed:?}");
+
+        // 2. Main: the base and one changeset per entry, none twice.
+        let log = store.read(&["log", TARGET]).ok();
+        let ids: Vec<&str> = (log["entries"].as_array().expect("entries").iter())
+            .map(|e| e["id"].as_str().expect("an id"))
+            .collect();
+        assert_eq!(ids.len(), entries.len() + 1, "{what}: {ids:?}");
+        assert_eq!(ids.last(), Some(&base), "{what}: {ids:?}");
+        for id in &landed {
+            assert!(
+                ids.contains(&id.as_str()),
+                "{what}: {id} not on main: {ids:?}"
+            );
+        }
+    }
+}
+
 /// Lowercase hex digits in an operation id's checksum: `<op>:<crc>`.
 const CRC_DIGITS: usize = 8;
 
