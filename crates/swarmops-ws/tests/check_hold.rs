@@ -70,3 +70,36 @@ fn an_edited_workspace_is_not_held() {
     );
     drop(lock::acquire(&f.beside("w")).unwrap());
 }
+
+/// Files that stand for another changeset than the head (an operation that moved them was cut
+/// short) are refused with `details.reason` `materialized`, both changesets named, and a hint at
+/// `ws status`; nothing is held.
+#[test]
+fn files_of_another_changeset_are_not_held() {
+    let f = Fixture::new();
+    let c1 = f.commit(None, &[Put::File("a.txt", "a\n")]);
+    let c2 = f.commit(Some(&c1), &[Put::File("a.txt", "b\n")]);
+    f.create("w", "main", &[]);
+    let file = f.beside("w").join(".swarmws/workspace.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(state["materialized"], c2.as_str());
+    state["materialized"] = c1.as_str().into();
+    std::fs::write(&file, state.to_string()).unwrap();
+    let refused = hold_for_run(&f.ctx(), &Locate::Name("w".to_owned())).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+    assert_eq!(
+        (
+            &refused.details["reason"],
+            &refused.details["materialized"],
+            &refused.details["head"]
+        ),
+        (
+            &serde_json::json!("materialized"),
+            &serde_json::json!(c1),
+            &serde_json::json!(c2)
+        )
+    );
+    assert!(refused.hint.unwrap().contains("ws status --ws w"));
+    drop(lock::acquire(&f.beside("w")).unwrap());
+}

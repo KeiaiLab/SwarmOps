@@ -76,10 +76,24 @@ pub fn hold_for_run(ctx: &Ctx<'_>, at: &Locate) -> Result<Held, OpError> {
     }
     status::refuse_stale(ctx.store, &ws.file)?;
     if ws.file.materialized != ws.file.head {
+        let details = Map::from_iter([
+            ("reason".to_owned(), Value::from("materialized")),
+            (
+                "materialized".to_owned(),
+                Value::from(ws.file.materialized.as_str()),
+            ),
+            ("head".to_owned(), Value::from(ws.file.head.as_str())),
+        ]);
         return Err(OpError::new(
             ErrorCode::InvalidArg,
             "the workspace's files stand for another changeset than its head: nothing to check",
-        ));
+        )
+        .with_details(details)
+        .with_hint(format!(
+            "an operation on the workspace was cut short: swarmops ws status --ws {} shows \
+             where it stands; finish that operation, then run the checks again",
+            ws.file.name
+        )));
     }
 
     // 2. Clean: no edit on disk.
