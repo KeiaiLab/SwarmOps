@@ -506,7 +506,10 @@ web-check:
 
 # The next four recipes are the gate's jobs that are more than one command, so that
 # .swarmops/checks.toml names each by one argv. The workflows still run their own steps, the same
-# commands: a change to one is made to the other in the same commit.
+# commands: a change to one is made to the other in the same commit, or the test
+# `check::the_check_recipes_run_their_jobs_steps` fails. It allows the differences named below
+# alone: a temporary directory for RUNNER_TEMP, the actionlint pins as shell variables, and the
+# site job's branch for the build and its stamp check.
 # The lint of the workflow files, the steps of ci.yml's `zizmor` job after its zizmor audit (which
 # stays an action there: a container action whose online audits use the job's token). actionlint
 # checks what zizmor does not: each workflow's keys, expressions, types and `needs:`. Its release

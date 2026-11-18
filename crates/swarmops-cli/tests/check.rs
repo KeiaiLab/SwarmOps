@@ -284,3 +284,173 @@ fn this_repository_s_checks_are_its_recipes() {
         assert!(recipes.contains(&name), "{name}: no recipe in {recipes:?}");
     }
 }
+
+/// The four recipes that stand for a workflow job of several steps run the job's own commands, so
+/// that `.swarmops/checks.toml` names what GitHub runs: a change to one side alone fails here.
+/// The differences are the ones the justfile's comment names, and nothing else: a temporary
+/// directory in place of `RUNNER_TEMP`, the actionlint pins as shell variables in place of the
+/// step's `env`, and the site job's branch for the build and its stamp check against the commit
+/// built, which only the job knows.
+#[test]
+fn the_check_recipes_run_their_jobs_steps() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |path: &str| fs::read_to_string(root.join(path)).unwrap();
+    let justfile = read("justfile");
+    let without = |commands: Vec<String>, dropped: &[&str]| -> Vec<String> {
+        (commands.into_iter())
+            .filter(|command| !dropped.contains(&command.as_str()))
+            .collect()
+    };
+
+    // 1. server.yml's two jobs, line for line after the toolchain's install.
+    let server = read(".github/workflows/server.yml");
+    for (recipe, job) in [
+        ("server-entrances", "entrances"),
+        ("server-acceptance", "acceptance"),
+    ] {
+        let (deps, commands) = recipe_commands(&justfile, recipe);
+        assert!(deps.is_empty(), "{recipe}: {deps:?}");
+        let steps = without(
+            job_commands(&server, job),
+            &["rustup toolchain install --no-self-update"],
+        );
+        assert_eq!(commands, steps, "{recipe} and server.yml's {job}");
+    }
+
+    // 2. site.yml's `site` job: the recipe's dependencies run as `just <dep>`, the build's branch
+    //    and the stamp check against the commit built aside.
+    let site = read(".github/workflows/site.yml");
+    let (deps, commands) = recipe_commands(&justfile, "site-check");
+    let mut recipe: Vec<String> = deps.iter().map(|dep| format!("just {dep}")).collect();
+    recipe.extend(commands);
+    let steps: Vec<String> = (job_commands(&site, "site").into_iter())
+        .filter(|command| !command.starts_with("node web/scripts/check-stamp.mjs --sha "))
+        .map(|command| command.replace("GITHUB_REF_NAME=\"$SCOPE_BRANCH\" ", ""))
+        .collect();
+    assert_eq!(recipe, steps, "site-check and site.yml's site");
+
+    // 3. ci.yml's `zizmor` job after its zizmor audit, the pins and the directory aside.
+    let ci = read(".github/workflows/ci.yml");
+    let (deps, commands) = recipe_commands(&justfile, "lint-workflows");
+    assert!(deps.is_empty(), "lint-workflows: {deps:?}");
+    let job = job_text(&ci, "zizmor");
+    let pin = |key: &str| {
+        let line = (job.lines())
+            .find_map(|line| line.trim().strip_prefix(&format!("{key}: ")))
+            .unwrap_or_else(|| panic!("ci.yml's zizmor job sets no {key}"));
+        line.trim().to_owned()
+    };
+    let version = format!("version={}", pin("ACTIONLINT_VERSION"));
+    let sha256 = format!("sha256={}", pin("ACTIONLINT_SHA256"));
+    assert!(commands.contains(&version), "{version}: {commands:#?}");
+    assert!(commands.contains(&sha256), "{sha256}: {commands:#?}");
+    let recipe = without(
+        commands,
+        &[
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            &version,
+            &sha256,
+            "dir=\"$(mktemp -d)\"",
+            "trap 'rm -rf \"$dir\"' EXIT",
+        ],
+    );
+    let steps: Vec<String> = without(
+        job_commands(&ci, "zizmor"),
+        &["dir=\"$RUNNER_TEMP/actionlint\"", "mkdir -p \"$dir\""],
+    )
+    .into_iter()
+    .map(|command| {
+        (command.replace("ACTIONLINT_VERSION", "version")).replace("ACTIONLINT_SHA256", "sha256")
+    })
+    .collect();
+    assert_eq!(recipe, steps, "lint-workflows and ci.yml's zizmor");
+}
+
+/// The text of `job` in the workflow `text`: its lines, from `  <job>:` to the next job.
+fn job_text(text: &str, job: &str) -> String {
+    let head = format!("  {job}:");
+    let mut lines = text.lines().skip_while(|line| *line != head);
+    assert!(lines.next().is_some(), "no job {job}");
+    lines
+        .take_while(|line| line.is_empty() || line.starts_with("   ") || line.starts_with("  #"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The commands `job`'s `run:` steps hold, in order: a block's lines, comments and blank lines
+/// left out, a line ending in `\` joined to the next.
+fn job_commands(text: &str, job: &str) -> Vec<String> {
+    let job = job_text(text, job);
+    let lines: Vec<&str> = job.lines().collect();
+    let mut script = Vec::new();
+    let mut at = 0;
+    while at < lines.len() {
+        let line = lines[at];
+        let trimmed = line.trim_start();
+        let key = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+        at += 1;
+        let Some(value) = key.strip_prefix("run:") else {
+            continue;
+        };
+        let value = value.trim();
+        if value != "|" {
+            script.push(value.to_owned());
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        while at < lines.len() {
+            let next = lines[at];
+            let deeper = next.len() - next.trim_start().len() > indent;
+            if !next.trim().is_empty() && !deeper {
+                break;
+            }
+            script.push(next.trim().to_owned());
+            at += 1;
+        }
+    }
+    joined(script)
+}
+
+/// The dependencies of `recipe` and the commands of its body: its lines, comments and blank lines
+/// left out, a line ending in `\` joined to the next.
+fn recipe_commands(justfile: &str, recipe: &str) -> (Vec<String>, Vec<String>) {
+    let mut lines = justfile
+        .lines()
+        .skip_while(|line| line.split(':').next() != Some(recipe) || line.contains(":="));
+    let head = lines.next().unwrap_or_else(|| panic!("no recipe {recipe}"));
+    let deps = head[recipe.len() + 1..]
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    let body = lines
+        .take_while(|line| line.starts_with("    "))
+        .map(|line| line.trim().to_owned())
+        .collect();
+    (deps, joined(body))
+}
+
+/// `lines` as commands: comments and blank lines left out, a line ending in `\` joined to the
+/// next, each trimmed.
+fn joined(lines: Vec<String>) -> Vec<String> {
+    let mut commands: Vec<String> = Vec::new();
+    let mut open = false;
+    for line in lines {
+        if !open && (line.is_empty() || (line.starts_with('#') && !line.starts_with("#!"))) {
+            continue;
+        }
+        let (text, continued) = match line.strip_suffix('\\') {
+            Some(text) => (text.trim_end().to_owned(), true),
+            None => (line, false),
+        };
+        match commands.last_mut() {
+            Some(last) if open => {
+                last.push(' ');
+                last.push_str(&text);
+            }
+            _ => commands.push(text),
+        }
+        open = continued;
+    }
+    commands
+}
