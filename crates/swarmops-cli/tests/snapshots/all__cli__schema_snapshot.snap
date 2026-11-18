@@ -1301,6 +1301,116 @@ expression: s.redact(&all)
       "title": "ChangesetSummary",
       "type": "object"
     },
+    "CheckFindingLevel": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "How much a finding matters. Findings change no check's outcome.",
+      "oneOf": [
+        {
+          "const": "error",
+          "description": "Something wrong.",
+          "type": "string"
+        },
+        {
+          "const": "warning",
+          "description": "Something likely wrong, or to look at.",
+          "type": "string"
+        },
+        {
+          "const": "notice",
+          "description": "Something to know.",
+          "type": "string"
+        }
+      ],
+      "title": "CheckFindingLevel"
+    },
+    "CheckFindingOut": {
+      "$defs": {
+        "CheckFindingLevel": {
+          "description": "How much a finding matters. Findings change no check's outcome.",
+          "oneOf": [
+            {
+              "const": "error",
+              "description": "Something wrong.",
+              "type": "string"
+            },
+            {
+              "const": "warning",
+              "description": "Something likely wrong, or to look at.",
+              "type": "string"
+            },
+            {
+              "const": "notice",
+              "description": "Something to know.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One finding of a check: something it reports at a level, about a path and lines of the tree\nor about the tree as a whole. Read from the report file the check writes\n(`SWARMOPS_CHECK_REPORT`, JSON lines), after the check has ended.",
+      "properties": {
+        "end_line": {
+          "description": "Its last line in `path`, at or after `line`. Omitted when it names none.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "group": {
+          "description": "What the report groups it under, when the report gives one. Omitted otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "level": {
+          "$ref": "#/$defs/CheckFindingLevel",
+          "description": "How much it matters."
+        },
+        "line": {
+          "description": "Its first line in `path`, from 1. Omitted when it names none.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "What to know about it, its line breaks kept: at most 4 KiB, cut with `…`. Omitted when\nempty.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The file it is about: a repository path from the tree's root. Omitted when the finding\nnames no file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "report": {
+          "description": "The report it came from: its index, from 0, in its check's `reports`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "description": "What it is, in one line: at most 200 bytes, cut with `…`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "level",
+        "title",
+        "report"
+      ],
+      "title": "CheckFindingOut",
+      "type": "object"
+    },
     "CheckListReq": {
       "$defs": {
         "CheckStage": {
@@ -2014,8 +2124,322 @@ expression: s.redact(&all)
       ],
       "title": "CheckOutcome"
     },
+    "CheckReportFault": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Why a report was not read. A report that is not read is a state of that report, never an\nerror of the run.",
+      "oneOf": [
+        {
+          "const": "too_large",
+          "description": "Past its size bound.",
+          "type": "string"
+        },
+        {
+          "const": "not_a_file",
+          "description": "A symbolic link, a directory, a FIFO or another kind of entry; nothing behind it read.",
+          "type": "string"
+        },
+        {
+          "const": "not_text",
+          "description": "Not UTF-8.",
+          "type": "string"
+        },
+        {
+          "const": "syntax",
+          "description": "Not of its format's syntax.",
+          "type": "string"
+        },
+        {
+          "const": "doctype",
+          "description": "A document type declaration, which is refused before anything is read.",
+          "type": "string"
+        },
+        {
+          "const": "too_deep",
+          "description": "Nested past its depth bound.",
+          "type": "string"
+        },
+        {
+          "const": "shape",
+          "description": "Well formed, but not of its format's shape.",
+          "type": "string"
+        },
+        {
+          "const": "io",
+          "description": "It could not be read: the host's words are in `message`.",
+          "type": "string"
+        }
+      ],
+      "title": "CheckReportFault"
+    },
+    "CheckReportFormat": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The format of a report a check's findings come from.",
+      "oneOf": [
+        {
+          "const": "findings",
+          "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`.",
+          "type": "string"
+        }
+      ],
+      "title": "CheckReportFormat"
+    },
+    "CheckReportReadOut": {
+      "$defs": {
+        "CheckReportFault": {
+          "description": "Why a report was not read. A report that is not read is a state of that report, never an\nerror of the run.",
+          "oneOf": [
+            {
+              "const": "too_large",
+              "description": "Past its size bound.",
+              "type": "string"
+            },
+            {
+              "const": "not_a_file",
+              "description": "A symbolic link, a directory, a FIFO or another kind of entry; nothing behind it read.",
+              "type": "string"
+            },
+            {
+              "const": "not_text",
+              "description": "Not UTF-8.",
+              "type": "string"
+            },
+            {
+              "const": "syntax",
+              "description": "Not of its format's syntax.",
+              "type": "string"
+            },
+            {
+              "const": "doctype",
+              "description": "A document type declaration, which is refused before anything is read.",
+              "type": "string"
+            },
+            {
+              "const": "too_deep",
+              "description": "Nested past its depth bound.",
+              "type": "string"
+            },
+            {
+              "const": "shape",
+              "description": "Well formed, but not of its format's shape.",
+              "type": "string"
+            },
+            {
+              "const": "io",
+              "description": "It could not be read: the host's words are in `message`.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckReportFormat": {
+          "description": "The format of a report a check's findings come from.",
+          "oneOf": [
+            {
+              "const": "findings",
+              "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckReportState": {
+          "description": "What came of a report after its check.",
+          "oneOf": [
+            {
+              "const": "read",
+              "description": "Read: its findings are the check's.",
+              "type": "string"
+            },
+            {
+              "const": "missing",
+              "description": "Not there after the check.",
+              "type": "string"
+            },
+            {
+              "const": "stale",
+              "description": "There, but not written by this run of the check: left from before, and not read.",
+              "type": "string"
+            },
+            {
+              "const": "refused",
+              "description": "There, and not read as its format: `fault` says why.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A report a check's findings were read from, as one run read it, after the check ended.",
+      "properties": {
+        "cut": {
+          "description": "Whether the report file was past 64 MiB: its lines up to the bound were read, the rest\nnot. Omitted when false.",
+          "type": "boolean"
+        },
+        "fault": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckReportFault"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why it was not read, for `refused`."
+        },
+        "findings": {
+          "description": "The findings it gave, returned or not, for `read`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "format": {
+          "$ref": "#/$defs/CheckReportFormat",
+          "description": "Its format."
+        },
+        "invalid_lines": {
+          "description": "The report file's lines that are no finding, each skipped. Omitted when 0.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "description": "One line: for `refused`, why, in the host's words where they apply; for the report\nfile, its first invalid line and why, or that it was cut. Omitted otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Where it was: the report file's absolute path on the host the check ran on.",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/CheckReportState",
+          "description": "What came of it."
+        }
+      },
+      "required": [
+        "format",
+        "path",
+        "state"
+      ],
+      "title": "CheckReportReadOut",
+      "type": "object"
+    },
+    "CheckReportState": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What came of a report after its check.",
+      "oneOf": [
+        {
+          "const": "read",
+          "description": "Read: its findings are the check's.",
+          "type": "string"
+        },
+        {
+          "const": "missing",
+          "description": "Not there after the check.",
+          "type": "string"
+        },
+        {
+          "const": "stale",
+          "description": "There, but not written by this run of the check: left from before, and not read.",
+          "type": "string"
+        },
+        {
+          "const": "refused",
+          "description": "There, and not read as its format: `fault` says why.",
+          "type": "string"
+        }
+      ],
+      "title": "CheckReportState"
+    },
     "CheckRunOut": {
       "$defs": {
+        "CheckFindingLevel": {
+          "description": "How much a finding matters. Findings change no check's outcome.",
+          "oneOf": [
+            {
+              "const": "error",
+              "description": "Something wrong.",
+              "type": "string"
+            },
+            {
+              "const": "warning",
+              "description": "Something likely wrong, or to look at.",
+              "type": "string"
+            },
+            {
+              "const": "notice",
+              "description": "Something to know.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckFindingOut": {
+          "description": "One finding of a check: something it reports at a level, about a path and lines of the tree\nor about the tree as a whole. Read from the report file the check writes\n(`SWARMOPS_CHECK_REPORT`, JSON lines), after the check has ended.",
+          "properties": {
+            "end_line": {
+              "description": "Its last line in `path`, at or after `line`. Omitted when it names none.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "group": {
+              "description": "What the report groups it under, when the report gives one. Omitted otherwise.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "level": {
+              "$ref": "#/$defs/CheckFindingLevel",
+              "description": "How much it matters."
+            },
+            "line": {
+              "description": "Its first line in `path`, from 1. Omitted when it names none.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "message": {
+              "description": "What to know about it, its line breaks kept: at most 4 KiB, cut with `…`. Omitted when\nempty.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "The file it is about: a repository path from the tree's root. Omitted when the finding\nnames no file.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "report": {
+              "description": "The report it came from: its index, from 0, in its check's `reports`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "title": {
+              "description": "What it is, in one line: at most 200 bytes, cut with `…`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "level",
+            "title",
+            "report"
+          ],
+          "type": "object"
+        },
         "CheckNotStarted": {
           "description": "Why a check did not start.",
           "oneOf": [
@@ -2067,6 +2491,146 @@ expression: s.redact(&all)
             {
               "const": "not_run",
               "description": "The run was stopped before it started: no process, no log.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckReportFault": {
+          "description": "Why a report was not read. A report that is not read is a state of that report, never an\nerror of the run.",
+          "oneOf": [
+            {
+              "const": "too_large",
+              "description": "Past its size bound.",
+              "type": "string"
+            },
+            {
+              "const": "not_a_file",
+              "description": "A symbolic link, a directory, a FIFO or another kind of entry; nothing behind it read.",
+              "type": "string"
+            },
+            {
+              "const": "not_text",
+              "description": "Not UTF-8.",
+              "type": "string"
+            },
+            {
+              "const": "syntax",
+              "description": "Not of its format's syntax.",
+              "type": "string"
+            },
+            {
+              "const": "doctype",
+              "description": "A document type declaration, which is refused before anything is read.",
+              "type": "string"
+            },
+            {
+              "const": "too_deep",
+              "description": "Nested past its depth bound.",
+              "type": "string"
+            },
+            {
+              "const": "shape",
+              "description": "Well formed, but not of its format's shape.",
+              "type": "string"
+            },
+            {
+              "const": "io",
+              "description": "It could not be read: the host's words are in `message`.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckReportFormat": {
+          "description": "The format of a report a check's findings come from.",
+          "oneOf": [
+            {
+              "const": "findings",
+              "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckReportReadOut": {
+          "description": "A report a check's findings were read from, as one run read it, after the check ended.",
+          "properties": {
+            "cut": {
+              "description": "Whether the report file was past 64 MiB: its lines up to the bound were read, the rest\nnot. Omitted when false.",
+              "type": "boolean"
+            },
+            "fault": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CheckReportFault"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Why it was not read, for `refused`."
+            },
+            "findings": {
+              "description": "The findings it gave, returned or not, for `read`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "format": {
+              "$ref": "#/$defs/CheckReportFormat",
+              "description": "Its format."
+            },
+            "invalid_lines": {
+              "description": "The report file's lines that are no finding, each skipped. Omitted when 0.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "message": {
+              "description": "One line: for `refused`, why, in the host's words where they apply; for the report\nfile, its first invalid line and why, or that it was cut. Omitted otherwise.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "Where it was: the report file's absolute path on the host the check ran on.",
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/CheckReportState",
+              "description": "What came of it."
+            }
+          },
+          "required": [
+            "format",
+            "path",
+            "state"
+          ],
+          "type": "object"
+        },
+        "CheckReportState": {
+          "description": "What came of a report after its check.",
+          "oneOf": [
+            {
+              "const": "read",
+              "description": "Read: its findings are the check's.",
+              "type": "string"
+            },
+            {
+              "const": "missing",
+              "description": "Not there after the check.",
+              "type": "string"
+            },
+            {
+              "const": "stale",
+              "description": "There, but not written by this run of the check: left from before, and not read.",
+              "type": "string"
+            },
+            {
+              "const": "refused",
+              "description": "There, and not read as its format: `fault` says why.",
               "type": "string"
             }
           ]
@@ -2126,6 +2690,19 @@ expression: s.redact(&all)
             "null"
           ]
         },
+        "findings": {
+          "description": "Its findings that the run returns, in order: those of its report file, in line order,\nthen those of each report it declares, in declared order. Findings change no outcome.\nOmitted when none is returned.",
+          "items": {
+            "$ref": "#/$defs/CheckFindingOut"
+          },
+          "type": "array"
+        },
+        "findings_total": {
+          "description": "Every finding read from its reports, returned or not: more than `findings` holds once\nthe run's bound is reached. Omitted when 0.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "log": {
           "description": "Its log's path on the host it ran on, absolute. Omitted for `not_run`, which has none.",
           "type": [
@@ -2158,6 +2735,13 @@ expression: s.redact(&all)
         "outcome": {
           "$ref": "#/$defs/CheckOutcome",
           "description": "How it ended; only `passed` passes."
+        },
+        "reports": {
+          "description": "The reports its findings were read from, as this run read them: its report file first,\nwhen it wrote one. Omitted when there is none.",
+          "items": {
+            "$ref": "#/$defs/CheckReportReadOut"
+          },
+          "type": "array"
         },
         "sections": {
           "description": "The sections it opened with a marker line, in order. Omitted when it opened none.",
@@ -2271,6 +2855,90 @@ expression: s.redact(&all)
     },
     "CheckRunResp": {
       "$defs": {
+        "CheckFindingLevel": {
+          "description": "How much a finding matters. Findings change no check's outcome.",
+          "oneOf": [
+            {
+              "const": "error",
+              "description": "Something wrong.",
+              "type": "string"
+            },
+            {
+              "const": "warning",
+              "description": "Something likely wrong, or to look at.",
+              "type": "string"
+            },
+            {
+              "const": "notice",
+              "description": "Something to know.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckFindingOut": {
+          "description": "One finding of a check: something it reports at a level, about a path and lines of the tree\nor about the tree as a whole. Read from the report file the check writes\n(`SWARMOPS_CHECK_REPORT`, JSON lines), after the check has ended.",
+          "properties": {
+            "end_line": {
+              "description": "Its last line in `path`, at or after `line`. Omitted when it names none.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "group": {
+              "description": "What the report groups it under, when the report gives one. Omitted otherwise.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "level": {
+              "$ref": "#/$defs/CheckFindingLevel",
+              "description": "How much it matters."
+            },
+            "line": {
+              "description": "Its first line in `path`, from 1. Omitted when it names none.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "message": {
+              "description": "What to know about it, its line breaks kept: at most 4 KiB, cut with `…`. Omitted when\nempty.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "The file it is about: a repository path from the tree's root. Omitted when the finding\nnames no file.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "report": {
+              "description": "The report it came from: its index, from 0, in its check's `reports`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "title": {
+              "description": "What it is, in one line: at most 200 bytes, cut with `…`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "level",
+            "title",
+            "report"
+          ],
+          "type": "object"
+        },
         "CheckNotStarted": {
           "description": "Why a check did not start.",
           "oneOf": [
@@ -2326,6 +2994,146 @@ expression: s.redact(&all)
             }
           ]
         },
+        "CheckReportFault": {
+          "description": "Why a report was not read. A report that is not read is a state of that report, never an\nerror of the run.",
+          "oneOf": [
+            {
+              "const": "too_large",
+              "description": "Past its size bound.",
+              "type": "string"
+            },
+            {
+              "const": "not_a_file",
+              "description": "A symbolic link, a directory, a FIFO or another kind of entry; nothing behind it read.",
+              "type": "string"
+            },
+            {
+              "const": "not_text",
+              "description": "Not UTF-8.",
+              "type": "string"
+            },
+            {
+              "const": "syntax",
+              "description": "Not of its format's syntax.",
+              "type": "string"
+            },
+            {
+              "const": "doctype",
+              "description": "A document type declaration, which is refused before anything is read.",
+              "type": "string"
+            },
+            {
+              "const": "too_deep",
+              "description": "Nested past its depth bound.",
+              "type": "string"
+            },
+            {
+              "const": "shape",
+              "description": "Well formed, but not of its format's shape.",
+              "type": "string"
+            },
+            {
+              "const": "io",
+              "description": "It could not be read: the host's words are in `message`.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckReportFormat": {
+          "description": "The format of a report a check's findings come from.",
+          "oneOf": [
+            {
+              "const": "findings",
+              "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckReportReadOut": {
+          "description": "A report a check's findings were read from, as one run read it, after the check ended.",
+          "properties": {
+            "cut": {
+              "description": "Whether the report file was past 64 MiB: its lines up to the bound were read, the rest\nnot. Omitted when false.",
+              "type": "boolean"
+            },
+            "fault": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CheckReportFault"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Why it was not read, for `refused`."
+            },
+            "findings": {
+              "description": "The findings it gave, returned or not, for `read`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "format": {
+              "$ref": "#/$defs/CheckReportFormat",
+              "description": "Its format."
+            },
+            "invalid_lines": {
+              "description": "The report file's lines that are no finding, each skipped. Omitted when 0.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "message": {
+              "description": "One line: for `refused`, why, in the host's words where they apply; for the report\nfile, its first invalid line and why, or that it was cut. Omitted otherwise.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "Where it was: the report file's absolute path on the host the check ran on.",
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/CheckReportState",
+              "description": "What came of it."
+            }
+          },
+          "required": [
+            "format",
+            "path",
+            "state"
+          ],
+          "type": "object"
+        },
+        "CheckReportState": {
+          "description": "What came of a report after its check.",
+          "oneOf": [
+            {
+              "const": "read",
+              "description": "Read: its findings are the check's.",
+              "type": "string"
+            },
+            {
+              "const": "missing",
+              "description": "Not there after the check.",
+              "type": "string"
+            },
+            {
+              "const": "stale",
+              "description": "There, but not written by this run of the check: left from before, and not read.",
+              "type": "string"
+            },
+            {
+              "const": "refused",
+              "description": "There, and not read as its format: `fault` says why.",
+              "type": "string"
+            }
+          ]
+        },
         "CheckRunOut": {
           "description": "One check of a run: how it ended, and where its log is.",
           "properties": {
@@ -2352,6 +3160,19 @@ expression: s.redact(&all)
                 "integer",
                 "null"
               ]
+            },
+            "findings": {
+              "description": "Its findings that the run returns, in order: those of its report file, in line order,\nthen those of each report it declares, in declared order. Findings change no outcome.\nOmitted when none is returned.",
+              "items": {
+                "$ref": "#/$defs/CheckFindingOut"
+              },
+              "type": "array"
+            },
+            "findings_total": {
+              "description": "Every finding read from its reports, returned or not: more than `findings` holds once\nthe run's bound is reached. Omitted when 0.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
             },
             "log": {
               "description": "Its log's path on the host it ran on, absolute. Omitted for `not_run`, which has none.",
@@ -2385,6 +3206,13 @@ expression: s.redact(&all)
             "outcome": {
               "$ref": "#/$defs/CheckOutcome",
               "description": "How it ended; only `passed` passes."
+            },
+            "reports": {
+              "description": "The reports its findings were read from, as this run read them: its report file first,\nwhen it wrote one. Omitted when there is none.",
+              "items": {
+                "$ref": "#/$defs/CheckReportReadOut"
+              },
+              "type": "array"
             },
             "sections": {
               "description": "The sections it opened with a marker line, in order. Omitted when it opened none.",
@@ -2535,6 +3363,12 @@ expression: s.redact(&all)
         "file": {
           "description": "The file the checks came from: `.swarmops/checks.toml`, or `.swarmops/workspaces.json`\nfor the one check `default`.",
           "type": "string"
+        },
+        "findings_omitted": {
+          "description": "The findings of the run that were counted and not returned: past the run's bound of\n10,000 findings and 4 MiB of their text, every later finding is counted in its check's\n`findings_total` and here, and none is returned. Omitted when 0.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "inherited_all": {
           "description": "Whether the checks got the caller's whole environment: only the check `default` of\n`.swarmops/workspaces.json`, which keeps what `ws land --check` gives it.",
@@ -4907,7 +5741,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_CHECK_FAILED",
-          "description": "A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create`\n(`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its\noutput, `log`, `changeset`; nothing was landed), or one or more of `check run`'s\n(`details.run`: the run's whole result, every check's outcome, or `cancelled` after a\nsignal).",
+          "description": "A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create`\n(`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its\noutput, `log`, `changeset`; nothing was landed), or one or more of `check run`'s\n(`details.run`: the run's whole result, every check's outcome and each check's findings,\nor `cancelled` after a signal).",
           "type": "string"
         },
         {
@@ -12794,7 +13628,7 @@ expression: s.redact(&all)
             },
             {
               "const": "E_CHECK_FAILED",
-              "description": "A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create`\n(`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its\noutput, `log`, `changeset`; nothing was landed), or one or more of `check run`'s\n(`details.run`: the run's whole result, every check's outcome, or `cancelled` after a\nsignal).",
+              "description": "A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create`\n(`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its\noutput, `log`, `changeset`; nothing was landed), or one or more of `check run`'s\n(`details.run`: the run's whole result, every check's outcome and each check's findings,\nor `cancelled` after a signal).",
               "type": "string"
             },
             {

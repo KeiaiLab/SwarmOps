@@ -271,6 +271,7 @@ answered, and then the server exits. A check that did not pass makes the call's 
 | `duration_ms` | `integer` | yes | The run's milliseconds, from its first check's start to its last's end. |
 | `failed` | `array of string` | yes | The checks that did not pass, in run order; empty when every one passed. |
 | `file` | `string` | yes | The file the checks came from: `.swarmops/checks.toml`, or `.swarmops/workspaces.json` for the one check `default`. |
+| `findings_omitted` | `integer` | no | The findings of the run that were counted and not returned: past the run's bound of 10,000 findings and 4 MiB of their text, every later finding is counted in its check's `findings_total` and here, and none is returned. Omitted when 0. |
 | `inherited_all` | `boolean` | yes | Whether the checks got the caller's whole environment: only the check `default` of `.swarmops/workspaces.json`, which keeps what `ws land --check` gives it. |
 | `inherited_env` | `array of string` | yes | The names of the caller's variables the checks got besides the pinned ones, sorted; no values. Empty when `inherited_all`. |
 | `run` | `string` | yes | The run's id: a UUID v7, so that runs sort by their start. |
@@ -289,7 +290,7 @@ Exit codes:
 
 ## Errors
 
-- [`E_CHECK_FAILED`](../errors.md#e_check_failed) (exit 1): A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create` (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`; nothing was landed), or one or more of `check run`'s (`details.run`: the run's whole result, every check's outcome, or `cancelled` after a signal).
+- [`E_CHECK_FAILED`](../errors.md#e_check_failed) (exit 1): A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create` (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`; nothing was landed), or one or more of `check run`'s (`details.run`: the run's whole result, every check's outcome and each check's findings, or `cancelled` after a signal).
 
 Any command that opens a store may also fail with a store error, such as [`E_NOT_A_REPO`](../errors.md#e_not_a_repo), [`E_IO`](../errors.md#e_io) or [`E_STORE_CORRUPT`](../errors.md#e_store_corrupt); a command line the grammar refuses is [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2).
 

@@ -74,7 +74,7 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | [`E_WS_UNPORTABLE`](#e_ws_unportable) | 1 | no | The tree holds paths the workspace's volume cannot hold: `details.reason` says why (`case_collision`, `windows_name`, `reserved_name`: a path component named `.swarmws` at any depth, in any ASCII case) and `details.paths` names them. |
 | [`E_WS_OUTSIDE_PREFIXES`](#e_ws_outside_prefixes) | 1 | no | A sparse workspace's `ws commit` or `ws land` met edits outside its prefixes (`details.paths`, sorted, the first 20). |
 | [`E_WS_STALE`](#e_ws_stale) | 1 | no | `ws status`, `ws diff`, `ws commit`, `ws materialize`, `ws land` (onto any target) or `ws rebase --continue` found the workspace's base gone from its target's history (`details.target`, `base`, `head`; `base_op`, the operation that moved the target to the base; `moved_op`, the latest that moved it to `head`, or null when not found). |
-| [`E_CHECK_FAILED`](#e_check_failed) | 1 | no | A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create` (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`; nothing was landed), or one or more of `check run`'s (`details.run`: the run's whole result, every check's outcome, or `cancelled` after a signal). |
+| [`E_CHECK_FAILED`](#e_check_failed) | 1 | no | A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create` (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`; nothing was landed), or one or more of `check run`'s (`details.run`: the run's whole result, every check's outcome and each check's findings, or `cancelled` after a signal). |
 | [`E_STORE_TOO_NEW`](#e_store_too_new) | 1 | no | The store is of a later format than this build reads, or lists a feature it lacks (`details.format`, and `details.features`, the features it lacks, none for a later format). |
 | [`E_CHECK_FILE`](#e_check_file) | 1 | no | A check file does not read: `.swarmops/checks.toml` (or, in a tree without one, `.swarmops/workspaces.json`) is too large, not text, not a file, not TOML (JSON), not version 1, or holds a key, a name or a value version 1 does not take (`details.file`, `details.reason`, `details.vouched`, and `details.line` and `details.key` when known). |
 
@@ -406,7 +406,7 @@ Exit 1. Retryable: no.
 
 Exit 1. Retryable: no.
 
-A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create` (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`; nothing was landed), or one or more of `check run`'s (`details.run`: the run's whole result, every check's outcome, or `cancelled` after a signal).
+A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create` (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`; nothing was landed), or one or more of `check run`'s (`details.run`: the run's whole result, every check's outcome and each check's findings, or `cancelled` after a signal).
 
 ## E_STORE_TOO_NEW
 

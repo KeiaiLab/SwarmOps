@@ -82,14 +82,17 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - API types `CheckListReq`, `CheckListResp`, `CheckOut` and `CheckStage`, the request and
   result of `check list` and a check's stage; `CheckRunReq`, `CheckRunResp`, `CheckRunOut`,
   `CheckOutcome`, `CheckNotStarted` and `CheckSectionOut`, those of `check run`; `CheckLogReq`,
-  `CheckLogResp`, `CheckLogLineOut`, `CheckLogStream` and `CheckLogEnd`, those of `check log`.
-  `swarmops schema` prints them (213 types).
+  `CheckLogResp`, `CheckLogLineOut`, `CheckLogStream` and `CheckLogEnd`, those of `check log`;
+  `CheckFindingOut`, `CheckFindingLevel`, `CheckReportReadOut`, `CheckReportFormat`,
+  `CheckReportState` and `CheckReportFault`, a check's findings and the reports they came from.
+  `swarmops schema` prints them (219 types).
 
 ### Changed
 
 - `E_CHECK_FAILED` also stands for a run of `check run` where a check did not pass, or that a
-  signal stopped: its `details.run` is the run's whole result. `ws land --check`'s and the
-  bootstrap's details are unchanged (`details.stage` keeps meaning `check` or `bootstrap`).
+  signal stopped: its `details.run` is the run's whole result, each check's findings with it.
+  `ws land --check`'s and the bootstrap's details are unchanged (`details.stage` keeps meaning
+  `check` or `bootstrap`).
 - `ws land --check` and the bootstrap kill what their command left running in its process group
   once it has exited and its output has ended (or a second after it exits, if a process holds the
   output), whatever the outcome: a server or helper sent to the background with its output
