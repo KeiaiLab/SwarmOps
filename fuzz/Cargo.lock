@@ -1611,7 +1611,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "swarmops-api"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "schemars",
  "serde",
@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "swarmops-core"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -1648,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "swarmops-git"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "base64",
  "blake3",
@@ -1664,7 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "swarmops-merge"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "imara-diff",
  "swarmops-core",
@@ -1672,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "swarmops-ops"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "base64",
  "blake3",
@@ -1691,7 +1691,7 @@ dependencies = [
 
 [[package]]
 name = "swarmops-repo"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "blake3",
  "camino",
@@ -1705,7 +1705,7 @@ dependencies = [
 
 [[package]]
 name = "swarmops-store"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "blake3",
  "camino",
@@ -1722,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "swarmops-testkit"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "camino",
  "swarmops-core",
@@ -1732,7 +1732,7 @@ dependencies = [
 
 [[package]]
 name = "swarmops-ws"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "base64",
  "blake3",

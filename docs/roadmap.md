@@ -149,11 +149,12 @@ The releases that get there:
 | v0.10.0 | Serve under load | M17: served reads off the writer lock, preparation, one pack per identical read; the prepared first clone 0.72× git's own server; G18's commit wait, G19's CPU, G20's land p99 at 50 processes and G22's memory missed, G21 not measured yet ([perf.md](perf.md#m17-baselines--2026-11-07)) |
 | v0.11.0 | Take back, workspaces | M18's and M19's slices: `revert`, `ref log` (55 of 55 codes pinned), `land-check`, `land-group`, `ref txn`, `merge-base`; stale workspaces refused everywhere, edits snapshotted before an update; G4 at 50 processes on v0.10.0's batching met in two gated runs (p99 157.3 ms and 154.5 ms), its 32-process runs not recorded; the first sync after a clone missed (13.081 s against 1 s); G9's rows not measured again ([perf.md](perf.md#d2-8-gated-runs--2026-11-09), [perf.md](perf.md#m19-fan-in--2026-11-09-not-measured)) |
 | v0.12.0 | `FORMAT 3`, update, macOS | M20's slices: FORMAT 3 the default of `init`, `upgrade` 2 → 3, verify and repair on it, `E_STORE_TOO_NEW` (56 of 56 codes pinned); its exit criterion, G18 at 1,000,000 records, is not measured yet ([perf.md](perf.md#m20--format-3-at-1000000-records--2026-11-12-not-measured)). M21's first slices, its exit criterion open. Beside them: `so update` and automatic update, logins, git's verbs on the command line, `so://` remotes, and the first macOS archive (M12). Still to do from this row's plan: M20 and M21 to their exit criteria below; the open soft findings triaged, each one that touches data safety or the contract fixed or recorded in [known limitations](known-limitations.md) with its target (condition 5) |
+| v0.13.0 | The landing queue | M22's core, on a local store: `queue enqueue`, `status`, `withdraw`, `wait` and `run` and the four `queue_*` MCP tools; entries survive kill and power loss, candidates are checked in parallel, a red one is found by bisection and removed with a reason, the target moves only to a tree that passed; A22 met: 50 processes with a 30 s check each landed 50 of 50 once, 0 % retries, the longest hold of the lock 72.4 ms ([perf.md](perf.md#m22--the-landing-queue-under-50-processes--2026-11-18)). Beside it: `check list` and the check file. The queue's remote publish (M22-R) and M22-C1 to M22-C7 are still to do |
 
 SwarmOps is declared usable at the first release where all seven conditions hold; condition 6
 counts from the last release that shipped a data-safety fix.
 
-**Status (2026-11-18).** v0.12.0 is released (M20's slices and M21's first ones, their exit criteria open; `so update`; the first macOS archive), after v0.11.0 (M18's and M19's slices, their exit criteria open), v0.10.0 (M17), v0.9.0 (M16) and v0.8.0 (M15); v0.7.0 has M14, which serves topology 1 (condition 7), its criteria 1
+**Status (2026-11-18).** v0.13.0 is released (M22's core, the landing queue), after v0.12.0 (M20's slices and M21's first ones, their exit criteria open; `so update`; the first macOS archive), v0.11.0 (M18's and M19's slices, their exit criteria open), v0.10.0 (M17), v0.9.0 (M16) and v0.8.0 (M15); v0.7.0 has M14, which serves topology 1 (condition 7), its criteria 1
 to 5 pass in `just check` and in the Scheduled run's git matrix, and G16 is met
 ([docs/perf.md](perf.md#v070--2026-10-29): a clone 0.97× and a no-op fetch 1.82× git's own
 server on 12,000 commits). G1 and G2 are met. G4 is met but for its p99 at 50 processes: 25
@@ -1421,7 +1422,7 @@ GitHub goal, M15 to M26 by the plan of 2026-11-05, and M30 to M40 on 2026-11-18 
 
 **Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0, M5 in v0.3.0, M6 in
 v0.4.0, M14 in v0.7.0, M15 in v0.8.0 and M16 in v0.9.0, ahead of M12, which is developed separately.
-**Provisional:** after M16, delivered in v0.9.0, with M17's slices in v0.10.0, M18's and M19's in v0.11.0, M20's and M21's first ones in v0.12.0, and their exit criteria open, the order follows
+**Provisional:** after M16, delivered in v0.9.0, with M17's slices in v0.10.0, M18's and M19's in v0.11.0, M20's and M21's first ones in v0.12.0, M22's core in v0.13.0, and their exit criteria open, the order follows
 [To usable](#to-usable): M17 serves under load, M18 and M19 need no new format, one `FORMAT 3` (M20)
 then serves review, the queue, withdrawal and lineage, and topology 3 stays after the simulator.
 M22's core moves ahead of M7 (2026-11-18): it needs only `FORMAT 3`. The order below is the plan:

@@ -14,7 +14,7 @@ SwarmOps is version control for swarms of coding agents: many agent processes co
 [Documentation](https://swarmops.cc/docs) · [Install](#install) · [Quick start](#quick-start) ·
 [Roadmap](#roadmap) · [Contributing](CONTRIBUTING.md)
 
-SwarmOps is pre-release, at v0.12.0 (2026-11-18). It is designed for large pools of coding agents
+SwarmOps is pre-release, at v0.13.0 (2026-11-18). It is designed for large pools of coding agents
 that commit, land and sync with git. It is measured today at 50 agents landing on one host: 25.0
 lands/s, nothing lost ([perf.md](docs/perf.md#d2-8-gated-runs--2026-11-09)). The
 [roadmap](docs/roadmap.md) says what comes next.
@@ -54,13 +54,13 @@ so --repo ./acme --as agent/worker-1 commit -m "Add hello" --changes change.json
 so --repo ./acme cat main:hello.txt
 ```
 
-Output of a 0.12.0 build, on a Mac:
+Output of a 0.13.0 build, on Linux:
 
 ```text
-swarmops 0.12.0
-{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"e3da399bcfad53399c50a4e8f2911efe","name":"acme","store_version":3,"changesets":0,"refs":0},"meta":{"repo":"./acme","elapsed_ms":107,"resolved":{},"auth":"trust"}}
-{"ok":true,"op":"commit","api":1,"result":{"changeset":"cde4ddd2713232360f56460a421c727f12b5186e1edc5503d3835673a22e9a8e","root":"df3040af7381e7e412c6a0c5e9ab8b490ab80d92dedad94530d98340ced54a6e","files_changed":1,"blobs_written":1,"advanced":{"name":"main","new":"cde4ddd2713232360f56460a421c727f12b5186e1edc5503d3835673a22e9a8e","already_applied":false},"replayed":false},"meta":{"repo":"./acme","elapsed_ms":50,"resolved":{},"auth":"trust"}}
-{"ok":true,"op":"read_file","api":1,"result":{"blob":"464418f5a53907c921906843e6f1f4f984f144067b3bf32d69c1ff4c13627464","size":6,"kind":"file","encoding":"utf8","content":"hello\n","truncated":false},"meta":{"repo":"./acme","elapsed_ms":6,"resolved":{"main":"cde4ddd2713232360f56460a421c727f12b5186e1edc5503d3835673a22e9a8e"},"auth":"trust"}}
+swarmops 0.13.0
+{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"a9f02ba020679780dae5f64d147fb717","name":"acme","store_version":3,"changesets":0,"refs":0},"meta":{"repo":"./acme","elapsed_ms":264,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"commit","api":1,"result":{"changeset":"3388293347d2c58a0da5565c71038404ec1dfaa0a2a5dc367bc10943254ba63e","root":"df3040af7381e7e412c6a0c5e9ab8b490ab80d92dedad94530d98340ced54a6e","files_changed":1,"blobs_written":1,"advanced":{"name":"main","new":"3388293347d2c58a0da5565c71038404ec1dfaa0a2a5dc367bc10943254ba63e","already_applied":false},"replayed":false},"meta":{"repo":"./acme","elapsed_ms":91,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"read_file","api":1,"result":{"blob":"464418f5a53907c921906843e6f1f4f984f144067b3bf32d69c1ff4c13627464","size":6,"kind":"file","encoding":"utf8","content":"hello\n","truncated":false},"meta":{"repo":"./acme","elapsed_ms":1,"resolved":{"main":"3388293347d2c58a0da5565c71038404ec1dfaa0a2a5dc367bc10943254ba63e"},"auth":"trust"}}
 ```
 
 Each store command prints one JSON envelope. `--advance main` moved `main` to the new changeset in the

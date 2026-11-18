@@ -11,14 +11,22 @@ and FORMAT 2 (M6), 0.5.0 the fifth, with the pilot on a real repository and the 
 0.6.0 the sixth, with the fixes those measurements asked for, 0.7.0 the seventh, with stock git
 against a store (M14), 0.8.0 the eighth, with data safety and the contract (M15),
 0.9.0 the ninth, with safety and load (M16), 0.10.0 the tenth, with serving under load (M17),
-0.11.0 the eleventh, with taking back and workspace safety (M18's and M19's slices), and 0.12.0
-the twelfth, with FORMAT 3 (M20's slices), the program's own update and the first macOS build;
-no crate is published (`publish = false`). The 0.1.0 section holds every
-change up to it, grouped by milestone of the design (umbrella spec §13). From here, **Unreleased**
-collects the changes on `stable` that no release holds yet, until the next release
-([RELEASE.md](RELEASE.md)) moves them into a section of its own.
+0.11.0 the eleventh, with taking back and workspace safety (M18's and M19's slices), 0.12.0
+the twelfth, with FORMAT 3 (M20's slices), the program's own update and the first macOS build, and
+0.13.0 the thirteenth, with the landing queue; no crate is published (`publish = false`). The
+0.1.0 section holds every change up to it, grouped by milestone of the design (umbrella spec §13).
+From here, **Unreleased** collects the changes on `stable` that no release holds yet, until the
+next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
+
+## [0.13.0] - 2026-11-18
+
+A landing queue on a local store: `queue enqueue`, `status`, `withdraw`, `wait` and `run` check
+changes in parallel and land each one whose check passed, in queue order. `check list` shows the
+checks a tree names. A store's first queue entry turns on a feature that 0.12.x builds refuse.
+
+No incompatible changes and no security fixes.
 
 ### Added
 
@@ -33,7 +41,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   `queue_status`, `queue_withdraw` and `queue_wait`. Entries are checked in parallel in
   workspaces of their own, a red one is found by bisection and removed with a reason, and the
   target moves only to a tree that passed its check; a runner the queue's commands start drives
-  it, with no daemon. A store's first entry turns on its `queue` feature (the M22 core design).
+  it, with no daemon. A store's first entry turns on its `queue` feature, which a 0.12.x build
+  refuses with `E_STORE_TOO_NEW` (the M22 core design).
 - A22's measurement (`queue_perf`, in `just perf` and the weekly run): 50 processes each enqueue
   and wait on a check of 30 s; every entry lands once and no hold of the store's lock reaches
   1 s (docs/perf.md, "M22").
@@ -2976,7 +2985,8 @@ fixes the measurements and the pilot asked for.
   ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
   head's whole tree, and onto a native head the whole history below it").
 
-[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.12.0...stable
+[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.13.0...stable
+[0.13.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.9.0...v0.10.0

@@ -34,14 +34,14 @@ fuzzing = []
 name = "all"
 
 [dependencies]
-swarmops-api = { path = "../swarmops-api", version = "0.12.0" }
-swarmops-core = { path = "../swarmops-core", version = "0.12.0" }
+swarmops-api = { path = "../swarmops-api", version = "0.13.0" }
+swarmops-core = { path = "../swarmops-core", version = "0.13.0" }
 # `git import`: the import, which reads a git repository on the caller's host through gix.
-swarmops-git = { path = "../swarmops-git", version = "0.12.0" }
-swarmops-repo = { path = "../swarmops-repo", version = "0.12.0" }
-swarmops-store = { path = "../swarmops-store", version = "0.12.0" }
+swarmops-git = { path = "../swarmops-git", version = "0.13.0" }
+swarmops-repo = { path = "../swarmops-repo", version = "0.13.0" }
+swarmops-store = { path = "../swarmops-store", version = "0.13.0" }
 # The landing queue's `QueueDriver`, which `LocalOps` implements for the runner (M22).
-swarmops-ws = { path = "../swarmops-ws", version = "0.12.0" }
+swarmops-ws = { path = "../swarmops-ws", version = "0.13.0" }
 base64.workspace = true
 # Native sync's land keys (`native::key`), hashed as `serve`'s are.
 blake3.workspace = true
@@ -61,5 +61,5 @@ toml.workspace = true
 proptest.workspace = true
 # `health`'s request schema, read from the type in its tests.
 schemars.workspace = true
-swarmops-testkit = { path = "../swarmops-testkit", version = "0.12.0" }
+swarmops-testkit = { path = "../swarmops-testkit", version = "0.13.0" }
 tempfile.workspace = true
