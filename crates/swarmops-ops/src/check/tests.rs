@@ -961,7 +961,8 @@ proptest! {
     }
 }
 
-/// Nesting past the reader's depth is a syntax refusal, never a crash.
+/// Nesting past the reader's depth is a syntax refusal, never a crash. Arrays and inline tables
+/// name their line; dotted keys, which the parser gives no span for, name none.
 #[test]
 fn deep_nesting_is_refused() {
     for depth in [1_000, 100_000] {
@@ -978,4 +979,6 @@ fn deep_nesting_is_refused() {
         );
         refuses(&tables, Reason::Syntax, Some(2), None);
     }
+    let keys = format!("version = 1\n{}a = 1\n", "a.".repeat(300_000));
+    refuses(&keys, Reason::Syntax, None, None);
 }

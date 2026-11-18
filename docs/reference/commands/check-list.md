@@ -209,7 +209,8 @@ until checks run through SwarmOps.
 
 A file that does not read is `E_CHECK_FILE`, exit 1, and nothing is listed. `details.reason` is
 one of `too_large`, `not_text`, `not_a_file`, `syntax`, `version`, `unknown_key`, `name`, `value`
-and `too_many`; `details.line` names the line (1 is the first) when the fault has one, and
+and `too_many`; `details.line` names the line (1 is the first) when the fault has one (keys
+dotted past the reader's nesting depth are a `syntax` fault without one), and
 `details.key` the key at fault as a dotted path. The faults are judged in file order after the
 version, and the first one is the refusal. [Troubleshooting](../../troubleshooting.md#e_check_file)
 says what fixes each.
