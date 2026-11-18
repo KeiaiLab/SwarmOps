@@ -1050,14 +1050,18 @@ fn an_entry_enqueued_at_lane_release_is_landed() {
 // ---- K21 ----
 
 /// K21: no store lock spans a check: another writer commits while the check waits for a
-/// marker made only after that commit returns.
+/// marker made only after that commit returns. The runner drives the fixture's `LocalOps`, whose
+/// queue writes take the store's lock, not the in-memory double.
 #[test]
-#[ignore = "K21: needs LocalOps QueueDriver (M22-5); the in-memory double takes no store lock"]
 fn no_store_lock_is_held_during_a_check() {
     let s = Setup::new(QUICK);
-    let q = Queue::new(&s.f);
-    let ctx = ctx_of(&s, &q);
-    let id = s.enqueue(&ctx, &q, "e1", &["wait-marker"]);
+    let ctx = s.f.ctx().with_queue(&s.f.ops);
+    let head = s.f.side(
+        Some(&s.base),
+        &[Put::File("e1", "e1\n"), Put::File("wait-marker", "")],
+    );
+    let req = QueueEnqueueReq::new(TARGET, head.as_str());
+    let id = queue::enqueue(&ctx, req).unwrap().entry.id;
 
     // 1. The other writer, then the marker.
     let committed = std::thread::scope(|scope| {
@@ -1071,13 +1075,16 @@ fn no_store_lock_is_held_during_a_check() {
             std::fs::write(&s.marker, "").unwrap();
             done.is_ok()
         });
-        drain(&s, &q, 4);
+        queue::run(&ctx, &s.run_req(4)).unwrap();
         writer.join().unwrap()
     });
 
     // 2. The commit went through during the check, and the entry landed.
     assert!(committed, "the commit failed while the check ran");
-    assert_eq!(q.fate(&id), Fate::Landed);
+    let mut by_id = QueueStatusReq::new();
+    by_id.entry = Some(id);
+    let status = s.f.ops.queue_status(by_id).unwrap();
+    assert_eq!(status.entries[0].state, QueueEntryState::Landed);
 }
 
 // ---- K22 ----
