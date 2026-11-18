@@ -231,3 +231,42 @@ fn the_legacy_check_is_what_a_checked_land_runs() {
         );
     }
 }
+
+/// This repository's own `.swarmops/checks.toml` lists through the directory form, as `just check`
+/// lists it: the gate's six checks, each a recipe of the justfile run by `just`, with no shell.
+#[test]
+fn this_repository_s_checks_are_its_recipes() {
+    // 1. The file, listed from the repository's root.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let lab = Lab::new();
+    let listed = list_dir(&lab, &root).ok();
+    assert_eq!(listed["vouched"], true, "{listed}");
+    assert_eq!(listed["file"], ".swarmops/checks.toml", "{listed}");
+    let checks = listed["checks"].as_array().unwrap();
+    let names: Vec<&str> = checks.iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        [
+            "check",
+            "check-compare",
+            "lint-workflows",
+            "server-acceptance",
+            "server-entrances",
+            "site-check",
+        ]
+    );
+
+    // 2. Each one `just <recipe>`, at the root, the recipe its name, and the justfile has it.
+    let justfile = fs::read_to_string(root.join("justfile")).unwrap();
+    let recipes: Vec<&str> = (justfile.lines())
+        .filter(|line| !line.starts_with([' ', '\t', '#']) && !line.contains(":="))
+        .filter_map(|line| line.split([' ', ':']).next())
+        .filter(|name| !name.is_empty() && *name != "set")
+        .collect();
+    for check in checks {
+        let name = check["name"].as_str().unwrap();
+        assert_eq!(check["argv"], json!(["just", name]), "{name}");
+        assert_eq!(check["dir"], ".", "{name}");
+        assert!(recipes.contains(&name), "{name}: no recipe in {recipes:?}");
+    }
+}
