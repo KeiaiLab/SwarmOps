@@ -398,6 +398,21 @@ fn a_log_that_cannot_be_written_fails_its_check_and_the_run_goes_on() {
     assert_eq!(record["result"]["checks"][1]["outcome"], "failed");
 }
 
+/// A check gets no stdin: with a line waiting on `swarmops check run`'s own stdin, a check that
+/// reads one gets nothing. That matters most for the MCP tool, whose server's stdin carries the
+/// agent's requests.
+#[test]
+fn a_check_reads_nothing_from_stdin() {
+    let tree =
+        Tree::new("[check.reads]\nargv = [\"sh\", \"-c\", \"if read line; then exit 1; fi\"]\n");
+    let runs = tree.runs();
+    let dir = tree.dir();
+    let line = ["check", "run", "--dir", dir.to_str().unwrap()];
+    let env = [("SWARMOPS_CHECK_RUNS_DIR", runs.to_str().unwrap())];
+    let run = run_in(tree.tmp(), &env, &line, Some("a request\n")).ok();
+    assert_eq!(check(&run, "reads")["outcome"], "passed", "{run}");
+}
+
 /// A program that does not exist does not start: `not_started`, `program`, its name in the
 /// message.
 #[test]
