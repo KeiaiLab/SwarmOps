@@ -34,6 +34,7 @@ The limits of the SwarmOps contract: what a request may hold, with the error a r
 | [Check timeout](#check-timeout) | 86,400 s | `swarmops_ops::check::MAX_CHECK_TIMEOUT_S` | [`E_CHECK_FILE`](errors.md#e_check_file) |
 | [Variables passed](#variables-passed) | 64 names | `swarmops_ops::check::env::MAX_PASS` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
 | [Variable name passed](#variable-name-passed) | 128 bytes | `swarmops_ops::check::env::MAX_PASS_NAME_BYTES` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
+| [Check log tail](#check-log-tail) | 100,000 lines | `swarmops_api::MAX_CHECK_LOG_TAIL` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
 
 ### Request text
 
@@ -268,6 +269,15 @@ A `--pass` name, of `[A-Za-z_][A-Za-z0-9_]*`: a longer one is refused with `deta
 - Commands: [`check run`](commands/check-run.md).
 - Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
 
+### Check log tail
+
+`check log --tail` (`tail`), from 1: more are refused with `details.reason` `tail`.
+
+- Value: 100,000 lines.
+- Constant: `swarmops_api::MAX_CHECK_LOG_TAIL`, in `crates/swarmops-api/src/check.rs`.
+- Commands: [`check log`](commands/check-log.md).
+- Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
+
 ## Bounds without an error
 
 A response past these leaves the rest out, and says so in its fields; nothing fails.
@@ -288,6 +298,7 @@ A response past these leaves the rest out, and says so in its fields; nothing fa
 | [Check sections](#check-sections) | 1,000 sections | `swarmops_ops::check::log::MAX_CHECK_SECTIONS` | [`check run`](commands/check-run.md) |
 | [Section title](#section-title) | 200 bytes | `swarmops_ops::check::log::MAX_SECTION_TITLE_BYTES` | [`check run`](commands/check-run.md) |
 | [Check runs kept](#check-runs-kept) | 20 runs | `swarmops_ops::check::run::KEPT_CHECK_RUNS` | [`check run`](commands/check-run.md) |
+| [Followed lines](#followed-lines) | 1,000 lines | `swarmops_ops::check::follow::MAX_FOLLOW_LINES` | [`check log`](commands/check-log.md) |
 
 ### Lossy commits listed
 
@@ -401,12 +412,21 @@ The runs a directory (by its canonical path) or a workspace keeps, the new one a
 - Constant: `swarmops_ops::check::run::KEPT_CHECK_RUNS`, in `crates/swarmops-ops/src/check/run.rs`.
 - Commands: [`check run`](commands/check-run.md).
 
+### Followed lines
+
+The most lines one envelope of `check log --follow` gives after its first: the rest come in the next ones.
+
+- Value: 1,000 lines.
+- Constant: `swarmops_ops::check::follow::MAX_FOLLOW_LINES`, in `crates/swarmops-ops/src/check/follow.rs`.
+- Commands: [`check log`](commands/check-log.md).
+
 ## Defaults
 
 What a paged request takes when it does not say. The command line's flag has the same default, and a request over MCP that leaves the field out takes it too.
 
 | Command | Flag | Request field | Default | Constant |
 | --- | --- | --- | --- | --- |
+| [`check log`](commands/check-log.md) | `--tail` | [`CheckLogReq`](schema-types.md#checklogreq) `tail` | 1,000 lines | `swarmops_api::DEFAULT_CHECK_LOG_TAIL` |
 | [`cat`](commands/cat.md) | `--max-bytes` | [`ReadFileReq`](schema-types.md#readfilereq) `max_bytes` | 1,048,576 bytes (1 MiB) | `swarmops_api::DEFAULT_MAX_BYTES` |
 | [`ls`](commands/ls.md) | `--limit` | [`ReadTreeReq`](schema-types.md#readtreereq) `limit` | 250 entries | `swarmops_api::DEFAULT_READ_TREE_LIMIT` |
 | [`show`](commands/show.md) | `--max-changes` | [`ShowReq`](schema-types.md#showreq) `max_changes` | 400 changes | `swarmops_api::DEFAULT_MAX_CHANGES` |

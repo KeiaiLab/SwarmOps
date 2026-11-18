@@ -1,6 +1,6 @@
-//! `check run` (M31-1, M31-2, M31-3, M30-6) through the binary: outcomes, a timed-out check's
-//! process group, the environment a check gets, sections in its log, signals, stages, the
-//! workspace form and where runs go.
+//! `check run` and `check log` (M31-1, M31-2, M31-3, M30-6) through the binary: outcomes, a
+//! timed-out check's process group, the environment a check gets, sections in its log, signals,
+//! stages, the workspace form, where runs go, and a log read, and followed while it grows.
 //!
 //! Every fixture check is a program with its arguments: `sh -c …` where a script is wanted, since
 //! a check may run a shell, but SwarmOps adds none.
@@ -613,4 +613,235 @@ fn the_workspace_form_runs_on_the_tree_and_holds_the_workspace() {
     made.ok();
     let run = failed_run(&lab.so(&["check", "run", "--ws", "w2", "--stage", "deploy"]));
     assert_eq!(check(&run, "docs")["not_started"], "dir");
+}
+
+// `check log` (M31-3).
+
+/// A child whose stdout this test reads a line at a time; killed and reaped when dropped.
+struct Streamed {
+    /// The process.
+    child: std::process::Child,
+    /// Its stdout's lines, as a thread of their own reads them.
+    lines: std::sync::mpsc::Receiver<String>,
+}
+
+impl Streamed {
+    /// Spawns `swarmops args` in `cwd` with `env`, its stdout read a line at a time.
+    fn spawn(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Streamed {
+        use std::io::BufRead as _;
+        let mut command = support::swarmops(args, env);
+        command
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let (send, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in stdout.lines().map_while(Result::ok) {
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Streamed { child, lines }
+    }
+
+    /// The next envelope it prints, within 60 s.
+    fn next(&self) -> Value {
+        let line =
+            (self.lines.recv_timeout(Duration::from_secs(60))).expect("an envelope within 60 s");
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"))
+    }
+
+    /// Its exit code, within 60 s; it fails the test past that.
+    fn exit(&mut self) -> i32 {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status.code().unwrap_or(-1);
+            }
+            assert!(Instant::now() < deadline, "past its deadline");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+impl Drop for Streamed {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The texts of `envelope`'s lines.
+fn texts(envelope: &Value) -> Vec<String> {
+    (envelope["result"]["lines"].as_array().unwrap().iter())
+        .map(|line| line["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Waits up to 60 s for a run of the tree to start: its record there.
+fn run_started(tree: &Tree) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let records = fs::read_dir(tree.runs())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|keyed| {
+                fs::read_dir(keyed.path())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|run| run.path().join("run.json").is_file())
+            });
+        if records {
+            return;
+        }
+        assert!(Instant::now() < deadline, "no run started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A follower reads a line that the check wrote before its last one (M31-3's acceptance): the
+/// check writes `first`, then waits for a file the test makes only once the follower has
+/// printed `first`; then it writes `last`, which the follower prints, with the end.
+#[test]
+fn a_follower_reads_a_line_before_the_check_s_last() {
+    // 1. The run, waiting for `go`.
+    let tree = Tree::new(
+        "[check.probe]\nargv = [\"sh\", \"-c\", \"echo first; while [ ! -e go ]; do sleep 0.05; \
+         done; echo last\"]\n",
+    );
+    let runs = tree.runs();
+    let env = [("SWARMOPS_CHECK_RUNS_DIR", runs.to_str().unwrap())];
+    let dir = tree.dir();
+    let dir = dir.to_str().unwrap();
+    let mut run = Streamed::spawn(tree.tmp(), &["check", "run", "--dir", dir], &env);
+    run_started(&tree);
+
+    // 2. The follower, until it prints `first`; only then `go`.
+    let args = [
+        "check",
+        "log",
+        "--dir",
+        dir,
+        "probe",
+        "--follow",
+        "--interval-ms",
+        "20",
+    ];
+    let mut follower = Streamed::spawn(tree.tmp(), &args, &env);
+    let mut seen = Vec::new();
+    while !seen.iter().any(|text: &String| text == "first") {
+        let envelope = follower.next();
+        assert_eq!(envelope["op"], "check_log");
+        assert_eq!(envelope["result"]["ended"], false, "{envelope}");
+        seen.extend(texts(&envelope));
+    }
+    assert!(!dir_holds(&tree.dir(), "go"));
+    fs::write(tree.dir().join("go"), "").unwrap();
+
+    // 3. Then `last`, and the end, exit 0; the run passed.
+    let mut last = Value::Null;
+    while last["result"]["ended"] != true {
+        last = follower.next();
+        seen.extend(texts(&last));
+    }
+    assert!(seen.iter().any(|text| text == "last"), "{seen:?}");
+    assert_eq!(
+        (&last["result"]["ended_by"], &last["result"]["outcome"]),
+        (&json!("end"), &json!("passed"))
+    );
+    assert_eq!(follower.exit(), 0);
+    assert_eq!(run.exit(), 0);
+}
+
+/// Whether `dir` holds `name`.
+fn dir_holds(dir: &Path, name: &str) -> bool {
+    dir.join(name).exists()
+}
+
+/// A run killed with SIGKILL leaves its check's log without an end: a follower ends with
+/// `runner_gone` once the run's lock is free.
+#[test]
+fn a_follower_ends_when_its_runner_is_gone() {
+    let tree =
+        Tree::new("[check.sleeper]\nargv = [\"sh\", \"-c\", \"echo $$ > group; sleep 600\"]\n");
+    let runs = tree.runs();
+    let env = [("SWARMOPS_CHECK_RUNS_DIR", runs.to_str().unwrap())];
+    let dir = tree.dir();
+    let dir = dir.to_str().unwrap();
+    let mut run = Streamed::spawn(tree.tmp(), &["check", "run", "--dir", dir], &env);
+    let group = pid_in(&tree.dir(), "group");
+    let args = [
+        "check",
+        "log",
+        "--dir",
+        dir,
+        "sleeper",
+        "--follow",
+        "--interval-ms",
+        "20",
+    ];
+    let mut follower = Streamed::spawn(tree.tmp(), &args, &env);
+    assert_eq!(follower.next()["result"]["ended"], false);
+    run.child.kill().unwrap();
+    run.child.wait().unwrap();
+    let mut last = Value::Null;
+    while last["result"]["ended"] != true {
+        last = follower.next();
+    }
+    assert_eq!(last["result"]["ended_by"], "runner_gone");
+    assert_eq!(follower.exit(), 0);
+    let _ = rustix::process::kill_process_group(group, Signal::KILL);
+    assert!(group_gone(group));
+}
+
+/// `check log` of a workspace's run reads the newest run that ran the check, the `--tail` last
+/// lines, and the MCP tool `check_log` answers as the command does; another check, or a run
+/// that is not there, is refused.
+#[test]
+fn check_log_reads_a_workspace_s_run_as_its_tool_does() {
+    let (lab, _ws) = checked_lab();
+    let ran = lab.so(&["check", "run", "--ws", "w1"]).ok();
+    let read = lab
+        .so(&["check", "log", "--ws", "w1", "env", "--tail", "3"])
+        .ok();
+    assert_eq!(
+        (&read["run"], &read["vouched"], &read["ended"]),
+        (&ran["run"], &json!(false), &json!(true))
+    );
+    assert_eq!(read["lines"].as_array().unwrap().len(), 3);
+    assert_eq!(read["outcome"], "passed");
+    let total = read["total_lines"].as_u64().unwrap();
+    assert_eq!(read["first_line"], total - 2);
+
+    let mut server = crate::mcp::Server::start(&["--repo", lab.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let tool = server.ok(
+        "check_log",
+        json!({"workspace": "w1", "check": "env", "tail": 3}),
+    );
+    assert_eq!(tool["result"], read);
+
+    let other = lab
+        .so(&["check", "log", "--ws", "w1", "nope"])
+        .err("E_INVALID_ARG", 2);
+    assert_eq!(other["details"]["reason"], "run");
+    let gone = [
+        "check",
+        "log",
+        "--ws",
+        "w1",
+        "env",
+        "--run",
+        "0193f1e2-0000-7000-8000-000000000000",
+    ];
+    assert_eq!(
+        lab.so(&gone).err("E_INVALID_ARG", 2)["details"]["reason"],
+        "run"
+    );
 }

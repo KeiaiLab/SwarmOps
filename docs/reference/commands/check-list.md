@@ -283,5 +283,6 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 ## See also
 
 - [`swarmops check run`](check-run.md)
+- [`swarmops check log`](check-log.md)
 - [CLI reference](../cli.md)
 - [Error codes](../errors.md)

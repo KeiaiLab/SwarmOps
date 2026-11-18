@@ -1,6 +1,6 @@
 ---
 source: crates/swarmops-cli/tests/mcp.rs
-assertion_line: 321
+assertion_line: 322
 expression: listed
 ---
 {
@@ -3065,6 +3065,51 @@ expression: listed
       },
       "name": "check_run",
       "title": "Run a workspace's checks"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Reads a check's log of a workspace's run (the newest that ran it unless run is given): its last lines (tail, 1,000 by default), each with its time since the check's start, its stream and its text, and whether the log has ended and how the check ended.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. Reads\nonly: no lock, nothing written.",
+        "properties": {
+          "check": {
+            "description": "The check whose log to read.",
+            "type": "string"
+          },
+          "run": {
+            "description": "The run, by its id; the newest run of the workspace that ran `check` when omitted.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tail": {
+            "default": 1000,
+            "description": "The most lines to give, the last ones: 1 to 100,000; 1,000 when omitted.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "workspace": {
+            "description": "The workspace, by its name in the store's registry.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace",
+          "check"
+        ],
+        "title": "CheckLogReq",
+        "type": "object"
+      },
+      "name": "check_log",
+      "title": "Read a check's log"
     }
   ],
   "ttlMs": 3600000

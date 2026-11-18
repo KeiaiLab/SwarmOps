@@ -16,20 +16,37 @@
 //! so check run [NAME…] --dir DIR ─▶ check::run::run_dir(DIR, stage, names, opts)
 //! so check run [NAME…] [--ws N]  ─▶ ws::on_named ─▶ check::run::run_ws(&WsCtx, req, opts)
 //!                          opts: --pass names, the stop flag, the environment, the runs root
+//! so check log CHECK --dir DIR | [--ws N] ─▶ the runs found (no store opened)
+//!                                         ─▶ check::follow::Follower: its last lines, and
+//!                                            with --follow one envelope a line as they come
 //! ```
+//!
+//! `check log --follow` prints more than one envelope: the first with the last `--tail` lines,
+//! then one for each look that found whole lines, flushed at once as `derive --follow` writes its
+//! envelopes, the last the one that holds the log's end, exit 0. With `--human` it prints the
+//! lines as the log holds them, and nothing else.
 
 use std::collections::BTreeMap;
+use std::io::{self, Write as _};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
+use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::Value;
-use swarmops_api::{CheckListReq, CheckRunReq, ErrorCode, OpError, Rev};
-use swarmops_ops::check::run::{self as check_run, RunOpts};
+use swarmops_api::{
+    CheckListReq, CheckLogResp, CheckLogStream, CheckRunReq, ErrorCode, OpError, Rev,
+};
+use swarmops_ops::check::follow::{self, Follower};
+use swarmops_ops::check::run::{self as check_run, RunOpts, WS_RUNS_DIR};
+use swarmops_ws::RealFs;
+use swarmops_ws::registry::Registry;
+use swarmops_ws::workspace::{self, Locate};
 
-use super::{Ctx, ws};
-use crate::cli::{CheckCommand, StageArg};
+use super::{Ctx, run as commands_run, ws};
+use crate::cli::{CheckCommand, StageArg, WsAt};
 use crate::context;
-use crate::output::Printed;
+use crate::output::{Format, Printed};
 
 /// Runs `check`'s `command`, which names operation `op`.
 pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Printed {
@@ -103,7 +120,132 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Pri
                 },
             )
         }
+        CheckCommand::Log {
+            at,
+            dir,
+            check,
+            run,
+            tail,
+            follow,
+            interval_ms,
+        } => {
+            // 1. The runs: of the directory, or of the workspace.
+            let runs = match &dir {
+                Some(dir) => context::check_runs_root(ctx.env)
+                    .and_then(|root| follow::dir_runs(dir, root.as_deref())),
+                None => ws_runs(ctx, &at),
+            };
+
+            // 2. The log's last lines; with --follow, the rest as it comes.
+            let started =
+                runs.and_then(|runs| Follower::start(&runs, &check, run.as_deref(), tail, follow));
+            let (follower, first) = match started {
+                Ok(started) => started,
+                Err(e) => return ctx.finish(op, ctx.used.meta(), Err::<(), _>(e)),
+            };
+            if !follow || first.ended {
+                return log_printed(ctx, op, Ok(first));
+            }
+            follow_log(
+                ctx,
+                op,
+                follower,
+                &first,
+                Duration::from_millis(interval_ms),
+            )
+        }
     }
+}
+
+/// The runs of the workspace `at` names, found as the `ws` commands find it: by name through
+/// the registry beside the store named, or by its directory. No store is opened.
+fn ws_runs(ctx: &Ctx<'_>, at: &WsAt) -> Result<Utf8PathBuf, OpError> {
+    let start = ws::lookup_of(at)?;
+    let store = context::store_for(ctx.global.repo.as_deref(), ctx.env, start.as_ref())?;
+    if let Some(store) = &store {
+        ctx.used.repo.replace(Some(store.clone()));
+    }
+    let locate = match (&at.name, start) {
+        (Some(name), _) => Locate::Name(name.clone()),
+        (None, Some(start)) => start,
+        (None, None) => {
+            return Err(OpError::new(
+                ErrorCode::InvalidArg,
+                "the working directory is not UTF-8: name the workspace with --ws or --ws-path",
+            ));
+        }
+    };
+    let fs = Arc::new(RealFs::new());
+    let registry = store.map(|store| Registry::open(Utf8Path::new(&store), fs.clone()));
+    let found = workspace::find(&locate, registry.as_ref(), fs.as_ref())?;
+    Ok(found.dir.join(WS_RUNS_DIR))
+}
+
+/// `check log --follow`: `first`, printed at once, then each look's lines as they come, every
+/// `interval` while there is nothing new, until the envelope that holds the log's end, exit 0.
+/// A look that fails ends it with its envelope; output that cannot be written ends it with exit
+/// code 1, said on stderr.
+fn follow_log(
+    ctx: &Ctx<'_>,
+    op: &str,
+    mut follower: Follower,
+    first: &CheckLogResp,
+    interval: Duration,
+) -> Printed {
+    let mut next = Some(first.clone());
+    loop {
+        // 1. What the last look found, at once.
+        if let Some(resp) = next.take() {
+            let ended = resp.ended;
+            let printed = log_printed(ctx, op, Ok(resp));
+            if let Err(e) = commands_run::write_now(&printed.stdout) {
+                let _ = writeln!(io::stderr(), "swarmops: cannot write the envelope: {e}");
+                return Printed {
+                    stdout: String::new(),
+                    exit: 1,
+                };
+            }
+            if ended {
+                return Printed {
+                    stdout: String::new(),
+                    exit: 0,
+                };
+            }
+        }
+
+        // 2. The next look, after a wait when there was nothing new.
+        match follower.look() {
+            Ok(Some(resp)) => next = Some(resp),
+            Ok(None) => std::thread::sleep(interval),
+            Err(e) => return ctx.finish(op, ctx.used.meta(), Err::<(), _>(e)),
+        }
+    }
+}
+
+/// The answer of `check log`, printed: in the human format the log's lines as the log holds
+/// them and nothing else; else its envelope.
+fn log_printed(ctx: &Ctx<'_>, op: &str, resp: Result<CheckLogResp, OpError>) -> Printed {
+    match (ctx.format, resp) {
+        (Format::Human, Ok(resp)) => Printed {
+            stdout: (resp.lines.iter())
+                .map(|line| as_logged(line) + "\n")
+                .collect(),
+            exit: 0,
+        },
+        (_, resp) => ctx.finish(op, ctx.used.meta(), resp),
+    }
+}
+
+/// `line` as the log holds it: its time, its stream and its text; a line of `other` as it is.
+fn as_logged(line: &swarmops_api::CheckLogLineOut) -> String {
+    let kind = match line.stream {
+        CheckLogStream::Out => "out",
+        CheckLogStream::Err => "err",
+        CheckLogStream::Run => "run",
+        _ => return line.text.clone(),
+    };
+    let ms = line.at_ms.unwrap_or_default();
+    format!("{:>5}.{:03} {kind} {}", ms / 1_000, ms % 1_000, line.text)
 }
 
 /// A flag that SIGINT, SIGTERM and SIGHUP set, and nothing else: from now on none of them ends

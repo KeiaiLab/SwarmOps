@@ -94,7 +94,8 @@ name it as you invoked it: a usage error's hint, the usage line (`Usage: so …`
 for a missing subcommand (`'so' requires a subcommand but one was not provided`).
 
 Some runs print something other than one envelope. `derive --follow` prints one envelope a line
-for each run that derived something, `mcp` speaks MCP on stdout, and `auth git-credential` answers
+for each run that derived something, `check log --follow` one a line as a check's log grows (the
+last holds `ended: true`, and the command then exits 0), `mcp` speaks MCP on stdout, and `auth git-credential` answers
 git there as a credential helper, with a failure's envelope on stderr. `--help`, `--version` and the `help`
 subcommand print plain text, and so does `swarmops` alone, or a command group alone, when stdout
 is a terminal and neither `--json` nor `SWARMOPS_FORMAT=json` is given

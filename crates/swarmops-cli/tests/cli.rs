@@ -548,6 +548,64 @@ fn check_run_golden() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// The log of a check of two sections, as `check run` writes it: what `check_log_golden` reads.
+const CHECK_LOG_FIXTURE: &str =
+    "    0.002 run start {\"argv\":[\"sh\",\"-c\",\"…\"],\"attempt\":1,\
+\"check\":\"sections\",\"dir\":\".\",\"run\":\"0193f1e2-0000-7000-8000-00000000c10c\",\
+\"stage\":\"before-land\",\"started_at_ms\":1763452800123,\"timeout_s\":900,\"tree\":null}
+    0.005 run section {\"n\":1,\"title\":\"build\"}
+    0.006 out a
+    0.309 run section {\"n\":2,\"title\":\"test\"}
+    0.611 out b
+    0.614 run end {\"dropped_bytes\":0,\"duration_ms\":614,\"exit_code\":0,\"outcome\":\"passed\",\
+\"sections\":[{\"duration_ms\":304,\"n\":1,\"start_ms\":5,\"title\":\"build\"},\
+{\"duration_ms\":305,\"n\":2,\"start_ms\":309,\"title\":\"test\"}]}
+";
+
+/// `check log` (M31-3), its pinned JSON form, of a run kept as `check run --dir` keeps it (its
+/// record and its log written by the test, so that every time is the log's own): the whole log,
+/// each line with its time, its stream and its text, the sections as the runner's lines, the end
+/// with the outcome; `--tail 2` the last two lines; a check the run does not list, refused.
+#[test]
+fn check_log_golden() {
+    // 1. A tree, and a run of it below the runs directory, as `check run --dir` keeps one.
+    let mut s = Session::new();
+    let tmp = s.tmp();
+    let dir = format!("{tmp}/tree");
+    fs::create_dir_all(format!("{dir}/.swarmops")).unwrap();
+    let canonical = fs::canonicalize(&dir).unwrap();
+    let key = swarmops_ops::check::log::dir_key(camino::Utf8Path::from_path(&canonical).unwrap());
+    s.name(&key, "dir_key");
+    let id = "0193f1e2-0000-7000-8000-00000000c10c";
+    let run = format!("{tmp}/runs/{key}/{id}");
+    fs::create_dir_all(format!("{run}/logs")).unwrap();
+    fs::write(format!("{run}/logs/sections.log"), CHECK_LOG_FIXTURE).unwrap();
+    let record = json!({"format": 1, "state": "ended", "result": {
+        "vouched": true, "run": id, "stage": "before-land", "file": ".swarmops/checks.toml",
+        "version": 1, "dir": run, "inherited_env": [], "inherited_all": false,
+        "cancelled": false, "failed": [], "duration_ms": 614,
+        "checks": [{"name": "sections", "outcome": "passed", "definition_digest": "ab",
+                    "timeout_s": 900, "duration_ms": 614, "exit_code": 0,
+                    "log": format!("{run}/logs/sections.log")}]}});
+    fs::write(format!("{run}/run.json"), record.to_string()).unwrap();
+    let runs = format!("{tmp}/runs");
+    let env = [("SWARMOPS_CHECK_RUNS_DIR", runs.as_str())];
+
+    // 2. The log, whole, then its last two lines; another check, refused.
+    let whole = s.run_env(&env, &["check", "log", "--dir", &dir, "sections"]);
+    assert_eq!(whole.exit, 0, "{}", whole.json);
+    assert_eq!(whole["result"]["total_lines"], 6);
+    assert_eq!(whole["result"]["ended_by"], "end");
+    let tail = s.run_env(
+        &env,
+        &["check", "log", "--dir", &dir, "sections", "--tail", "2"],
+    );
+    assert_eq!(tail["result"]["first_line"], 5);
+    let other = s.run_env(&env, &["check", "log", "--dir", &dir, "lint"]);
+    assert_eq!((other.exit, other.code()), (2, "E_INVALID_ARG"));
+    insta::assert_json_snapshot!(s.transcript());
+}
+
 /// `check list` (M30-1, M30-2), its pinned JSON form: the plan's fixture at main lists its
 /// three checks sorted by name, each with its line and the digest of its definition, read from
 /// the store (`vouched: false`, the tree named); the same file in a directory lists the same

@@ -10,7 +10,7 @@ use clap::{
     ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
 };
 use swarmops_api::remote::{DEFAULT_REMOTE, DEFAULT_SYNC_STATUS_LIMIT};
-use swarmops_api::{CheckStage, RefTxnMoveIn, Rev};
+use swarmops_api::{CheckStage, DEFAULT_CHECK_LOG_TAIL, RefTxnMoveIn, Rev};
 use swarmops_api::{
     DEFAULT_ANCESTRY_LIMIT, DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES,
     DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_MAX_CHANGESETS,
@@ -380,7 +380,8 @@ the web server authenticated";
 
 /// Source control for coding-agent swarms.
 ///
-/// Every command but mcp, serve, derive --follow and auth git-credential prints one JSON
+/// Every command but mcp, serve, derive --follow, check log --follow and auth git-credential
+/// prints one JSON
 /// envelope on stdout; at a terminal, the program alone or a command group alone prints its
 /// help screen instead of its usage error's envelope, unless --json or SWARMOPS_FORMAT=json
 /// is given. The program's own help screen is laid out by the `help` module, which shows the
@@ -632,7 +633,7 @@ pub enum Command {
     /// DIR names another.
     #[command(subcommand)]
     Ws(WsCommand),
-    /// List the checks a tree names in .swarmops/checks.toml, and run one stage of them.
+    /// List the checks a tree names in .swarmops/checks.toml, run one stage of them, read a log.
     #[command(subcommand)]
     Check(CheckCommand),
     /// Name the changeset REV names, and whether REV is a ref's name.
@@ -860,7 +861,7 @@ pub enum Command {
     /// blob_has, verify, the maintenance's gc, repair and upgrade, the git remotes' remote_list,
     /// fetch, push, sync and sync_status, and the workspaces' ws_create, ws_status, ws_diff,
     /// ws_commit, ws_rebase, ws_resolve, ws_land, ws_materialize, ws_discard, ws_snapshot,
-    /// ws_list, ws_info and check_run), each
+    /// ws_list, ws_info, check_run and check_log), each
     /// taking the operation's request as its arguments and returning the envelope the other
     /// commands print. The store and the identity are the server's, --repo and --as or their
     /// variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
@@ -1626,6 +1627,50 @@ pub enum CheckCommand {
         #[arg(value_name = "NAME")]
         names: Vec<String>,
     },
+    /// Read a check's log of a run of a workspace, or of a directory with --dir.
+    ///
+    /// The run is --run RUN, else the newest run that ran CHECK (with --follow, the newest still
+    /// running first), of the workspace (--ws, --ws-path, else the one around the working
+    /// directory) or of the directory --dir names, on this host. Gives the log's last --tail
+    /// lines, each with its number, its time since the check's start, its stream (out, err, run
+    /// for the runner's own lines, or other) and its text, and whether the log ended and how:
+    /// end, with the check's outcome, or runner_gone. With --follow it then prints one envelope a
+    /// line for each batch of lines the check writes, looking again every --interval-ms, and
+    /// ends with the envelope that holds the log's end, exit 0; --human prints the lines as the
+    /// log holds them. Reads only: no identity, nothing written, no store operation.
+    Log {
+        #[command(flatten)]
+        at: WsAt,
+        /// Read a run of the checks of DIR on this host, as check run --dir kept it.
+        #[arg(long, value_name = "DIR", conflicts_with_all = ["name", "ws_path"])]
+        dir: Option<Utf8PathBuf>,
+        /// The check whose log to read.
+        #[arg(value_name = "CHECK")]
+        check: String,
+        /// The run, by its id (default: the newest that ran CHECK).
+        #[arg(long, value_name = "RUN")]
+        run: Option<String>,
+        /// The most lines to give first, the last ones.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = DEFAULT_CHECK_LOG_TAIL,
+            value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=100_000)
+        )]
+        tail: usize,
+        /// Then print the lines the check writes as it writes them, until its log ends.
+        #[arg(long)]
+        follow: bool,
+        /// With --follow: how many milliseconds to wait before looking again.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 200,
+            requires = "follow",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        interval_ms: u64,
+    },
 }
 
 /// `remote`'s operations.
@@ -2013,6 +2058,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ws", "hook"] => "ws_hook",
         ["check", "list"] => "check_list",
         ["check", "run"] => "check_run",
+        ["check", "log"] => "check_log",
         ["cat"] => "read_file",
         ["ls"] => "read_tree",
         ["show"] => "show",
@@ -2192,10 +2238,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 67);
+        assert_eq!(ops.len(), 68);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 67, "two subcommands name one op");
+        assert_eq!(ops.len(), 68, "two subcommands name one op");
 
         // Automatic update follows every operation but these, and not `serve --prepare`,
         // which a flag names and no subcommand.

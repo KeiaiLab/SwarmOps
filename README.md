@@ -93,7 +93,7 @@ Every command prints one envelope, `ok`, `op`, `api`, `result` or `error`, then 
 ([exceptions](docs/develop/cli-scripting.md#the-envelope)). A failure carries a stable `E_*` code,
 the exit code, `retryable`, `details` and a `hint` ([error reference](docs/reference/errors.md)).
 `swarmops schema` prints the JSON Schema of every request and response, and `swarmops mcp` serves
-the operations to an agent as 48 MCP tools ([MCP integration](docs/develop/mcp.md)).
+the operations to an agent as 49 MCP tools ([MCP integration](docs/develop/mcp.md)).
 
 ### Git and GitHub round trip
 

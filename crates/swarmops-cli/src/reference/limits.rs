@@ -148,6 +148,12 @@ const CHECK_LOG: &str = "crates/swarmops-ops/src/check/log.rs";
 /// The file that declares a run of the checks (M31).
 const CHECK_RUN: &str = "crates/swarmops-ops/src/check/run.rs";
 
+/// The file that declares the check log's request (M31).
+const CHECK_API: &str = "crates/swarmops-api/src/check.rs";
+
+/// The file that declares the reader of a check's log (M31).
+const CHECK_FOLLOW: &str = "crates/swarmops-ops/src/check/follow.rs";
+
 /// A paging default of `command`'s `flag`, filling `request`'s `field`.
 const fn paged(
     request: &'static str,
@@ -187,7 +193,7 @@ const fn internal_value(
 // ---- The tables ----
 
 /// The limits a request is refused past, with the error it gets.
-static CONTRACT: [Limit; 26] = [
+static CONTRACT: [Limit; 27] = [
     Limit {
         name: "Request text",
         constant: code(
@@ -593,10 +599,24 @@ static CONTRACT: [Limit; 26] = [
         what: "A `--pass` name, of `[A-Za-z_][A-Za-z0-9_]*`: a longer one is refused with \
                    `details.reason` `pass`.",
     },
+    Limit {
+        name: "Check log tail",
+        constant: code(
+            "swarmops_api::MAX_CHECK_LOG_TAIL",
+            CHECK_API,
+            "pub const MAX_CHECK_LOG_TAIL: usize = 100_000;",
+            || bytes::to_u64(swarmops_api::MAX_CHECK_LOG_TAIL),
+        ),
+        unit: Unit::Count("lines"),
+        commands: &["check log"],
+        errors: &[ErrorCode::InvalidArg],
+        what: "`check log --tail` (`tail`), from 1: more are refused with `details.reason` \
+                   `tail`.",
+    },
 ];
 
 /// The bounds a response keeps without an error: what it leaves out, and how it says so.
-static BOUNDS: [Limit; 14] = [
+static BOUNDS: [Limit; 15] = [
     Limit {
         name: "Lossy commits listed",
         constant: code(
@@ -800,10 +820,37 @@ static BOUNDS: [Limit; 14] = [
                    among them: when a run starts the older ones are removed, but never one whose \
                    lock is held.",
     },
+    Limit {
+        name: "Followed lines",
+        constant: code(
+            "swarmops_ops::check::follow::MAX_FOLLOW_LINES",
+            CHECK_FOLLOW,
+            "pub const MAX_FOLLOW_LINES: usize = 1_000;",
+            || bytes::to_u64(swarmops_ops::check::follow::MAX_FOLLOW_LINES),
+        ),
+        unit: Unit::Count("lines"),
+        commands: &["check log"],
+        errors: &[],
+        what: "The most lines one envelope of `check log --follow` gives after its first: \
+                   the rest come in the next ones.",
+    },
 ];
 
 /// The paging defaults a request takes when it does not say.
-static DEFAULTS: [DefaultRow; 15] = [
+static DEFAULTS: [DefaultRow; 16] = [
+    paged(
+        "CheckLogReq",
+        "tail",
+        code(
+            "swarmops_api::DEFAULT_CHECK_LOG_TAIL",
+            CHECK_API,
+            "pub const DEFAULT_CHECK_LOG_TAIL: usize = 1_000;",
+            || bytes::to_u64(swarmops_api::DEFAULT_CHECK_LOG_TAIL),
+        ),
+        Unit::Count("lines"),
+        "check log",
+        Some("tail"),
+    ),
     paged(
         "ReadFileReq",
         "max_bytes",

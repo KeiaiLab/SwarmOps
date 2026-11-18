@@ -2850,7 +2850,12 @@ pub(crate) mod probe {
                 R,
             ) -> Result<T, OpError>,
         ) {
-            let req = serde_json::from_value(sample()).expect("every request reads the sample");
+            // `check` is a land's check input in `ws_land`'s request and a check's name in
+            // `check_log`'s: the sample gives the name to the request that does not read it bare.
+            let mut named = sample();
+            named["check"] = json!("probe");
+            let req = (serde_json::from_value(sample()).or_else(|_| serde_json::from_value(named)))
+                .expect("every request reads the sample");
             let root = tempfile::tempdir().expect("a temporary store root");
             let root = Utf8Path::from_path(root.path()).expect("a UTF-8 temporary directory");
             let outcome = match call(&Recorder(self.called), root, None, Bootstrap::Run, req) {

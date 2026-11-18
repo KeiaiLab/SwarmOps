@@ -32,7 +32,7 @@ collects the changes on `stable` that no release holds yet, until the next relea
   the store at the changeset the files stand for, holds the workspace's lock while the checks run
   and never writes the store; the directory form opens no store and says `vouched: true`.
   SIGINT, SIGTERM and SIGHUP kill the running check's process group and end the run. The MCP tool
-  has the workspace form only. `swarmops mcp` lists 48 tools.
+  has the workspace form only. `swarmops mcp` lists 49 tools.
 - The environment a check of `check run` gets: `SWARMOPS_CHECK_NAME`, `SWARMOPS_CHECK_STAGE`,
   `SWARMOPS_CHECK_TREE`, `SWARMOPS_CHECK_ATTEMPT`, `SWARMOPS_CHECK_RUN`, the paths
   `SWARMOPS_CHECK_REPORT`, `SWARMOPS_CHECK_OUTPUTS`, `SWARMOPS_CHECK_SUMMARY` and
@@ -47,6 +47,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   logs and each check's own directory: in a workspace below `.swarmws/check-runs/`, in the
   directory form below `SWARMOPS_CHECK_RUNS_DIR`, else the state directory's
   `swarmops/check-runs`; the newest 20 runs are kept. The format is provisional.
+- `check log` and the MCP tool `check_log`: one check's log of a run (`--run`, else the newest
+  that ran it), its last `--tail` lines (1,000 by default), each with its time, its stream and its
+  text, and whether the log ended and how (`end` with the outcome, or `runner_gone`).
+  `check log --follow` prints one envelope a line as the log grows and exits 0 with the one that
+  holds its end, as `derive --follow` prints its envelopes; `--human` prints the lines as the log
+  holds them. The tool has the workspace form only, and no follow.
 - Dependencies: `signal-hook` and `signal-hook-registry` (MIT OR Apache-2.0), for `check run`'s
   signals.
 - `check list` and the MCP tool `check_list`: the checks a tree names, from the store at a

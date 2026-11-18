@@ -124,7 +124,7 @@ const UPDATE_COMMAND: &str = "update";
 const UPDATE_SINCE: &str = "0.12.0";
 
 /// The checks' commands (M30), and the release they first ship in: the one after 0.12.0.
-const CHECK_COMMANDS: [&str; 2] = ["check list", "check run"];
+const CHECK_COMMANDS: [&str; 3] = ["check list", "check run", "check log"];
 const CHECK_SINCE: &str = "0.13.0";
 
 /// The release the command at `path` first shipped in.
@@ -276,7 +276,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 67] = [
+const META: [Meta; 68] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -455,6 +455,13 @@ const META: [Meta; 67] = [
         true,
         false,
         Returns::Type("CheckRunResp"),
+    ),
+    meta(
+        "check log",
+        Group::Checks,
+        false,
+        false,
+        Returns::Type("CheckLogResp"),
     ),
     meta(
         "resolve",
@@ -1496,7 +1503,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 62] = [
+const RETURN_SITES: [(&str, &str, &str); 63] = [
     ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1562,6 +1569,11 @@ const RETURN_SITES: [(&str, &str, &str); 62] = [
         "check run",
         "../swarmops-ops/src/check/run.rs",
         "pub fn run_ws(",
+    ),
+    (
+        "check log",
+        "../swarmops-ops/src/check/follow.rs",
+        "pub fn log_ws(",
     ),
     (
         "ws delete",
