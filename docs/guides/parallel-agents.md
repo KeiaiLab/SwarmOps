@@ -387,11 +387,19 @@ place of a git worktree ([Workspaces for worktree sessions and subagents](claude
 ### A tree's checks
 
 A repository names its checks in `.swarmops/checks.toml`, in its tree: one command each, run with
-no shell, with the directory it runs in and a timeout. `so check list` lists them from the store at
-a changeset, and `so check list --dir .` from a checkout, each with the digest of its definition;
-a key the file's version does not take is refused at its line. Nothing runs these checks yet:
-`so ws land --check` still runs the one command of `.swarmops/workspaces.json`
-([`check list`](../reference/commands/check-list.md)).
+no shell, with the directory it runs in, a timeout and the stages its answer is wanted at
+(`before-land` by default). `so check list` lists them from the store at a changeset, and
+`so check list --dir .` from a checkout, each with the digest of its definition; a key the file's
+version does not take is refused at its line.
+
+`so check run` runs one stage's checks of a clean workspace, on the tree its files stand for, or
+with `--dir .` those of a checkout as they are: one at a time, each in its own process group under
+its timeout, with one envelope naming every check's outcome and `E_CHECK_FAILED` when one did not
+pass. Each check gets the `SWARMOPS_CHECK_*` variables and a short list of the caller's (more only
+with `--pass`), and writes a log with a time on every line, which `so check log` reads and
+`so check log --follow` reads while it grows. `so ws land --check` still runs the one command of
+`.swarmops/workspaces.json` ([`check run`](../reference/commands/check-run.md),
+[`check log`](../reference/commands/check-log.md)).
 
 ### Git at both ends
 
