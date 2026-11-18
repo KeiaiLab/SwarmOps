@@ -52,10 +52,20 @@ fn kept(argv: &[String], dir: &Utf8Path, spec: &Spec<'_>) -> (Run, Vec<u8>, Vec<
     (ran, out, err)
 }
 
-/// The pid a script wrote into `file` of `dir`.
+/// The pid a script wrote into `file` of `dir`, waiting up to 60 s for the file to hold one: a
+/// shell's `>` makes the file before it writes the number.
 fn pid_in(dir: &Utf8Path, file: &str) -> rustix::process::Pid {
-    let text = std::fs::read_to_string(dir.join(file)).unwrap();
-    rustix::process::Pid::from_raw(text.trim().parse().unwrap()).unwrap()
+    let path = dir.join(file);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(pid) = text.trim().parse()
+        {
+            return rustix::process::Pid::from_raw(pid).unwrap();
+        }
+        assert!(Instant::now() < deadline, "no pid in {path}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Waits up to 10 s for `group` to be gone, then says whether it is.
@@ -88,9 +98,10 @@ fn only_the_given_variables_reach_the_command() {
 /// run says it was stopped, not timed out, with no exit code.
 #[test]
 fn the_stop_flag_kills_the_group() {
-    // 1. A shell that writes its group and its sleeper, and a flag set once both are written.
+    // 1. A shell that writes its group and its sleeper, and a flag set once both are written:
+    //    the group's file is renamed into place whole, so that it never holds a part of the pid.
     let (_tmp, dir) = workdir();
-    let script = "sleep 600 & echo $! > sleeper; echo $$ > group; wait";
+    let script = "sleep 600 & echo $! > sleeper; echo $$ > group.tmp && mv group.tmp group; wait";
     let stop = Arc::new(AtomicBool::new(false));
     let setter = {
         let (stop, dir) = (Arc::clone(&stop), dir.clone());
