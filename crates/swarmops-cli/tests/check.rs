@@ -167,13 +167,16 @@ fn a_link_is_not_a_check_file() {
 type Config = fn(&Path) -> String;
 
 /// `check.argv` of `workspaces.json` still reads as the one check `default`, and `check list`
-/// reads the file as `ws land --check` does: where it lists `default`, the land runs that argv;
-/// where it lists none, the land has no command to run; where it refuses the file, so does the
-/// land. Each case lands from a workspace made before the file was published.
+/// refuses every file `ws land --check` refuses: where it lists `default`, the land runs that
+/// argv; where it lists none, the land has no command to run; where the land refuses the file, so
+/// does `check list`. The one pinned disagreement: `check list` holds `check.timeout_s` (and
+/// `check.argv`) to version 1's rules, which the land does not read, so a timeout past 86,400 s
+/// is refused by `check list` and run by the land (known limitations, target M31-10). Each case
+/// lands from a workspace made before the file was published.
 #[test]
 fn the_legacy_check_is_what_a_checked_land_runs() {
     let ran = |lab: &Lab| lab.beside("ran.txt");
-    let cases: [(&str, Config); 5] = [
+    let cases: [(&str, Config); 6] = [
         ("valid", |ran| {
             let script = format!("echo checked > {}", ran.display());
             json!({"check": {"argv": ["sh", "-c", script]}}).to_string()
@@ -183,6 +186,10 @@ fn the_legacy_check_is_what_a_checked_land_runs() {
         ("not json", |_| "{\"check\": ".to_owned()),
         ("argv a string", |_| {
             r#"{"check": {"argv": "make"}}"#.to_owned()
+        }),
+        ("timeout past version 1", |ran| {
+            let script = format!("echo checked > {}", ran.display());
+            json!({"check": {"argv": ["sh", "-c", script], "timeout_s": 100_000}}).to_string()
         }),
     ];
     for (case, config) in cases {
@@ -207,6 +214,13 @@ fn the_legacy_check_is_what_a_checked_land_runs() {
                 let said = fs::read_to_string(ran(&lab)).expect("the check ran");
                 assert_eq!(said, "checked\n", "{case}");
             }
+            "timeout past version 1" => {
+                let refused = listed.err("E_CHECK_FILE", 1);
+                assert_eq!(refused["details"]["key"], "check.timeout_s", "{refused}");
+                assert_eq!(landed.exit, 0, "{case}: {landed}");
+                let said = fs::read_to_string(ran(&lab)).expect("the check ran");
+                assert_eq!(said, "checked\n", "{case}");
+            }
             "empty" | "no check" => {
                 assert_eq!(listed.ok()["checks"], json!([]), "{case}");
                 let error = landed.err("E_INVALID_ARG", 2);
@@ -226,7 +240,7 @@ fn the_legacy_check_is_what_a_checked_land_runs() {
             }
         }
         assert!(
-            !ran(&lab).exists() || case == "valid",
+            !ran(&lab).exists() || case == "valid" || case == "timeout past version 1",
             "{case}: nothing ran"
         );
     }

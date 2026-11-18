@@ -316,9 +316,15 @@ pub fn parse(bytes: &[u8]) -> Result<CheckFile, Refusal> {
     })
 }
 
-/// Reads `bytes` as `.swarmops/workspaces.json`, as a workspace reads it: its `check.argv`, if
-/// it has one that is not empty, as the one check [`LEGACY_CHECK`], at the root, with its
-/// `check.timeout_s` or the default. None for a file without one.
+/// Reads `bytes` as `.swarmops/workspaces.json`: its `check.argv`, if it has one that is not
+/// empty, as the one check [`LEGACY_CHECK`], at the root, with its `check.timeout_s` or the
+/// default. None for a file without one.
+///
+/// Every file a workspace refuses is refused here too, since the shape and the size are a
+/// workspace's. This also holds `check.argv` and `check.timeout_s` to version 1's rules, which
+/// `ws land --check` does not: it runs an argv of an empty program, say, and never reads
+/// `check.timeout_s`, taking its own `--check-timeout`. The timeout given here is the one a
+/// later runner of the check will use.
 pub fn parse_legacy(bytes: &[u8]) -> Result<Option<Check>, Refusal> {
     // 1. Bounded, text, JSON of the shape a workspace reads (unknown keys taken).
     let text = text_of(LEGACY_FILE, bytes, MAX_LEGACY_BYTES)?;
@@ -375,7 +381,7 @@ fn legacy_refusal(e: &serde_json::Error) -> Refusal {
 }
 
 /// The shape a workspace reads `.swarmops/workspaces.json` in (`swarmops-ws`'s `RepoConfig`), so
-/// that both refuse the same files. Unknown keys are taken.
+/// that a file a workspace refuses for its shape is refused here too. Unknown keys are taken.
 #[derive(Deserialize)]
 struct LegacyConfig {
     /// The prefixes a new workspace holds.

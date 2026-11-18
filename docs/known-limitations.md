@@ -951,7 +951,8 @@ left).
   is durable and the workspace stands on it; a cut unchecked land run again with `--check` replays
   the unchecked land; a `ws land -m` cut inside its own commit asks for `ws commit` first; the
   `timeout_s` of `.swarmops/workspaces.json`'s `check` is not read by `ws land --check` (the
-  request's, 900 s by default, applies), though `check list` gives it as the check's timeout, and a `--check-timeout` too large for the clock aborts the command;
+  request's, 900 s by default, applies), and a `--check-timeout` too large for the clock aborts
+  the command;
   `blob get` takes `--max-bytes 0` as one blob, and caps neither the ids nor the bytes it holds.
   A `ws land -m` cut after the store's land and run again after further edits replays the land
   only while the operation that made the workspace's head is among the journal's newest 10,000;
@@ -1130,6 +1131,12 @@ the check file and `check list` are built ([roadmap](roadmap.md#checks-and-deliv
   checks `.swarmops/checks.toml` names are listed by `check list` and run by nothing yet, and a
   tree that holds both files gives `check list` the check file's checks and `ws land --check`
   the other file's command. *Target: M31. Found: requirement CD-E20.*
+- **`check list` refuses some `workspaces.json` files that `ws land --check` runs.** It holds
+  `check.argv` and `check.timeout_s` to version 1's rules, which the land does not read: a
+  `check.timeout_s` of 0 or past 86,400, an empty program, or an argv past 1,024 strings is
+  `E_CHECK_FILE` to `check list`, while the land accepts the file and runs the argv under its own
+  `--check-timeout`. The `timeout_s` that `check list` gives the check `default` is not the one
+  the land uses. *Target: M31-10. Found: the M30-1 review.*
 - **A check's definition digest can change.** `check list` gives each check the digest of its
   definition by a provisional recipe, outside the hash contract: a later release may give the
   same definition another digest, so digests compare only between builds of one release.

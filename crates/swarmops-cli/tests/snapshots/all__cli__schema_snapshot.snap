@@ -1353,7 +1353,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "timeout_s": {
-              "description": "The most seconds it may run, its default (900) filled in.",
+              "description": "The most seconds it may run, its default (900) filled in. For the check `default` of\n`.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does\nnot read it, and takes its own `--check-timeout`.",
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
@@ -1447,7 +1447,7 @@ expression: s.redact(&all)
           "type": "string"
         },
         "timeout_s": {
-          "description": "The most seconds it may run, its default (900) filled in.",
+          "description": "The most seconds it may run, its default (900) filled in. For the check `default` of\n`.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does\nnot read it, and takes its own `--check-timeout`.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"

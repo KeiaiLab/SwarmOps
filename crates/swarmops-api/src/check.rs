@@ -87,7 +87,9 @@ pub struct CheckOut {
     pub argv: Vec<String>,
     /// The directory of the tree it runs in, as a repository path; `.` is the root.
     pub dir: String,
-    /// The most seconds it may run, its default (900) filled in.
+    /// The most seconds it may run, its default (900) filled in. For the check `default` of
+    /// `.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does
+    /// not read it, and takes its own `--check-timeout`.
     pub timeout_s: u64,
     /// The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not
     /// its name): 64 hex digits. Two checks that differ only in name share it. Provisional: the
