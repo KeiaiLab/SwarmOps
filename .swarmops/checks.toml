@@ -3,7 +3,8 @@
 # parse fails the gate. Each timeout is its job's `timeout-minutes` in the workflow file, the two
 # `before-land` checks sharing the check job's; no run was measured.
 #
-# Stages: `before-land` is the gate, what ci.yml's `check` job runs. The `manual` checks run on
+# Stages: `before-land` is the gate, what ci.yml's `check` job runs and what
+# `so check run --dir . --stage before-land` runs before a push. The `manual` checks run on
 # GitHub, in their own jobs, as before; later steps of M30 and M31 give them stages of their own.
 # Every check writes its stages out, the default too.
 version = 1

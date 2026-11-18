@@ -102,6 +102,8 @@ default: check
 # scripts/golden-frozen.py's that the release cut's golden check (`golden-frozen`) still does.
 # Last, scripts/release-marks.py's shows that `release-marks` still gives each release the marks
 # its rules say, and runs gh as it should, against a stand-in for gh and offline.
+# `so check run --dir . --stage before-land` (M31) runs this recipe and `check-compare`, the two
+# before-land checks of .swarmops/checks.toml, one after the other, each with a log of its own.
 # The definition of done: fmt, clippy, tests, hook proof, docs, deny, notices, script checks.
 check:
     cargo fmt --all --check
