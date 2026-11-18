@@ -2741,3 +2741,27 @@ whole:
 cargo nextest run --locked -p swarmops-git --all-features --run-ignored ignored-only \
   -E 'test(=export::by_step::export_of_12000_by_step)' --no-capture
 ```
+
+## M22 — the landing queue under 50 processes — 2026-11-18
+
+A22 (the M22 core design, K31): `queue_perf::perf::fifty_entries_with_thirty_second_checks`. 50
+processes each enqueue one change onto `main` and wait for it; the repository's check sleeps
+30 s; the runner checks at most 4 candidates at once (`--inflight`'s default). A sampler reads
+`/proc/locks` every 1 ms and times each process's hold of `meta/lock`. At `093f9823`, in the
+bench directory, a 1-minute load of 3.0 at the start and 13.0 at the end:
+
+| Build | Landed | Wall | Lands/s | Gate latency p50 / p99 | Retries | Holds | Hold p50 / p99 / max |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| release | 50 of 50 | 92.5 s | 0.54 | 62.2 / 92.5 s | 0 | 56 | 7.5 / 72.4 / **72.4 ms** |
+| debug (load 18.7) | 50 of 50 | 92.6 s | 0.54 | 62.3 / 92.6 s | 0 | 71 | 8.6 / 78.6 / 78.6 ms |
+
+Every entry landed once, each on a changeset of its own, and `verify --deep` found the store clean. The
+longest hold, 72.4 ms, is under the case's 1 s bound: no hold of the lock spans a check. With the
+runner holding `meta/lock` across its checks (a mutation, not committed) the case fails, the
+longest hold 30,029.9 ms.
+
+A21's figures are G4's for a plain land: 20 lands/s or more, a p99 under 500 ms, retries under 5 %,
+nothing lost. Against a 30 s check, lands/s and the gate latency count the check's time, three
+rounds of it here (92.5 s), so only retries (0 %) and nothing lost compare; the lock's share is the
+hold, 72.4 ms at most. The fold's cost over 50 entries does not show (the known limitations, "The
+landing queue").
