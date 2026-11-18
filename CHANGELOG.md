@@ -20,6 +20,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ## [Unreleased]
 
+### Added
+
+- The error code `E_QUEUE_WAIT_TIMEOUT` (exit 4, retryable), which `queue wait` raises when
+  its timeout passes with the entry still open (the M22 core design §6). Golden envelopes pin
+  56 of the 57 error codes: no command raises the new one yet.
+
 ## [0.12.0] - 2026-11-18
 
 `init` now makes a FORMAT 3 store, which 0.11.x and older builds do not open; `upgrade` converts

@@ -432,6 +432,7 @@ const ROWS: &[(ErrorCode, &str, i32, bool)] = &[
     (ErrorCode::WsStale, "E_WS_STALE", 1, false),
     (ErrorCode::CheckFailed, "E_CHECK_FAILED", 1, false),
     (ErrorCode::StoreTooNew, "E_STORE_TOO_NEW", 1, false),
+    (ErrorCode::QueueWaitTimeout, "E_QUEUE_WAIT_TIMEOUT", 4, true),
 ];
 
 #[test]

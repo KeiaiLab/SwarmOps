@@ -3549,6 +3549,11 @@ expression: s.redact(&all)
           "const": "E_STORE_TOO_NEW",
           "description": "The store is of a later format than this build reads, or lists a feature it lacks\n(`details.format`, and `details.features`, the features it lacks, none for a later\nformat). Nothing was written; a newer swarmops reads the store.",
           "type": "string"
+        },
+        {
+          "const": "E_QUEUE_WAIT_TIMEOUT",
+          "description": "`queue wait` reached its timeout with the entry still open (`details.entry`, and\n`details.state`, `waiting` or `checking`). The entry stays queued; waiting again can see\nit land.",
+          "type": "string"
         }
       ],
       "title": "ErrorCode"
@@ -11430,6 +11435,11 @@ expression: s.redact(&all)
             {
               "const": "E_STORE_TOO_NEW",
               "description": "The store is of a later format than this build reads, or lists a feature it lacks\n(`details.format`, and `details.features`, the features it lacks, none for a later\nformat). Nothing was written; a newer swarmops reads the store.",
+              "type": "string"
+            },
+            {
+              "const": "E_QUEUE_WAIT_TIMEOUT",
+              "description": "`queue wait` reached its timeout with the entry still open (`details.entry`, and\n`details.state`, `waiting` or `checking`). The entry stays queued; waiting again can see\nit land.",
               "type": "string"
             }
           ]

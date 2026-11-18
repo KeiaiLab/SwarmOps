@@ -322,6 +322,11 @@ error_codes! {
     /// (`details.format`, and `details.features`, the features it lacks, none for a later
     /// format). Nothing was written; a newer swarmops reads the store.
     StoreTooNew => "E_STORE_TOO_NEW", EXIT_ERROR, false;
+    // The landing queue (M22).
+    /// `queue wait` reached its timeout with the entry still open (`details.entry`, and
+    /// `details.state`, `waiting` or `checking`). The entry stays queued; waiting again can see
+    /// it land.
+    QueueWaitTimeout => "E_QUEUE_WAIT_TIMEOUT", EXIT_RETRYABLE, true;
 }
 
 impl ErrorCode {
