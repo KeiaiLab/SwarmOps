@@ -570,6 +570,29 @@ fn a_check_of_two_stages_runs_in_both() {
     );
 }
 
+/// A relative `SWARMOPS_CHECK_RUNS_DIR` is refused as a host with no runs root is, with
+/// `details.reason` `runs_dir`, and a hint naming an absolute directory.
+#[test]
+fn a_relative_runs_directory_is_refused_with_a_reason() {
+    let tree = Tree::new("[check.ok]\nargv = [\"true\"]\n");
+    let dir = tree.dir();
+    let line = ["check", "run", "--dir", dir.to_str().unwrap()];
+    let out = run_in(
+        tree.tmp(),
+        &[("SWARMOPS_CHECK_RUNS_DIR", "rel")],
+        &line,
+        None,
+    );
+    let error = out.err("E_INVALID_ARG", 2);
+    assert_eq!(error["details"]["reason"], "runs_dir", "{error}");
+    let hint = error["hint"].as_str().unwrap();
+    assert!(
+        hint.contains("SWARMOPS_CHECK_RUNS_DIR=\"$PWD/rel\""),
+        "{hint}"
+    );
+    assert!(!tree.tmp().join("rel").exists());
+}
+
 /// The directory form writes its runs below `SWARMOPS_CHECK_RUNS_DIR` only, else below the
 /// state directory of the environment it is given; never into the tree, nor into a home or state
 /// directory it is not given.

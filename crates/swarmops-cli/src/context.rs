@@ -146,10 +146,17 @@ pub fn check_runs_root(env: Env<'_>) -> Result<Option<Utf8PathBuf>, OpError> {
     if let Some(root) = var(env, CHECK_RUNS_DIR_ENV)? {
         let root = Utf8PathBuf::from(root);
         if !root.is_absolute() {
-            return Err(OpError::new(
+            let mut error = OpError::new(
                 ErrorCode::InvalidArg,
                 format!("{CHECK_RUNS_DIR_ENV} is {root:?}: give an absolute directory"),
-            ));
+            );
+            error
+                .details
+                .insert("reason".to_owned(), Value::from("runs_dir"));
+            return Err(error.with_hint(format!(
+                "name an absolute directory, such as {CHECK_RUNS_DIR_ENV}=\"$PWD/{root}\", or \
+                 unset it for the state directory's swarmops/check-runs"
+            )));
         }
         return Ok(Some(root));
     }
