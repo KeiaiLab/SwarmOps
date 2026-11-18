@@ -19,7 +19,7 @@
 //! `check run` (M31, [`mod@run`]) runs one stage's checks of a directory or of a workspace held
 //! clean, each with the environment of [`mod@env`], its output in a log of [`mod@log`]'s format.
 //! Once a check has ended, what it reported is read as findings (`intake`): its report file
-//! ([`mod@findings`]) and the JUnit reports it declares ([`mod@junit`]).
+//! ([`mod@findings`]) and the JUnit and SARIF reports it declares ([`mod@junit`], [`mod@sarif`]).
 
 mod digest;
 pub mod env;
@@ -30,6 +30,7 @@ mod intake;
 pub mod junit;
 pub mod log;
 pub mod run;
+pub mod sarif;
 
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read as _};
