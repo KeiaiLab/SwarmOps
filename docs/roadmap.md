@@ -193,7 +193,8 @@ Deferred past usable, with what stands in until then:
 | M12, macOS and Windows | The pilot and CI run on Linux | The Linux releases; M12 is developed separately, and its macOS part builds, passes its tests and is packed by the release workflow, from v0.12.0 on |
 | M20, `FORMAT 3` | One layout decision serves M7's records, the queue, withdrawal, lineage and the manifest that takes compaction out of the write; its design comes first | `FORMAT 2`; compaction inside the write |
 | M21, health, drift and housekeeping | It reads the records M17 adds | `info`'s exit status; the envelope counts of [Monitoring](operate/monitoring.md#summarise-the-envelopes) |
-| M22, the landing queue | Its checks are the gate M7 builds, on `FORMAT 3` | `ws land --check` in each process; the lock's own queue |
+| M22, the landing queue | Its core is pulled forward: it needs only `FORMAT 3`'s queue records and the workspace check; M7's required-check rules plug into it later | `ws land --check` in each process; the lock's own queue |
+| M22-R, the queue's remote publish | The core proves the local queue first | land-direct; `so push` after a local queue land |
 | M23, withdrawal and erasure | Its records need `FORMAT 3` | None: unreachable objects are counted, not removed |
 | M24, rewriting with lineage | Its lineage id needs `FORMAT 3` | `rebase` and `op undo` |
 | M25, moving onto a store without a pause | It needs M17's serve path | Follow a git remote, then switch (M13) |
@@ -664,18 +665,19 @@ GitHub goal, M15 to M26 by the plan of 2026-11-05; M11 (topology 3) takes `so cl
 v0.4.0, M14 in v0.7.0, M15 in v0.8.0 and M16 in v0.9.0, ahead of M12, which is developed separately.
 **Provisional:** after M16, delivered in v0.9.0, with M17's slices in v0.10.0, M18's and M19's in v0.11.0, M20's and M21's first ones in v0.12.0, and their exit criteria open, the order follows
 [To usable](#to-usable): M17 serves under load, M18 and M19 need no new format, one `FORMAT 3` (M20)
-then serves review, the queue, withdrawal and lineage, and topology 3 stays after the simulator;
-the order below is the plan:
+then serves review, the queue, withdrawal and lineage, and topology 3 stays after the simulator.
+M22's core moves ahead of M7 (2026-11-18): it needs only `FORMAT 3`. The order below is the plan:
 
 ```text
-order   M13 → M5 → M6 → M14 → M15 → M16 → M17 → M18 ∥ M19 → M20 ∥ M21 → M7 → M22 ∥ M23
+order   M13 → M5 → M6 → M14 → M15 → M16 → M17 → M18 ∥ M19 → M20 ∥ M21 → M22 → M7 ∥ M23 ∥ M22-R
         → M9 → M11 ∥ M24 → M25
         M12 apart, developed separately; M26 after 1.0, if a pilot asks
 needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
         M14  ← M13, M6                    FORMAT 2: branch names and tags
         M20  ← its design                 the manifest, record kinds
         M7   ← M20                        annotations, check results
-        M22  ← M7, M20                    the gate's checks, queue entries
+        M22  ← M20                        queue entries, the workspace check
+        M22-R ← M22, M13                  the local queue, the sync engine
         M11  ← M9, M7, M13, M14, M24      the simulator, approvals, lineage
 ```
 
@@ -694,9 +696,10 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
 | 📋 M19 | — | Workspaces, second round: stale workspaces everywhere, edit snapshots, the update's latency | M16 | G9's misses met. Built, in v0.11.0: `E_WS_STALE` from every command that reads or writes a workspace, along every parent; an update that snapshots edits first and carries them; `ws snapshot`; update obstacles refused before the store; `ws status` listing what a sparse commit refuses; one scan walk on 8 threads; unreadable directories and kind changes named; a kill sweep of `ws land -m` (10 kills per format in `just check`); the OpenCode adapter; the large-tree and many-workspace cases. Not met yet: the update after a land and `ws commit` not measured again since v0.6.0's 116.6 ms and 89.0 ms (the host was never quiet), and the commit row stays missed until a change feed exists (the M19 design, decision D1); the 500-kill sweep and the new cases not recorded yet ([perf.md](perf.md#m19-fan-in--2026-11-09-not-measured)) |
 | 📋 M20 | — | `FORMAT 3`: the sorted views under a manifest, the new record kinds, `upgrade` | its design | G18 at 1,000,000 records. Built, in v0.12.0: FORMAT 3 the default of `init`, its journal frames with a nonce (byte-identical operations get distinct ids), the fact records and their index behind named features, the sorted views as runs built after the lock is released, `upgrade` 2 → 3 keeping every op id, verify and repair on it, every crash, power-loss and kill sweep on all three formats, `E_STORE_TOO_NEW`, the release cut's golden check. Not measured yet: G18 at 1,000,000 records, A5's 1,000,000 commits, A1's commit cost and the 200,000-changeset upgrade ran only as a 20,000-changeset trial under load ([perf.md](perf.md#m20--format-3-at-1000000-records--2026-11-12-not-measured)) |
 | 📋 M21 | — | Health, drift and housekeeping | M17 | G24: a land p99 that climbs from 50 to 120 ms is marked as drift, and a steady run is not; G24 joins [docs/goals.md](goals.md) with its first measurement |
+| 📋 M22 | — | The landing queue | M20 (`FORMAT 3`) | On a local store: entries survive kill and power loss and the queue resumes (C8); candidates checked in parallel, ref moves in queue order, a red isolated by bisection (C2, C4); removal with a machine-readable reason (C3); CLI and MCP control (C9); 50 processes each with a 30 s check measured against A21's numbers, no lock spanning a check (A22) |
 | 📋 M7 | — | Blame and review | M20 (`FORMAT 3`) | As the README states it |
-| 📋 M22 | — | The landing queue | M7, M20 | Queue durable; checks never under the lock |
 | 📋 M23 | — | Withdrawal and erasure | M20 | Every id kept |
+| 📋 M22-R | 2 | The queue's remote publish (Forgejo or git remote), postland, the land-direct cutover | M22, M13 | A queued land reaches the remote's branch as the checked tree |
 | 📋 M9 | — | Simulation and a benchmark gate | M20 | As the README states it |
 | 📋 M11 | 3 | Native sync over `so://`, extending M13's sync engine and M14's entry | M3, M4, M6, M7, M8, M9, M13, M14, M24 | Topology 3's acceptance criteria 1 to 3 pass |
 | 📋 M24 | 3 | Rewriting with lineage | M20 | Lineage kept through every rewrite and upstream land |
