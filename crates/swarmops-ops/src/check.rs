@@ -259,13 +259,17 @@ fn on_host(dir: &Utf8Path, name: &'static str, limit: u64) -> Result<Option<Vec<
 }
 
 /// `E_IO` for `name`, below the directory the caller named, that could not be read: the
-/// message names it relative to that directory, never by the host's whole path.
+/// message names it relative to that directory, never by the host's whole path, and
+/// `details.vouched` is `true`, as in every answer about a directory's files.
 fn host_failed(name: &str, e: &std::io::Error) -> OpError {
     let mut error = error::error(
         ErrorCode::Io,
         error::one_line(format!("{name} cannot be read: {}", e.kind())),
     );
     error.details.insert("path".to_owned(), Value::from(name));
+    error
+        .details
+        .insert("vouched".to_owned(), Value::from(true));
     error
 }
 

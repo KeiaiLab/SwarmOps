@@ -848,6 +848,29 @@ fn the_directory_form_needs_a_directory() {
     assert_eq!(list_dir(&root).unwrap().checks, []);
 }
 
+/// A file the directory form cannot read is `E_IO`, named below the directory and vouched for
+/// like every answer of that form.
+#[test]
+fn the_directory_form_s_io_error_is_vouched_for() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (_dir, root) = dir_with(&[(CHECK_FILE, FIXTURE.as_bytes())]);
+    let file = root.join(CHECK_FILE);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&file).is_ok() {
+        return; // A user that reads every file, such as root: nothing to refuse.
+    }
+    let error = error_of(list_dir(&root));
+    assert_eq!(error.code, ErrorCode::Io.as_str());
+    assert_eq!(
+        error.message,
+        ".swarmops/checks.toml cannot be read: permission denied"
+    );
+    assert_eq!(
+        Value::Object(error.details),
+        json!({"path": ".swarmops/checks.toml", "vouched": true})
+    );
+}
+
 #[test]
 fn the_directory_form_refuses_a_file_over_the_limit() {
     let big = vec![b'#'; usize::try_from(MAX_CHECK_FILE_BYTES).unwrap() + 1];

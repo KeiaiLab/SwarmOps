@@ -210,6 +210,11 @@ and `too_many`; `details.line` names the line (1 is the first) when the fault ha
 version, and the first one is the refusal. [Troubleshooting](../../troubleshooting.md#e_check_file)
 says what fixes each.
 
+The directory form has two errors of its own. A `.swarmops` or a file in it that the host will not
+let it read (a permission, say) is `E_IO`, exit 1, with `details.path` naming it below `DIR` and
+`details.vouched: true`. A `DIR` that is not a directory is `E_INVALID_ARG`, exit 2, with
+`details.reason: dir` and `details.dir` as given.
+
 ### Through MCP
 
 The MCP tool is `check_list`, with an optional `rev`. It has the store form alone: the server
