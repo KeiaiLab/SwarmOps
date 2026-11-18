@@ -8,10 +8,14 @@ answer.
 
 - **stdout** carries nothing but answers.
 - **stderr** gets a line, starting `swarmops mcp:`, for a message that is a response from the
-  client, and for the I/O error that stops the server; a bug's panic report; and the reason before
-  one of the store's four documented aborts.
+  client, for the I/O error that stops the server, and for a signal that stops it during a
+  `check_run`; a bug's panic report; and the reason before one of the store's four documented
+  aborts.
 - **The exit code** is 0 when stdin ends, 1 when reading stdin or writing stdout fails. On one of
   the store's aborts the process ends by SIGABRT, and the client has to start it again.
+- **Signals.** SIGINT, SIGTERM and SIGHUP end the server as they end any process, except while a
+  `check_run` runs: then they kill the running check's process group and end the run (`cancelled`),
+  the call is answered, and the server exits 0 instead of reading the next message.
 
 ### Options
 
@@ -45,19 +49,21 @@ are not served. The results of `server/discover` and `tools/list` may be kept fo
 
 ### Tools
 
-`tools/list` gives 51 tools, one per operation, named as the envelope's `op` is: the 39 store
+`tools/list` gives 53 tools, one per operation, named as the envelope's `op` is: the 39 store
 operations `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`,
-`path_history`, `diff`, `merge_base`, `op_log`, `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `ref_txn`, `undo`, `commit`,
-`land`, `revert`, `land_check`, `land_group`, `check_list`, `rebase`, `blob_put`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`,
-`fetch`, `push`, `sync` and `sync_status`, then the 12 workspace operations `ws_create`, `ws_status`, `ws_diff`,
+`path_history`, `diff`, `merge_base`, `op_log`, `ref_list`, `ref_set`, `ref_delete`, `ref_log`,
+`ref_txn`, `undo`, `commit`, `land`, `revert`, `land_check`, `land_group`, `check_list`, `rebase`,
+`blob_put`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`, `fetch`, `push`, `sync`,
+`sync_status`, `queue_enqueue`, `queue_status`, `queue_withdraw` and `queue_wait`, then the 14 workspace operations `ws_create`, `ws_status`, `ws_diff`,
 `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize`, `ws_discard`, `ws_snapshot`,
-`ws_list` and `ws_info`. A tool's input schema is its request type's JSON Schema (`swarmops schema <Req>`), with
-every reference inlined so that it stands alone. Its annotations say what it does to the store:
+`ws_list`, `ws_info`, `check_run` and `check_log`. A tool's input schema is its request type's JSON
+Schema (`swarmops schema <Req>`), with every reference inlined so that it stands alone. Its
+annotations say what it does to the store:
 
 | Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
 | --- | --- | --- | --- | --- |
-| The 19 store reads, `land_check`, `check_list`, `blob_has`, `verify`, `remote_list` and `sync_status` among them; `ws_status`, `ws_diff`, `ws_list`, `ws_info` | `true` | `false` | `true` | `false` |
-| `commit`, `rebase`, `blob_put`, `ws_commit` | `false` | `false` | `false` | `false` |
+| The 19 store reads, `land_check`, `check_list`, `blob_has`, `verify`, `remote_list` and `sync_status` among them; `ws_status`, `ws_diff`, `ws_list`, `ws_info`, `check_log` | `true` | `false` | `true` | `false` |
+| `commit`, `rebase`, `blob_put`, `ws_commit`, `check_run` | `false` | `false` | `false` | `false` |
 | `ref_set`, `ref_delete`, `ref_txn`, `undo`, `gc`, `repair`, `upgrade` | `false` | `true` | `true` | `false` |
 | `land`, `revert`, `land_group`, `ws_create`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize` | `false` | `false` | `true` | `false` |
 | `ws_discard` | `false` | `true` | `true` | `false` |

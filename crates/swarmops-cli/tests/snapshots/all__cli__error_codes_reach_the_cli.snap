@@ -720,7 +720,7 @@ expression: s.transcript()
           "reason": "unknown_key",
           "vouched": true
         },
-        "hint": "version 1 of .swarmops/checks.toml takes version and [check.<name>] tables of argv, dir and timeout_s; a newer swarmops may read this key"
+        "hint": "version 1 of .swarmops/checks.toml takes version and [check.<name>] tables of argv, dir, timeout_s and stages; a newer swarmops may read this key"
       },
       "meta": {
         "elapsed_ms": "[elapsed_ms]",

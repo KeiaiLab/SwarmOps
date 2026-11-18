@@ -1,0 +1,1 @@
+A check names its stages in .swarmops/checks.toml, before-land by default; check list --stage lists one stage, and check plan --stage comes with M30-4.

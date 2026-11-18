@@ -6,8 +6,8 @@ use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use serde_json::{Value, json};
 use swarmops_api::{
-    ChangeInput, ChangeOp, CheckListReq, CommitReq, ContentInput, ErrorCode, Identity, ModeInput,
-    OpError, StoreOps,
+    ChangeInput, ChangeOp, CheckListReq, CheckStage, CommitReq, ContentInput, ErrorCode, Identity,
+    ModeInput, OpError, StoreOps,
 };
 
 use super::*;
@@ -18,6 +18,10 @@ const FIXTURE: &str = include_str!("../../../swarmops-cli/tests/fixtures/check/c
 
 /// The fixture with a key no version 1 takes, `stage`, on line 11.
 const REFUSED: &str = include_str!("../../../swarmops-cli/tests/fixtures/check/refused.toml");
+
+/// A check file whose one check names a stage no build knows, `nightly`, on line 8.
+const REFUSED_STAGE: &str =
+    include_str!("../../../swarmops-cli/tests/fixtures/check/refused-stage.toml");
 
 /// The checks of `text`, or the test fails.
 #[track_caller]
@@ -60,6 +64,7 @@ fn check(name: &str, argv: &[&str], dir: &str, timeout_s: u64) -> Check {
         argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),
         dir: dir.to_owned(),
         timeout_s,
+        stages: vec![CheckStage::BeforeLand],
         line: None,
     }
 }
@@ -89,6 +94,132 @@ fn the_fixture_reads_sorted_with_its_lines() {
         ]
     );
     assert_eq!(read.checks[2].argv, ["cargo", "test", "--locked"]);
+    let stages: Vec<&[CheckStage]> = read.checks.iter().map(|c| c.stages.as_slice()).collect();
+    assert_eq!(
+        stages,
+        [
+            &[CheckStage::BeforeLand, CheckStage::AfterLand][..],
+            &[CheckStage::BeforeLand],
+            &[CheckStage::BeforeLand],
+        ]
+    );
+}
+
+// Stages (M30-6).
+
+/// A check without `stages` is `before-land`; one may name several, and any order of the six
+/// reads as their own order.
+#[test]
+fn stages_default_to_before_land_and_read_in_their_own_order() {
+    assert_eq!(
+        checks(&one("a", "argv = [\"x\"]"))[0].stages,
+        [CheckStage::BeforeLand]
+    );
+    let two = one("a", "argv = [\"x\"]\nstages = [\"manual\", \"after-land\"]");
+    assert_eq!(
+        checks(&two)[0].stages,
+        [CheckStage::AfterLand, CheckStage::Manual]
+    );
+    let all = "stages = [\"deploy\", \"manual\", \"release\", \"scheduled\", \"after-land\", \
+               \"before-land\"]";
+    assert_eq!(
+        checks(&one("a", &format!("argv = [\"x\"]\n{all}")))[0].stages,
+        CheckStage::ALL
+    );
+    let legacy = parse_legacy(br#"{"check": {"argv": ["make"]}}"#)
+        .unwrap()
+        .unwrap();
+    assert_eq!(legacy.stages, [CheckStage::BeforeLand]);
+    assert_eq!(legacy.out().stages, [CheckStage::BeforeLand]);
+}
+
+/// Each fault of `stages` is `value`, naming the key and the line of what is at fault: the
+/// value, the item, or the second of a stage given twice.
+#[test]
+fn stages_refuse_each_fault_at_its_line() {
+    let key = Some("check.a.stages");
+    let at = |body: &str| one("a", &format!("argv = [\"x\"]\n{body}"));
+    refuses(&at("stages = \"manual\""), Reason::Value, Some(4), key);
+    refuses(&at("stages = []"), Reason::Value, Some(4), key);
+    refuses(
+        &at("stages = [\n  \"manual\",\n  1,\n]"),
+        Reason::Value,
+        Some(6),
+        key,
+    );
+    refuses(
+        &at("stages = [\n  \"manual\",\n  \"nightly\",\n]"),
+        Reason::Value,
+        Some(6),
+        key,
+    );
+    refuses(
+        &at("stages = [\n  \"manual\",\n  \"manual\",\n]"),
+        Reason::Value,
+        Some(6),
+        key,
+    );
+
+    // The unknown stage is named, quoted and cut, and the six are listed.
+    let error = refused(REFUSED_STAGE.as_bytes()).into_error(false);
+    assert_eq!(
+        error.message,
+        ".swarmops/checks.toml has check.unit.stages holds \"nightly\", not a stage: one of \
+         before-land, after-land, scheduled, release, manual, deploy (line 8)"
+    );
+    assert_eq!(
+        Value::Object(error.details),
+        json!({"file": ".swarmops/checks.toml", "reason": "value", "vouched": false,
+               "line": 8, "key": "check.unit.stages"})
+    );
+    let long = "n".repeat(500);
+    let refusal = refused(at(&format!("stages = [\"{long}\"]")).as_bytes());
+    assert!(refusal.what.len() < 200, "{refusal:?}");
+    assert!(refusal.what.contains('…'), "{refusal:?}");
+}
+
+/// Stages are not part of the definition: the digest of a check is the same with no `stages`,
+/// the default written out, or other stages.
+#[test]
+fn stages_leave_the_definition_digest_alone() {
+    let digest = |stages: &str| {
+        checks(&one("a", &format!("argv = [\"make\"]\n{stages}")))[0].definition_digest()
+    };
+    let none = digest("");
+    assert_eq!(none, check("a", &["make"], ".", 900).definition_digest());
+    assert_eq!(digest("stages = [\"before-land\"]"), none);
+    assert_eq!(digest("stages = [\"manual\", \"deploy\"]"), none);
+}
+
+/// `check list` with a stage lists the checks of it, still sorted by name, and echoes it; the
+/// same in both forms.
+#[test]
+fn both_forms_list_one_stage() {
+    // 1. The store form.
+    let (_dir, ops) = store_with(&[(CHECK_FILE, FIXTURE, ModeInput::File)]);
+    let mut req = CheckListReq::default();
+    req.stage = Some(CheckStage::AfterLand);
+    let after = list(&ops, req).unwrap();
+    let names: Vec<&str> = after.checks.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        (names, after.stage),
+        (vec!["docs"], Some(CheckStage::AfterLand))
+    );
+    let mut req = CheckListReq::default();
+    req.stage = Some(CheckStage::BeforeLand);
+    let before = list(&ops, req).unwrap();
+    let names: Vec<&str> = before.checks.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["docs", "lint", "unit"]);
+    let mut req = CheckListReq::default();
+    req.stage = Some(CheckStage::Deploy);
+    assert_eq!(list(&ops, req).unwrap().checks, []);
+    assert_eq!(list(&ops, CheckListReq::default()).unwrap().stage, None);
+
+    // 2. The directory form.
+    let (_tmp, root) = dir_with(&[(CHECK_FILE, FIXTURE.as_bytes())]);
+    let dir_after = list_dir(&root, Some(CheckStage::AfterLand)).unwrap();
+    assert_eq!(dir_after.checks, after.checks);
+    assert_eq!(dir_after.stage, Some(CheckStage::AfterLand));
 }
 
 /// Any table syntax is the same document: dotted keys and inline tables, a check's line the line
@@ -773,7 +904,7 @@ fn both_forms_refuse_swarmops_as_a_link() {
 
     let (_dir, root) = dir_with(&[("real/checks.toml", FIXTURE.as_bytes())]);
     std::os::unix::fs::symlink("real", root.join(".swarmops")).unwrap();
-    let error = error_of(list_dir(&root));
+    let error = error_of(list_dir(&root, None));
     assert_eq!(error.message, said);
     assert_eq!(
         Value::Object(error.details),
@@ -807,7 +938,7 @@ fn dir_with(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Utf8PathBuf) {
 #[test]
 fn the_directory_form_is_vouched_for() {
     let (_dir, root) = dir_with(&[(CHECK_FILE, FIXTURE.as_bytes())]);
-    let resp = list_dir(&root).unwrap();
+    let resp = list_dir(&root, None).unwrap();
     assert!(resp.vouched);
     assert_eq!(resp.tree, None);
     let (_store, ops) = store_with(&[(CHECK_FILE, FIXTURE, ModeInput::File)]);
@@ -815,19 +946,19 @@ fn the_directory_form_is_vouched_for() {
     assert_eq!(resp.checks, stored.checks);
 
     let (_dir, root) = dir_with(&[]);
-    let resp = list_dir(&root).unwrap();
+    let resp = list_dir(&root, None).unwrap();
     assert_eq!(
         (resp.vouched, resp.file, resp.checks.len()),
         (true, None, 0)
     );
 
     let (_dir, root) = dir_with(&[(CHECK_FILE, REFUSED.as_bytes())]);
-    let error = error_of(list_dir(&root));
+    let error = error_of(list_dir(&root, None));
     assert_eq!(error.details["vouched"], true);
     assert_eq!(error.details["line"], 11);
 
     let (_dir, root) = dir_with(&[(LEGACY_FILE, br#"{"check": {"argv": ["make"]}}"#)]);
-    assert_eq!(list_dir(&root).unwrap().checks[0].name, "default");
+    assert_eq!(list_dir(&root, None).unwrap().checks[0].name, "default");
 }
 
 #[test]
@@ -835,31 +966,37 @@ fn the_directory_form_follows_no_link() {
     let (_dir, root) = dir_with(&[("elsewhere.toml", FIXTURE.as_bytes())]);
     std::fs::create_dir(root.join(".swarmops")).unwrap();
     std::os::unix::fs::symlink("../elsewhere.toml", root.join(CHECK_FILE)).unwrap();
-    let error = error_of(list_dir(&root));
+    let error = error_of(list_dir(&root, None));
     assert_eq!(error.details["reason"], "not_a_file");
     assert_eq!(error.details["vouched"], true);
 
     let (_dir, root) = dir_with(&[("real/checks.toml", FIXTURE.as_bytes())]);
     std::os::unix::fs::symlink("real", root.join(".swarmops")).unwrap();
-    assert_eq!(error_of(list_dir(&root)).details["reason"], "not_a_file");
+    assert_eq!(
+        error_of(list_dir(&root, None)).details["reason"],
+        "not_a_file"
+    );
 
     let (_dir, root) = dir_with(&[]);
     std::fs::create_dir_all(root.join(CHECK_FILE)).unwrap();
-    assert_eq!(error_of(list_dir(&root)).details["reason"], "not_a_file");
+    assert_eq!(
+        error_of(list_dir(&root, None)).details["reason"],
+        "not_a_file"
+    );
 }
 
 #[test]
 fn the_directory_form_needs_a_directory() {
     let (_dir, root) = dir_with(&[("file", b"x")]);
     for dir in [root.join("missing"), root.join("file")] {
-        let error = error_of(list_dir(&dir));
+        let error = error_of(list_dir(&dir, None));
         assert_eq!(error.code, ErrorCode::InvalidArg.as_str());
         assert_eq!(error.details["reason"], "dir");
     }
-    let error = error_of(list_dir(camino::Utf8Path::new("")));
+    let error = error_of(list_dir(camino::Utf8Path::new(""), None));
     assert_eq!(error.message, "--dir \"\" names no directory");
     let (_dir, root) = dir_with(&[(".swarmops", b"a file")]);
-    assert_eq!(list_dir(&root).unwrap().checks, []);
+    assert_eq!(list_dir(&root, None).unwrap().checks, []);
 }
 
 /// A file the directory form cannot read is `E_IO`, named below the directory and vouched for
@@ -873,7 +1010,7 @@ fn the_directory_form_s_io_error_is_vouched_for() {
     if std::fs::File::open(&file).is_ok() {
         return; // A user that reads every file, such as root: nothing to refuse.
     }
-    let error = error_of(list_dir(&root));
+    let error = error_of(list_dir(&root, None));
     assert_eq!(error.code, ErrorCode::Io.as_str());
     assert_eq!(
         error.message,
@@ -889,7 +1026,7 @@ fn the_directory_form_s_io_error_is_vouched_for() {
 fn the_directory_form_refuses_a_file_over_the_limit() {
     let big = vec![b'#'; usize::try_from(MAX_CHECK_FILE_BYTES).unwrap() + 1];
     let (_dir, root) = dir_with(&[(CHECK_FILE, &big)]);
-    let error = error_of(list_dir(&root));
+    let error = error_of(list_dir(&root, None));
     assert_eq!(error.details["reason"], "too_large");
     assert_eq!(error.details["bytes"], MAX_CHECK_FILE_BYTES + 1);
     assert!(!error.message.contains(root.as_str()), "{}", error.message);

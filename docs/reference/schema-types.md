@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 219 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 231 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -32,7 +32,19 @@ The 219 request, response and value types of the API, as `swarmops schema` print
 | [`ChangesetSummary`](#changesetsummary) | object | One changeset of a log. |
 | [`CheckListReq`](#checklistreq) | object | `check_list` (CLI `check list`): the checks the tree of `rev` describes. |
 | [`CheckListResp`](#checklistresp) | object | `check_list`: the checks a tree describes, sorted by name. |
+| [`CheckLogEnd`](#checklogend) | enumeration | How a check's log ended. |
+| [`CheckLogLineOut`](#checkloglineout) | object | One line of a check's log. |
+| [`CheckLogReq`](#checklogreq) | object | `check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. |
+| [`CheckLogResp`](#checklogresp) | object | `check_log`: lines of a check's log, and whether it has ended. |
+| [`CheckLogStream`](#checklogstream) | enumeration | Where a line of a check's log came from. |
+| [`CheckNotStarted`](#checknotstarted) | enumeration | Why a check did not start. |
 | [`CheckOut`](#checkout) | object | One check: a command run with no shell, in a directory of the tree, for at most its time. |
+| [`CheckOutcome`](#checkoutcome) | enumeration | How a check of a run ended. |
+| [`CheckRunOut`](#checkrunout) | object | One check of a run: how it ended, and where its log is. |
+| [`CheckRunReq`](#checkrunreq) | object | `check_run` (CLI `check run`): run the checks of one stage of a workspace's tree, one at a time in name order. |
+| [`CheckRunResp`](#checkrunresp) | object | `check_run`: every selected check's outcome, in the order they ran. |
+| [`CheckSectionOut`](#checksectionout) | object | A section a check opened with a marker line: from its marker to the next one, or to the end of the check's output. |
+| [`CheckStage`](#checkstage) | enumeration | When a check's answer is wanted. |
 | [`CloneReq`](#clonereq) | object | `clone`: a new store in a directory of the caller's host, holding a git remote's history, with the remote recorded and its followed branch imported into `main`. |
 | [`CloneResp`](#cloneresp) | object | `clone`: the store made, the remote recorded, its fetch, and where `main` stands. |
 | [`CommitReq`](#commitreq) | object | `commit`: record a changeset from an explicit change list. |
@@ -524,6 +536,7 @@ Kind: object. `swarmops schema CheckListReq` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `rev` | [`Rev`](#rev) | no | The changeset whose tree's checks to list; `main` when omitted. Default: `"main"`. |
+| `stage` | [`CheckStage`](#checkstage) or `null` | no | Only the checks of this stage; every check when omitted. |
 
 ## CheckListResp
 
@@ -533,11 +546,94 @@ Kind: object. `swarmops schema CheckListResp` prints its JSON Schema.
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
-| `checks` | array of [`CheckOut`](#checkout) | yes | The checks, sorted by name, bytewise; empty when the tree describes none. |
+| `checks` | array of [`CheckOut`](#checkout) | yes | The checks, sorted by name, bytewise; empty when the tree describes none (or none of `stage`). |
 | `file` | `string` or `null` | no | The file the checks came from: `.swarmops/checks.toml`, or `.swarmops/workspaces.json` for the one check `default`. Omitted when the tree holds neither, or a `workspaces.json` with no `check.argv`. |
+| `stage` | [`CheckStage`](#checkstage) or `null` | no | The stage asked for: `checks` holds only the checks of it. Omitted when every check is listed. |
 | `tree` | `string` or `null` | no | The root tree the file was read from: 64 hex digits. Omitted for a directory. |
 | `version` | `integer` (uint32) or `null` | no | The check file's `version`, 1. Omitted unless `file` is `.swarmops/checks.toml`. |
 | `vouched` | `boolean` | yes | Whether only the caller stands behind the file: `true` when it was read from a directory the caller named (`check list --dir`), which no gate accepts; `false` when it was read from the store, at `tree`. |
+
+## CheckLogEnd
+
+How a check's log ended.
+
+Kind: enumeration. `swarmops schema CheckLogEnd` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"end"` | Its `end` line, or the run's record of a check it never started. |
+| `"runner_gone"` | The run's lock was let go with no `end` line: the runner died. |
+
+## CheckLogLineOut
+
+One line of a check's log.
+
+Kind: object. `swarmops schema CheckLogLineOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `at_ms` | `integer` (uint64) or `null` | no | Its time: milliseconds since the check's start. Omitted for a line of `other`. |
+| `n` | `integer` (uint64) | yes | Its number in the log, from 1. |
+| `stream` | [`CheckLogStream`](#checklogstream) | yes | Where it came from. |
+| `text` | `string` | yes | Its text. |
+
+## CheckLogReq
+
+`check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. Reads only: no lock, nothing written.
+
+Kind: object. `swarmops schema CheckLogReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `check` | `string` | yes | The check whose log to read. |
+| `run` | `string` or `null` | no | The run, by its id; the newest run of the workspace that ran `check` when omitted. |
+| `tail` | `integer` (uint) | no | The most lines to give, the last ones: 1 to 100,000; 1,000 when omitted. Default: `1000`. |
+| `workspace` | `string` | yes | The workspace, by its name in the store's registry. |
+
+## CheckLogResp
+
+`check_log`: lines of a check's log, and whether it has ended. `check log --follow` prints one of these first, then one for each batch of lines the check writes, the last with `ended`.
+
+Kind: object. `swarmops schema CheckLogResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `check` | `string` | yes | The check's name. |
+| `duration_ms` | `integer` (uint64) or `null` | no | The check's milliseconds, when its log's `end` line gives them. |
+| `ended` | `boolean` | yes | Whether the log is complete: no line follows. |
+| `ended_by` | [`CheckLogEnd`](#checklogend) or `null` | no | How it ended, when `ended`. |
+| `first_line` | `integer` (uint64) | yes | The number of the first line given, from 1. |
+| `lines` | array of [`CheckLogLineOut`](#checkloglineout) | yes | The lines given, in order. |
+| `log` | `string` or `null` | no | The log's path on the host it ran on. Omitted for a check the run never started (`not_run`), which has none. |
+| `outcome` | [`CheckOutcome`](#checkoutcome) or `null` | no | The check's outcome, when `ended_by` is `end`. |
+| `run` | `string` | yes | The run's id. |
+| `total_lines` | `integer` (uint64) | yes | The log's lines so far. |
+| `vouched` | `boolean` | yes | As the run's: `true` for a run of the directory form. |
+
+## CheckLogStream
+
+Where a line of a check's log came from.
+
+Kind: enumeration. `swarmops schema CheckLogStream` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"out"` | The check's stdout. |
+| `"err"` | The check's stderr. |
+| `"run"` | The runner's own line: `start`, `section`, `cut` or `end`, and a JSON object. |
+| `"other"` | A line not in the log's format, as a check writing into its own log could leave. |
+
+## CheckNotStarted
+
+Why a check did not start.
+
+Kind: enumeration. `swarmops schema CheckNotStarted` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"dir"` | Its directory is not a directory of the tree on disk (a sparse workspace may lack it). |
+| `"program"` | Its program could not be started: not found, or not executable. |
+| `"log"` | Its log, or its own directory in the run's, could not be made or written (a full disk, say): nothing was run without a log. |
 
 ## CheckOut
 
@@ -548,11 +644,113 @@ Kind: object. `swarmops schema CheckOut` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `argv` | array of `string` | yes | The program and its arguments, run with no shell: at least the program. |
-| `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not its name): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
+| `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
 | `dir` | `string` | yes | The directory of the tree it runs in, as a repository path; `.` is the root. |
 | `line` | `integer` (uint64) or `null` | no | The line of `.swarmops/checks.toml` that starts its table. Omitted for the check `default` read from `.swarmops/workspaces.json`. |
 | `name` | `string` | yes | Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit. |
+| `stages` | array of [`CheckStage`](#checkstage) | no | When its answer is wanted: one to six stages, in the stages' own order (`before-land`, `after-land`, `scheduled`, `release`, `manual`, `deploy`), whatever order the file wrote them in; `before-land` by default, and for the check `default` of `.swarmops/workspaces.json`. Default: `["before-land"]`. |
 | `timeout_s` | `integer` (uint64) | yes | The most seconds it may run, its default (900) filled in. For the check `default` of `.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does not read it, and takes its own `--check-timeout`. |
+
+## CheckOutcome
+
+How a check of a run ended. Only `passed` passes.
+
+Kind: enumeration. `swarmops schema CheckOutcome` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"passed"` | It exited 0. |
+| `"failed"` | It exited with another code, or a signal it was not sent by the runner ended it. |
+| `"timed_out"` | It ran past its timeout, and its process group was killed. |
+| `"not_started"` | Its directory is missing, or its program did not start. |
+| `"cancelled"` | It was running when a signal stopped the run, and its process group was killed. |
+| `"not_run"` | The run was stopped before it started: no process, no log. |
+
+## CheckRunOut
+
+One check of a run: how it ended, and where its log is.
+
+Kind: object. `swarmops schema CheckRunOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `definition_digest` | `string` | yes | The digest of its definition, as `check list` gives it (provisional). |
+| `dropped_bytes` | `integer` (uint64) | no | The bytes of its output its log left out, past the log's bounds. Omitted when none. |
+| `duration_ms` | `integer` (uint64) | yes | Its milliseconds, from its start to the end of its output; 0 for `not_started` and `not_run`. |
+| `exit_code` | `integer` (int32) or `null` | no | Its exit code, when it exited. |
+| `log` | `string` or `null` | no | Its log's path on the host it ran on, absolute. Omitted for `not_run`, which has none. |
+| `message` | `string` or `null` | no | The host's words for why it did not start, one line, for `not_started`; or, for a check that ran and is `failed` because its log could not be written, why not. |
+| `name` | `string` | yes | Its name. |
+| `not_started` | [`CheckNotStarted`](#checknotstarted) or `null` | no | Why it did not start, for `not_started`. |
+| `outcome` | [`CheckOutcome`](#checkoutcome) | yes | How it ended; only `passed` passes. |
+| `sections` | array of [`CheckSectionOut`](#checksectionout) | no | The sections it opened with a marker line, in order. Omitted when it opened none. |
+| `signal` | `integer` (int32) or `null` | no | The signal that ended it, for a check `failed` by a signal the runner did not send. |
+| `stderr_tail` | `string` or `null` | no | The last 8 KiB of its stderr, for a check that ran and did not pass. |
+| `stdout_tail` | `string` or `null` | no | The last 8 KiB of its stdout, for a check that ran and did not pass. |
+| `timeout_s` | `integer` (uint64) | yes | The timeout it ran under, in seconds. |
+
+## CheckRunReq
+
+`check_run` (CLI `check run`): run the checks of one stage of a workspace's tree, one at a time in name order. The workspace must be clean (no edits, not rebasing, not stale); its lock is held while the checks run, and the store is never written.
+
+Kind: object. `swarmops schema CheckRunReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `checks` | array of `string` | no | The checks to run, each of the stage; empty (the default): every check of the stage. A name given twice runs once. |
+| `stage` | [`CheckStage`](#checkstage) | no | The stage whose checks to run; `before-land` when omitted. Default: `"before-land"`. |
+| `workspace` | `string` | yes | The workspace, by its name in the store's registry. |
+
+## CheckRunResp
+
+`check_run`: every selected check's outcome, in the order they ran. A run where any check did not pass is `E_CHECK_FAILED`, whose `details.run` is this whole result.
+
+Kind: object. `swarmops schema CheckRunResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cancelled` | `boolean` | yes | Whether a signal stopped the run before its checks ended: the check running then is `cancelled`, those after it `not_run`. A signal once the last check has exited stops nothing: the run ends as its checks did. |
+| `changeset` | `string` or `null` | no | The changeset the workspace's files stood for. Omitted in the directory form. |
+| `checks` | array of [`CheckRunOut`](#checkrunout) | yes | One per selected check, in the order they ran (by name). |
+| `dir` | `string` | yes | The run's directory on the host it ran on, absolute: `run.json`, the logs and each check's own directory. |
+| `duration_ms` | `integer` (uint64) | yes | The run's milliseconds, from its first check's start to its last's end. |
+| `failed` | array of `string` | yes | The checks that did not pass, in run order; empty when every one passed. |
+| `file` | `string` | yes | The file the checks came from: `.swarmops/checks.toml`, or `.swarmops/workspaces.json` for the one check `default`. |
+| `inherited_all` | `boolean` | yes | Whether the checks got the caller's whole environment: only the check `default` of `.swarmops/workspaces.json`, which keeps what `ws land --check` gives it. |
+| `inherited_env` | array of `string` | yes | The names of the caller's variables the checks got besides the pinned ones, sorted; no values. Empty when `inherited_all`. |
+| `run` | `string` | yes | The run's id: a UUID v7, so that runs sort by their start. |
+| `stage` | [`CheckStage`](#checkstage) | yes | The stage run. |
+| `tree` | `string` or `null` | no | That changeset's root tree, 64 hex digits: the tree every check ran on. Omitted in the directory form, which knows no tree. |
+| `version` | `integer` (uint32) or `null` | no | The check file's `version`, 1. Omitted unless `file` is `.swarmops/checks.toml`. |
+| `vouched` | `boolean` | yes | Whether only the caller stands behind the files the checks ran on: `true` in the directory form (`check run --dir`), which no gate accepts; `false` in a workspace, whose files were checked against `tree` first. |
+| `workspace` | `string` or `null` | no | The workspace's name. Omitted in the directory form. |
+
+## CheckSectionOut
+
+A section a check opened with a marker line: from its marker to the next one, or to the end of the check's output.
+
+Kind: object. `swarmops schema CheckSectionOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `duration_ms` | `integer` (uint64) | yes | How long it lasted, in milliseconds. |
+| `start_ms` | `integer` (uint64) | yes | When it opened: milliseconds since the check's start. |
+| `title` | `string` | yes | Its title, as the marker gave it (at most 200 bytes, cut with `…`). |
+
+## CheckStage
+
+When a check's answer is wanted. A check names one or more; `check run` runs one stage's checks.
+
+Kind: enumeration. `swarmops schema CheckStage` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"before-land"` | Before a change lands: the gate. The default. |
+| `"after-land"` | After a change has landed. |
+| `"scheduled"` | On a schedule. |
+| `"release"` | Before a release is cut. |
+| `"manual"` | Only when someone asks for it. |
+| `"deploy"` | Before a deployment. |
 
 ## CloneReq
 
@@ -898,7 +1096,7 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_WS_UNPORTABLE"` | The tree holds paths the workspace's volume cannot hold: `details.reason` says why (`case_collision`, `windows_name`, `reserved_name`: a path component named `.swarmws` at any depth, in any ASCII case) and `details.paths` names them. Nothing was written, unless a target gained the path between the check and the store's call: `ws delete --rescue`. |
 | `"E_WS_OUTSIDE_PREFIXES"` | A sparse workspace's `ws commit` or `ws land` met edits outside its prefixes (`details.paths`, sorted, the first 20). Nothing changed; the hint names `swarmops ws materialize <path>`, which widens the prefixes. |
 | `"E_WS_STALE"` | `ws status`, `ws diff`, `ws commit`, `ws materialize`, `ws land` (onto any target) or `ws rebase --continue` found the workspace's base gone from its target's history (`details.target`, `base`, `head`; `base_op`, the operation that moved the target to the base; `moved_op`, the latest that moved it to `head`, or null when not found). Nothing changed; the hint names `swarmops ws rebase` (after a continue, `swarmops ws rebase --abort` first). |
-| `"E_CHECK_FAILED"` | A workspace's check or bootstrap command failed or ran past its time (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`). Nothing was landed. |
+| `"E_CHECK_FAILED"` | A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create` (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`; nothing was landed), or one or more of `check run`'s (`details.run`: the run's whole result, every check's outcome, or `cancelled` after a signal). |
 | `"E_STORE_TOO_NEW"` | The store is of a later format than this build reads, or lists a feature it lacks (`details.format`, and `details.features`, the features it lacks, none for a later format). Nothing was written; a newer swarmops reads the store. |
 | `"E_QUEUE_WAIT_TIMEOUT"` | `queue wait` reached its timeout with the entry still open (`details.entry`, and `details.state`, `waiting` or `checking`). The entry stays queued; waiting again can see it land. |
 | `"E_CHECK_FILE"` | A check file does not read: `.swarmops/checks.toml` (or, in a tree without one, `.swarmops/workspaces.json`) is too large, not text, not a file, not TOML (JSON), not version 1, or holds a key, a name or a value version 1 does not take (`details.file`, `details.reason`, `details.vouched`, and `details.line` and `details.key` when known). Nothing was listed; the hint says what the file takes. |

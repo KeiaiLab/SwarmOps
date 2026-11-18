@@ -23,6 +23,7 @@ test-hooks = [
     "swarmops-repo/test-hooks",
     "swarmops-store/test-hooks",
     "swarmops-testkit/test-hooks",
+    "swarmops-ws/test-hooks",
 ]
 # The serve parsers' public wrappers the fuzz targets call (`serve::cgi::fuzz_parse_path`,
 # `serve::hook::fuzz_read_updates`); the parsers stay private. Off unless asked for.
@@ -40,7 +41,10 @@ swarmops-core = { path = "../swarmops-core", version = "0.13.0" }
 swarmops-git = { path = "../swarmops-git", version = "0.13.0" }
 swarmops-repo = { path = "../swarmops-repo", version = "0.13.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.13.0" }
-# The landing queue's `QueueDriver`, which `LocalOps` implements for the runner (M22).
+# `check run` (M31): each check run through the workspaces' process runner, and a workspace held
+# clean and locked for a run, and the landing queue's `QueueDriver`, which `LocalOps` implements
+# for the runner (M22). The graph stays one-way: swarmops-ws depends on no crate that
+# depends on this one (its tests take this crate's store, as a dev-dependency).
 swarmops-ws = { path = "../swarmops-ws", version = "0.13.0" }
 base64.workspace = true
 # Native sync's land keys (`native::key`), hashed as `serve`'s are.
@@ -55,6 +59,8 @@ serde_json.workspace = true
 # The store's TOML files, `remotes.toml` and `authors.toml` (M13), the user's login file, and
 # the check file (M30), walked with its spans.
 toml.workspace = true
+# A run of `check run` (M31) is named by a uuid v7, so that runs sort by their start.
+uuid.workspace = true
 
 [dev-dependencies]
 # The check file's round trip: definitions written by `toml`, read back (M30).

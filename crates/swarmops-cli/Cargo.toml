@@ -61,6 +61,8 @@ getrandom.workspace = true
 # package swarmops-store and swarmops-ws already use.
 rustix.workspace = true
 serde.workspace = true
+# `check run` catches SIGINT, SIGTERM and SIGHUP to kill the running check's process group.
+signal-hook.workspace = true
 # `swarmops mcp` reads a message line's members as their JSON text (`RawValue`), so that it
 # parses only what it serves and nothing else a line holds.
 serde_json = { workspace = true, features = ["raw_value"] }

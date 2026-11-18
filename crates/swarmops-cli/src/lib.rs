@@ -1,7 +1,7 @@
 //! The SwarmOps command line (operations spec §0–§1), the program of two binaries: `swarmops`,
 //! and `so`, its short form. One subcommand per operation, and on stdout exactly one envelope
-//! per run, which agents script against, but for `mcp`, `serve`, `derive --follow` and
-//! `auth git-credential` (below).
+//! per run, which agents script against, but for `mcp`, `serve`, `derive --follow`,
+//! `check log --follow` and `auth git-credential` (below).
 //!
 //! - Success prints `{"ok":true,"op":…,"api":1,"result":…,"meta":…}` and exits 0; a failure
 //!   prints `{"ok":false,…,"error":{code,message,retryable,exit,details,hint},…}` and exits
@@ -45,6 +45,8 @@
 //! - `derive --follow` prints one envelope a line for each run that derived something, and
 //!   nothing for a run that derived nothing (a follower that has caught up is silent), until it
 //!   is killed or a run fails, whose envelope is the last.
+//! - `check log --follow` prints one envelope a line: the log's last lines, then each batch of
+//!   lines the check writes, the last the one that holds the log's end, exit 0.
 //!
 //! The envelope's `op` is the operation's library name (`cat` is `read_file`), or `swarmops`
 //! for a command line that names no operation.

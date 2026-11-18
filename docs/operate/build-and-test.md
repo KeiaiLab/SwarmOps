@@ -21,15 +21,19 @@ Commands and outputs here follow the
   ```
 
 - Optionally, the project's checks named in `.swarmops/checks.toml`, one command each, run with
-  no shell. `swarmops check list` lists them from the store, and `swarmops check list --dir .`
-  from a directory; nothing runs them yet, and `ws land --check` still runs `check.argv` above
-  ([`check list`](../reference/commands/check-list.md)):
+  no shell, each of the stages it names. `swarmops check list` lists them from the store, and
+  `swarmops check list --dir .` from a directory; `swarmops check run` runs one stage's checks
+  in a clean workspace, and `swarmops check run --dir .` in a directory, each with a log
+  `swarmops check log` reads; `ws land --check` still runs `check.argv` above
+  ([`check list`](../reference/commands/check-list.md),
+  [`check run`](../reference/commands/check-run.md)):
 
   ```toml
   version = 1
 
   [check.test]
   argv = ["./check.sh"]
+  stages = ["before-land"]
   ```
 
 A workspace is a directory holding a changeset's tree, or only the paths under `--prefix`, and

@@ -30,6 +30,7 @@ argv = ["cargo", "test", "--locked"]
 argv = ["cargo", "clippy", "--", "-D", "warnings"]
 dir = "crates/app"
 timeout_s = 600
+stages = ["before-land", "after-land"]
 ```
 
 | Key | Required | Default | Rule |
@@ -39,6 +40,7 @@ timeout_s = 600
 | `argv` | yes | | The program and its arguments, 1 to 1,024 strings, 64 KiB together, no NUL byte, the program not empty. It runs with no shell: steps and conditions belong in the repository's own scripts. |
 | `dir` | no | `"."` | The directory of the tree it runs in: `.` or a repository path (no empty, `.` or `..` part, no leading or trailing `/`). Whether the tree holds it is not checked. |
 | `timeout_s` | no | `900` | The most seconds it may run, 1 to 86,400. |
+| `stages` | no | `["before-land"]` | When its answer is wanted: 1 to 6 of `before-land`, `after-land`, `scheduled`, `release`, `manual` and `deploy`, none twice. An unknown stage, an empty array, an item that is not a string, or a stage given twice is refused as `value`, at the line of the item (or the array) at fault. The key is `stages`, plural: `stage` is refused as an unknown key. |
 
 The file holds at most 1 MiB and 1,000 checks. Any TOML table syntax reads alike: a header, dotted
 keys (`check.unit.argv = [...]`) or an inline table. The [limits](../../limits.md) page lists each
@@ -52,10 +54,13 @@ existing key means is a new version.
 ### The answer
 
 The checks come sorted by name, so moving a table in the file changes nothing but their `line`.
-Each has its `argv`, its `dir` and its `timeout_s` with the defaults filled in, the `line` its
-table starts on, and `definition_digest`, a digest of `argv`, `dir` and `timeout_s` (not of the
-name): two checks that differ only in name, or a check renamed, share a digest, and a default
-written out gives the same digest as one left out. The same tree gives the same `result` byte for
+Each has its `argv`, its `dir`, its `timeout_s` and its `stages` with the defaults filled in, the
+`line` its table starts on, and `definition_digest`, a digest of `argv`, `dir` and `timeout_s`
+(not of the name, nor of the stages, which say when an answer is wanted, not what the command
+computes): two checks that differ only in name or stages, or a check renamed, share a digest, and
+a default written out gives the same digest as one left out. `stages` come in the stages' own
+order (`before-land`, `after-land`, `scheduled`, `release`, `manual`, `deploy`), whatever order
+the file wrote them in. The same tree gives the same `result` byte for
 byte, whichever changeset names it.
 
 **The digest is provisional.** Its recipe is not part of the hash contract and may change in a
@@ -64,15 +69,23 @@ later release; compare digests made by one release only.
 ### A tree without the file
 
 When the tree holds no `.swarmops/checks.toml`, `check.argv` of `.swarmops/workspaces.json`, if it
-names a command, is the one check `default`: that argv, at the root, with `check.timeout_s` or
-900, and no `line`; `file` says `.swarmops/workspaces.json`. That file is read in the shape and
-the size a workspace reads it in, at most 64 KiB of JSON, so `check list` refuses every file that
-`ws land --check` refuses (as `E_CHECK_FILE`, where the land says `E_INVALID_ARG`). It also holds
-`check.argv` and `check.timeout_s` to version 1's rules, which the land does not: a timeout past
-86,400 s, or an argv whose program is empty, is refused here and accepted by the land. The land
-never reads `check.timeout_s` at all, and takes its own `--check-timeout`; the `timeout_s` listed
-for `default` is the one a later runner will use. A tree with neither file, or with an empty or
-missing `check.argv`, lists no check and exits 0.
+names a command, is the one check `default`: that argv, at the root, with `check.timeout_s` or 900,
+the stage `before-land` (the check `ws land --check` runs before a land), and no `line`; `file` says
+`.swarmops/workspaces.json`. That file is read in the shape and the size a workspace reads it in, at
+most 64 KiB of JSON, so `check list` refuses every file that `ws land --check` refuses (as
+`E_CHECK_FILE`, where the land says `E_INVALID_ARG`). It also holds `check.argv` and
+`check.timeout_s` to version 1's rules, which the land does not: a timeout past 86,400 s, or an argv
+whose program is empty, is refused here and accepted by the land. The land never reads
+`check.timeout_s` at all, and takes its own `--check-timeout`; the `timeout_s` listed for `default`
+is the one a later runner will use. A tree with neither file, or with an empty or missing
+`check.argv`, lists no check and exits 0.
+
+### One stage
+
+`--stage STAGE` (the request's `stage`) lists only the checks whose `stages` hold `STAGE`, still
+sorted by name, in either form, and the result echoes `stage`; without it every check is listed
+and the result has no `stage`. A stage no check names lists none and exits 0. `--stage
+before-land` lists what `check run` runs by default.
 
 A tree that holds `.swarmops/checks.toml` is listed from it alone, whatever `workspaces.json`
 says. `ws land --check` does not read the check file yet, so in such a tree the two can disagree

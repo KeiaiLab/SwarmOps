@@ -143,6 +143,23 @@ A change is done when `just check` passes on it. It runs, in order:
     crafted changelog the marks its rules say, and uploads and withdraws them as it should,
     against a stand-in for `gh` and with no network.
 
+The same gate starts through SwarmOps, using a build of a `stable` commit that holds
+`check run` (0.13.0 or later once it is released), never the build under test:
+
+```sh
+so check run --dir . --stage before-land --pass CARGO_HOME --pass RUSTUP_HOME \
+  --pass RUSTUP_TOOLCHAIN --pass CARGO_TARGET_DIR
+```
+
+It runs `just check` and `just check-compare`, this repository's two `before-land` checks in
+`.swarmops/checks.toml`, one after the other under their timeouts, each with a log that
+`so check log --dir . <check>` reads, and answers one envelope naming both outcomes. A check gets
+only a fixed list of your variables (`HOME`, `PATH`, `TMPDIR`, the locale and a few more) and
+those `--pass` names, each when it is set: without the four above, a shared target directory or a
+pinned toolchain is not used, and the build starts cold in `./target`. `just check` itself stays
+what CI runs until the `check` job of `ci.yml` makes that switch with a pinned build
+([known limitations](docs/known-limitations.md#checks-and-delivery)).
+
 The third lockfile, `bench/compare/Cargo.lock`, which `just check` does not build, is checked
 where it is built, by `just bench-compare` and the weekly scheduled run, with a policy of its
 own: `bench/compare/deny.toml`, every line of `deny.toml` and the harness's own entries. The

@@ -1122,15 +1122,40 @@ left).
 
 ## Checks and delivery
 
-What SwarmOps does not do for a repository's checks today. Each item is planned; of the work, only
-the check file and `check list` are built ([roadmap](roadmap.md#checks-and-delivery)).
+What SwarmOps does not do for a repository's checks today. Each item is planned; of the work, the
+check file with its stages, `check list` and `check run` are built
+([roadmap](roadmap.md#checks-and-delivery)).
 
 - **One command per checked land.** `ws land --check` runs one argv: the command after `--`, else
-  `check.argv` of `.swarmops/workspaces.json`. A repository that needs several checks, an order
-  between them or a plan of which ones a change needs puts all of that in the one command. The
-  checks `.swarmops/checks.toml` names are listed by `check list` and run by nothing yet, and a
-  tree that holds both files gives `check list` the check file's checks and `ws land --check`
-  the other file's command. *Target: M31. Found: requirement CD-E20.*
+  `check.argv` of `.swarmops/workspaces.json`. `check run` runs a stage's checks of
+  `.swarmops/checks.toml`, but the land does not: a tree that holds both files gives `check list`
+  and `check run` the check file's checks and `ws land --check` the other file's command, and a
+  land is gated by that one command alone. *Target: M31-10. Found: requirement CD-E20.*
+- **A process that leaves a check's group outlives it.** `check run` kills a check's process
+  group at once (SIGKILL) past its timeout or on a signal, and once the check has exited and its
+  output has ended, whatever it left running in the group; `swarmops mcp` stops its
+  `check_run` the same way on SIGINT, SIGTERM or SIGHUP before it exits. A process the check
+  started in a group or session of its own keeps running, and so does the running check when
+  `swarmops` or `swarmops mcp` is killed with SIGKILL, which it cannot catch. There is no grace
+  before the kill, and the outcome does not name a process that left. *Target: M31-9. Found: the
+  M31 plan; the M31-1 review.*
+- **A check is told no changed paths.** `SWARMOPS_CHECK_CHANGED` is set and empty: with no plan,
+  a check takes the whole tree as changed. *Target: M30-4. Found: the M31 plan.*
+- **A check's report, outputs, summary and artifacts are read by nothing.** `check run` gives
+  each check the paths `SWARMOPS_CHECK_REPORT`, `SWARMOPS_CHECK_OUTPUTS`,
+  `SWARMOPS_CHECK_SUMMARY` and `SWARMOPS_CHECK_ARTIFACTS`; what a check writes there changes no
+  answer yet. *Target: M31-4, M31-6, M31-18, M36-3. Found: the M31 plan.*
+- **Two runs of one directory are not kept apart.** `check run --dir` takes no lock on the
+  directory: two runs at once run their checks side by side, each with a run directory of its
+  own. The workspace form holds the workspace's lock. *Target: M31-8. Found: the M31 plan.*
+- **This repository's CI does not start its gate through `check run` yet.** The `check` job of
+  `ci.yml` runs `just check` and `just check-compare` itself; it moves to
+  `check run --dir . --stage before-land` with a pinned build once a release holds `check run`,
+  since the build under test is not to check itself. The pin is to be by commit id (CD-D18): the
+  job will name the release, the SHA-256 of its Linux archive and the commit id its tag names,
+  and refuse the archive unless the tag still names that commit, since `swarmops --version` names
+  no commit. Before the switch, the job's step times are to be read from recent runs and the
+  gate's timeouts checked against them. *Target: M31. Found: the M31 plan; the M31-1 review.*
 - **`check list` refuses some `workspaces.json` files that `ws land --check` runs.** It holds
   `check.argv` and `check.timeout_s` to version 1's rules, which the land does not read: a
   `check.timeout_s` of 0 or past 86,400, an empty program, or an argv past 1,024 strings is
@@ -1147,16 +1172,18 @@ the check file and `check list` are built ([roadmap](roadmap.md#checks-and-deliv
 - **Every land's push starts a run on GitHub, even for an unchanged tree.** Where the checks run
   on GitHub (topology 2), a pushed commit is checked again although the same tree already passed,
   because nothing keys a result by tree (issue #43). *Target: M32. Found: requirement CD-E20.*
-- **No runner, schedule or trigger.** SwarmOps starts a check only inside `ws land --check`, on
-  the caller's host. Nothing starts one after a land, on a tag, on a schedule or on another host.
-  *Target: M33, M34. Found: requirement CD-E20.*
-- **No secrets handling.** A check gets the environment of the process that runs it. SwarmOps
-  neither stores a secret for a check, nor scopes one, nor masks one in output.
+- **No runner, schedule or trigger.** SwarmOps starts a check only inside `ws land --check` or
+  `check run`, on the caller's host. Nothing starts one after a land, on a tag, on a schedule or on
+  another host. *Target: M33, M34. Found: requirement CD-E20.*
+- **No secrets handling.** A check of `ws land --check` gets the environment of the process that
+  runs it; one of `check run`, a short fixed list of it and what `--pass` names. SwarmOps neither
+  stores a secret for a check, nor scopes one, nor masks one in output.
   *Target: M35. Found: requirement CD-E20.*
 - **No logs or artifacts kept.** A check's output comes back as the tails in the envelope and as
-  a log file in its workspace (`.swarmws/checks/`), and the files a check makes stay there.
-  Nothing is kept beside the store, by digest or for a set time.
-  *Target: M36. Found: requirement CD-E20.*
+  a log file on the host it ran on (`.swarmws/checks/` for `ws land --check`; a run's directory,
+  of which the newest 20 are kept, for `check run`), and the files a check makes stay there.
+  Nothing is kept beside the store, by digest or for a set time, and a log is read on its own
+  host only. *Target: M36. Found: requirement CD-E20.*
 
 ## Git's verbs on the command line
 

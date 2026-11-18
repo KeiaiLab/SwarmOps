@@ -52,6 +52,15 @@ const MEMO_KEY_DIR_ENV: &str = "SWARMOPS_MEMO_KEY_DIR";
 /// that every command run on a store, through a [`Store`] or not, reads the same key.
 const SHARED_MEMO_KEYS: &str = "swarmops-test-memo-keys";
 
+/// The variable that names where `check run --dir` keeps its runs (`swarmops-ops`'
+/// `check::run::CHECK_RUNS_DIR_ENV`, which this crate cannot name): every run of the binary sets
+/// it ([`isolate`]), so that no test writes a run into the user's state directory.
+const CHECK_RUNS_DIR_ENV: &str = "SWARMOPS_CHECK_RUNS_DIR";
+
+/// The runs' directory of every run, under the system's temp directory: one for all, its runs
+/// kept apart by the key of the directory each checked.
+const SHARED_CHECK_RUNS: &str = "swarmops-test-check-runs";
+
 /// The variable that names the user's login file, which this crate cannot name by its constant:
 /// every run of the binary sets it ([`isolate`]), so that no test reads or writes the
 /// developer's.
@@ -105,14 +114,15 @@ pub fn swarmops_vars() -> impl Iterator<Item = OsString> {
 /// binary's own file and from the user's state directory: the login file's variable
 /// (`SWARMOPS_AUTH_FILE`) and curl's (`SWARMOPS_CURL`), each naming an absolute path under the
 /// system's temp directory where nothing is and nothing is made, `SWARMOPS_AUTO_UPDATE=off`,
-/// and the memo keys' directory (`SWARMOPS_MEMO_KEY_DIR`), the one under the system's temp
-/// directory that every run shares. The run then finds no login and no curl, whatever the
-/// developer's home directory and `PATH` hold, neither looks for a newer release nor installs
-/// one, and makes a store's memo key there, not in the developer's state directory. A test of
+/// the memo keys' directory (`SWARMOPS_MEMO_KEY_DIR`) and the check runs' directory
+/// (`SWARMOPS_CHECK_RUNS_DIR`), the ones under the system's temp directory that every run
+/// shares. The run then finds no login and no curl, whatever the developer's home directory and
+/// `PATH` hold, neither looks for a newer release nor installs one, and makes a store's memo key
+/// and keeps a `check run --dir`'s run there, not in the developer's state directory. A test of
 /// a login names a file of its own, one of the device flow a stand-in for curl, one of
 /// automatic update turns it on for a copy of the binary in a directory of its own, and one of
-/// the memo keys names a directory of its own or none.
-pub fn isolation() -> [(&'static str, OsString); 4] {
+/// the memo keys or of the check runs names a directory of its own or none.
+pub fn isolation() -> [(&'static str, OsString); 5] {
     let temp = std::env::temp_dir();
     let nowhere = temp.join(NO_LOGIN);
     [
@@ -122,6 +132,10 @@ pub fn isolation() -> [(&'static str, OsString); 4] {
         (
             MEMO_KEY_DIR_ENV,
             temp.join(SHARED_MEMO_KEYS).into_os_string(),
+        ),
+        (
+            CHECK_RUNS_DIR_ENV,
+            temp.join(SHARED_CHECK_RUNS).into_os_string(),
         ),
     ]
 }
@@ -717,12 +731,12 @@ mod tests {
         );
     }
 
-    /// The four names, spelled out: a variable dropped from [`isolation`], or renamed there
+    /// The five names, spelled out: a variable dropped from [`isolation`], or renamed there
     /// and not in the binary, fails here. A run that [`isolate`] alone prepares, as the CLI's
-    /// tests of the help's examples and of the error codes do, then makes no memo key in the
-    /// developer's state directory.
+    /// tests of the help's examples and of the error codes do, then makes no memo key and keeps
+    /// no check run in the developer's state directory.
     #[test]
-    fn isolation_names_the_login_file_curl_automatic_update_and_the_memo_keys() {
+    fn isolation_names_the_login_file_curl_automatic_update_the_memo_keys_and_the_runs() {
         let named = isolation();
 
         assert_eq!(
@@ -731,9 +745,13 @@ mod tests {
                 "SWARMOPS_AUTH_FILE",
                 "SWARMOPS_CURL",
                 "SWARMOPS_AUTO_UPDATE",
-                "SWARMOPS_MEMO_KEY_DIR"
+                "SWARMOPS_MEMO_KEY_DIR",
+                "SWARMOPS_CHECK_RUNS_DIR"
             ]
         );
+        let runs = std::env::temp_dir().join(SHARED_CHECK_RUNS);
+        assert_eq!(named[4].1, runs.clone().into_os_string());
+        assert!(runs.is_absolute(), "{}", runs.display());
         let keys = std::env::temp_dir().join(SHARED_MEMO_KEYS);
         assert_eq!(named[3].1, keys.clone().into_os_string());
         assert!(keys.is_absolute(), "{}", keys.display());
@@ -743,6 +761,10 @@ mod tests {
         assert_eq!(
             set(&command, "SWARMOPS_MEMO_KEY_DIR"),
             Some(keys.into_os_string())
+        );
+        assert_eq!(
+            set(&command, "SWARMOPS_CHECK_RUNS_DIR"),
+            Some(runs.into_os_string())
         );
     }
 

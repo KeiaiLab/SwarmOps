@@ -99,7 +99,17 @@ const PARITY_EXEMPT: &[(&str, &str)] = &[
     ("ws_materialize", MUTATES),
     ("ws_discard", MUTATES),
     ("ws_snapshot", MUTATES),
+    ("check_run", RUNS),
+    ("check_log", LOGS),
 ];
+
+/// Why a check's log is not compared: the fixture holds no run of the checks to read one of.
+const LOGS: &str = "it reads a check's log of a run, and the fixture has run no checks: \
+                    check_run.rs compares the tool's and the command's answers on a run";
+
+/// Why a run of checks is not compared: each run is a run of its own.
+const RUNS: &str = "each run of the checks is a run of its own: a new id, its own directory and \
+                    logs, and its own times";
 
 /// Each tool of [`PARITY`], called on the fixture through `swarmops mcp` and run as its command,
 /// prints the same envelope, `meta`'s [`MASKED`] fields aside.

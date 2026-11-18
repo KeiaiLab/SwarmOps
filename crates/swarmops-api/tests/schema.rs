@@ -24,6 +24,8 @@ const REQUESTS: &[&str] = &[
     "BlobPutReq",
     "ChangeInput",
     "CheckListReq",
+    "CheckLogReq",
+    "CheckRunReq",
     "CloneReq",
     "CommitReq",
     "DeriveReq",
@@ -110,7 +112,12 @@ const RESPONSES: &[&str] = &[
     "ChangesetDetail",
     "ChangesetSummary",
     "CheckListResp",
+    "CheckLogLineOut",
+    "CheckLogResp",
     "CheckOut",
+    "CheckRunOut",
+    "CheckRunResp",
+    "CheckSectionOut",
     "CloneResp",
     "CommitResp",
     "ConflictReport",
@@ -209,6 +216,11 @@ const RESPONSES: &[&str] = &[
 const SCALARS: &[&str] = &[
     "AutoUpdate",
     "ChangeOp",
+    "CheckLogEnd",
+    "CheckLogStream",
+    "CheckNotStarted",
+    "CheckOutcome",
+    "CheckStage",
     "ConflictKindOut",
     "ContentEncoding",
     "ContentInput",
@@ -2157,10 +2169,240 @@ mod update {
     }
 }
 
-/// `check list`'s request and result (M30).
+/// `check list`'s and `check run`'s requests and results (M30, M31).
 mod check {
     use serde_json::json;
-    use swarmops_api::{CheckListReq, CheckListResp, CheckOut, Rev, schema_for_all};
+    use swarmops_api::{
+        CheckListReq, CheckListResp, CheckLogEnd, CheckLogLineOut, CheckLogReq, CheckLogResp,
+        CheckLogStream, CheckNotStarted, CheckOut, CheckOutcome, CheckRunOut, CheckRunReq,
+        CheckRunResp, CheckSectionOut, CheckStage, Rev, schema_for_all,
+    };
+
+    /// A log's request names the workspace and the check; the newest run and 1,000 lines when
+    /// it names neither.
+    #[test]
+    fn a_check_log_request_defaults_to_the_newest_run() {
+        let read: CheckLogReq =
+            serde_json::from_value(json!({"workspace": "w", "check": "unit"})).unwrap();
+        assert_eq!(read, CheckLogReq::new("w", "unit"));
+        assert_eq!((read.run.as_deref(), read.tail), (None, 1_000));
+        assert_eq!(
+            serde_json::to_string(&read).unwrap(),
+            r#"{"workspace":"w","check":"unit","tail":1000}"#
+        );
+        assert_eq!(
+            schema_for_all()["CheckLogReq"]["required"],
+            json!(["workspace", "check"])
+        );
+        assert_ignores_unknown_fields::<CheckLogReq>(
+            "CheckLogReq",
+            json!({"workspace": "w", "check": "unit"}),
+        );
+    }
+
+    /// A log's answer in the documented order: a running one without its end; an ended one with
+    /// how and its outcome; a line of `other` without a time.
+    #[test]
+    fn a_check_log_result_says_how_it_ended() {
+        let mut running = CheckLogResp::new(false, "0193", "unit");
+        running.log = Some("/w/.swarmws/check-runs/0193/logs/unit.log".to_owned());
+        running.first_line = 2;
+        running.total_lines = 3;
+        let mut line = CheckLogLineOut::new(2, CheckLogStream::Out, "a");
+        line.at_ms = Some(12);
+        running.lines = vec![line, CheckLogLineOut::new(3, CheckLogStream::Other, "b")];
+        let text = serde_json::to_string(&running).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"vouched":false,"run":"0193","check":"unit","#,
+                r#""log":"/w/.swarmws/check-runs/0193/logs/unit.log","ended":false,"#,
+                r#""first_line":2,"total_lines":3,"lines":[{"n":2,"at_ms":12,"stream":"out","#,
+                r#""text":"a"},{"n":3,"stream":"other","text":"b"}]}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(
+            serde_json::from_str::<CheckLogResp>(&text).unwrap(),
+            running
+        );
+        let mut ended = CheckLogResp::new(true, "0193", "unit");
+        ended.ended = true;
+        ended.ended_by = Some(CheckLogEnd::End);
+        ended.outcome = Some(CheckOutcome::Passed);
+        ended.duration_ms = Some(5);
+        let text = serde_json::to_string(&ended).unwrap();
+        assert!(
+            text.contains(r#""ended":true,"ended_by":"end","outcome":"passed","duration_ms":5,"#),
+            "{text}"
+        );
+        assert_eq!(
+            serde_json::to_value(CheckLogEnd::RunnerGone).unwrap(),
+            json!("runner_gone")
+        );
+        let all = schema_for_all();
+        assert_eq!(
+            all["CheckLogResp"]["required"],
+            json!([
+                "vouched",
+                "run",
+                "check",
+                "ended",
+                "first_line",
+                "total_lines",
+                "lines"
+            ])
+        );
+        assert_ignores_unknown_fields::<CheckLogLineOut>(
+            "CheckLogLineOut",
+            json!({"n": 1, "stream": "run", "text": "start {}"}),
+        );
+    }
+
+    /// A run's request names a workspace; its stage is `before-land` and its checks every one
+    /// of the stage when omitted.
+    #[test]
+    fn a_check_run_request_defaults_to_the_whole_gate() {
+        let read: CheckRunReq = serde_json::from_value(json!({"workspace": "w"})).unwrap();
+        assert_eq!(read, CheckRunReq::new("w"));
+        assert_eq!((read.stage, read.checks.len()), (CheckStage::BeforeLand, 0));
+        assert_eq!(
+            serde_json::to_string(&read).unwrap(),
+            r#"{"workspace":"w","stage":"before-land"}"#
+        );
+        assert_eq!(
+            schema_for_all()["CheckRunReq"]["required"],
+            json!(["workspace"])
+        );
+        assert_ignores_unknown_fields::<CheckRunReq>("CheckRunReq", json!({"workspace": "w"}));
+    }
+
+    /// A run's result in the documented order: the directory form's without workspace,
+    /// changeset or tree; a passed check without tails or exit details it lacks; a failed one
+    /// with its tails; a check not started with its reason; one not run without a log.
+    #[test]
+    fn a_check_run_result_keeps_its_order_and_omits_what_it_lacks() {
+        let mut passed = CheckRunOut::new("a", CheckOutcome::Passed, "ab", 900);
+        passed.duration_ms = 12;
+        passed.exit_code = Some(0);
+        passed.log = Some("/r/logs/a.log".to_owned());
+        passed.sections = vec![CheckSectionOut::new("build", 1, 2)];
+        let mut failed = CheckRunOut::new("b", CheckOutcome::Failed, "cd", 60);
+        failed.signal = Some(15);
+        failed.log = Some("/r/logs/b.log".to_owned());
+        failed.dropped_bytes = 3;
+        failed.stdout_tail = Some(String::new());
+        failed.stderr_tail = Some("boom\n".to_owned());
+        let mut missing = CheckRunOut::new("c", CheckOutcome::NotStarted, "ef", 1);
+        missing.not_started = Some(CheckNotStarted::Program);
+        missing.message = Some("cannot run \"x\"".to_owned());
+        missing.log = Some("/r/logs/c.log".to_owned());
+        let never = CheckRunOut::new("d", CheckOutcome::NotRun, "01", 1);
+        let mut run = CheckRunResp::new(true, "0193", CheckStage::BeforeLand, ".f", "/r");
+        run.version = Some(1);
+        run.inherited_env = vec!["HOME".to_owned()];
+        run.cancelled = true;
+        run.failed = vec!["b".to_owned(), "c".to_owned(), "d".to_owned()];
+        run.duration_ms = 20;
+        run.checks = vec![passed, failed, missing, never];
+        let text = serde_json::to_string(&run).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"vouched":true,"run":"0193","stage":"before-land","file":".f","version":1,"#,
+                r#""dir":"/r","inherited_env":["HOME"],"inherited_all":false,"cancelled":true,"#,
+                r#""failed":["b","c","d"],"duration_ms":20,"checks":["#,
+                r#"{"name":"a","outcome":"passed","definition_digest":"ab","timeout_s":900,"#,
+                r#""duration_ms":12,"exit_code":0,"log":"/r/logs/a.log","sections":"#,
+                r#"[{"title":"build","start_ms":1,"duration_ms":2}]},"#,
+                r#"{"name":"b","outcome":"failed","definition_digest":"cd","timeout_s":60,"#,
+                r#""duration_ms":0,"signal":15,"log":"/r/logs/b.log","dropped_bytes":3,"#,
+                r#""stdout_tail":"","stderr_tail":"boom\n"},"#,
+                r#"{"name":"c","outcome":"not_started","definition_digest":"ef","timeout_s":1,"#,
+                r#""duration_ms":0,"not_started":"program","message":"cannot run \"x\"","#,
+                r#""log":"/r/logs/c.log"},"#,
+                r#"{"name":"d","outcome":"not_run","definition_digest":"01","timeout_s":1,"#,
+                r#""duration_ms":0}]}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(serde_json::from_str::<CheckRunResp>(&text).unwrap(), run);
+
+        // The workspace form names the workspace, the changeset and the tree.
+        run.workspace = Some("w".to_owned());
+        run.changeset = Some("c1".to_owned());
+        run.tree = Some("7f".to_owned());
+        let text = serde_json::to_string(&run).unwrap();
+        assert!(
+            text.contains(r#""stage":"before-land","workspace":"w","changeset":"c1","tree":"7f","#),
+            "{text}"
+        );
+    }
+
+    /// What a run's result requires, and the outcomes' words.
+    #[test]
+    fn a_check_run_result_s_schema_names_its_outcomes() {
+        let all = schema_for_all();
+        assert_eq!(
+            all["CheckRunResp"]["required"],
+            json!([
+                "vouched",
+                "run",
+                "stage",
+                "file",
+                "dir",
+                "inherited_env",
+                "inherited_all",
+                "cancelled",
+                "failed",
+                "duration_ms",
+                "checks"
+            ])
+        );
+        assert_eq!(
+            all["CheckRunOut"]["required"],
+            json!([
+                "name",
+                "outcome",
+                "definition_digest",
+                "timeout_s",
+                "duration_ms"
+            ])
+        );
+        let words: Vec<&str> = (all["CheckOutcome"]["oneOf"].as_array().unwrap().iter())
+            .filter_map(|alt| alt["const"].as_str())
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "passed",
+                "failed",
+                "timed_out",
+                "not_started",
+                "cancelled",
+                "not_run"
+            ]
+        );
+        for outcome in [
+            CheckOutcome::Passed,
+            CheckOutcome::NotRun,
+            CheckOutcome::TimedOut,
+        ] {
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                json!(outcome.as_str())
+            );
+        }
+        assert_ignores_unknown_fields::<CheckRunOut>(
+            "CheckRunOut",
+            json!({"name": "a", "outcome": "passed", "definition_digest": "ab",
+                   "timeout_s": 1, "duration_ms": 0}),
+        );
+        assert_ignores_unknown_fields::<CheckSectionOut>(
+            "CheckSectionOut",
+            json!({"title": "t", "start_ms": 0, "duration_ms": 0}),
+        );
+    }
 
     use super::assert_ignores_unknown_fields;
 
@@ -2175,6 +2417,51 @@ mod check {
         );
         assert_eq!(schema_for_all()["CheckListReq"].get("required"), None);
         assert_ignores_unknown_fields::<CheckListReq>("CheckListReq", json!({}));
+
+        // A stage, when one is asked for.
+        let mut staged = CheckListReq::default();
+        staged.stage = Some(CheckStage::AfterLand);
+        assert_eq!(
+            serde_json::to_string(&staged).unwrap(),
+            r#"{"rev":"main","stage":"after-land"}"#
+        );
+    }
+
+    /// The six stages, written as the check file writes them, in their own order; `before-land`
+    /// the default; a name outside them refused.
+    #[test]
+    fn the_stages_are_six_words_in_their_order() {
+        let names: Vec<&str> = CheckStage::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "before-land",
+                "after-land",
+                "scheduled",
+                "release",
+                "manual",
+                "deploy"
+            ]
+        );
+        for stage in CheckStage::ALL {
+            let text = serde_json::to_string(&stage).unwrap();
+            assert_eq!(text, format!("\"{stage}\""));
+            assert_eq!(serde_json::from_str::<CheckStage>(&text).unwrap(), stage);
+            assert_eq!(CheckStage::parse(stage.as_str()), Some(stage));
+        }
+        let mut sorted = CheckStage::ALL;
+        sorted.sort();
+        assert_eq!(sorted, CheckStage::ALL, "Ord is the stages' own order");
+        assert_eq!(CheckStage::default(), CheckStage::BeforeLand);
+        assert_eq!(CheckStage::parse("nightly"), None);
+        assert!(serde_json::from_str::<CheckStage>(r#""nightly""#).is_err());
+        let all = schema_for_all();
+        let alts = all["CheckStage"]["oneOf"].as_array().unwrap();
+        let one_of: Vec<&str> = alts
+            .iter()
+            .filter_map(|alt| alt["const"].as_str())
+            .collect();
+        assert_eq!(one_of, names);
     }
 
     /// A directory's answer holds `vouched` and its checks, in the documented order; the store's
@@ -2187,22 +2474,25 @@ mod check {
             serde_json::to_string(&CheckListResp::new(true, vec![check.clone()])).unwrap(),
             [
                 r#"{"vouched":true,"checks":[{"name":"default","argv":["make"],"dir":".","#,
-                r#""timeout_s":900,"definition_digest":"ab"}]}"#,
+                r#""timeout_s":900,"definition_digest":"ab","stages":["before-land"]}]}"#,
             ]
             .concat()
         );
         check.line = Some(4);
+        check.stages = vec![CheckStage::BeforeLand, CheckStage::Manual];
         let mut stored = CheckListResp::new(false, vec![check]);
         stored.tree = Some("7f".to_owned());
         stored.file = Some(".swarmops/checks.toml".to_owned());
         stored.version = Some(1);
+        stored.stage = Some(CheckStage::Manual);
         let text = serde_json::to_string(&stored).unwrap();
         assert_eq!(
             text,
             [
                 r#"{"vouched":false,"tree":"7f","file":".swarmops/checks.toml","version":1,"#,
-                r#""checks":[{"name":"default","argv":["make"],"dir":".","timeout_s":900,"#,
-                r#""definition_digest":"ab","line":4}]}"#,
+                r#""stage":"manual","checks":[{"name":"default","argv":["make"],"dir":".","#,
+                r#""timeout_s":900,"definition_digest":"ab","stages":["before-land","manual"],"#,
+                r#""line":4}]}"#,
             ]
             .concat()
         );
@@ -2229,5 +2519,11 @@ mod check {
             json!({"name": "a", "argv": ["a"], "dir": ".", "timeout_s": 1,
                    "definition_digest": "ab"}),
         );
+
+        // An answer of a build before stages reads as before-land.
+        let older: CheckOut = serde_json::from_value(json!({"name": "a", "argv": ["a"],
+            "dir": ".", "timeout_s": 1, "definition_digest": "ab"}))
+        .unwrap();
+        assert_eq!(older.stages, [CheckStage::BeforeLand]);
     }
 }

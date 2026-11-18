@@ -385,7 +385,7 @@ fn create(
 /// Runs a workspace command that names its workspace: `build` makes the request from the
 /// workspace's name, which `at` gives, or else the workspace around the working directory (or
 /// `--ws-path`) does.
-fn on_named<R, T: Serialize>(
+pub(super) fn on_named<R, T: Serialize>(
     ctx: &Ctx<'_>,
     op: &'static str,
     at: WsAt,
@@ -444,7 +444,7 @@ fn here_lookup() -> Option<Locate> {
 /// Where a store is looked for, and a workspace found, for the selector `at`: `--ws-path`'s
 /// directory, else the working directory. `Err` for a directory that is no path the workspace
 /// crate takes.
-fn lookup_of(at: &WsAt) -> Result<Option<Locate>, OpError> {
+pub(super) fn lookup_of(at: &WsAt) -> Result<Option<Locate>, OpError> {
     match &at.ws_path {
         Some(dir) => Ok(Some(Locate::Path(absolute(dir)?))),
         None => Ok(here_lookup()),

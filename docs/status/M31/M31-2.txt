@@ -1,0 +1,1 @@
+A check gets the SWARMOPS_CHECK_ variables and a short list of the caller's, more only by --pass; a check.argv check keeps the whole environment.

@@ -31,7 +31,10 @@ use swarmops_api::{
     WsMaterializeResp, WsRebaseReq, WsRebaseResp, WsRebasing, WsResolveReq, WsResolveResp, WsState,
     WsStatus, WsStatusReq,
 };
-use swarmops_api::{CheckListReq, CheckListResp, CheckOut};
+use swarmops_api::{
+    CheckListReq, CheckListResp, CheckLogLineOut, CheckLogReq, CheckLogResp, CheckLogStream,
+    CheckOut, CheckOutcome, CheckRunOut, CheckRunReq, CheckRunResp, CheckSectionOut, CheckStage,
+};
 use swarmops_api::{SnapshotWrite, WsSnapshotReq, WsSnapshotResp};
 use swarmops_api::{UpdateOut, UpdatePending, UpdatePendingKind};
 
@@ -67,6 +70,8 @@ fn every_request_new_fills_the_serde_defaults() {
     reads_back(&BlobHasReq::new(Vec::new()));
     reads_back(&BlobPutReq::new(ContentInput::Inline("x".to_owned())));
     reads_back(&ChangeInput::new("x", ChangeOp::Put));
+    reads_back(&CheckRunReq::new("x"));
+    reads_back(&CheckLogReq::new("x", "x"));
     reads_back(&CloneReq::new("x", "x"));
     reads_back(&CommitReq::new(Vec::new(), "x"));
     reads_back(&DiffReq::new("main", "main"));
@@ -158,6 +163,8 @@ fn every_response_new_fills_the_serde_defaults() {
     reads_back(&AuthLogout::new("x", "x", true));
     reads_back(&UpdateOut::new("x", true, AutoUpdate::On));
     reads_back(&CheckListResp::new(true, Vec::new()));
+    reads_back(&CheckRunResp::new(true, "x", CheckStage::Manual, "x", "x"));
+    reads_back(&CheckLogResp::new(true, "x", "x"));
     reads_back(&RemoteRemoveResp::new("x", 7));
     reads_back(&SyncResp::new(
         "x",
@@ -199,6 +206,9 @@ fn every_item_new_fills_the_serde_defaults() {
     reads_back(&BlobOut::new("x", 7, ContentEncoding::Utf8, "x"));
     reads_back(&ChangeOut::new("x", ChangeOp::Put));
     reads_back(&CheckOut::new("x", Vec::new(), "x", 7, "x"));
+    reads_back(&CheckRunOut::new("x", CheckOutcome::NotRun, "x", 7));
+    reads_back(&CheckSectionOut::new("x", 7, 7));
+    reads_back(&CheckLogLineOut::new(7, CheckLogStream::Err, "x"));
     reads_back(&DiffLineOut::new(LineOp::Context, "x"));
     reads_back(&FileConflictOut::new("x", ConflictKindOut::Content));
     reads_back(&HunkOut::new(

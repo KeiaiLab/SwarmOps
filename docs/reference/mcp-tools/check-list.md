@@ -24,6 +24,7 @@ max_result_chars: null
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `rev` | string | no | `"main"` | The changeset whose tree's checks to list; `main` when omitted. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a ref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}` is the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move recorded at or before that instant (the writer's clock, moves read in journal order); optionally followed by `~N` for the N-th first-parent ancestor. |
+| `stage` | string or null | no |  | Only the checks of this stage; every check when omitted. |
 
 ### JSON Schema
 
@@ -38,6 +39,49 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
       "default": "main",
       "description": "The changeset whose tree's checks to list; `main` when omitted. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
       "type": "string"
+    },
+    "stage": {
+      "anyOf": [
+        {
+          "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+          "oneOf": [
+            {
+              "const": "before-land",
+              "description": "Before a change lands: the gate. The default.",
+              "type": "string"
+            },
+            {
+              "const": "after-land",
+              "description": "After a change has landed.",
+              "type": "string"
+            },
+            {
+              "const": "scheduled",
+              "description": "On a schedule.",
+              "type": "string"
+            },
+            {
+              "const": "release",
+              "description": "Before a release is cut.",
+              "type": "string"
+            },
+            {
+              "const": "manual",
+              "description": "Only when someone asks for it.",
+              "type": "string"
+            },
+            {
+              "const": "deploy",
+              "description": "Before a deployment.",
+              "type": "string"
+            }
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Only the checks of this stage; every check when omitted."
     }
   },
   "title": "CheckListReq",
@@ -68,7 +112,7 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 45,
+  "id": 47,
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
@@ -80,7 +124,7 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 45,
+  "id": 47,
   "jsonrpc": "2.0",
   "result": {
     "content": [
@@ -119,7 +163,8 @@ The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after 
 
 It reads the tree of `rev` (default `main`) from the store the server was started on: there is no
 directory form here, which `swarmops check list --dir` serves on the command line.
-An answer from the store says `vouched: false` and names the tree it read.
+An answer from the store says `vouched: false` and names the tree it read; with `stage`, it lists
+only the checks of that stage and echoes it.
 Nothing runs the checks it lists.
 
 ## Return information

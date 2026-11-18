@@ -270,7 +270,30 @@ fn this_repository_s_checks_are_its_recipes() {
         ]
     );
 
-    // 2. Each one `just <recipe>`, at the root, the recipe its name, and the justfile has it.
+    // 2. Each one's stages: the gate's two before-land, the rest manual (M30-6).
+    let stages: Vec<(&str, &Value)> = (checks.iter())
+        .map(|c| (c["name"].as_str().unwrap(), &c["stages"]))
+        .collect();
+    let (gate, manual) = (json!(["before-land"]), json!(["manual"]));
+    assert_eq!(
+        stages,
+        [
+            ("check", &gate),
+            ("check-compare", &gate),
+            ("lint-workflows", &manual),
+            ("server-acceptance", &manual),
+            ("server-entrances", &manual),
+            ("site-check", &manual),
+        ]
+    );
+    let text = fs::read_to_string(root.join(".swarmops/checks.toml")).unwrap();
+    assert_eq!(
+        text.matches("\nstages = ").count(),
+        6,
+        "every check writes its stages"
+    );
+
+    // 3. Each one `just <recipe>`, at the root, the recipe its name, and the justfile has it.
     let justfile = fs::read_to_string(root.join("justfile")).unwrap();
     let recipes: Vec<&str> = (justfile.lines())
         .filter(|line| !line.starts_with([' ', '\t', '#']) && !line.contains(":="))
@@ -284,6 +307,62 @@ fn this_repository_s_checks_are_its_recipes() {
         assert!(recipes.contains(&name), "{name}: no recipe in {recipes:?}");
     }
 }
+
+/// The gate's checks, the `before-land` ones, run one after the other inside ci.yml's `check` job:
+/// their timeouts, with the runner's grace and drain after each one's kill, leave the job
+/// [`SETUP_S`] of its `timeout-minutes` for its checkout and tool steps, so that a hung check
+/// ends with its own timeout, not with the job's kill.
+#[test]
+fn this_repository_s_gate_fits_its_job() {
+    // 1. The job's limit.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    let job = job_text(&ci, "check");
+    let minutes: Vec<u64> = (job.lines())
+        .filter_map(|line| line.trim().strip_prefix("timeout-minutes:"))
+        .map(|value| value.trim().parse().unwrap())
+        .collect();
+    assert_eq!(
+        minutes.len(),
+        1,
+        "one timeout-minutes in the check job: {minutes:?}"
+    );
+    let job_s = minutes[0] * 60;
+
+    // 2. The before-land checks' timeouts, together, a minute under it.
+    let lab = Lab::new();
+    let listed = list_dir(&lab, &root).ok();
+    let gate: Vec<(&str, u64)> = (listed["checks"].as_array().unwrap().iter())
+        .filter(|c| {
+            c["stages"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("before-land"))
+        })
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap(),
+                c["timeout_s"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(gate, [("check", 1420), ("check-compare", 300)]);
+
+    // 3. Each check's timeout, and past it the kill's grace and drain, plus the steps' allowance.
+    let after_kill = (swarmops_ws::run::GRACE + swarmops_ws::run::DRAIN).as_secs();
+    let total: u64 = gate.iter().map(|(_, s)| s + after_kill).sum();
+    assert!(
+        total + SETUP_S <= job_s,
+        "the gate's checks take up to {total} s with grace and drain, the job {job_s} s, less \
+         {SETUP_S} for its steps"
+    );
+}
+
+/// What the `check` job's steps before the gate (checkout, the toolchain, install-action, the
+/// cache, and after the switch the pinned build's download) are allowed: a minute. Stated, not
+/// measured: it is to be read from the runners' recent runs before ci.yml switches to
+/// `check run`, and this and the check's timeout set from it.
+const SETUP_S: u64 = 60;
 
 /// The four recipes that stand for a workflow job of several steps run the job's own commands, so
 /// that `.swarmops/checks.toml` names what GitHub runs: a change to one side alone fails here.

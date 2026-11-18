@@ -1,0 +1,9 @@
+# A version 1 check file with a stage no build knows.
+version = 1
+
+[check.unit]
+argv = ["cargo", "test", "--locked"]
+stages = [
+  "before-land",
+  "nightly",
+]

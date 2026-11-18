@@ -36,7 +36,16 @@ use swarmops_testkit::store::layout_of;
 const AGENT: &str = "agent/worker-17";
 
 /// The keys whose numbers are times or durations, replaced by `[<key>]` in snapshots.
-const TIME_KEYS: &[&str] = &["elapsed_ms", "created_at", "secs", "at"];
+const TIME_KEYS: &[&str] = &[
+    "elapsed_ms",
+    "created_at",
+    "secs",
+    "at",
+    "duration_ms",
+    "start_ms",
+    "started_at_ms",
+    "at_ms",
+];
 
 /// The store's access file for `serve`'s refusals: `person/bob` is named and granted nothing.
 const ACCESS: &str = "version = 1\n\n[[grant]]\nwho = [\"person/bob\"]\n";
@@ -475,12 +484,157 @@ fn commit_to_main(s: &mut Session, store: &str, changes: &Value, name: &str) -> 
     id.to_owned()
 }
 
+/// A check file of one passing and one failing check, for `check run`'s golden.
+const CHECK_RUN_FIXTURE: &str = "version = 1\n\n[check.ok]\nargv = [\"true\"]\n\n\
+[check.bad]\nargv = [\"sh\", \"-c\", \"echo boom >&2; exit 3\"]\n";
+
+/// The caller's variables of `check run`'s golden: every one of the fixed list a check gets, so
+/// that `inherited_env` is the same on every host, and the runs below the session's temp dir.
+fn check_run_env(tmp: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("SWARMOPS_CHECK_RUNS_DIR", format!("{tmp}/runs")),
+        ("HOME", format!("{tmp}/home")),
+        ("LANG", "C".to_owned()),
+        ("LC_ALL", "C".to_owned()),
+        ("LC_CTYPE", "C".to_owned()),
+        ("LOGNAME", "agent".to_owned()),
+        ("PATH", "/usr/bin:/bin".to_owned()),
+        ("TMPDIR", tmp.to_owned()),
+        ("TZ", "UTC".to_owned()),
+        ("USER", "agent".to_owned()),
+    ]
+}
+
+/// `check run` (M31-1), its pinned JSON form, in the directory form: a check that fails and one
+/// that passes run in name order, and the run is E_CHECK_FAILED with the whole run in
+/// `details.run`, the failing check's tails beside its exit code; the passing check alone, named,
+/// is a run that passes. Ids, paths and times are named.
+#[test]
+fn check_run_golden() {
+    // 1. The tree, and the caller's environment.
+    let mut s = Session::new();
+    let tmp = s.tmp();
+    let dir = format!("{tmp}/tree");
+    fs::create_dir_all(format!("{dir}/.swarmops")).unwrap();
+    fs::write(format!("{dir}/.swarmops/checks.toml"), CHECK_RUN_FIXTURE).unwrap();
+    let owned = check_run_env(&tmp);
+    let env: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+    // 2. Both checks: one failed.
+    let failed = s.run_env(&env, &["check", "run", "--dir", &dir]);
+    assert_eq!(
+        (failed.exit, failed.code()),
+        (1, "E_CHECK_FAILED"),
+        "{}",
+        failed.json
+    );
+    let run = &failed["error"]["details"]["run"];
+    let run_dir = run["dir"].as_str().unwrap().to_owned();
+    let key = Path::new(&run_dir)
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    s.name(key, "dir_key");
+    s.name_at(&failed, "/error/details/run/run", "run1");
+    assert_eq!(run["failed"], json!(["bad"]));
+
+    // 3. The passing one alone.
+    let passed = s.run_env(&env, &["check", "run", "--dir", &dir, "ok"]);
+    assert_eq!(passed.exit, 0, "{}", passed.json);
+    s.name_at(&passed, "/result/run", "run2");
+    insta::assert_json_snapshot!(s.transcript());
+}
+
+/// The log of a check of two sections, as `check run` writes it: what `check_log_golden` reads.
+const CHECK_LOG_FIXTURE: &str =
+    "    0.002 run start {\"argv\":[\"sh\",\"-c\",\"…\"],\"attempt\":1,\
+\"check\":\"sections\",\"dir\":\".\",\"run\":\"0193f1e2-0000-7000-8000-00000000c10c\",\
+\"stage\":\"before-land\",\"started_at_ms\":1763452800123,\"timeout_s\":900,\"tree\":null}
+    0.005 run section {\"n\":1,\"title\":\"build\"}
+    0.006 out a
+    0.309 run section {\"n\":2,\"title\":\"test\"}
+    0.611 out b
+    0.614 run end {\"dropped_bytes\":0,\"duration_ms\":614,\"exit_code\":0,\"outcome\":\"passed\",\
+\"sections\":[{\"duration_ms\":304,\"n\":1,\"start_ms\":5,\"title\":\"build\"},\
+{\"duration_ms\":305,\"n\":2,\"start_ms\":309,\"title\":\"test\"}]}
+";
+
+/// `check log` (M31-3), its pinned JSON form, of a run kept as `check run --dir` keeps it (its
+/// record and its log written by the test, so that every time is the log's own): the whole log,
+/// each line with its time, its stream and its text, the sections as the runner's lines, the end
+/// with the outcome; `--tail 2` the last two lines; a check the run does not list, refused.
+#[test]
+fn check_log_golden() {
+    // 1. A tree, and a run of it below the runs directory, as `check run --dir` keeps one.
+    let mut s = Session::new();
+    let tmp = s.tmp();
+    let dir = format!("{tmp}/tree");
+    fs::create_dir_all(format!("{dir}/.swarmops")).unwrap();
+    let canonical = fs::canonicalize(&dir).unwrap();
+    let key = swarmops_ops::check::log::dir_key(camino::Utf8Path::from_path(&canonical).unwrap());
+    s.name(&key, "dir_key");
+    let id = "0193f1e2-0000-7000-8000-00000000c10c";
+    let run = format!("{tmp}/runs/{key}/{id}");
+    fs::create_dir_all(format!("{run}/logs")).unwrap();
+    fs::write(format!("{run}/logs/sections.log"), CHECK_LOG_FIXTURE).unwrap();
+    let record = json!({"format": 1, "state": "ended", "result": {
+        "vouched": true, "run": id, "stage": "before-land", "file": ".swarmops/checks.toml",
+        "version": 1, "dir": run, "inherited_env": [], "inherited_all": false,
+        "cancelled": false, "failed": [], "duration_ms": 614,
+        "checks": [{"name": "sections", "outcome": "passed", "definition_digest": "ab",
+                    "timeout_s": 900, "duration_ms": 614, "exit_code": 0,
+                    "log": format!("{run}/logs/sections.log")}]}});
+    fs::write(format!("{run}/run.json"), record.to_string()).unwrap();
+    let runs = format!("{tmp}/runs");
+    let env = [("SWARMOPS_CHECK_RUNS_DIR", runs.as_str())];
+
+    // 2. The log, whole, then its last two lines; another check, refused.
+    let whole = s.run_env(&env, &["check", "log", "--dir", &dir, "sections"]);
+    assert_eq!(whole.exit, 0, "{}", whole.json);
+    assert_eq!(whole["result"]["total_lines"], 6);
+    assert_eq!(whole["result"]["ended_by"], "end");
+    let tail = s.run_env(
+        &env,
+        &["check", "log", "--dir", &dir, "sections", "--tail", "2"],
+    );
+    assert_eq!(tail["result"]["first_line"], 5);
+    let other = s.run_env(&env, &["check", "log", "--dir", &dir, "lint"]);
+    assert_eq!((other.exit, other.code()), (2, "E_INVALID_ARG"));
+    insta::assert_json_snapshot!(s.transcript());
+
+    // 3. With --human, the lines as the log holds them, control characters escaped: a check's
+    //    output cannot drive the terminal of whoever reads its log.
+    let weird = "    0.001 run start {\"check\":\"weird\"}\n    0.028 out \u{1b}[2J\u{1b}]0;a \
+                 title\u{7}\u{1b}[31mred\u{1b}[0m\tand a tab\n    0.030 run end \
+                 {\"outcome\":\"passed\"}\n";
+    fs::write(format!("{run}/logs/weird.log"), weird).unwrap();
+    let mut record = record;
+    let weird_check = json!({"name": "weird", "outcome": "passed", "definition_digest": "cd",
+                             "timeout_s": 900, "duration_ms": 30, "exit_code": 0,
+                             "log": format!("{run}/logs/weird.log")});
+    record["result"]["checks"]
+        .as_array_mut()
+        .unwrap()
+        .push(weird_check);
+    fs::write(format!("{run}/run.json"), record.to_string()).unwrap();
+    let args = ["--human", "check", "log", "--dir", &dir, "weird"];
+    let output = Session::run_raw(&env, &args, None);
+    assert_eq!(output.exit, 0, "{}", output.stdout);
+    assert!(!output.stdout.contains('\u{1b}'), "{}", output.stdout);
+    let text = s.text_step(&env, &args, &output);
+    insta::assert_snapshot!("check_log_golden_human", text);
+}
+
 /// `check list` (M30-1, M30-2), its pinned JSON form: the plan's fixture at main lists its
 /// three checks sorted by name, each with its line and the digest of its definition, read from
 /// the store (`vouched: false`, the tree named); the same file in a directory lists the same
 /// checks, vouched for by the caller; a tree without a check file lists no check, exit 0; a
 /// tree whose `.swarmops/workspaces.json` alone names `check.argv` lists it as the one check
-/// `default`; and the fixture with `stage` added is E_CHECK_FILE at line 11, exit 1.
+/// `default`; and the fixture with `stage` added is E_CHECK_FILE at line 11, exit 1. With
+/// `--stage after-land`, both forms list `docs` alone, the one check of two stages (M30-6).
 #[test]
 fn check_list_golden() {
     let mut s = Session::new();
@@ -520,6 +674,14 @@ fn check_list_golden() {
     assert_eq!(vouched["result"]["vouched"], true);
     assert!(vouched["result"].get("tree").is_none(), "{}", vouched.json);
     assert!(vouched["meta"].get("repo").is_none(), "{}", vouched.json);
+
+    // 2b. One stage, in both forms: after-land is docs' alone.
+    let after = s.run(&["--repo", &store, "check", "list", "--stage", "after-land"]);
+    assert_eq!(after.exit, 0, "{}", after.json);
+    assert_eq!(after["result"]["stage"], "after-land");
+    assert_eq!(after["result"]["checks"], json!([result["checks"][0]]));
+    let after_dir = s.run(&["check", "list", "--dir", &dir, "--stage", "after-land"]);
+    assert_eq!(after_dir["result"]["checks"], after["result"]["checks"]);
 
     // 3. No check file: no check, exit 0, and the tree named.
     let readme = json!([

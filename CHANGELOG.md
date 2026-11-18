@@ -46,15 +46,56 @@ No incompatible changes and no security fixes.
 - A22's measurement (`queue_perf`, in `just perf` and the weekly run): 50 processes each enqueue
   and wait on a check of 30 s; every entry lands once and no hold of the store's lock reaches
   1 s (docs/perf.md, "M22").
+- `check run` and the MCP tool `check_run`: the checks of one stage (`--stage`, `before-land` by
+  default) of a clean workspace, or with `check run --dir DIR` of a directory, one at a time in
+  name order, each with no shell and no stdin, in its own process group, under its `timeout_s`;
+  `NAME…` runs only those checks of the stage. Every check runs whatever an earlier one did, and
+  one envelope names each outcome: `passed`, `failed`, `timed_out` (its group killed),
+  `not_started`, `cancelled` or `not_run`. A run where any check did not pass is
+  `E_CHECK_FAILED`, the whole run in `details.run`. The workspace form reads the check file from
+  the store at the changeset the files stand for, holds the workspace's lock while the checks run
+  and never writes the store; the directory form opens no store and says `vouched: true`.
+  SIGINT, SIGTERM and SIGHUP kill the running check's process group and end the run. The MCP tool
+  has the workspace form only; the same signals to `swarmops mcp` while it runs end the run, and
+  the server exits once it has answered the call. `swarmops mcp` lists 53 tools.
+- The environment a check of `check run` gets: `SWARMOPS_CHECK_NAME`, `SWARMOPS_CHECK_STAGE`,
+  `SWARMOPS_CHECK_TREE`, `SWARMOPS_CHECK_ATTEMPT`, `SWARMOPS_CHECK_RUN`, the paths
+  `SWARMOPS_CHECK_REPORT`, `SWARMOPS_CHECK_OUTPUTS`, `SWARMOPS_CHECK_SUMMARY` and
+  `SWARMOPS_CHECK_ARTIFACTS` (which nothing reads yet), `SWARMOPS_CHECK_CHANGED` (empty until
+  plans exist) and `SWARMOPS_WS` in a workspace; of the caller's variables only `HOME`, `LANG`,
+  `LC_ALL`, `LC_CTYPE`, `LOGNAME`, `PATH`, `TMPDIR`, `TZ` and `USER`, and each `--pass NAME`. The
+  one check `default` of `.swarmops/workspaces.json` keeps the caller's whole environment, as
+  `ws land --check` gives it.
+- A check's log: both streams of its output with a time on every line, the runner's own lines
+  (`start`, `end`, and `section` for each line `swarmops:section <title>` a check writes), within
+  bounds (64 MiB a log, 16 KiB a line, 1,000 sections). A run's directory holds `run.json`, the
+  logs and each check's own directory: in a workspace below `.swarmws/check-runs/`, in the
+  directory form below `SWARMOPS_CHECK_RUNS_DIR`, else the state directory's
+  `swarmops/check-runs`; the newest 20 runs are kept, and a run of a directory removes the runs
+  of directories that are gone. The format is provisional. A log that
+  cannot be written (a full disk) fails its check (`not_started: log` before it starts), and the
+  run goes on.
+- `check log` and the MCP tool `check_log`: one check's log of a run (`--run`, else the newest
+  that ran it), its last `--tail` lines (1,000 by default), each with its time, its stream and its
+  text, and whether the log ended and how (`end` with the outcome, or `runner_gone`).
+  `check log --follow` prints one envelope a line as the log grows and exits 0 with the one that
+  holds its end, as `derive --follow` prints its envelopes; `--human` prints the lines as the log
+  holds them, control characters escaped. The tool has the workspace form only, and no follow.
+- Dependencies: `signal-hook` and `signal-hook-registry` (MIT OR Apache-2.0), for `check run`'s
+  signals.
 - `check list` and the MCP tool `check_list`: the checks a tree names, from the store at a
   changeset (`main` by default) or, with `check list --dir DIR`, from a directory of this host,
-  which opens no store. Each check comes with its argv, its directory, its timeout and the digest
-  of its definition, sorted by name; the directory form's answer says `vouched: true`, since only
+  which opens no store. Each check comes with its argv, its directory, its timeout, the digest
+  of its definition and its stages, sorted by name; `--stage STAGE` (the request's `stage`) lists
+  only the checks of one stage; the directory form's answer says `vouched: true`, since only
   the caller stands behind the files. The digest's recipe is provisional and may change in a later
   release. Nothing runs the checks yet: `ws land --check` still runs `check.argv` of
   `.swarmops/workspaces.json`.
 - The check file, `.swarmops/checks.toml`, version 1: `version = 1`, then one `[check.<name>]`
-  table a check, with `argv` (one command, run with no shell), `dir` and `timeout_s`. Any other
+  table a check, with `argv` (one command, run with no shell), `dir`, `timeout_s` and `stages`
+  (when its answer is wanted: one or more of `before-land`, the default, `after-land`,
+  `scheduled`, `release`, `manual` and `deploy`; an unknown stage is refused at its line; the
+  stages are not part of the definition's digest). Any other
   key is refused at its line, so a build refuses a file whose keys it does not know instead of
   reading less of it. In a tree without it, `check.argv` of `.swarmops/workspaces.json` reads as
   the one check `default`.
@@ -62,11 +103,22 @@ No incompatible changes and no security fixes.
   or, in a tree without one, `.swarmops/workspaces.json`; `details` name the `file`, the `reason`,
   whether the caller `vouched` for it, and its `line` and `key` when known. Golden envelopes now
   pin 57 of the 58 error codes.
-- API types `CheckListReq`, `CheckListResp` and `CheckOut`, the request and result of
-  `check list`. `swarmops schema` prints them (201 types).
+- API types `CheckListReq`, `CheckListResp`, `CheckOut` and `CheckStage`, the request and
+  result of `check list` and a check's stage; `CheckRunReq`, `CheckRunResp`, `CheckRunOut`,
+  `CheckOutcome`, `CheckNotStarted` and `CheckSectionOut`, those of `check run`; `CheckLogReq`,
+  `CheckLogResp`, `CheckLogLineOut`, `CheckLogStream` and `CheckLogEnd`, those of `check log`.
+  `swarmops schema` prints them (231 types).
 
 ### Changed
 
+- `E_CHECK_FAILED` also stands for a run of `check run` where a check did not pass, or that a
+  signal stopped: its `details.run` is the run's whole result. `ws land --check`'s and the
+  bootstrap's details are unchanged (`details.stage` keeps meaning `check` or `bootstrap`).
+- `ws land --check` and the bootstrap kill what their command left running in its process group
+  once it has exited and its output has ended (or a second after it exits, if a process holds the
+  output), whatever the outcome: a server or helper sent to the background with its output
+  elsewhere no longer outlives the land, nor writes into the workspace once its lock is let go.
+  `check run` does the same for each check.
 - Docs: the roadmap gains a section, "Checks and delivery": a role beside the three topologies in
   which SwarmOps describes a tree's checks, plans what a change needs, runs the checks on the
   caller's host or on runners that ask for work, records each result against its tree, gates a

@@ -53,6 +53,10 @@ pub const WS_BOOTSTRAP_ENV: &str = "SWARMOPS_WS_BOOTSTRAP";
 /// What [`WS_BOOTSTRAP_ENV`] is set to in order to skip the bootstrap.
 pub const BOOTSTRAP_SKIP: &str = "skip";
 
+/// The environment variable that names where `check run --dir` keeps its runs
+/// ([`check_runs_root`]).
+pub const CHECK_RUNS_DIR_ENV: &str = swarmops_ops::check::run::CHECK_RUNS_DIR_ENV;
+
 /// The environment variable that names the directory of the stores' memo keys ([`memo_key`]).
 pub const MEMO_KEY_DIR_ENV: &str = "SWARMOPS_MEMO_KEY_DIR";
 
@@ -132,6 +136,32 @@ pub fn ws_root(env: Env<'_>) -> Result<Utf8PathBuf, OpError> {
     }
     let state = state_dir(env)?;
     Ok(state.join("swarmops").join("workspaces"))
+}
+
+/// Where `check run --dir` keeps its runs: [`CHECK_RUNS_DIR_ENV`], which must be absolute, else
+/// the per-OS state directory's `swarmops/check-runs` (`$XDG_STATE_HOME/swarmops/check-runs`,
+/// `~/.local/state/…` by default, on Linux); `None` for a host that names neither, which the
+/// run refuses naming the variable.
+pub fn check_runs_root(env: Env<'_>) -> Result<Option<Utf8PathBuf>, OpError> {
+    if let Some(root) = var(env, CHECK_RUNS_DIR_ENV)? {
+        let root = Utf8PathBuf::from(root);
+        if !root.is_absolute() {
+            let mut error = OpError::new(
+                ErrorCode::InvalidArg,
+                format!("{CHECK_RUNS_DIR_ENV} is {root:?}: give an absolute directory"),
+            );
+            error
+                .details
+                .insert("reason".to_owned(), Value::from("runs_dir"));
+            return Err(error.with_hint(format!(
+                "name an absolute directory, such as {CHECK_RUNS_DIR_ENV}=\"$PWD/{root}\", or \
+                 unset it for the state directory's swarmops/check-runs"
+            )));
+        }
+        return Ok(Some(root));
+    }
+    let state = userdir::state_dir(env)?;
+    Ok(state.map(|state| state.join("swarmops").join("check-runs")))
 }
 
 /// The memo key of the store whose id is `repo_id` (operations spec §1, storage spec §5): 32

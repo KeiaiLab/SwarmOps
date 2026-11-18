@@ -104,7 +104,10 @@ pub(crate) const GROUPS: [Group; 8] = [
     },
     Group {
         title: "Checks",
-        commands: &[entry("check", "List the checks a tree describes")],
+        commands: &[entry(
+            "check",
+            "List and run a tree's checks, and read their logs",
+        )],
     },
     Group {
         title: "Read history",
@@ -414,15 +417,26 @@ pub(crate) const FAMILIES: [Family; 9] = [
     },
     Family {
         name: "check",
-        commands: &[entry(
-            "list",
-            "List the checks of a changeset's tree, or of a directory",
-        )],
+        commands: &[
+            entry(
+                "list",
+                "List the checks of a changeset's tree, or of a directory",
+            ),
+            entry(
+                "run",
+                "Run one stage's checks of a clean workspace or a directory",
+            ),
+            entry(
+                "log",
+                "Read a check's log of a run, or follow it as it grows",
+            ),
+        ],
         examples: &[
             Step::Shell("mkdir -p .swarmops"),
             Step::Shell("echo 'version = 1' > .swarmops/checks.toml"),
-            Step::Shell("echo 'check.test.argv = [\"make\", \"test\"]' >> .swarmops/checks.toml"),
-            run(&["--human", "check", "list", "--dir", "."]),
+            Step::Shell("echo 'check.test.argv = [\"true\"]' >> .swarmops/checks.toml"),
+            run(&["--human", "check", "run", "--dir", "."]),
+            run(&["--human", "check", "log", "--dir", ".", "test"]),
         ],
         needs: Needs::Nothing,
         guide: "https://swarmops.cc/docs/guides/parallel-agents",
@@ -432,9 +446,9 @@ pub(crate) const FAMILIES: [Family; 9] = [
 /// What the program's screen says of its output, the rule of [`bare`] included.
 const OUTPUT: &str = "Every command prints one JSON envelope on stdout, or a short text with \
 --human or SWARMOPS_FORMAT=human, and exits 0 or with its error's code. mcp, serve, derive \
---follow and auth git-credential speak their own protocols there. The program alone, or a \
-command group alone (ws, auth, ...), is a usage error, exit 2: at a terminal it prints its help \
-instead of the envelope, unless --json or SWARMOPS_FORMAT=json is given.";
+--follow, check log --follow and auth git-credential speak their own protocols there. The \
+program alone, or a command group alone (ws, auth, ...), is a usage error, exit 2: at a terminal \
+it prints its help instead of the envelope, unless --json or SWARMOPS_FORMAT=json is given.";
 
 /// The label of the line that says how to read one command's help: its arguments, its options
 /// and its long text.

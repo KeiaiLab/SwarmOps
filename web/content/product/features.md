@@ -136,7 +136,7 @@ attempts: 1
 
 Claude Code's `WorktreeCreate` and `WorktreeRemove` hooks (`so ws hook config` prints the
 settings) give `claude --worktree` sessions and `isolation: worktree` subagents a workspace
-instead of a git worktree, and MCP has twelve workspace tools.
+instead of a git worktree, and MCP has fourteen workspace tools.
 [Build and test a change](/docs/operate/build-and-test) is the guide.
 
 ## One JSON envelope per command
@@ -163,8 +163,8 @@ exit 5
 
 ## An MCP server for agents
 
-`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout: 47 tools, one
-per operation (35 store operations and 12 workspace operations), each taking the operation's
+`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout: 49 tools, one
+per operation (35 store operations and 14 workspace operations), each taking the operation's
 request and returning the envelope the CLI prints.
 Register it with Claude Code, one identity per agent process:
 

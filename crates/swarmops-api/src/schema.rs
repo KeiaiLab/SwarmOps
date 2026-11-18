@@ -347,7 +347,24 @@ fn queue_schemas() -> serde_json::Value {
     ]
 }
 
-/// The schemas of the checks' types (M30): `check list`, the checks a tree describes.
+/// The schemas of the checks' types (M30, M31): `check list`, the checks a tree describes;
+/// `check run`, a run of one stage's checks; and `check log`, a check's log of a run.
 fn check_schemas() -> serde_json::Value {
-    schemas![CheckListReq, CheckListResp, CheckOut]
+    schemas![
+        CheckListReq,
+        CheckListResp,
+        CheckOut,
+        CheckStage,
+        CheckRunReq,
+        CheckRunResp,
+        CheckRunOut,
+        CheckOutcome,
+        CheckNotStarted,
+        CheckSectionOut,
+        CheckLogReq,
+        CheckLogResp,
+        CheckLogLineOut,
+        CheckLogStream,
+        CheckLogEnd,
+    ]
 }

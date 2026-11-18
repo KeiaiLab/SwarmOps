@@ -767,7 +767,7 @@ fn derive_req(after: Option<u64>, limit: usize) -> DeriveReq {
 
 /// Writes `text` to stdout and flushes it, so that a reader has it at once: one envelope of
 /// `derive --follow`'s output.
-fn write_now(text: &str) -> io::Result<()> {
+pub(super) fn write_now(text: &str) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     stdout.write_all(text.as_bytes())?;
     stdout.flush()

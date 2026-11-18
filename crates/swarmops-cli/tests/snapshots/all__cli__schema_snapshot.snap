@@ -1,5 +1,6 @@
 ---
 source: crates/swarmops-cli/tests/cli.rs
+assertion_line: 2066
 expression: s.redact(&all)
 ---
 {
@@ -1302,6 +1303,41 @@ expression: s.redact(&all)
     },
     "CheckListReq": {
       "$defs": {
+        "CheckStage": {
+          "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+          "oneOf": [
+            {
+              "const": "before-land",
+              "description": "Before a change lands: the gate. The default.",
+              "type": "string"
+            },
+            {
+              "const": "after-land",
+              "description": "After a change has landed.",
+              "type": "string"
+            },
+            {
+              "const": "scheduled",
+              "description": "On a schedule.",
+              "type": "string"
+            },
+            {
+              "const": "release",
+              "description": "Before a release is cut.",
+              "type": "string"
+            },
+            {
+              "const": "manual",
+              "description": "Only when someone asks for it.",
+              "type": "string"
+            },
+            {
+              "const": "deploy",
+              "description": "Before a deployment.",
+              "type": "string"
+            }
+          ]
+        },
         "Rev": {
           "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
           "type": "string"
@@ -1314,6 +1350,17 @@ expression: s.redact(&all)
           "$ref": "#/$defs/Rev",
           "default": "main",
           "description": "The changeset whose tree's checks to list; `main` when omitted."
+        },
+        "stage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckStage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only the checks of this stage; every check when omitted."
         }
       },
       "title": "CheckListReq",
@@ -1332,7 +1379,7 @@ expression: s.redact(&all)
               "type": "array"
             },
             "definition_digest": {
-              "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not\nits name): 64 hex digits. Two checks that differ only in name share it. Provisional: the\nrecipe may change in a later release, so compare digests of one release only.",
+              "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not\nits name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
               "type": "string"
             },
             "dir": {
@@ -1352,6 +1399,16 @@ expression: s.redact(&all)
               "description": "Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit.",
               "type": "string"
             },
+            "stages": {
+              "default": [
+                "before-land"
+              ],
+              "description": "When its answer is wanted: one to six stages, in the stages' own order (`before-land`,\n`after-land`, `scheduled`, `release`, `manual`, `deploy`), whatever order the file wrote\nthem in; `before-land` by default, and for the check `default` of\n`.swarmops/workspaces.json`.",
+              "items": {
+                "$ref": "#/$defs/CheckStage"
+              },
+              "type": "array"
+            },
             "timeout_s": {
               "description": "The most seconds it may run, its default (900) filled in. For the check `default` of\n`.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does\nnot read it, and takes its own `--check-timeout`.",
               "format": "uint64",
@@ -1367,13 +1424,48 @@ expression: s.redact(&all)
             "definition_digest"
           ],
           "type": "object"
+        },
+        "CheckStage": {
+          "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+          "oneOf": [
+            {
+              "const": "before-land",
+              "description": "Before a change lands: the gate. The default.",
+              "type": "string"
+            },
+            {
+              "const": "after-land",
+              "description": "After a change has landed.",
+              "type": "string"
+            },
+            {
+              "const": "scheduled",
+              "description": "On a schedule.",
+              "type": "string"
+            },
+            {
+              "const": "release",
+              "description": "Before a release is cut.",
+              "type": "string"
+            },
+            {
+              "const": "manual",
+              "description": "Only when someone asks for it.",
+              "type": "string"
+            },
+            {
+              "const": "deploy",
+              "description": "Before a deployment.",
+              "type": "string"
+            }
+          ]
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`check_list`: the checks a tree describes, sorted by name. The same tree gives the same\nanswer byte for byte, whichever changeset names it.",
       "properties": {
         "checks": {
-          "description": "The checks, sorted by name, bytewise; empty when the tree describes none.",
+          "description": "The checks, sorted by name, bytewise; empty when the tree describes none (or none of\n`stage`).",
           "items": {
             "$ref": "#/$defs/CheckOut"
           },
@@ -1385,6 +1477,17 @@ expression: s.redact(&all)
             "string",
             "null"
           ]
+        },
+        "stage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckStage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The stage asked for: `checks` holds only the checks of it. Omitted when every check is\nlisted."
         },
         "tree": {
           "description": "The root tree the file was read from: 64 hex digits. Omitted for a directory.",
@@ -1414,7 +1517,408 @@ expression: s.redact(&all)
       "title": "CheckListResp",
       "type": "object"
     },
+    "CheckLogEnd": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "How a check's log ended.",
+      "oneOf": [
+        {
+          "const": "end",
+          "description": "Its `end` line, or the run's record of a check it never started.",
+          "type": "string"
+        },
+        {
+          "const": "runner_gone",
+          "description": "The run's lock was let go with no `end` line: the runner died.",
+          "type": "string"
+        }
+      ],
+      "title": "CheckLogEnd"
+    },
+    "CheckLogLineOut": {
+      "$defs": {
+        "CheckLogStream": {
+          "description": "Where a line of a check's log came from.",
+          "oneOf": [
+            {
+              "const": "out",
+              "description": "The check's stdout.",
+              "type": "string"
+            },
+            {
+              "const": "err",
+              "description": "The check's stderr.",
+              "type": "string"
+            },
+            {
+              "const": "run",
+              "description": "The runner's own line: `start`, `section`, `cut` or `end`, and a JSON object.",
+              "type": "string"
+            },
+            {
+              "const": "other",
+              "description": "A line not in the log's format, as a check writing into its own log could leave.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One line of a check's log.",
+      "properties": {
+        "at_ms": {
+          "description": "Its time: milliseconds since the check's start. Omitted for a line of `other`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "n": {
+          "description": "Its number in the log, from 1.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stream": {
+          "$ref": "#/$defs/CheckLogStream",
+          "description": "Where it came from."
+        },
+        "text": {
+          "description": "Its text.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "n",
+        "stream",
+        "text"
+      ],
+      "title": "CheckLogLineOut",
+      "type": "object"
+    },
+    "CheckLogReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. Reads\nonly: no lock, nothing written.",
+      "properties": {
+        "check": {
+          "description": "The check whose log to read.",
+          "type": "string"
+        },
+        "run": {
+          "description": "The run, by its id; the newest run of the workspace that ran `check` when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tail": {
+          "default": 1000,
+          "description": "The most lines to give, the last ones: 1 to 100,000; 1,000 when omitted.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workspace": {
+          "description": "The workspace, by its name in the store's registry.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace",
+        "check"
+      ],
+      "title": "CheckLogReq",
+      "type": "object"
+    },
+    "CheckLogResp": {
+      "$defs": {
+        "CheckLogEnd": {
+          "description": "How a check's log ended.",
+          "oneOf": [
+            {
+              "const": "end",
+              "description": "Its `end` line, or the run's record of a check it never started.",
+              "type": "string"
+            },
+            {
+              "const": "runner_gone",
+              "description": "The run's lock was let go with no `end` line: the runner died.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckLogLineOut": {
+          "description": "One line of a check's log.",
+          "properties": {
+            "at_ms": {
+              "description": "Its time: milliseconds since the check's start. Omitted for a line of `other`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "n": {
+              "description": "Its number in the log, from 1.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stream": {
+              "$ref": "#/$defs/CheckLogStream",
+              "description": "Where it came from."
+            },
+            "text": {
+              "description": "Its text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "n",
+            "stream",
+            "text"
+          ],
+          "type": "object"
+        },
+        "CheckLogStream": {
+          "description": "Where a line of a check's log came from.",
+          "oneOf": [
+            {
+              "const": "out",
+              "description": "The check's stdout.",
+              "type": "string"
+            },
+            {
+              "const": "err",
+              "description": "The check's stderr.",
+              "type": "string"
+            },
+            {
+              "const": "run",
+              "description": "The runner's own line: `start`, `section`, `cut` or `end`, and a JSON object.",
+              "type": "string"
+            },
+            {
+              "const": "other",
+              "description": "A line not in the log's format, as a check writing into its own log could leave.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckOutcome": {
+          "description": "How a check of a run ended. Only `passed` passes.",
+          "oneOf": [
+            {
+              "const": "passed",
+              "description": "It exited 0.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "It exited with another code, or a signal it was not sent by the runner ended it.",
+              "type": "string"
+            },
+            {
+              "const": "timed_out",
+              "description": "It ran past its timeout, and its process group was killed.",
+              "type": "string"
+            },
+            {
+              "const": "not_started",
+              "description": "Its directory is missing, or its program did not start.",
+              "type": "string"
+            },
+            {
+              "const": "cancelled",
+              "description": "It was running when a signal stopped the run, and its process group was killed.",
+              "type": "string"
+            },
+            {
+              "const": "not_run",
+              "description": "The run was stopped before it started: no process, no log.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`check_log`: lines of a check's log, and whether it has ended. `check log --follow` prints one\nof these first, then one for each batch of lines the check writes, the last with `ended`.",
+      "properties": {
+        "check": {
+          "description": "The check's name.",
+          "type": "string"
+        },
+        "duration_ms": {
+          "description": "The check's milliseconds, when its log's `end` line gives them.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ended": {
+          "description": "Whether the log is complete: no line follows.",
+          "type": "boolean"
+        },
+        "ended_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckLogEnd"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How it ended, when `ended`."
+        },
+        "first_line": {
+          "description": "The number of the first line given, from 1.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lines": {
+          "description": "The lines given, in order.",
+          "items": {
+            "$ref": "#/$defs/CheckLogLineOut"
+          },
+          "type": "array"
+        },
+        "log": {
+          "description": "The log's path on the host it ran on. Omitted for a check the run never started\n(`not_run`), which has none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The check's outcome, when `ended_by` is `end`."
+        },
+        "run": {
+          "description": "The run's id.",
+          "type": "string"
+        },
+        "total_lines": {
+          "description": "The log's lines so far.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vouched": {
+          "description": "As the run's: `true` for a run of the directory form.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "vouched",
+        "run",
+        "check",
+        "ended",
+        "first_line",
+        "total_lines",
+        "lines"
+      ],
+      "title": "CheckLogResp",
+      "type": "object"
+    },
+    "CheckLogStream": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Where a line of a check's log came from.",
+      "oneOf": [
+        {
+          "const": "out",
+          "description": "The check's stdout.",
+          "type": "string"
+        },
+        {
+          "const": "err",
+          "description": "The check's stderr.",
+          "type": "string"
+        },
+        {
+          "const": "run",
+          "description": "The runner's own line: `start`, `section`, `cut` or `end`, and a JSON object.",
+          "type": "string"
+        },
+        {
+          "const": "other",
+          "description": "A line not in the log's format, as a check writing into its own log could leave.",
+          "type": "string"
+        }
+      ],
+      "title": "CheckLogStream"
+    },
+    "CheckNotStarted": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Why a check did not start.",
+      "oneOf": [
+        {
+          "const": "dir",
+          "description": "Its directory is not a directory of the tree on disk (a sparse workspace may lack it).",
+          "type": "string"
+        },
+        {
+          "const": "program",
+          "description": "Its program could not be started: not found, or not executable.",
+          "type": "string"
+        },
+        {
+          "const": "log",
+          "description": "Its log, or its own directory in the run's, could not be made or written (a full disk,\nsay): nothing was run without a log.",
+          "type": "string"
+        }
+      ],
+      "title": "CheckNotStarted"
+    },
     "CheckOut": {
+      "$defs": {
+        "CheckStage": {
+          "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+          "oneOf": [
+            {
+              "const": "before-land",
+              "description": "Before a change lands: the gate. The default.",
+              "type": "string"
+            },
+            {
+              "const": "after-land",
+              "description": "After a change has landed.",
+              "type": "string"
+            },
+            {
+              "const": "scheduled",
+              "description": "On a schedule.",
+              "type": "string"
+            },
+            {
+              "const": "release",
+              "description": "Before a release is cut.",
+              "type": "string"
+            },
+            {
+              "const": "manual",
+              "description": "Only when someone asks for it.",
+              "type": "string"
+            },
+            {
+              "const": "deploy",
+              "description": "Before a deployment.",
+              "type": "string"
+            }
+          ]
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "One check: a command run with no shell, in a directory of the tree, for at most its time.",
       "properties": {
@@ -1426,7 +1930,7 @@ expression: s.redact(&all)
           "type": "array"
         },
         "definition_digest": {
-          "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not\nits name): 64 hex digits. Two checks that differ only in name share it. Provisional: the\nrecipe may change in a later release, so compare digests of one release only.",
+          "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not\nits name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
           "type": "string"
         },
         "dir": {
@@ -1446,6 +1950,16 @@ expression: s.redact(&all)
           "description": "Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit.",
           "type": "string"
         },
+        "stages": {
+          "default": [
+            "before-land"
+          ],
+          "description": "When its answer is wanted: one to six stages, in the stages' own order (`before-land`,\n`after-land`, `scheduled`, `release`, `manual`, `deploy`), whatever order the file wrote\nthem in; `before-land` by default, and for the check `default` of\n`.swarmops/workspaces.json`.",
+          "items": {
+            "$ref": "#/$defs/CheckStage"
+          },
+          "type": "array"
+        },
         "timeout_s": {
           "description": "The most seconds it may run, its default (900) filled in. For the check `default` of\n`.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does\nnot read it, and takes its own `--check-timeout`.",
           "format": "uint64",
@@ -1462,6 +1976,694 @@ expression: s.redact(&all)
       ],
       "title": "CheckOut",
       "type": "object"
+    },
+    "CheckOutcome": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "How a check of a run ended. Only `passed` passes.",
+      "oneOf": [
+        {
+          "const": "passed",
+          "description": "It exited 0.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "It exited with another code, or a signal it was not sent by the runner ended it.",
+          "type": "string"
+        },
+        {
+          "const": "timed_out",
+          "description": "It ran past its timeout, and its process group was killed.",
+          "type": "string"
+        },
+        {
+          "const": "not_started",
+          "description": "Its directory is missing, or its program did not start.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "It was running when a signal stopped the run, and its process group was killed.",
+          "type": "string"
+        },
+        {
+          "const": "not_run",
+          "description": "The run was stopped before it started: no process, no log.",
+          "type": "string"
+        }
+      ],
+      "title": "CheckOutcome"
+    },
+    "CheckRunOut": {
+      "$defs": {
+        "CheckNotStarted": {
+          "description": "Why a check did not start.",
+          "oneOf": [
+            {
+              "const": "dir",
+              "description": "Its directory is not a directory of the tree on disk (a sparse workspace may lack it).",
+              "type": "string"
+            },
+            {
+              "const": "program",
+              "description": "Its program could not be started: not found, or not executable.",
+              "type": "string"
+            },
+            {
+              "const": "log",
+              "description": "Its log, or its own directory in the run's, could not be made or written (a full disk,\nsay): nothing was run without a log.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckOutcome": {
+          "description": "How a check of a run ended. Only `passed` passes.",
+          "oneOf": [
+            {
+              "const": "passed",
+              "description": "It exited 0.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "It exited with another code, or a signal it was not sent by the runner ended it.",
+              "type": "string"
+            },
+            {
+              "const": "timed_out",
+              "description": "It ran past its timeout, and its process group was killed.",
+              "type": "string"
+            },
+            {
+              "const": "not_started",
+              "description": "Its directory is missing, or its program did not start.",
+              "type": "string"
+            },
+            {
+              "const": "cancelled",
+              "description": "It was running when a signal stopped the run, and its process group was killed.",
+              "type": "string"
+            },
+            {
+              "const": "not_run",
+              "description": "The run was stopped before it started: no process, no log.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckSectionOut": {
+          "description": "A section a check opened with a marker line: from its marker to the next one, or to the end\nof the check's output.",
+          "properties": {
+            "duration_ms": {
+              "description": "How long it lasted, in milliseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "start_ms": {
+              "description": "When it opened: milliseconds since the check's start.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "title": {
+              "description": "Its title, as the marker gave it (at most 200 bytes, cut with `…`).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "start_ms",
+            "duration_ms"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One check of a run: how it ended, and where its log is.",
+      "properties": {
+        "definition_digest": {
+          "description": "The digest of its definition, as `check list` gives it (provisional).",
+          "type": "string"
+        },
+        "dropped_bytes": {
+          "description": "The bytes of its output its log left out, past the log's bounds. Omitted when none.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "duration_ms": {
+          "description": "Its milliseconds, from its start to the end of its output; 0 for `not_started` and\n`not_run`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exit_code": {
+          "description": "Its exit code, when it exited.",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "log": {
+          "description": "Its log's path on the host it ran on, absolute. Omitted for `not_run`, which has none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "The host's words for why it did not start, one line, for `not_started`; or, for a check\nthat ran and is `failed` because its log could not be written, why not.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Its name.",
+          "type": "string"
+        },
+        "not_started": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckNotStarted"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why it did not start, for `not_started`."
+        },
+        "outcome": {
+          "$ref": "#/$defs/CheckOutcome",
+          "description": "How it ended; only `passed` passes."
+        },
+        "sections": {
+          "description": "The sections it opened with a marker line, in order. Omitted when it opened none.",
+          "items": {
+            "$ref": "#/$defs/CheckSectionOut"
+          },
+          "type": "array"
+        },
+        "signal": {
+          "description": "The signal that ended it, for a check `failed` by a signal the runner did not send.",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stderr_tail": {
+          "description": "The last 8 KiB of its stderr, for a check that ran and did not pass.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stdout_tail": {
+          "description": "The last 8 KiB of its stdout, for a check that ran and did not pass.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeout_s": {
+          "description": "The timeout it ran under, in seconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "outcome",
+        "definition_digest",
+        "timeout_s",
+        "duration_ms"
+      ],
+      "title": "CheckRunOut",
+      "type": "object"
+    },
+    "CheckRunReq": {
+      "$defs": {
+        "CheckStage": {
+          "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+          "oneOf": [
+            {
+              "const": "before-land",
+              "description": "Before a change lands: the gate. The default.",
+              "type": "string"
+            },
+            {
+              "const": "after-land",
+              "description": "After a change has landed.",
+              "type": "string"
+            },
+            {
+              "const": "scheduled",
+              "description": "On a schedule.",
+              "type": "string"
+            },
+            {
+              "const": "release",
+              "description": "Before a release is cut.",
+              "type": "string"
+            },
+            {
+              "const": "manual",
+              "description": "Only when someone asks for it.",
+              "type": "string"
+            },
+            {
+              "const": "deploy",
+              "description": "Before a deployment.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`check_run` (CLI `check run`): run the checks of one stage of a workspace's tree, one at a\ntime in name order. The workspace must be clean (no edits, not rebasing, not stale); its lock\nis held while the checks run, and the store is never written.",
+      "properties": {
+        "checks": {
+          "description": "The checks to run, each of the stage; empty (the default): every check of the stage. A\nname given twice runs once.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "stage": {
+          "$ref": "#/$defs/CheckStage",
+          "default": "before-land",
+          "description": "The stage whose checks to run; `before-land` when omitted."
+        },
+        "workspace": {
+          "description": "The workspace, by its name in the store's registry.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "title": "CheckRunReq",
+      "type": "object"
+    },
+    "CheckRunResp": {
+      "$defs": {
+        "CheckNotStarted": {
+          "description": "Why a check did not start.",
+          "oneOf": [
+            {
+              "const": "dir",
+              "description": "Its directory is not a directory of the tree on disk (a sparse workspace may lack it).",
+              "type": "string"
+            },
+            {
+              "const": "program",
+              "description": "Its program could not be started: not found, or not executable.",
+              "type": "string"
+            },
+            {
+              "const": "log",
+              "description": "Its log, or its own directory in the run's, could not be made or written (a full disk,\nsay): nothing was run without a log.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckOutcome": {
+          "description": "How a check of a run ended. Only `passed` passes.",
+          "oneOf": [
+            {
+              "const": "passed",
+              "description": "It exited 0.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "It exited with another code, or a signal it was not sent by the runner ended it.",
+              "type": "string"
+            },
+            {
+              "const": "timed_out",
+              "description": "It ran past its timeout, and its process group was killed.",
+              "type": "string"
+            },
+            {
+              "const": "not_started",
+              "description": "Its directory is missing, or its program did not start.",
+              "type": "string"
+            },
+            {
+              "const": "cancelled",
+              "description": "It was running when a signal stopped the run, and its process group was killed.",
+              "type": "string"
+            },
+            {
+              "const": "not_run",
+              "description": "The run was stopped before it started: no process, no log.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckRunOut": {
+          "description": "One check of a run: how it ended, and where its log is.",
+          "properties": {
+            "definition_digest": {
+              "description": "The digest of its definition, as `check list` gives it (provisional).",
+              "type": "string"
+            },
+            "dropped_bytes": {
+              "description": "The bytes of its output its log left out, past the log's bounds. Omitted when none.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "duration_ms": {
+              "description": "Its milliseconds, from its start to the end of its output; 0 for `not_started` and\n`not_run`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "exit_code": {
+              "description": "Its exit code, when it exited.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "log": {
+              "description": "Its log's path on the host it ran on, absolute. Omitted for `not_run`, which has none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message": {
+              "description": "The host's words for why it did not start, one line, for `not_started`; or, for a check\nthat ran and is `failed` because its log could not be written, why not.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "Its name.",
+              "type": "string"
+            },
+            "not_started": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CheckNotStarted"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Why it did not start, for `not_started`."
+            },
+            "outcome": {
+              "$ref": "#/$defs/CheckOutcome",
+              "description": "How it ended; only `passed` passes."
+            },
+            "sections": {
+              "description": "The sections it opened with a marker line, in order. Omitted when it opened none.",
+              "items": {
+                "$ref": "#/$defs/CheckSectionOut"
+              },
+              "type": "array"
+            },
+            "signal": {
+              "description": "The signal that ended it, for a check `failed` by a signal the runner did not send.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "stderr_tail": {
+              "description": "The last 8 KiB of its stderr, for a check that ran and did not pass.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stdout_tail": {
+              "description": "The last 8 KiB of its stdout, for a check that ran and did not pass.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeout_s": {
+              "description": "The timeout it ran under, in seconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "name",
+            "outcome",
+            "definition_digest",
+            "timeout_s",
+            "duration_ms"
+          ],
+          "type": "object"
+        },
+        "CheckSectionOut": {
+          "description": "A section a check opened with a marker line: from its marker to the next one, or to the end\nof the check's output.",
+          "properties": {
+            "duration_ms": {
+              "description": "How long it lasted, in milliseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "start_ms": {
+              "description": "When it opened: milliseconds since the check's start.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "title": {
+              "description": "Its title, as the marker gave it (at most 200 bytes, cut with `…`).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "start_ms",
+            "duration_ms"
+          ],
+          "type": "object"
+        },
+        "CheckStage": {
+          "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+          "oneOf": [
+            {
+              "const": "before-land",
+              "description": "Before a change lands: the gate. The default.",
+              "type": "string"
+            },
+            {
+              "const": "after-land",
+              "description": "After a change has landed.",
+              "type": "string"
+            },
+            {
+              "const": "scheduled",
+              "description": "On a schedule.",
+              "type": "string"
+            },
+            {
+              "const": "release",
+              "description": "Before a release is cut.",
+              "type": "string"
+            },
+            {
+              "const": "manual",
+              "description": "Only when someone asks for it.",
+              "type": "string"
+            },
+            {
+              "const": "deploy",
+              "description": "Before a deployment.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`check_run`: every selected check's outcome, in the order they ran. A run where any check\ndid not pass is `E_CHECK_FAILED`, whose `details.run` is this whole result.",
+      "properties": {
+        "cancelled": {
+          "description": "Whether a signal stopped the run before its checks ended: the check running then is\n`cancelled`, those after it `not_run`. A signal once the last check has exited stops\nnothing: the run ends as its checks did.",
+          "type": "boolean"
+        },
+        "changeset": {
+          "description": "The changeset the workspace's files stood for. Omitted in the directory form.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checks": {
+          "description": "One per selected check, in the order they ran (by name).",
+          "items": {
+            "$ref": "#/$defs/CheckRunOut"
+          },
+          "type": "array"
+        },
+        "dir": {
+          "description": "The run's directory on the host it ran on, absolute: `run.json`, the logs and each\ncheck's own directory.",
+          "type": "string"
+        },
+        "duration_ms": {
+          "description": "The run's milliseconds, from its first check's start to its last's end.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed": {
+          "description": "The checks that did not pass, in run order; empty when every one passed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "file": {
+          "description": "The file the checks came from: `.swarmops/checks.toml`, or `.swarmops/workspaces.json`\nfor the one check `default`.",
+          "type": "string"
+        },
+        "inherited_all": {
+          "description": "Whether the checks got the caller's whole environment: only the check `default` of\n`.swarmops/workspaces.json`, which keeps what `ws land --check` gives it.",
+          "type": "boolean"
+        },
+        "inherited_env": {
+          "description": "The names of the caller's variables the checks got besides the pinned ones, sorted; no\nvalues. Empty when `inherited_all`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "run": {
+          "description": "The run's id: a UUID v7, so that runs sort by their start.",
+          "type": "string"
+        },
+        "stage": {
+          "$ref": "#/$defs/CheckStage",
+          "description": "The stage run."
+        },
+        "tree": {
+          "description": "That changeset's root tree, 64 hex digits: the tree every check ran on. Omitted in the\ndirectory form, which knows no tree.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "description": "The check file's `version`, 1. Omitted unless `file` is `.swarmops/checks.toml`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "vouched": {
+          "description": "Whether only the caller stands behind the files the checks ran on: `true` in the\ndirectory form (`check run --dir`), which no gate accepts; `false` in a workspace, whose\nfiles were checked against `tree` first.",
+          "type": "boolean"
+        },
+        "workspace": {
+          "description": "The workspace's name. Omitted in the directory form.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "vouched",
+        "run",
+        "stage",
+        "file",
+        "dir",
+        "inherited_env",
+        "inherited_all",
+        "cancelled",
+        "failed",
+        "duration_ms",
+        "checks"
+      ],
+      "title": "CheckRunResp",
+      "type": "object"
+    },
+    "CheckSectionOut": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A section a check opened with a marker line: from its marker to the next one, or to the end\nof the check's output.",
+      "properties": {
+        "duration_ms": {
+          "description": "How long it lasted, in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start_ms": {
+          "description": "When it opened: milliseconds since the check's start.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "description": "Its title, as the marker gave it (at most 200 bytes, cut with `…`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "start_ms",
+        "duration_ms"
+      ],
+      "title": "CheckSectionOut",
+      "type": "object"
+    },
+    "CheckStage": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+      "oneOf": [
+        {
+          "const": "before-land",
+          "description": "Before a change lands: the gate. The default.",
+          "type": "string"
+        },
+        {
+          "const": "after-land",
+          "description": "After a change has landed.",
+          "type": "string"
+        },
+        {
+          "const": "scheduled",
+          "description": "On a schedule.",
+          "type": "string"
+        },
+        {
+          "const": "release",
+          "description": "Before a release is cut.",
+          "type": "string"
+        },
+        {
+          "const": "manual",
+          "description": "Only when someone asks for it.",
+          "type": "string"
+        },
+        {
+          "const": "deploy",
+          "description": "Before a deployment.",
+          "type": "string"
+        }
+      ],
+      "title": "CheckStage"
     },
     "CloneReq": {
       "$defs": {
@@ -3705,7 +4907,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_CHECK_FAILED",
-          "description": "A workspace's check or bootstrap command failed or ran past its time\n(`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its\noutput, `log`, `changeset`). Nothing was landed.",
+          "description": "A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create`\n(`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its\noutput, `log`, `changeset`; nothing was landed), or one or more of `check run`'s\n(`details.run`: the run's whole result, every check's outcome, or `cancelled` after a\nsignal).",
           "type": "string"
         },
         {
@@ -12911,7 +14113,7 @@ expression: s.redact(&all)
             },
             {
               "const": "E_CHECK_FAILED",
-              "description": "A workspace's check or bootstrap command failed or ran past its time\n(`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its\noutput, `log`, `changeset`). Nothing was landed.",
+              "description": "A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create`\n(`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its\noutput, `log`, `changeset`; nothing was landed), or one or more of `check run`'s\n(`details.run`: the run's whole result, every check's outcome, or `cancelled` after a\nsignal).",
               "type": "string"
             },
             {

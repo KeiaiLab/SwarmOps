@@ -7,10 +7,12 @@
 //! answers it on stdout if it is a request, and reads the next: one at a time, in order. stdout
 //! carries nothing but answers. stderr gets a line for a message that has no answer although it
 //! is neither a request nor a notification (a response from the client), a line for the I/O
-//! error that stops the server, the panic hook's report of a bug, and the reason one of the
-//! store's four documented aborts (storage spec §2; README) writes before
-//! `std::process::abort` ends the process; nothing else. The server exits 0 when stdin ends, 1
-//! if reading stdin or writing stdout fails, and by SIGABRT on those aborts.
+//! error that stops the server, a line for a signal that stops it during a `check_run`, the panic
+//! hook's report of a bug, and the reason one of the store's four documented aborts (storage
+//! spec §2; README) writes before `std::process::abort` ends the process; nothing else. The
+//! server exits 0 when stdin ends, 1 if reading stdin or writing stdout fails, and by SIGABRT on
+//! those aborts. SIGINT, SIGTERM and SIGHUP end it as they end any process, but while a
+//! `check_run` runs: then they cancel the run, the call is answered, and the server exits 0.
 //!
 //! It serves the protocol's revisions each the way its clients open:
 //!
@@ -791,6 +793,9 @@ static TOOLS: [Spec; 39] = [
 /// `global` and `env` name. It prints no envelope: what it returns has nothing for stdout, and
 /// the exit code.
 pub fn serve(global: &Global, env: Env<'_>) -> Printed {
+    if let Err(why) = mcp_ws::catch_signals() {
+        log(&why);
+    }
     let mut server = Server::new(global, env);
     let ended = server.serve(io::stdin().lock(), io::stdout().lock());
     server.reap();
@@ -983,6 +988,12 @@ impl<'a> Server<'a> {
             }
             self.start_after();
             self.step_after();
+
+            // A signal during a check_run: that run is answered, and the server ends.
+            if mcp_ws::stopped() {
+                log("stopped: a signal came while check_run ran; its call was answered");
+                return Ok(());
+            }
         }
     }
 
@@ -2938,7 +2949,12 @@ pub(crate) mod probe {
                 R,
             ) -> Result<T, OpError>,
         ) {
-            let req = serde_json::from_value(sample()).expect("every request reads the sample");
+            // `check` is a land's check input in `ws_land`'s request and a check's name in
+            // `check_log`'s: the sample gives the name to the request that does not read it bare.
+            let mut named = sample();
+            named["check"] = json!("probe");
+            let req = (serde_json::from_value(sample()).or_else(|_| serde_json::from_value(named)))
+                .expect("every request reads the sample");
             let root = tempfile::tempdir().expect("a temporary store root");
             let root = Utf8Path::from_path(root.path()).expect("a UTF-8 temporary directory");
             let outcome = match call(&Recorder(self.called), root, None, Bootstrap::Run, req) {
@@ -3159,7 +3175,8 @@ mod tests {
         // operations (M5) are tools of their own table, `WS_TOOLS`, but `ws_delete`, which
         // removes a directory tree. `derive` only fills ahead of time a cache that each read
         // fills itself, so it changes no result an agent reads; `blob_get` is a client's
-        // primitive, raw bytes that a workspace writes out.
+        // primitive, raw bytes that a workspace writes out. `check_run` and `check_log` (M31) run
+        // and read a workspace's checks: they belong with the workspaces' tools.
         let client_side = [
             "InitReq",
             "GitImportReq",
@@ -3183,6 +3200,8 @@ mod tests {
             .filter(|name| {
                 name.ends_with("Req")
                     && !name.starts_with("Ws")
+                    && *name != "CheckRunReq"
+                    && *name != "CheckLogReq"
                     && !client_side.contains(name)
                     && !no_tool.contains(name)
                     && !queue.contains(name)

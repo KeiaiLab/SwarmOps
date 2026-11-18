@@ -25,7 +25,7 @@ Record and land changes:
   blob        Store content as a blob for a commit to name
 
 Checks:
-  check       List the checks a tree describes
+  check       List and run a tree's checks, and read their logs
 
 Read history:
   log         List history along first parents, newest first
@@ -75,10 +75,10 @@ Examples:
 Output:
   Every command prints one JSON envelope on stdout, or a short text with --human
   or SWARMOPS_FORMAT=human, and exits 0 or with its error's code. mcp, serve,
-  derive --follow and auth git-credential speak their own protocols there. The
-  program alone, or a command group alone (ws, auth, ...), is a usage error,
-  exit 2: at a terminal it prints its help instead of the envelope, unless
-  --json or SWARMOPS_FORMAT=json is given.
+  derive --follow, check log --follow and auth git-credential speak their own
+  protocols there. The program alone, or a command group alone (ws, auth, ...),
+  is a usage error, exit 2: at a terminal it prints its help instead of the
+  envelope, unless --json or SWARMOPS_FORMAT=json is given.
 
 Learn more:
   A command's help      so <command> --help

@@ -1,0 +1,1 @@
+A check's log holds both streams with a time on every line and its sections; check log --follow reads it as it grows, and the envelope keeps the tails.

@@ -26,6 +26,10 @@ expression: s.transcript()
             "dir": ".",
             "timeout_s": 900,
             "definition_digest": "[docs_digest]",
+            "stages": [
+              "before-land",
+              "after-land"
+            ],
             "line": 12
           },
           {
@@ -40,6 +44,9 @@ expression: s.transcript()
             "dir": "crates/app",
             "timeout_s": 600,
             "definition_digest": "[lint_digest]",
+            "stages": [
+              "before-land"
+            ],
             "line": 7
           },
           {
@@ -52,6 +59,9 @@ expression: s.transcript()
             "dir": ".",
             "timeout_s": 900,
             "definition_digest": "[unit_digest]",
+            "stages": [
+              "before-land"
+            ],
             "line": 4
           }
         ]
@@ -89,6 +99,10 @@ expression: s.transcript()
             "dir": ".",
             "timeout_s": 900,
             "definition_digest": "[docs_digest]",
+            "stages": [
+              "before-land",
+              "after-land"
+            ],
             "line": 12
           },
           {
@@ -103,6 +117,9 @@ expression: s.transcript()
             "dir": "crates/app",
             "timeout_s": 600,
             "definition_digest": "[lint_digest]",
+            "stages": [
+              "before-land"
+            ],
             "line": 7
           },
           {
@@ -115,7 +132,91 @@ expression: s.transcript()
             "dir": ".",
             "timeout_s": 900,
             "definition_digest": "[unit_digest]",
+            "stages": [
+              "before-land"
+            ],
             "line": 4
+          }
+        ]
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store check list --stage after-land",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "check_list",
+      "api": 1,
+      "result": {
+        "vouched": false,
+        "tree": "[tree_c0]",
+        "file": ".swarmops/checks.toml",
+        "version": 1,
+        "stage": "after-land",
+        "checks": [
+          {
+            "name": "docs",
+            "argv": [
+              "python3",
+              "-I",
+              "scripts/check-docs.py"
+            ],
+            "dir": ".",
+            "timeout_s": 900,
+            "definition_digest": "[docs_digest]",
+            "stages": [
+              "before-land",
+              "after-land"
+            ],
+            "line": 12
+          }
+        ]
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c0]": "[c0]",
+          "main": "[c0]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "check list --dir [tmp]/tree --stage after-land",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "check_list",
+      "api": 1,
+      "result": {
+        "vouched": true,
+        "file": ".swarmops/checks.toml",
+        "version": 1,
+        "stage": "after-land",
+        "checks": [
+          {
+            "name": "docs",
+            "argv": [
+              "python3",
+              "-I",
+              "scripts/check-docs.py"
+            ],
+            "dir": ".",
+            "timeout_s": 900,
+            "definition_digest": "[docs_digest]",
+            "stages": [
+              "before-land",
+              "after-land"
+            ],
+            "line": 12
           }
         ]
       },
@@ -168,7 +269,10 @@ expression: s.transcript()
             ],
             "dir": ".",
             "timeout_s": 900,
-            "definition_digest": "[default_digest]"
+            "definition_digest": "[default_digest]",
+            "stages": [
+              "before-land"
+            ]
           }
         ]
       },
@@ -202,7 +306,7 @@ expression: s.transcript()
           "reason": "unknown_key",
           "vouched": true
         },
-        "hint": "version 1 of .swarmops/checks.toml takes version and [check.<name>] tables of argv, dir and timeout_s; a newer swarmops may read this key"
+        "hint": "version 1 of .swarmops/checks.toml takes version and [check.<name>] tables of argv, dir, timeout_s and stages; a newer swarmops may read this key"
       },
       "meta": {
         "elapsed_ms": "[elapsed_ms]",

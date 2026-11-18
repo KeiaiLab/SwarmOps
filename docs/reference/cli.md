@@ -163,9 +163,11 @@ Queue changes to land on a ref once a check of them passes.
 
 ### swarmops check
 
-List the checks a tree names in .swarmops/checks.toml; nothing here runs them.
+List the checks a tree names in .swarmops/checks.toml, run one stage of them, read a log.
 
 - [`swarmops check list`](commands/check-list.md): List the checks REV's tree describes, or those of a directory with --dir.
+- [`swarmops check run`](commands/check-run.md): Run the checks of one stage of a clean workspace, or of a directory with --dir.
+- [`swarmops check log`](commands/check-log.md): Read a check's log of a run of a workspace, or of a directory with --dir.
 
 ## Server
 

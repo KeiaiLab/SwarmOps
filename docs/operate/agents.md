@@ -61,12 +61,12 @@ matters. Give the store's path absolute, as above.
 
 ## The tools agents get
 
-The server lists 51 tools, one per operation, each taking the operation's request as its
+The server lists 53 tools, one per operation, each taking the operation's request as its
 arguments and returning the envelope the CLI prints for it:
 
 | Reads | Writes | Workspaces |
 | --- | --- | --- |
-| `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `merge_base`, `op_log`, `ref_list`, `ref_log`, `land_check`, `check_list`, `blob_has`, `verify`, `remote_list`, `sync_status` | `commit`, `land`, `revert`, `land_group`, `rebase`, `blob_put`, `ref_set`, `ref_delete`, `ref_txn`, `undo`, `fetch`, `push`, `sync`, `gc`, `repair`, `upgrade` | `ws_create`, `ws_status`, `ws_diff`, `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize`, `ws_discard`, `ws_snapshot`, `ws_list`, `ws_info` |
+| `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `merge_base`, `op_log`, `ref_list`, `ref_log`, `land_check`, `check_list`, `blob_has`, `verify`, `remote_list`, `sync_status` | `commit`, `land`, `revert`, `land_group`, `rebase`, `blob_put`, `ref_set`, `ref_delete`, `ref_txn`, `undo`, `fetch`, `push`, `sync`, `gc`, `repair`, `upgrade` | `ws_create`, `ws_status`, `ws_diff`, `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize`, `ws_discard`, `ws_snapshot`, `ws_list`, `ws_info`, `check_run`, `check_log` |
 
 `init`, `whoami`, `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`,
 `derive`, `clone`, `remote add|remove`, `auth login|status|logout|git-credential` and `update` are

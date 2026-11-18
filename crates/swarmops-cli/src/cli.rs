@@ -10,6 +10,7 @@ use clap::{
     ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
 };
 use swarmops_api::remote::{DEFAULT_REMOTE, DEFAULT_SYNC_STATUS_LIMIT};
+use swarmops_api::{CheckStage, DEFAULT_CHECK_LOG_TAIL, RefTxnMoveIn, Rev};
 use swarmops_api::{
     DEFAULT_ANCESTRY_LIMIT, DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES,
     DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_MAX_CHANGESETS,
@@ -18,7 +19,6 @@ use swarmops_api::{
 };
 use swarmops_api::{DEFAULT_BLOB_GET_MAX_BYTES, DEFAULT_CHECK_TIMEOUT_S, DEFAULT_WS_STATUS_LIMIT};
 use swarmops_api::{DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_CONFLICT_BYTES};
-use swarmops_api::{RefTxnMoveIn, Rev};
 use swarmops_ws::queue::QUEUE_INFLIGHT_DEFAULT;
 
 use crate::{help, output};
@@ -381,7 +381,8 @@ the web server authenticated";
 
 /// Source control for coding-agent swarms.
 ///
-/// Every command but mcp, serve, derive --follow and auth git-credential prints one JSON
+/// Every command but mcp, serve, derive --follow, check log --follow and auth git-credential
+/// prints one JSON
 /// envelope on stdout; at a terminal, the program alone or a command group alone prints its
 /// help screen instead of its usage error's envelope, unless --json or SWARMOPS_FORMAT=json
 /// is given. The program's own help screen is laid out by the `help` module, which shows the
@@ -641,7 +642,7 @@ pub enum Command {
     /// DIR names another.
     #[command(subcommand)]
     Ws(WsCommand),
-    /// List the checks a tree names in .swarmops/checks.toml; nothing here runs them.
+    /// List the checks a tree names in .swarmops/checks.toml, run one stage of them, read a log.
     #[command(subcommand)]
     Check(CheckCommand),
     /// Name the changeset REV names, and whether REV is a ref's name.
@@ -870,7 +871,7 @@ pub enum Command {
     /// fetch, push, sync and sync_status, the landing queue's queue_enqueue, queue_status,
     /// queue_withdraw and queue_wait, and the workspaces' ws_create, ws_status, ws_diff,
     /// ws_commit, ws_rebase, ws_resolve, ws_land, ws_materialize, ws_discard, ws_snapshot,
-    /// ws_list and ws_info), each
+    /// ws_list, ws_info, check_run and check_log), each
     /// taking the operation's request as its arguments and returning the envelope the other
     /// commands print. The store and the identity are the server's, --repo and --as or their
     /// variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
@@ -1340,6 +1341,38 @@ pub enum LandModeArg {
     Exact,
 }
 
+/// A check's stage, as `check list --stage` and `check run --stage` name it.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StageArg {
+    /// Before a change lands: the gate.
+    #[default]
+    BeforeLand,
+    /// After a change has landed.
+    AfterLand,
+    /// On a schedule.
+    Scheduled,
+    /// Before a release is cut.
+    Release,
+    /// Only when someone asks for it.
+    Manual,
+    /// Before a deployment.
+    Deploy,
+}
+
+impl StageArg {
+    /// The API's stage.
+    pub fn stage(self) -> CheckStage {
+        match self {
+            StageArg::BeforeLand => CheckStage::BeforeLand,
+            StageArg::AfterLand => CheckStage::AfterLand,
+            StageArg::Scheduled => CheckStage::Scheduled,
+            StageArg::Release => CheckStage::Release,
+            StageArg::Manual => CheckStage::Manual,
+            StageArg::Deploy => CheckStage::Deploy,
+        }
+    }
+}
+
 /// A kind of file, as `ws commit --mode` gives it.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModeArg {
@@ -1618,15 +1651,16 @@ pub enum CheckCommand {
     /// List the checks REV's tree describes, or those of a directory with --dir.
     ///
     /// A tree names its checks in .swarmops/checks.toml (version 1): one [check.NAME] table a
-    /// check, each one command (argv) run with no shell, with a directory (dir) and a timeout
-    /// (timeout_s); any other key is refused at its line. This reads .swarmops/checks.toml at
-    /// REV (default main), resolved once; a tree without it lists check.argv of
-    /// .swarmops/workspaces.json as the one check default, and a tree with neither lists no
-    /// check. Each check comes with its argv, its directory, its timeout and the digest of its
-    /// definition, sorted by name. --dir DIR reads the files below DIR on this host instead, and
-    /// opens no store: the answer says vouched, since only the caller stands behind them. A file
-    /// that does not read is E_CHECK_FILE, naming its line and key. Reads only: no identity, no
-    /// lock.
+    /// check, each one command (argv) run with no shell, with a directory (dir), a timeout
+    /// (timeout_s) and the stages its answer is wanted at (stages, default before-land); any
+    /// other key is refused at its line. This reads .swarmops/checks.toml at REV (default main),
+    /// resolved once; a tree without it lists check.argv of .swarmops/workspaces.json as the one
+    /// check default, and a tree with neither lists no check. Each check comes with its argv,
+    /// its directory, its timeout, the digest of its definition and its stages, sorted by name;
+    /// --stage lists only the checks of one stage. --dir DIR reads the files below DIR on this
+    /// host instead, and opens no store: the answer says vouched, since only the caller stands
+    /// behind them. A file that does not read is E_CHECK_FILE, naming its line and key. Reads
+    /// only: no identity, no lock.
     List {
         /// The changeset whose tree's checks to list.
         #[arg(value_name = "REV")]
@@ -1634,6 +1668,90 @@ pub enum CheckCommand {
         /// Read the check file below DIR on this host, not from the store.
         #[arg(long, value_name = "DIR", conflicts_with = "rev")]
         dir: Option<Utf8PathBuf>,
+        /// List only the checks of this stage.
+        #[arg(long, value_enum, value_name = "STAGE")]
+        stage: Option<StageArg>,
+    },
+    /// Run the checks of one stage of a clean workspace, or of a directory with --dir.
+    ///
+    /// Runs the checks of STAGE (default before-land) that .swarmops/checks.toml names, or the
+    /// one check default of .swarmops/workspaces.json's check.argv, or only the NAMEs given (each
+    /// of the stage), one at a time in name order: each with no shell and no stdin, in its own
+    /// process group, under its timeout_s, in its dir. Every selected check runs, whatever an
+    /// earlier one did, and one envelope names each outcome: passed, failed, timed_out,
+    /// not_started, cancelled or not_run. A run where any check did not pass is E_CHECK_FAILED,
+    /// its details.run the whole result. A check gets the SWARMOPS_CHECK_* variables, HOME, LANG,
+    /// LC_ALL, LC_CTYPE, LOGNAME, PATH, TMPDIR, TZ and USER of your environment, and the
+    /// variables --pass names; nothing else (the check default keeps your whole environment).
+    /// Its output goes to a log with a time on every line, which check log reads.
+    ///
+    /// The workspace form (--ws, --ws-path, else the workspace around the working directory)
+    /// needs a clean workspace: no edits, not rebasing, not stale. It reads the check file from
+    /// the store at the changeset the files stand for, holds the workspace's lock while the
+    /// checks run, and never writes the store; its runs are kept in .swarmws/check-runs/. --dir
+    /// DIR runs the checks of the files below DIR as they are, opens no store, and says vouched:
+    /// its runs are kept below SWARMOPS_CHECK_RUNS_DIR, else the state directory's
+    /// swarmops/check-runs; the newest 20 of each are kept. SIGINT, SIGTERM and SIGHUP kill the
+    /// running check's process group and end the run. No identity.
+    Run {
+        #[command(flatten)]
+        at: WsAt,
+        /// Run the checks of the files below DIR on this host, as they are.
+        #[arg(long, value_name = "DIR", conflicts_with_all = ["name", "ws_path"])]
+        dir: Option<Utf8PathBuf>,
+        /// The stage whose checks to run.
+        #[arg(long, value_enum, value_name = "STAGE", default_value_t = StageArg::BeforeLand)]
+        stage: StageArg,
+        /// A variable of your environment the checks also get; repeatable.
+        #[arg(long = "pass", value_name = "NAME")]
+        pass: Vec<String>,
+        /// Only these checks, each of the stage.
+        #[arg(value_name = "NAME")]
+        names: Vec<String>,
+    },
+    /// Read a check's log of a run of a workspace, or of a directory with --dir.
+    ///
+    /// The run is --run RUN, else the newest run that ran CHECK (with --follow, the newest still
+    /// running first), of the workspace (--ws, --ws-path, else the one around the working
+    /// directory) or of the directory --dir names, on this host. Gives the log's last --tail
+    /// lines, each with its number, its time since the check's start, its stream (out, err, run
+    /// for the runner's own lines, or other) and its text, and whether the log ended and how:
+    /// end, with the check's outcome, or runner_gone. With --follow it then prints one envelope a
+    /// line for each batch of lines the check writes, looking again every --interval-ms, and
+    /// ends with the envelope that holds the log's end, exit 0; --human prints the lines as the
+    /// log holds them. Reads only: no identity, nothing written, no store operation.
+    Log {
+        #[command(flatten)]
+        at: WsAt,
+        /// Read a run of the checks of DIR on this host, as check run --dir kept it.
+        #[arg(long, value_name = "DIR", conflicts_with_all = ["name", "ws_path"])]
+        dir: Option<Utf8PathBuf>,
+        /// The check whose log to read.
+        #[arg(value_name = "CHECK")]
+        check: String,
+        /// The run, by its id (default: the newest that ran CHECK).
+        #[arg(long, value_name = "RUN")]
+        run: Option<String>,
+        /// The most lines to give first, the last ones.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = DEFAULT_CHECK_LOG_TAIL,
+            value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=100_000)
+        )]
+        tail: usize,
+        /// Then print the lines the check writes as it writes them, until its log ends.
+        #[arg(long)]
+        follow: bool,
+        /// With --follow: how many milliseconds to wait before looking again.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 200,
+            requires = "follow",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        interval_ms: u64,
     },
 }
 
@@ -2026,6 +2144,8 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ws", "delete"] => "ws_delete",
         ["ws", "hook"] => "ws_hook",
         ["check", "list"] => "check_list",
+        ["check", "run"] => "check_run",
+        ["check", "log"] => "check_log",
         ["cat"] => "read_file",
         ["ls"] => "read_tree",
         ["show"] => "show",
@@ -2206,10 +2326,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 71);
+        assert_eq!(ops.len(), 73);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 71, "two subcommands name one op");
+        assert_eq!(ops.len(), 73, "two subcommands name one op");
 
         // Automatic update follows every operation but these, and not `serve --prepare`,
         // which a flag names and no subcommand.

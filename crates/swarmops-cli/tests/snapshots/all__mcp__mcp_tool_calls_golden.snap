@@ -2361,6 +2361,106 @@ expression: transcript
         "method": "tools/call",
         "params": {
           "arguments": {
+            "workspace": "ws1"
+          },
+          "name": "check_run"
+        }
+      },
+      "response": {
+        "id": 41,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"error\":{\"code\":\"E_INVALID_ARG\",\"details\":{\"reason\":\"no_checks\",\"stage\":\"before-land\"},\"exit\":2,\"hint\":\"swarmops check list [id15] shows each check's stages\",\"message\":\"ws1 has no .swarmops/checks.toml, and no check.argv in .swarmops/workspaces.json: nothing to run\",\"retryable\":false},\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id15]\":\"[id15]\",\"main\":\"[id15]\"}},\"ok\":false,\"op\":\"check_run\"}",
+              "type": "text"
+            }
+          ],
+          "isError": true,
+          "structuredContent": {
+            "api": 1,
+            "error": {
+              "code": "E_INVALID_ARG",
+              "details": {
+                "reason": "no_checks",
+                "stage": "before-land"
+              },
+              "exit": 2,
+              "hint": "swarmops check list [id15] shows each check's stages",
+              "message": "ws1 has no .swarmops/checks.toml, and no check.argv in .swarmops/workspaces.json: nothing to run",
+              "retryable": false
+            },
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[id15]": "[id15]",
+                "main": "[id15]"
+              }
+            },
+            "ok": false,
+            "op": "check_run"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 42,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "check": "unit",
+            "workspace": "ws1"
+          },
+          "name": "check_log"
+        }
+      },
+      "response": {
+        "id": 42,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"error\":{\"code\":\"E_INVALID_ARG\",\"details\":{\"check\":\"unit\",\"reason\":\"run\"},\"exit\":2,\"hint\":\"start one: swarmops check run --ws ws1\",\"message\":\"no run here ran the check unit\",\"retryable\":false},\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":false,\"op\":\"check_log\"}",
+              "type": "text"
+            }
+          ],
+          "isError": true,
+          "structuredContent": {
+            "api": 1,
+            "error": {
+              "code": "E_INVALID_ARG",
+              "details": {
+                "check": "unit",
+                "reason": "run"
+              },
+              "exit": 2,
+              "hint": "start one: swarmops check run --ws ws1",
+              "message": "no run here ran the check unit",
+              "retryable": false
+            },
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {}
+            },
+            "ok": false,
+            "op": "check_log"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 43,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
             "changeset": "[theirs]",
             "idempotency_key": "revert-1",
             "reason": "the docs were wrong"
@@ -2369,7 +2469,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 41,
+        "id": 43,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -2416,7 +2516,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 42,
+        "id": 44,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2437,7 +2537,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 42,
+        "id": 44,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -2473,7 +2573,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 43,
+        "id": 45,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2494,7 +2594,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 43,
+        "id": 45,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -2530,7 +2630,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 44,
+        "id": 46,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2550,7 +2650,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 44,
+        "id": 46,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -2599,7 +2699,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 45,
+        "id": 47,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2608,7 +2708,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 45,
+        "id": 47,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -2642,7 +2742,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 46,
+        "id": 48,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2662,7 +2762,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 46,
+        "id": 48,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -2708,7 +2808,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 47,
+        "id": 49,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2729,7 +2829,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 47,
+        "id": 49,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -2777,7 +2877,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 48,
+        "id": 50,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2786,7 +2886,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 48,
+        "id": 50,
         "jsonrpc": "2.0",
         "result": {
           "content": [

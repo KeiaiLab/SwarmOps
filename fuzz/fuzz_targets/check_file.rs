@@ -5,8 +5,9 @@
 //! ```text
 //! even ─▶ check::parse(.swarmops/checks.toml)   odd ─▶ check::parse_legacy(workspaces.json)
 //! accepted: names unique, sorted, of the grammar; argv, dir and timeout_s inside their rules;
-//!           each digest the one its definition gives; written back by this target as TOML,
-//!           read as the same checks
+//!           stages (M30-6) never empty, known, none twice, in their own order; each digest the
+//!           one its definition gives; written back by this target as TOML, read as the same
+//!           checks
 //! refused:  E_CHECK_FILE, a known reason, a line from 1 to the input's lines + 1, a message
 //!           of one line and at most 512 bytes
 //! ```
@@ -15,6 +16,7 @@
 use std::fmt::Write as _;
 
 use libfuzzer_sys::fuzz_target;
+use swarmops_api::CheckStage;
 use swarmops_ops::check::{
     self, CHECK_FILE, Check, LEGACY_CHECK, LEGACY_FILE, MAX_ARGV_BYTES, MAX_ARGV_ITEMS,
     MAX_CHECK_NAME_BYTES, MAX_CHECK_TIMEOUT_S, MAX_CHECKS, ROOT_DIR, Reason, Refusal,
@@ -39,6 +41,7 @@ fuzz_target!(|data: &[u8]| {
         Ok(Some(default)) => {
             assert_eq!(default.name, LEGACY_CHECK);
             assert_eq!(default.line, None);
+            assert_eq!(default.stages, [CheckStage::BeforeLand]);
             accepted(std::slice::from_ref(&default));
         }
         Ok(None) => {}
@@ -85,6 +88,19 @@ fn accepted(checks: &[Check]) {
             "{check:?}"
         );
 
+        assert!(
+            !check.stages.is_empty() && check.stages.len() <= CheckStage::ALL.len(),
+            "{check:?}"
+        );
+        for pair in check.stages.windows(2) {
+            assert!(pair[0] < pair[1], "{check:?}");
+        }
+        assert!(
+            check.stages.iter().all(|s| CheckStage::ALL.contains(s)),
+            "{check:?}"
+        );
+        assert_eq!(check.out().stages, check.stages);
+
         let same = Check::clone(check);
         assert_eq!(same.definition_digest(), check.definition_digest());
         assert_eq!(check.definition_digest().len(), 64, "{check:?}");
@@ -102,6 +118,8 @@ fn round_trip(checks: &[Check]) {
         let _ = writeln!(text, "argv = [{}]", argv.join(", "));
         let _ = writeln!(text, "dir = {}", basic(&check.dir));
         let _ = writeln!(text, "timeout_s = {}", check.timeout_s);
+        let stages: Vec<String> = check.stages.iter().map(|s| basic(s.as_str())).collect();
+        let _ = writeln!(text, "stages = [{}]", stages.join(", "));
     }
     let again = check::parse(text.as_bytes()).unwrap_or_else(|e| panic!("{text:?}: {e:?}"));
     assert_eq!(again.checks.len(), checks.len(), "{text:?}");
@@ -111,6 +129,7 @@ fn round_trip(checks: &[Check]) {
             (&check.name, &check.argv, &check.dir, check.timeout_s),
             "{text:?}"
         );
+        assert_eq!(read.stages, check.stages, "{text:?}");
         assert_eq!(read.definition_digest(), check.definition_digest());
     }
 }
