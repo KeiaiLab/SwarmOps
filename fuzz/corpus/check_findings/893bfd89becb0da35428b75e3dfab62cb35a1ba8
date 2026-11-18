@@ -1,0 +1,4 @@
+	{"level":"error","title":"unused variable `x`","path":"crates/app/src/lib.rs","line":12,"end_line":14,"message":"remove it or prefix it with _"}
+{"level":"warning","title":"a slow test","group":"x"}
+
+{"level":"notice","title":"coverage 81%","path":"crates/app"}
