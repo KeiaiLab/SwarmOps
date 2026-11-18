@@ -913,6 +913,25 @@ fn the_published_tree_is_the_checked_tree() {
     let head = q.head().unwrap();
     assert_eq!(state.published.last(), Some(&head));
     assert!(tree_holds(&s.f, &head, "fixed"));
+    drop(state);
+
+    // 4. The target moves between the red verdict and the publish that would remove entry 1:
+    //    that publish lands and removes nothing, and the next round on the new head lands it.
+    let s = Setup::new(QUICK);
+    let q = Queue::new(&s.f);
+    let ctx = ctx_of(&s, &q);
+    let first = s.enqueue(&ctx, &q, "e1", &["needs-fix"]);
+    let fixed = s.change(&q, "fixed", &[]);
+    let mut moved = false;
+    *q.before_publish.lock().unwrap() = Some(Box::new(move |f: &Fixture, _: &mut State| {
+        if !std::mem::replace(&mut moved, true) {
+            f.point(TARGET, &fixed);
+        }
+    }));
+    drain(&s, &q, 4);
+    assert_eq!(q.verdicts_of(&first)[0], VerdictState::Failed);
+    assert_eq!(q.fate(&first), Fate::Landed);
+    assert!(tree_holds(&s.f, &q.head().unwrap(), "fixed"));
 }
 
 /// Waits until a check has started.
