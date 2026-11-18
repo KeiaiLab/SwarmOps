@@ -59,6 +59,10 @@ fn an_edited_workspace_is_not_held() {
         refused.details["paths"],
         serde_json::json!(["a.txt", "new.txt"])
     );
+    assert_eq!(
+        refused.message,
+        r#"the workspace holds edits its checks would not run on: ["a.txt","new.txt"]"#
+    );
     let hint = refused.hint.unwrap();
     assert!(
         hint.contains("ws commit") && hint.contains("check run --dir"),

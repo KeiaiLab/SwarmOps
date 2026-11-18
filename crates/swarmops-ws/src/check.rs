@@ -91,7 +91,13 @@ pub fn hold_for_run(ctx: &Ctx<'_>, at: &Locate) -> Result<Held, OpError> {
              swarmops check run --dir {} to check the files as they are, vouched for",
             ws.dir
         );
-        return Err(materialize::dirty(paths).with_hint(hint));
+        // `dirty`'s code, details and cut, with this command's words: a run overwrites nothing.
+        let mut error = materialize::dirty(paths).with_hint(hint);
+        error.message = format!(
+            "the workspace holds edits its checks would not run on: {}",
+            error.details["paths"]
+        );
+        return Err(error);
     }
 
     // 3. The tree the files are.
