@@ -1320,6 +1320,27 @@ left).
   util-linux's `script`, with other arguments than macOS's, and has not run yet. *Target: the
   first CI run of the branch. Found: the automatic update's implementation.*
 
+## The landing queue
+
+- **The queue's fold reads every queue record of its target.** Each look at a target's queue
+  (`queue status`, `queue wait`'s poll, each round of the runner) reads all of the target's
+  queue records, landed and removed entries' too, so its cost grows with the queue's history.
+  A22's case, 50 entries, does not show it ([perf.md](perf.md#m22--the-landing-queue-under-50-processes--2026-11-18)). *Target: an index of open
+  entries, when a measurement asks for one (the M22 core design §9). Found: the M22 core
+  design.*
+- **A spaced batch leaves its middle trees unchecked.** When more entries wait than the runner
+  checks at once (`--inflight`, 4 by default), it checks candidates spread across them and lands
+  the longest green prefix: the trees between two checked candidates are never checked
+  themselves. What lands is always a tree that passed its check. *Documented (the M22 core
+  design §9, requirement C4).*
+- **A red head blames the first entry.** When the target's own head fails the check, the first
+  entry's candidate fails with it, and that entry is removed (`check_failed`); the next round
+  blames the next one. No lane repairs the target first. *Unscheduled (the prototype's
+  trunk-repair lane, the M22 core design §8). Found: the M22 core design.*
+- **Undoing a publish keeps its Landed records.** `op undo` of a queue's publish moves the target
+  back, but the entries it landed stay landed: they are not queued again. *Unscheduled (undo of
+  queue records, the M22 core design §8). Found: the M22 core design.*
+
 ## Performance
 
 - **Part of each lock pass through the binary is unexplained.** In the quiet-window run the lock
@@ -1413,8 +1434,8 @@ These do not change what SwarmOps does, only how well the tests can see it.
   of their own six the first test cannot raise (M15):
   `E_AMBIGUOUS_ID`, `E_IO_TRANSIENT`, `E_INTERNAL`, `E_CAS_RETRY_EXHAUSTED`, `E_BUSY` in the slow
   `op_log_behind_a_held_lock_is_e_busy`, and `E_UNKNOWN_PARENT` as an error object, since every
-  operation resolves a parent first. What remains: `E_QUEUE_WAIT_TIMEOUT` (M22), which no command
-  raises until `queue wait` comes with the queue's commands; and a code a later milestone adds
+  operation resolves a parent first. What remains: `E_QUEUE_WAIT_TIMEOUT` (M22), which `queue wait`
+  raises and the queue's own tests pin, not the golden test; and a code a later milestone adds
   joins the same test, which fails until it is pinned or listed. *Closed for today's codes in M18 (the M18 design
   §3.2; `E_IO` joined in M1.6, the six `E_GIT_*` codes in M3, `E_WS_OUTSIDE_PREFIXES` and
   `E_WS_STALE` in M15). Found: the 2026-10-16 comparison.*

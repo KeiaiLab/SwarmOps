@@ -27,7 +27,16 @@ collects the changes on `stable` that no release holds yet, until the next relea
   M22 core design §6).
 - The error code `E_QUEUE_WAIT_TIMEOUT` (exit 4, retryable), which `queue wait` raises when
   its timeout passes with the entry still open (the M22 core design §6). Golden envelopes pin
-  56 of the 57 error codes: no command raises the new one yet.
+  56 of the 57 error codes; the queue's own tests pin the new one.
+- The landing queue (M22's core, on a local store): `queue enqueue`, `queue status`,
+  `queue withdraw`, `queue wait` and `queue run`, and the MCP tools `queue_enqueue`,
+  `queue_status`, `queue_withdraw` and `queue_wait`. Entries are checked in parallel in
+  workspaces of their own, a red one is found by bisection and removed with a reason, and the
+  target moves only to a tree that passed its check; a runner the queue's commands start drives
+  it, with no daemon. A store's first entry turns on its `queue` feature (the M22 core design).
+- A22's measurement (`queue_perf`, in `just perf` and the weekly run): 50 processes each enqueue
+  and wait on a check of 30 s; every entry lands once and no hold of the store's lock reaches
+  1 s (docs/perf.md, "M22").
 
 ## [0.12.0] - 2026-11-18
 
