@@ -18,8 +18,9 @@
 mod digest;
 mod file;
 
+use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read as _};
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -230,7 +231,7 @@ fn on_host(dir: &Utf8Path, name: &'static str, limit: u64) -> Result<Option<Vec<
     let path = dir.join(name);
     let failed = |e: &std::io::Error| host_failed(name, e);
 
-    // 1. A file, not followed if it is a link: a FIFO would block the open.
+    // 1. A file, not followed if it is a link.
     let seen = match std::fs::symlink_metadata(&path) {
         Ok(meta) if meta.is_file() => meta,
         Ok(_) => return Err(Refusal::not_a_file(name).into_error(true)),
@@ -238,8 +239,20 @@ fn on_host(dir: &Utf8Path, name: &'static str, limit: u64) -> Result<Option<Vec<
         Err(e) => return Err(failed(&e)),
     };
 
-    // 2. The same file opened: a link put there since is refused, not followed.
-    let file = std::fs::File::open(&path).map_err(|e| failed(&e))?;
+    // 2. The same file opened: a link put there since fails the open (`O_NOFOLLOW`), a FIFO
+    //    does not block it (`O_NONBLOCK`, which a regular file's reads ignore), and anything else
+    //    is refused by what was opened.
+    let file = match (OpenOptions::new().read(true))
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(Refusal::not_a_file(name).into_error(true));
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(failed(&e)),
+    };
     let opened = file.metadata().map_err(|e| failed(&e))?;
     if !opened.is_file() || (opened.dev(), opened.ino()) != (seen.dev(), seen.ino()) {
         return Err(Refusal::not_a_file(name).into_error(true));

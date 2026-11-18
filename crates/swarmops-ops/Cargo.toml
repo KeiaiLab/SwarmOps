@@ -37,6 +37,10 @@ base64.workspace = true
 # Native sync's land keys (`native::key`), hashed as `serve`'s are.
 blake3.workspace = true
 camino.workspace = true
+# `check list --dir`: the check file opened without following a link or waiting on a FIFO
+# (`O_NOFOLLOW`, `O_NONBLOCK`), as the store opens its lock files; already in the tree through
+# swarmops-store.
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # The store's TOML files, `remotes.toml` and `authors.toml` (M13), the user's login file, and

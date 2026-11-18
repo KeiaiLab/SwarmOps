@@ -1575,6 +1575,7 @@ dependencies = [
  "base64",
  "blake3",
  "camino",
+ "libc",
  "serde",
  "serde_json",
  "swarmops-api",
