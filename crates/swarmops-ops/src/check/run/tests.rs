@@ -398,3 +398,42 @@ fn a_run_s_directories_are_its_owner_s_alone() {
         assert_eq!(mode, RUNS_DIR_MODE, "{made}: {mode:o}");
     }
 }
+
+/// A run of one directory removes the runs of another directory that is gone, unless one of them
+/// still holds its lock; the runs of a directory that is there stay.
+#[test]
+fn the_runs_of_a_directory_that_is_gone_go() {
+    // 1. Runs of three directories: one stays, one is removed, one is removed while running.
+    let checks = "version = 1\n[check.a]\nargv = [\"/usr/bin/true\"]\n";
+    let (_tmp, dir, runs) = tree("[check.a]\nargv = [\"/usr/bin/true\"]\n");
+    let base = dir.parent().unwrap();
+    let other = |name: &str| {
+        let made = base.join(name);
+        std::fs::create_dir_all(made.join(".swarmops")).unwrap();
+        std::fs::write(made.join(".swarmops/checks.toml"), checks).unwrap();
+        made
+    };
+    let (kept, gone, busy) = (other("kept"), other("gone"), other("busy"));
+    let key_of = |dir: &Utf8Path| {
+        let ran = run(dir, &runs, &[], &[]).unwrap();
+        let key = Utf8Path::new(&ran.dir).parent().unwrap().to_owned();
+        (key, Utf8Path::new(&ran.dir).join(RUN_LOCK))
+    };
+    let (kept_key, _) = key_of(&kept);
+    let (gone_key, _) = key_of(&gone);
+    let (busy_key, busy_lock) = key_of(&busy);
+    std::fs::remove_dir_all(&gone).unwrap();
+    std::fs::remove_dir_all(&busy).unwrap();
+    let lock = File::open(&busy_lock).unwrap();
+    lock.lock().unwrap();
+
+    // 2. A run of the first: the gone directory's runs go; the others stay.
+    run(&dir, &runs, &[], &[]).unwrap();
+    assert!(kept_key.exists() && busy_key.exists());
+    assert!(!gone_key.exists());
+
+    // 3. Its lock let go, the next run removes the busy one's too.
+    lock.unlock().unwrap();
+    run(&dir, &runs, &[], &[]).unwrap();
+    assert!(!busy_key.exists() && kept_key.exists());
+}

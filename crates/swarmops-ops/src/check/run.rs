@@ -14,6 +14,10 @@
 //!   run.json (ended), the lock let go ─▶ all passed: the result; else E_CHECK_FAILED{run}
 //! ```
 //!
+//! In the directory form, a run also removes the runs of each other directory that is gone: a
+//! key directory whose `dir` file names a path that is not there any more, none of whose runs
+//! holds its lock. So the runs root does not grow with every throwaway directory checked.
+//!
 //! A run directory holds `run.json`, `lock` (held while the run runs), `logs/<check>.log` and
 //! `checks/<check>/`, the paths each check's environment names. Nothing there is synced: they
 //! are diagnostics, which nothing decides from. A set stop flag (a signal, in the CLI) kills the
@@ -133,7 +137,8 @@ pub fn run_dir(
         std::fs::write(&which, format!("{root}\n")).map_err(|e| io_failed(&which, &e))?;
     }
 
-    // 3. The run.
+    // 3. The runs of directories that are gone, then the run.
+    forget_gone(runs_root, &runs);
     let mut subject = Subject::new(true, root, stage, runs);
     subject.hint_at = format!("--dir {dir}");
     run_checks(&subject, &listed, &selected, opts)
@@ -671,6 +676,43 @@ fn prune(runs: &Utf8Path, current: &str) {
             continue;
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Removes the key directories of `root`, but `current`, whose `dir` file names a directory that
+/// is not there any more and none of whose runs may hold its lock ([`held`]). One whose `dir`
+/// file does not read, or whose directory cannot be looked at, stays; a removal that fails is
+/// passed over.
+fn forget_gone(root: &Utf8Path, current: &Utf8Path) {
+    let Ok(entries) = root.read_dir_utf8() else {
+        return;
+    };
+    for entry in entries.flatten() {
+        // 1. Another key directory, naming a directory that is gone.
+        let key = entry.path();
+        if key == current || !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Ok(named) = std::fs::read_to_string(key.join(DIR_FILE)) else {
+            continue;
+        };
+        let named = named.strip_suffix('\n').unwrap_or(&named);
+        let gone =
+            std::fs::symlink_metadata(named).is_err_and(|e| e.kind() == io::ErrorKind::NotFound);
+        if named.is_empty() || !gone {
+            continue;
+        }
+
+        // 2. None of its runs running: it goes.
+        let Ok(runs) = key.read_dir_utf8() else {
+            continue;
+        };
+        let running = (runs.flatten())
+            .filter(|run| run.file_type().is_ok_and(|t| t.is_dir()))
+            .any(|run| held(&run.path().join(RUN_LOCK)));
+        if !running {
+            let _ = std::fs::remove_dir_all(key);
+        }
     }
 }
 

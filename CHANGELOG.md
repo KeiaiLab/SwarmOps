@@ -47,7 +47,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   bounds (64 MiB a log, 16 KiB a line, 1,000 sections). A run's directory holds `run.json`, the
   logs and each check's own directory: in a workspace below `.swarmws/check-runs/`, in the
   directory form below `SWARMOPS_CHECK_RUNS_DIR`, else the state directory's
-  `swarmops/check-runs`; the newest 20 runs are kept. The format is provisional. A log that
+  `swarmops/check-runs`; the newest 20 runs are kept, and a run of a directory removes the runs
+  of directories that are gone. The format is provisional. A log that
   cannot be written (a full disk) fails its check (`not_started: log` before it starts), and the
   run goes on.
 - `check log` and the MCP tool `check_log`: one check's log of a run (`--run`, else the newest
