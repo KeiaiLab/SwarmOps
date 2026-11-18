@@ -181,6 +181,8 @@ installs the same tool versions as `ci.yml`'s: move them together.
    - the repository page still matches `.github/repo-settings.json`:
      `python3 -I scripts/repo-settings.py check` reads the host, so it runs here and not in
      `just check`;
+   - the units of `docs/roadmap.md`'s tables whose state is `on stable` name the release instead
+     (`in X.Y.Z`), each one the release holds;
    - when a page was added since the last release, `web/addresses.txt` lists it: run
      `node scripts/check-site.mjs --write-addresses` in `web/` and commit the result;
    - the macOS sentences name the right releases: 0.11.0 is the last release without a macOS

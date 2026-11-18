@@ -108,7 +108,7 @@ Native sync is M11, planned.
 | Remotes, remote state and `sync` | 2, 3 | Built for git remotes (M13): `remotes.toml`, the mirror's refs, `so sync` | M13 (done), M11 (store remotes) |
 | Ref names beyond `main` and `release/<name>`, and tags | 1, 3 | Built (M6): free-form branches, `tags/<path>` and `remote/<remote>/<path>` in a `FORMAT 2` store; the git side maps them (M14): `git import`, `git export` and `serve` take branches and lightweight tags | M6 (done), M14 (done) |
 | Access control and identities for remote callers | 1, 3 | Built (M14): the store's `access.toml`, the caller named by the key line or the web server, `E_AUTH` and `E_POLICY_DENIED` | M14 (done), M11 |
-| Checks: a description of what runs for a tree | — | `ws land --check` with one command, the `check.argv` of `.swarmops/workspaces.json` | M30, M31 |
+| Checks: a description of what runs for a tree | — | `.swarmops/checks.toml` and `check list` (M30-1, M30-2); a checked land runs one command, the `check.argv` of `.swarmops/workspaces.json` | M30, M31 |
 | Checks: results on a tree | — | Not built | M7, M32 |
 | Checks: triggers | — | Not built | M33 |
 | Checks: runners | — | Not built | M34 |
@@ -175,7 +175,9 @@ against 1 s and 1.5× (49.6 s in v0.7.0;
 [perf.md](perf.md#m18-first-sync-after-a-clone--2026-11-08)). M19's workspace changes are in
 v0.11.0; G9's update and commit rows wait for a quiet run, and the commit row stays missed until a
 change feed exists. The benchmark gate (condition 3) runs in the weekly Scheduled run.
-[Checks and delivery](#checks-and-delivery) (M30 to M40) is planned and nothing of it is built. It
+[Checks and delivery](#checks-and-delivery) (M30 to M40) is planned; of it, the check file and
+`check list` (M30-1 and M30-2, step 1 of the first steps) are on `stable` and in no release yet,
+and nothing else is built. It
 is deferred past usable but for the units of M30 and M31 behind steps 1 to 8 of its
 [first steps](#first-steps), which start now: they write nothing to a store, touch no data-safety
 path and freeze nothing in the hash contract.
@@ -832,7 +834,8 @@ one guide. A unit's id is its slice id. It lands when what it depends on is in, 
 then the status file `docs/status/<milestone>/<slice-id>.txt`. The eleven tables below hold the
 169 units of M30 to M40; the twelve proposed slices of M7, M22, M11 and M26 follow, and are not
 counted among the 169. "Depends on" names milestones, proposed slices and units that must exist
-first. Every unit's state is `planned`; a unit that lands names its release there.
+first. Every unit's state is `planned`, `on stable` once it lands, and the release that first
+holds it once one does.
 
 What holds for every unit:
 
@@ -857,8 +860,8 @@ store and freezes nothing in the hash contract. 17 units.
 
 | Slice | Deliverable | Depends on | State |
 | --- | --- | --- | --- |
-| M30-1 | The check file `.swarmops/checks.toml`, `version = 1`: named checks, each one argv with no shell, a directory and a timeout; read from the store at a named changeset, or with `--dir` from a directory, in which case every answer says the caller vouched for the file | M5 | planned |
-| M30-2 | `check list`: the checks of a changeset's file, or of a directory's, each with the digest of its definition | M30-1 | planned |
+| M30-1 | The check file `.swarmops/checks.toml`, `version = 1`: named checks, each one argv with no shell, a directory and a timeout; read from the store at a named changeset, or with `--dir` from a directory, in which case every answer says the caller vouched for the file | M5 | on stable |
+| M30-2 | `check list`: the checks of a changeset's file, or of a directory's, each with the digest of its definition | M30-1 | on stable |
 | M30-3 | Declared inputs: a check's path patterns, in the access file's `*` and `**` grammar, resolve against a tree to the entries they match; no pattern means the whole tree | M30-1 | planned |
 | M30-4 | `check plan`: for a changeset against its target, a workspace's edits, a `land-check` item or, in the directory form, a list of changed paths, each check marked `run` or `not_applicable` with one reason from a closed set; no lock, nothing written | M30-3, M18 | planned |
 | M30-5 | Planning fails closed: unresolvable inputs, an unreadable path, a renamed or deleted definition, or a definition that differs from the one at the target's head widen the check to `run`, with the reason `widened` or `definition_changed`; a check whose definition changed is never `not_applicable` or `reused` for that land; an error never yields an empty plan | M30-4 | planned |
@@ -1184,7 +1187,8 @@ hand-made landing queue, whose code is not in the repository, pushes candidates 
 branches and moves `stable` after `ci.yml` is green there, so each landed change is gated twice.
 `site.yml` decides its scope with `scripts/freshness.py`, and the weekly suite takes a host-wide
 lock. This repository is not developed in a SwarmOps store: the repository on GitHub stays the
-source of truth ([pilot.md](pilot.md)), and it commits no `.swarmops/` directory.
+source of truth ([pilot.md](pilot.md)); its `.swarmops/` directory holds step 1's check file
+alone.
 
 **Two tracks.** Track A, steps 1 to 8, runs inside the jobs GitHub starts, with no store: it uses
 the directory form, writes nothing to any store, needs no new record kind and freezes nothing in
