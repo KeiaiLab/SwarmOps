@@ -50,9 +50,54 @@ fails does not stop the run: every selected check runs. Outcomes:
 | `not_run` | The run was stopped before it started: no process, no log. |
 
 Only `passed` passes. Every check passed: the result, exit 0. Otherwise `E_CHECK_FAILED`, exit 1,
-whose message names each check that did not pass and why, whose `details.run` is the whole result
-below, and whose hint names `check log` for the first. A check that did not pass carries the last
-8 KiB of each of its streams (`stdout_tail`, `stderr_tail`); one that passed does not.
+whose message names each check that did not pass and why, with the count of its findings when it
+has any (`check failed (exit 101, 2 findings)`), whose `details.run` is the whole result below,
+and whose hint names, for the first, where its findings are
+(`details.run.checks[<i>].findings`) when it has any, then `check log`. A check that did not pass
+carries the last 8 KiB of each of its streams (`stdout_tail`, `stderr_tail`); one that passed does
+not.
+
+### Findings
+
+A check reports findings by writing them to its report file, the path `SWARMOPS_CHECK_REPORT`
+names (in its own directory of the run, never in the tree; not made, so a check that has nothing
+to report writes nothing). Once the check has ended and its process group is gone, the file is
+read, and its findings come with its outcome: `findings`, `findings_total` and, in `reports`, the
+file as it was read. It is read for `passed`, `failed` and `timed_out`; not for `cancelled`, whose
+file a stop left partial. Findings change no outcome: a check that exits 0 passes whatever it
+reports, and one that fails with none still fails.
+
+The file is UTF-8, one JSON object a line, each line ended by `\n` (a `\r` before it is dropped,
+and the last line needs none):
+
+```json
+{"level":"error","title":"unused variable `x`","path":"crates/app/src/lib.rs","line":12,"end_line":14,"message":"remove it, or start its name with _"}
+```
+
+| Key | Type | Required | Rule |
+| --- | --- | --- | --- |
+| `level` | string | yes | `error`, `warning` or `notice`. |
+| `title` | string | yes | Not empty once trimmed. One line: a line break in it becomes a space. Cut to 200 bytes at a character's end, with `…`. |
+| `message` | string | no | Cut to 4 KiB at a character's end, with `…`; line breaks kept. Left out when empty. |
+| `path` | string | no | A repository path from the tree's root (the directory, in the directory form): no leading `/`, no `.` or `..`, at most 4 KiB. |
+| `line` | integer | no | 1 to 2^32; only with `path`. |
+| `end_line` | integer | no | From `line` to 2^32; only with `line`. |
+
+A line of spaces and tabs alone is skipped. Any other line that is not a finding (not JSON, not
+an object, a key not in the table, a missing `level` or `title`, a value of the wrong type or
+outside its rule, more than 64 KiB, bytes that are not UTF-8) is skipped and counted in the
+report's `invalid_lines`, and the report's `message` names the first one and why
+(`line 3: unknown key "lvl"`). A file past 64 MiB is read to that bound, its last partial line
+left out, and its report says `cut`. A report file that is a symbolic link, a FIFO or anything
+but a regular file is `refused` with `fault: not_a_file`, and nothing behind it is read; one that
+cannot be read is `refused` with `fault: io`. A report that is not read is never the run's error.
+
+A run returns at most 10,000 findings and 4 MiB of their text (titles, groups, messages and paths
+together), in run order: the checks in the order they ran, each check's in the order its report
+gave them. From the finding that would pass either bound on, no finding of the run is returned,
+but every one is counted: in its check's `findings_total`, its report's `findings`, and the run's
+`findings_omitted`. The 10,001st finding of a run is counted and not returned. Each finding's
+`report` is the index of its report in its check's `reports`.
 
 ### Signals
 
@@ -77,7 +122,7 @@ their values.
 | `SWARMOPS_CHECK_TREE` | The tree's 64 hex digits in a workspace; empty in the directory form. |
 | `SWARMOPS_CHECK_ATTEMPT` | `1`. |
 | `SWARMOPS_CHECK_RUN` | The run's id. |
-| `SWARMOPS_CHECK_REPORT` | A path for the check's findings, not made; nothing reads it yet (M31-4). |
+| `SWARMOPS_CHECK_REPORT` | The path of the check's report file of findings, JSON lines, not made; read after the check ends (see "Findings"). |
 | `SWARMOPS_CHECK_OUTPUTS` | A path for the check's outputs, not made; nothing reads it yet (M31-6). |
 | `SWARMOPS_CHECK_SUMMARY` | A path for the check's summary, not made; nothing reads it yet (M31-18). |
 | `SWARMOPS_CHECK_ARTIFACTS` | A directory for the check's artifacts, made empty; nothing reads it yet (M36-3). |
@@ -91,7 +136,8 @@ The one check `default` of `.swarmops/workspaces.json` keeps the caller's whole 
 
 ### The run and its logs
 
-A run's `dir` holds `run.json` (its `state`, `running` then `ended`, and the `result`), `lock`
+A run's `dir` holds `run.json` (its `state`, `running` then `ended`, and the `result`, the
+checks' findings in it once they have ended), `lock`
 (held while it runs), `logs/<check>.log` and `checks/<check>/`, the paths the environment names.
 Each directory a run makes, the runs root and a directory's key directory among them, is its
 owner's alone (mode `0700`), as a workspace's `.swarmws/` is: a log holds whatever its check
@@ -113,7 +159,8 @@ own; neither is a measured figure of any check.
 ### The MCP tool
 
 `swarmops mcp` serves the workspace form as the tool `check_run`, whose arguments are
-`CheckRunReq` (`workspace`, `stage`, `checks`): there is no directory form there, and no `--pass`,
+`CheckRunReq` (`workspace`, `stage`, `checks`), and whose result carries each check's findings as
+the command's does: there is no directory form there, and no `--pass`,
 since the server's environment is not the agent's to hand out; a check gets the fixed list of the
 server's variables. A call holds the server until the run ends, each check bounded by its
 timeout. SIGINT, SIGTERM or SIGHUP to the server stops the run as it stops `check run`: the call is

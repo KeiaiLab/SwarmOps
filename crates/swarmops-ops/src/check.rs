@@ -18,7 +18,7 @@
 //!
 //! `check run` (M31, [`mod@run`]) runs one stage's checks of a directory or of a workspace held
 //! clean, each with the environment of [`mod@env`], its output in a log of [`mod@log`]'s format.
-//! Once a check has ended, what it reported is read as findings: its report file
+//! Once a check has ended, what it reported is read as findings (`intake`): its report file
 //! ([`mod@findings`]).
 
 mod digest;
@@ -26,6 +26,7 @@ pub mod env;
 mod file;
 pub mod findings;
 pub mod follow;
+mod intake;
 pub mod log;
 pub mod run;
 

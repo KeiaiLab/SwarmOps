@@ -616,7 +616,7 @@ static CONTRACT: [Limit; 27] = [
 ];
 
 /// The bounds a response keeps without an error: what it leaves out, and how it says so.
-static BOUNDS: [Limit; 15] = [
+static BOUNDS: [Limit; 22] = [
     Limit {
         name: "Lossy commits listed",
         constant: code(
@@ -833,6 +833,105 @@ static BOUNDS: [Limit; 15] = [
         errors: &[],
         what: "The most lines one envelope of `check log --follow` gives after its first: \
                    the rest come in the next ones.",
+    },
+    Limit {
+        name: "Findings of a run",
+        constant: code(
+            "swarmops_ops::check::MAX_RUN_FINDINGS",
+            CHECK,
+            "pub const MAX_RUN_FINDINGS: usize = 10_000;",
+            || bytes::to_u64(swarmops_ops::check::MAX_RUN_FINDINGS),
+        ),
+        unit: Unit::Count("findings"),
+        commands: &["check run"],
+        errors: &[],
+        what: "The findings one run returns, its checks' together in run order: from the one \
+                   that would pass it on, every finding is counted in its check's \
+                   `findings_total` and in the run's `findings_omitted`, and none is returned. \
+                   Not measured.",
+    },
+    Limit {
+        name: "Findings' text of a run",
+        constant: code(
+            "swarmops_ops::check::MAX_RUN_FINDING_BYTES",
+            CHECK,
+            "pub const MAX_RUN_FINDING_BYTES: u64 = 4 << 20;",
+            || swarmops_ops::check::MAX_RUN_FINDING_BYTES,
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "The titles, groups, messages and paths of the findings one run returns, \
+                   together: from the finding that would pass it on, every finding is counted \
+                   and none is returned, as past the count of findings. Not measured.",
+    },
+    Limit {
+        name: "Report file",
+        constant: code(
+            "swarmops_ops::check::MAX_REPORT_BYTES",
+            CHECK,
+            "pub const MAX_REPORT_BYTES: u64 = 64 << 20;",
+            || swarmops_ops::check::MAX_REPORT_BYTES,
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "A check's report file (`SWARMOPS_CHECK_REPORT`): past it, its whole lines up to \
+                   the bound are read, the rest is not, and its report says `cut`.",
+    },
+    Limit {
+        name: "Report file line",
+        constant: code(
+            "swarmops_ops::check::MAX_FINDING_LINE_BYTES",
+            CHECK,
+            "pub const MAX_FINDING_LINE_BYTES: usize = 64 * 1024;",
+            || bytes::to_u64(swarmops_ops::check::MAX_FINDING_LINE_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "One line of a check's report file: a longer one is invalid, counted in its \
+                   report's `invalid_lines`, and the next line is read.",
+    },
+    Limit {
+        name: "Finding title",
+        constant: code(
+            "swarmops_ops::check::MAX_FINDING_TITLE_BYTES",
+            CHECK,
+            "pub const MAX_FINDING_TITLE_BYTES: usize = 200;",
+            || bytes::to_u64(swarmops_ops::check::MAX_FINDING_TITLE_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "A finding's title, one line: a longer one is cut at a character's end, with `…`.",
+    },
+    Limit {
+        name: "Finding message",
+        constant: code(
+            "swarmops_ops::check::MAX_FINDING_MESSAGE_BYTES",
+            CHECK,
+            "pub const MAX_FINDING_MESSAGE_BYTES: usize = 4 * 1024;",
+            || bytes::to_u64(swarmops_ops::check::MAX_FINDING_MESSAGE_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "A finding's message: a longer one is cut at a character's end, with `…`.",
+    },
+    Limit {
+        name: "Finding path",
+        constant: code(
+            "swarmops_ops::check::MAX_FINDING_PATH_BYTES",
+            CHECK,
+            "pub const MAX_FINDING_PATH_BYTES: usize = 4 * 1024;",
+            || bytes::to_u64(swarmops_ops::check::MAX_FINDING_PATH_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "A finding's path, a repository path: a longer one makes its line of the report \
+                   file invalid.",
     },
 ];
 

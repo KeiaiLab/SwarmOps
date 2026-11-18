@@ -1141,10 +1141,14 @@ check file with its stages, `check list` and `check run` are built
   M31 plan; the M31-1 review.*
 - **A check is told no changed paths.** `SWARMOPS_CHECK_CHANGED` is set and empty: with no plan,
   a check takes the whole tree as changed. *Target: M30-4. Found: the M31 plan.*
-- **A check's report, outputs, summary and artifacts are read by nothing.** `check run` gives
-  each check the paths `SWARMOPS_CHECK_REPORT`, `SWARMOPS_CHECK_OUTPUTS`,
-  `SWARMOPS_CHECK_SUMMARY` and `SWARMOPS_CHECK_ARTIFACTS`; what a check writes there changes no
-  answer yet. *Target: M31-4, M31-6, M31-18, M36-3. Found: the M31 plan.*
+- **A check's outputs, summary and artifacts are read by nothing.** `check run` gives each check
+  the paths `SWARMOPS_CHECK_OUTPUTS`, `SWARMOPS_CHECK_SUMMARY` and `SWARMOPS_CHECK_ARTIFACTS`;
+  what a check writes there changes no answer yet. *Target: M31-6, M31-18, M36-3. Found: the M31
+  plan.*
+- **Findings last as long as their run.** A check's findings are in `check run`'s result and in
+  its run's `run.json` alone, of which the newest 20 runs are kept; nothing keeps them beside the
+  store, and nothing reads them beside the lines a change touched. *Target: M36, M36-11. Found:
+  the M31 plan.*
 - **Two runs of one directory are not kept apart.** `check run --dir` takes no lock on the
   directory: two runs at once run their checks side by side, each with a run directory of its
   own. The workspace form holds the workspace's lock. *Target: M31-8. Found: the M31 plan.*

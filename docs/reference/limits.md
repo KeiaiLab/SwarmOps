@@ -299,6 +299,13 @@ A response past these leaves the rest out, and says so in its fields; nothing fa
 | [Section title](#section-title) | 200 bytes | `swarmops_ops::check::log::MAX_SECTION_TITLE_BYTES` | [`check run`](commands/check-run.md) |
 | [Check runs kept](#check-runs-kept) | 20 runs | `swarmops_ops::check::run::KEPT_CHECK_RUNS` | [`check run`](commands/check-run.md) |
 | [Followed lines](#followed-lines) | 1,000 lines | `swarmops_ops::check::follow::MAX_FOLLOW_LINES` | [`check log`](commands/check-log.md) |
+| [Findings of a run](#findings-of-a-run) | 10,000 findings | `swarmops_ops::check::MAX_RUN_FINDINGS` | [`check run`](commands/check-run.md) |
+| [Findings' text of a run](#findings-text-of-a-run) | 4,194,304 bytes (4 MiB) | `swarmops_ops::check::MAX_RUN_FINDING_BYTES` | [`check run`](commands/check-run.md) |
+| [Report file](#report-file) | 67,108,864 bytes (64 MiB) | `swarmops_ops::check::MAX_REPORT_BYTES` | [`check run`](commands/check-run.md) |
+| [Report file line](#report-file-line) | 65,536 bytes (64 KiB) | `swarmops_ops::check::MAX_FINDING_LINE_BYTES` | [`check run`](commands/check-run.md) |
+| [Finding title](#finding-title) | 200 bytes | `swarmops_ops::check::MAX_FINDING_TITLE_BYTES` | [`check run`](commands/check-run.md) |
+| [Finding message](#finding-message) | 4,096 bytes (4 KiB) | `swarmops_ops::check::MAX_FINDING_MESSAGE_BYTES` | [`check run`](commands/check-run.md) |
+| [Finding path](#finding-path) | 4,096 bytes (4 KiB) | `swarmops_ops::check::MAX_FINDING_PATH_BYTES` | [`check run`](commands/check-run.md) |
 
 ### Lossy commits listed
 
@@ -419,6 +426,62 @@ The most lines one envelope of `check log --follow` gives after its first: the r
 - Value: 1,000 lines.
 - Constant: `swarmops_ops::check::follow::MAX_FOLLOW_LINES`, in `crates/swarmops-ops/src/check/follow.rs`.
 - Commands: [`check log`](commands/check-log.md).
+
+### Findings of a run
+
+The findings one run returns, its checks' together in run order: from the one that would pass it on, every finding is counted in its check's `findings_total` and in the run's `findings_omitted`, and none is returned. Not measured.
+
+- Value: 10,000 findings.
+- Constant: `swarmops_ops::check::MAX_RUN_FINDINGS`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Findings' text of a run
+
+The titles, groups, messages and paths of the findings one run returns, together: from the finding that would pass it on, every finding is counted and none is returned, as past the count of findings. Not measured.
+
+- Value: 4,194,304 bytes (4 MiB).
+- Constant: `swarmops_ops::check::MAX_RUN_FINDING_BYTES`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Report file
+
+A check's report file (`SWARMOPS_CHECK_REPORT`): past it, its whole lines up to the bound are read, the rest is not, and its report says `cut`.
+
+- Value: 67,108,864 bytes (64 MiB).
+- Constant: `swarmops_ops::check::MAX_REPORT_BYTES`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Report file line
+
+One line of a check's report file: a longer one is invalid, counted in its report's `invalid_lines`, and the next line is read.
+
+- Value: 65,536 bytes (64 KiB).
+- Constant: `swarmops_ops::check::MAX_FINDING_LINE_BYTES`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Finding title
+
+A finding's title, one line: a longer one is cut at a character's end, with `…`.
+
+- Value: 200 bytes.
+- Constant: `swarmops_ops::check::MAX_FINDING_TITLE_BYTES`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Finding message
+
+A finding's message: a longer one is cut at a character's end, with `…`.
+
+- Value: 4,096 bytes (4 KiB).
+- Constant: `swarmops_ops::check::MAX_FINDING_MESSAGE_BYTES`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Finding path
+
+A finding's path, a repository path: a longer one makes its line of the report file invalid.
+
+- Value: 4,096 bytes (4 KiB).
+- Constant: `swarmops_ops::check::MAX_FINDING_PATH_BYTES`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check run`](commands/check-run.md).
 
 ## Defaults
 

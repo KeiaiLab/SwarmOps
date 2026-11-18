@@ -151,7 +151,9 @@ pub(super) static WS_TOOLS: [WsSpec; 14] = [
                       under its timeout, reading .swarmops/checks.toml from the store at the \
                       changeset the files stand for: a passing run gives every check's outcome, \
                       and a check that did not pass makes it E_CHECK_FAILED with the whole run \
-                      in details.run. Holds the workspace's lock while it runs; never writes the \
+                      in details.run. Each check's findings, from the JSON lines it writes to \
+                      SWARMOPS_CHECK_REPORT, come with its outcome, at most 10,000 a run, the \
+                      rest counted. Holds the workspace's lock while it runs; never writes the \
                       store.",
     },
     WsSpec {

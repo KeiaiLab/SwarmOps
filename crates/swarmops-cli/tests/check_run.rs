@@ -1,6 +1,7 @@
-//! `check run` and `check log` (M31-1, M31-2, M31-3, M30-6) through the binary: outcomes, a
-//! timed-out check's process group, the environment a check gets, sections in its log, signals,
-//! stages, the workspace form, where runs go, and a log read, and followed while it grows.
+//! `check run` and `check log` (M31-1, M31-2, M31-3, M30-6, M31-4) through the binary: outcomes,
+//! a timed-out check's process group, the environment a check gets, sections in its log, signals,
+//! stages, the workspace form, where runs go, a check's findings, and a log read, and followed
+//! while it grows.
 //!
 //! Every fixture check is a program with its arguments: `sh -c …` where a script is wanted, since
 //! a check may run a shell, but SwarmOps adds none.
@@ -440,9 +441,14 @@ fn a_signal_stops_the_run() {
     for signal in [Signal::INT, Signal::TERM, Signal::HUP] {
         // 1. Two checks, the first a sleeper writing its group.
         let tree = Tree::new(
-            "[check.a]\nargv = [\"sh\", \"-c\", \"echo $$ > group; sleep 600\"]\n\
+            "[check.a]\nargv = [\"sh\", \"a.sh\"]\n\
              [check.b]\nargv = [\"true\"]\n",
         );
+        let a = r#"echo '{"level":"error","title":"t"}' > "$SWARMOPS_CHECK_REPORT"
+echo $$ > group
+sleep 600
+"#;
+        write(&tree.dir(), "a.sh", a);
         let runs = tree.runs();
         let dir = tree.dir();
         let line = ["check", "run", "--dir", dir.to_str().unwrap()];
@@ -468,7 +474,16 @@ fn a_signal_stops_the_run() {
         };
         let run = failed_run(&out);
         assert_eq!(run["cancelled"], true, "{out}");
-        assert_eq!(check(&run, "a")["outcome"], "cancelled");
+        let a = check(&run, "a");
+        assert_eq!(a["outcome"], "cancelled");
+
+        // A cancelled check's report file is not read (M31-4): its report is partial.
+        let report = Path::new(&run["dir"].as_str().unwrap()).join("checks/a/report.jsonl");
+        assert!(report.is_file(), "{}", report.display());
+        assert!(
+            a.get("reports").is_none() && a.get("findings").is_none(),
+            "{a}"
+        );
         let b = check(&run, "b");
         assert_eq!(b["outcome"], "not_run");
         assert!(b.get("log").is_none(), "{b}");
@@ -497,6 +512,111 @@ fn a_signal_after_the_last_check_exited_stops_nothing() {
     assert_eq!(run["failed"], json!([]), "{run}");
     let ms = run["duration_ms"].as_u64().unwrap();
     assert!(ms < 1_000, "the grace was waited out: {ms} ms");
+}
+
+// A check's findings (M31-4).
+
+/// A tree whose check `found` runs `found.sh`, which writes three lines of findings to its report
+/// file, the second a warning with a path and lines, and exits with `code`; and whose check
+/// `quiet` writes none.
+fn three_findings(code: i32) -> Tree {
+    let tree = Tree::new(
+        "[check.found]\nargv = [\"sh\", \"found.sh\"]\n[check.quiet]\nargv = [\"true\"]\n",
+    );
+    let script = format!(
+        r#"cat > "$SWARMOPS_CHECK_REPORT" <<'EOF'
+{{"level":"error","title":"first"}}
+{{"level":"warning","title":"second","path":"src/a.rs","line":3,"end_line":5,"message":"why"}}
+{{"level":"notice","title":"third"}}
+EOF
+exit {code}
+"#
+    );
+    write(&tree.dir(), "found.sh", &script);
+    tree
+}
+
+/// A fixture check's three findings come back in order (M31-4's acceptance), field for field,
+/// with the report they came from: the check failing, they are in `E_CHECK_FAILED`'s
+/// `details.run`, the message counts them and the hint names them; the check passing, they are
+/// in the result, and the run passes. A check that writes no report file has no `reports`.
+#[test]
+fn a_check_s_three_findings_come_back_in_order() {
+    // 1. Failing: in details.run, counted in the message, named by the hint.
+    let tree = three_findings(1);
+    let out = tree.run(&[], &[]);
+    let run = failed_run(&out);
+    let found = check(&run, "found");
+    assert_eq!(
+        found["findings"],
+        json!([
+            {"level": "error", "title": "first", "report": 0},
+            {"level": "warning", "title": "second", "path": "src/a.rs", "line": 3,
+             "end_line": 5, "message": "why", "report": 0},
+            {"level": "notice", "title": "third", "report": 0},
+        ])
+    );
+    assert_eq!(found["findings_total"], 3);
+    let report = Path::new(run["dir"].as_str().unwrap()).join("checks/found/report.jsonl");
+    assert_eq!(
+        found["reports"],
+        json!([{"format": "findings", "path": report.to_str().unwrap(), "state": "read",
+                "findings": 3}])
+    );
+    let error = out.envelope();
+    assert_eq!(
+        error["error"]["message"],
+        "1 of 2 checks did not pass: found failed (exit 1, 3 findings)"
+    );
+    let hint = error["error"]["hint"].as_str().unwrap();
+    assert!(
+        hint.starts_with("read its findings in details.run.checks[0].findings, then its log: "),
+        "{hint}"
+    );
+    assert!(run.get("findings_omitted").is_none(), "{run}");
+
+    // 2. A check that wrote no report file has none.
+    let quiet = check(&run, "quiet");
+    for key in ["findings", "findings_total", "reports"] {
+        assert!(quiet.get(key).is_none(), "{quiet}");
+    }
+
+    // 3. Passing: the same findings, and the run passes.
+    let tree = three_findings(0);
+    let run = tree.run(&[], &[]).ok();
+    let passed = check(&run, "found");
+    assert_eq!(passed["outcome"], "passed");
+    assert_eq!(passed["findings"], found["findings"]);
+    assert_eq!(passed["findings_total"], 3);
+}
+
+/// The 10,001st finding of a run is counted, not returned (M31-4's acceptance): a check of
+/// 10,001 findings gives its first 10,000, the last `f10000`, and counts every one; a check
+/// after it has its findings counted and none returned; the run counts what it left out.
+#[test]
+fn the_10001st_finding_is_counted_not_returned() {
+    let tree = Tree::new(
+        "[check.many]\nargv = [\"sh\", \"many.sh\"]\n[check.more]\nargv = [\"sh\", \"more.sh\"]\n",
+    );
+    let many = r#"awk 'BEGIN { for (i = 1; i <= 10001; i++)
+    printf "{\"level\":\"notice\",\"title\":\"f%d\"}\n", i }' > "$SWARMOPS_CHECK_REPORT"
+"#;
+    write(&tree.dir(), "many.sh", many);
+    let more = r#"echo '{"level":"error","title":"late"}' > "$SWARMOPS_CHECK_REPORT"; exit 2
+"#;
+    write(&tree.dir(), "more.sh", more);
+    let run = failed_run(&tree.run(&[], &[]));
+    let many = check(&run, "many");
+    let findings = many["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 10_000);
+    assert_eq!(findings[0]["title"], "f1");
+    assert_eq!(findings[9_999]["title"], "f10000");
+    assert_eq!(many["findings_total"], 10_001);
+    assert_eq!(many["reports"][0]["findings"], 10_001);
+    let more = check(&run, "more");
+    assert!(more.get("findings").is_none(), "{more}");
+    assert_eq!(more["findings_total"], 1);
+    assert_eq!(run["findings_omitted"], 2);
 }
 
 /// Stages (M30-6): a check of two stages runs under each; a check of one runs under that one

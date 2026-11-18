@@ -34,10 +34,21 @@ collects the changes on `stable` that no release holds yet, until the next relea
   SIGINT, SIGTERM and SIGHUP kill the running check's process group and end the run. The MCP tool
   has the workspace form only; the same signals to `swarmops mcp` while it runs end the run, and
   the server exits once it has answered the call. `swarmops mcp` lists 49 tools.
+- A check's findings: a check writes them to its report file, at `SWARMOPS_CHECK_REPORT`, one
+  JSON object a line with `level` (`error`, `warning`, `notice`), `title`, and optionally
+  `message`, `path` (a repository path), `line` and `end_line`. Once the check has ended (and
+  not after a stop cancelled it), `check run` reads the file and returns its findings with the
+  check's outcome (`findings`, `findings_total`, and the file as it was read in `reports`: `read`
+  with its count, invalid lines and whether it was cut past 64 MiB, or `refused` with its
+  fault), at most 10,000 findings and 4 MiB of their text a run, the rest counted
+  (`findings_omitted`). Unknown keys and lines that are no finding are counted and the first one
+  named. Findings change no outcome. `E_CHECK_FAILED`'s message counts each failed check's
+  findings, and its hint names where they are.
 - The environment a check of `check run` gets: `SWARMOPS_CHECK_NAME`, `SWARMOPS_CHECK_STAGE`,
   `SWARMOPS_CHECK_TREE`, `SWARMOPS_CHECK_ATTEMPT`, `SWARMOPS_CHECK_RUN`, the paths
-  `SWARMOPS_CHECK_REPORT`, `SWARMOPS_CHECK_OUTPUTS`, `SWARMOPS_CHECK_SUMMARY` and
-  `SWARMOPS_CHECK_ARTIFACTS` (which nothing reads yet), `SWARMOPS_CHECK_CHANGED` (empty until
+  `SWARMOPS_CHECK_REPORT` (its report file of findings), `SWARMOPS_CHECK_OUTPUTS`,
+  `SWARMOPS_CHECK_SUMMARY` and `SWARMOPS_CHECK_ARTIFACTS` (which nothing reads yet),
+  `SWARMOPS_CHECK_CHANGED` (empty until
   plans exist) and `SWARMOPS_WS` in a workspace; of the caller's variables only `HOME`, `LANG`,
   `LC_ALL`, `LC_CTYPE`, `LOGNAME`, `PATH`, `TMPDIR`, `TZ` and `USER`, and each `--pass NAME`. The
   one check `default` of `.swarmops/workspaces.json` keeps the caller's whole environment, as
