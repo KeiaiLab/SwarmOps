@@ -23,8 +23,8 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 ## [0.13.0] - 2026-11-18
 
 A landing queue on a local store: `queue enqueue`, `status`, `withdraw`, `wait` and `run` check
-changes in parallel and land each one whose check passed, in queue order. `check list` shows the
-checks a tree names. A store's first queue entry turns on a feature that 0.12.x builds refuse.
+changes in parallel and land each one whose check passed, in queue order. `check list`, `check run` and
+`check log` show, run and log the checks a tree names. A store's first queue entry turns on a feature that 0.12.x builds refuse.
 
 No incompatible changes and no security fixes.
 
