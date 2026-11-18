@@ -475,6 +475,15 @@ pub(crate) fn one_line(text: String) -> String {
         .collect()
 }
 
+/// The 1-based line of byte `at` in `bytes`: the file's own lines, as a refusal of a file the
+/// user wrote names them (`access.toml`, the check file). An offset past the end counts every
+/// line.
+pub(crate) fn line_of(bytes: &[u8], at: usize) -> u64 {
+    let before = bytes.get(..at).unwrap_or(bytes);
+    let lines = before.split(|&b| b == b'\n').count();
+    u64::try_from(lines).unwrap_or(u64::MAX)
+}
+
 pub(crate) fn details<const N: usize>(entries: [(&str, Value); N]) -> Map<String, Value> {
     entries
         .into_iter()
@@ -1593,6 +1602,16 @@ mod tests {
             "{shown}"
         );
         assert!(!error.message.is_empty(), "{shown}");
+    }
+
+    /// A byte's line counts the line breaks before it, from 1; an offset past the end is on the
+    /// last line, after the last break.
+    #[test]
+    fn a_byte_is_on_the_line_its_breaks_say() {
+        let text = b"one\ntwo\n\nfour";
+        let lines: Vec<u64> = [0, 3, 4, 8, 9, 13, 99].map(|at| line_of(text, at)).to_vec();
+        assert_eq!(lines, [1, 1, 2, 3, 4, 4, 4], "{text:?}");
+        assert_eq!(line_of(b"", 0), 1, "an empty file is one line");
     }
 
     /// An `after` past the journal's end is `E_INVALID_ARG`, naming it.
