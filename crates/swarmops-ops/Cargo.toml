@@ -7,6 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+# The integration tests are one test binary, `tests/all.rs` (see `[[test]]`).
+autotests = false
 
 [lints]
 workspace = true
@@ -25,6 +27,11 @@ test-hooks = [
 # The serve parsers' public wrappers the fuzz targets call (`serve::cgi::fuzz_parse_path`,
 # `serve::hook::fuzz_read_updates`); the parsers stay private. Off unless asked for.
 fuzzing = []
+
+# The one integration-test binary (CONTRIBUTING.md): Cargo builds no other test target from `tests/`
+# (`autotests = false`), so a new test file is a `mod` line there.
+[[test]]
+name = "all"
 
 [dependencies]
 swarmops-api = { path = "../swarmops-api", version = "0.12.0" }

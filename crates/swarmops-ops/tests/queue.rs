@@ -4,8 +4,6 @@
 //! Every test owns a fresh store in a temp dir of its own, the feature `queue` enabled with the
 //! test hooks' `supported_for_tests` (the store's build does not support it yet).
 
-#![cfg(feature = "test-hooks")]
-
 use camino::Utf8PathBuf;
 use swarmops_api::{
     ChangeInput, ChangeOp, CommitReq, ContentInput, ErrorCode, Identity, ModeInput, OpError,
