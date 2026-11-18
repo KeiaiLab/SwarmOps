@@ -1,36 +1,48 @@
 # This repository's checks (M30): the commands its gate runs, one argv each, run with no shell.
 # `just check` lists them with the build under test (`check list --dir .`), so a file that does not
-# parse fails the gate. Nothing runs them through SwarmOps yet: GitHub's workflows run the same
-# commands. Each timeout is its job's `timeout-minutes` in the workflow file; no run was measured.
+# parse fails the gate. Each timeout is its job's `timeout-minutes` in the workflow file; no run
+# was measured.
+#
+# Stages: `before-land` is the gate, what ci.yml's `check` job runs. The `manual` checks run on
+# GitHub, in their own jobs, as before; later steps of M30 and M31 give them stages of their own.
+# Every check writes its stages out, the default too.
 version = 1
 
 # ci.yml, job `check`: the definition of done.
 [check.check]
 argv = ["just", "check"]
 timeout_s = 1800
+stages = ["before-land"]
 
 # ci.yml, job `check`, after it: bench/compare still compiles against the store's API.
 [check.check-compare]
 argv = ["just", "check-compare"]
 timeout_s = 1800
+stages = ["before-land"]
 
 # ci.yml, job `zizmor`: actionlint over every workflow, and tests-pass needing every other job.
-# The zizmor audit itself stays a step of that job.
+# The zizmor audit itself stays a step of that job. Manual: it downloads a Linux x86_64 actionlint,
+# and the check job would run it twice.
 [check.lint-workflows]
 argv = ["just", "lint-workflows"]
 timeout_s = 600
+stages = ["manual"]
 
-# site.yml, job `site`: the site built and checked.
+# site.yml, job `site`, on the paths it scopes: the site built and checked (node, npm's registry).
 [check.site-check]
 argv = ["just", "site-check"]
 timeout_s = 900
+stages = ["manual"]
 
-# server.yml, job `entrances`: stock git and so through sshd and nginx.
+# server.yml, job `entrances`, on its paths and weekly: stock git and so through sshd and nginx
+# (docker).
 [check.server-entrances]
 argv = ["just", "server-entrances"]
 timeout_s = 1800
+stages = ["manual"]
 
 # server.yml, job `acceptance`: the packages installed and accepted.
 [check.server-acceptance]
 argv = ["just", "server-acceptance"]
 timeout_s = 2700
+stages = ["manual"]

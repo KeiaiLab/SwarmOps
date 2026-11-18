@@ -270,7 +270,30 @@ fn this_repository_s_checks_are_its_recipes() {
         ]
     );
 
-    // 2. Each one `just <recipe>`, at the root, the recipe its name, and the justfile has it.
+    // 2. Each one's stages: the gate's two before-land, the rest manual (M30-6).
+    let stages: Vec<(&str, &Value)> = (checks.iter())
+        .map(|c| (c["name"].as_str().unwrap(), &c["stages"]))
+        .collect();
+    let (gate, manual) = (json!(["before-land"]), json!(["manual"]));
+    assert_eq!(
+        stages,
+        [
+            ("check", &gate),
+            ("check-compare", &gate),
+            ("lint-workflows", &manual),
+            ("server-acceptance", &manual),
+            ("server-entrances", &manual),
+            ("site-check", &manual),
+        ]
+    );
+    let text = fs::read_to_string(root.join(".swarmops/checks.toml")).unwrap();
+    assert_eq!(
+        text.matches("\nstages = ").count(),
+        6,
+        "every check writes its stages"
+    );
+
+    // 3. Each one `just <recipe>`, at the root, the recipe its name, and the justfile has it.
     let justfile = fs::read_to_string(root.join("justfile")).unwrap();
     let recipes: Vec<&str> = (justfile.lines())
         .filter(|line| !line.starts_with([' ', '\t', '#']) && !line.contains(":="))
