@@ -48,9 +48,11 @@ DESCRIPTION_CHARS = 120
 FORBIDDEN_CLAIM = "git replacement"
 TOPICS_MIN = 6
 TOPICS_MAX = 12
-LABELS_MAX = 30
+LABELS_MAX = 40
 LABEL_DESCRIPTION_CHARS = 100
 LABEL_PREFIXES = ("kind: ", "area: ", "triage: ", "invite: ")
+# A milestone label is the roadmap's milestone id in lower case: `m30` for M30.
+MILESTONE_LABEL = re.compile(r"m[1-9][0-9]*")
 KIND_PREFIX = "kind: "
 AREA_PREFIX = "area: "
 KINDS = ("kind: bug", "kind: feature", "kind: question", "kind: docs")
@@ -183,7 +185,7 @@ def validate(settings: dict[str, Any], form: str, card: bytes) -> list[Finding]:
     if len(set(topics)) != len(topics):
         found.append((Rule.TOPICS, "a topic appears twice"))
 
-    # 4. Labels: four families, short descriptions, every kind present.
+    # 4. Labels: four families and the milestones, short descriptions, every kind present.
     labels = settings["labels"]
     names = [label.get("name", "") for label in labels]
     if len(labels) > LABELS_MAX:
@@ -192,8 +194,9 @@ def validate(settings: dict[str, Any], form: str, card: bytes) -> list[Finding]:
         found.append((Rule.LABELS, "a label appears twice"))
     for label in labels:
         name = label.get("name", "")
-        if not name.startswith(LABEL_PREFIXES):
-            found.append((Rule.LABELS, f"`{name}` has none of the prefixes {LABEL_PREFIXES}"))
+        if not name.startswith(LABEL_PREFIXES) and not MILESTONE_LABEL.fullmatch(name):
+            found.append((Rule.LABELS, f"`{name}` has none of the prefixes {LABEL_PREFIXES}"
+                                       " and is no milestone label"))
         if len(label.get("description", "")) > LABEL_DESCRIPTION_CHARS:
             found.append((Rule.LABELS, f"`{name}`: description over {LABEL_DESCRIPTION_CHARS}"))
     for kind in KINDS:
@@ -241,6 +244,8 @@ def mutants(settings: dict[str, Any], form: str, card: bytes) -> list[tuple[str,
         {"name": f"triage: t{i}", "color": "ffffff", "description": ""} for i in range(31)))
     edit("no prefix", Rule.LABELS, lambda s: s["labels"].append(
         {"name": "bug", "color": "ffffff", "description": ""}))
+    edit("a milestone label with a letter", Rule.LABELS, lambda s: s["labels"].append(
+        {"name": "m3a", "color": "ffffff", "description": ""}))
     edit("a long label description", Rule.LABELS, lambda s: s["labels"][0].update(
         description="x" * 101))
     edit("an area the form lacks", Rule.AREAS, lambda s: s["labels"].append(

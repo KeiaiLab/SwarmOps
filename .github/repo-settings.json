@@ -41,6 +41,21 @@
     {"name": "triage: wontfix", "color": "ffffff", "description": "Will not be changed; the issue says why."},
     {"name": "triage: duplicate", "color": "cfd3d7", "description": "Another issue or pull request covers this."},
     {"name": "invite: good first issue", "color": "f59e0b", "description": "Small and self-contained; a first contribution fits."},
-    {"name": "invite: help wanted", "color": "f59e0b", "description": "Open to a contributor who takes it."}
+    {"name": "invite: help wanted", "color": "f59e0b", "description": "Open to a contributor who takes it."},
+    {"name": "m30", "color": "bfd4f2", "description": "Milestone M30: check definitions and plans."},
+    {"name": "m31", "color": "bfd4f2", "description": "Milestone M31: checks run where the caller is."},
+    {"name": "m32", "color": "bfd4f2", "description": "Milestone M32: results on a tree."},
+    {"name": "m33", "color": "bfd4f2", "description": "Milestone M33: triggers and admission."},
+    {"name": "m34", "color": "bfd4f2", "description": "Milestone M34: runners that ask for work."},
+    {"name": "m35", "color": "bfd4f2", "description": "Milestone M35: trust, isolation and secrets."},
+    {"name": "m36", "color": "bfd4f2", "description": "Milestone M36: logs, reports and artifacts."},
+    {"name": "m37", "color": "bfd4f2", "description": "Milestone M37: the gate's rules."},
+    {"name": "m38", "color": "bfd4f2", "description": "Milestone M38: delivery."},
+    {"name": "m39", "color": "bfd4f2", "description": "Milestone M39: caches and set-up time."},
+    {"name": "m40", "color": "bfd4f2", "description": "Milestone M40: figures, cost and events."},
+    {"name": "m7", "color": "bfd4f2", "description": "Milestone M7: blame and review; slices proposed to its plan."},
+    {"name": "m22", "color": "bfd4f2", "description": "Milestone M22: the landing queue; slices proposed to its plan."},
+    {"name": "m11", "color": "bfd4f2", "description": "Milestone M11: native sync; slices proposed to its plan."},
+    {"name": "m26", "color": "bfd4f2", "description": "Milestone M26: an identity from a short-lived credential; slices proposed to its plan."}
   ]
 }
