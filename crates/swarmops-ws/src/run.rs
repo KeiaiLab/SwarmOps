@@ -3,18 +3,24 @@
 //! each stream kept.
 //!
 //! ```text
-//!   run ──spawn──▶ child (own process group on Unix)
-//!    │               ├─ stdout ─▶ reader ─┬─▶ log (both streams, as they come)
-//!    │               └─ stderr ─▶ reader ─┘    and each stream's last 8 KiB
-//!    └─ waits until the exit or the timeout; past it, kills the group
+//!   run_with ──spawn──▶ child (own process group on Unix; env inherited + extra, or only given)
+//!    │                    ├─ stdout ─▶ reader ─┬─▶ the Output (RawLog: both streams as they come;
+//!    │                    └─ stderr ─▶ reader ─┘    or the caller's), and each stream's last 8 KiB
+//!    └─ waits until the exit, the timeout or the stop flag; past either, kills the group
 //! ```
+//!
+//! [`run`] is what `ws land --check` and the bootstrap use: the caller's environment plus a few
+//! variables, the output as it came into a raw log. [`run_with`] hands the caller the output
+//! ([`Output`]), the environment ([`Env`]) and a flag that stops the command (`check run`).
 //!
 //! On Windows only the child is killed: a grandchild holding the output open is left, and the
 //! runner stops reading after [`DRAIN`] (a known limitation).
 
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -47,14 +53,99 @@ const CHUNK: usize = 64 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Run {
-    /// Its exit code; none when it was killed (by its timeout, or by a signal).
+    /// Its exit code; none when it was killed (by its timeout, the stop flag, or a signal).
     pub exit_code: Option<i32>,
+    /// The signal that ended it, when one did that the runner did not send.
+    pub signal: Option<i32>,
     /// Whether its timeout ended it.
     pub timed_out: bool,
+    /// Whether the stop flag ended it.
+    pub stopped: bool,
     /// The last [`TAIL_BYTES`] of its stdout, as text (invalid UTF-8 replaced).
     pub stdout_tail: String,
     /// The last [`TAIL_BYTES`] of its stderr, as text.
     pub stderr_tail: String,
+}
+
+/// Which stream a chunk of output came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Stream {
+    /// The command's stdout.
+    Stdout,
+    /// The command's stderr.
+    Stderr,
+}
+
+/// Where a command's output goes as it comes: each chunk read from either stream, in the order
+/// the readers got them. The readers share it, one at a time.
+pub trait Output: Send {
+    /// Takes `bytes`, read from `stream`.
+    ///
+    /// # Errors
+    ///
+    /// A write that failed: the first one is the run's `E_IO`.
+    fn write(&mut self, stream: Stream, bytes: &[u8]) -> io::Result<()>;
+}
+
+/// The output as it came, both streams together, into a file: the log of `ws land --check` and
+/// of the bootstrap.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct RawLog {
+    /// The log.
+    file: File,
+}
+
+impl RawLog {
+    /// The log at `path`, made anew, its directory made if missing.
+    ///
+    /// # Errors
+    ///
+    /// `E_IO` naming the path that could not be made.
+    pub fn create(path: &Utf8Path) -> Result<RawLog, OpError> {
+        new_log(path).map(|file| RawLog { file })
+    }
+}
+
+impl Output for RawLog {
+    fn write(&mut self, _stream: Stream, bytes: &[u8]) -> io::Result<()> {
+        self.file.write_all(bytes)
+    }
+}
+
+/// The environment a command gets.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum Env<'e> {
+    /// The caller's environment, with these variables set over it.
+    Inherit(&'e [(&'e str, &'e str)]),
+    /// These variables alone: the caller's environment is cleared first.
+    Only(&'e [(String, OsString)]),
+}
+
+/// How a command runs: its environment, its timeout, and the flag that stops it.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct Spec<'a> {
+    /// Its environment.
+    pub env: Env<'a>,
+    /// The longest it may run.
+    pub timeout: Duration,
+    /// Set (by anyone, at any time): the command's group is killed and the run says
+    /// [`Run::stopped`].
+    pub stop: Option<&'a AtomicBool>,
+}
+
+impl<'a> Spec<'a> {
+    /// A run of at most `timeout`, in the caller's environment, with no stop flag.
+    pub fn new(timeout: Duration) -> Spec<'a> {
+        Spec {
+            env: Env::Inherit(&[]),
+            timeout,
+            stop: None,
+        }
+    }
 }
 
 /// Runs `argv` in `cwd`, without a shell, stdin null, its environment the caller's plus `env`,
@@ -71,37 +162,69 @@ pub fn run(
     timeout: Duration,
     log: &Utf8Path,
 ) -> Result<Run, OpError> {
-    // 1. A program to run, and the log made anew.
+    if argv.is_empty() {
+        return Err(OpError::new(ErrorCode::InvalidArg, "no command to run"));
+    }
+    let output: Arc<Mutex<dyn Output>> = Arc::new(Mutex::new(RawLog::create(log)?));
+    let mut spec = Spec::new(timeout);
+    spec.env = Env::Inherit(env);
+    run_with(argv, cwd, &spec, &output, log)
+}
+
+/// Runs `argv` in `cwd` as `spec` says, without a shell, stdin null, each chunk of both streams
+/// to `output` as it comes and the last [`TAIL_BYTES`] of each to the [`Run`]. Past the timeout,
+/// or once the stop flag is set, the command is killed: on Unix with its whole process group,
+/// which it was started in. `shown` names the output in an `E_IO`.
+///
+/// `E_INVALID_ARG` for an empty `argv` or a command that cannot start (`details.program`), with
+/// nothing written to `output`; `E_IO` for output that cannot be written or a wait that fails.
+pub fn run_with(
+    argv: &[String],
+    cwd: &Utf8Path,
+    spec: &Spec<'_>,
+    output: &Arc<Mutex<dyn Output>>,
+    shown: &Utf8Path,
+) -> Result<Run, OpError> {
+    // 1. A program to run.
     let Some((program, rest)) = argv.split_first() else {
         return Err(OpError::new(ErrorCode::InvalidArg, "no command to run"));
     };
-    let log_file = new_log(log)?;
 
     // 2. The child: no shell, no input, both streams piped, its own process group on Unix.
     let mut command = Command::new(program);
     command
         .args(rest)
         .current_dir(cwd)
-        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    match spec.env {
+        Env::Inherit(extra) => {
+            command.envs(extra.iter().copied());
+        }
+        Env::Only(vars) => {
+            command
+                .env_clear()
+                .envs(vars.iter().map(|(name, value)| (name, value)));
+        }
+    }
     own_group(&mut command);
     let mut child = command.spawn().map_err(|e| not_started(program, &e))?;
 
-    // 3. Each stream read on a thread of its own, into the log and its tail.
-    let shared = Arc::new(Output {
-        log: Mutex::new(log_file),
-        log_error: Mutex::new(None),
+    // 3. Each stream read on a thread of its own, into the output and its tail.
+    let shared = Arc::new(Shared {
+        output: Arc::clone(output),
+        error: Mutex::new(None),
     });
     let (done, finished) = mpsc::channel();
-    let stdout = read_out(child.stdout.take(), &shared, &done);
-    let stderr = read_out(child.stderr.take(), &shared, &done);
+    let stdout = read_out(child.stdout.take(), Stream::Stdout, &shared, &done);
+    let stderr = read_out(child.stderr.take(), Stream::Stderr, &shared, &done);
     drop(done);
 
-    // 4. The exit, or the timeout and the group killed.
-    let deadline = Instant::now() + timeout;
-    let ended = wait(&mut child, deadline).map_err(|e| host_failed("waiting for", log, &e))?;
+    // 4. The exit, or the timeout or the stop and the group killed.
+    let deadline = Instant::now() + spec.timeout;
+    let ended =
+        wait(&mut child, deadline, spec.stop).map_err(|e| host_failed("waiting for", shown, &e))?;
 
     // 5. The output to its end: a process left in the group holding it is killed after the
     //    grace, and the readers then get the drain.
@@ -110,64 +233,76 @@ pub fn run(
         drained(&finished, DRAIN);
     }
 
-    // 6. The log written whole, and the outcome.
+    // 6. The output written whole, and the outcome.
     if let Some(e) = shared
-        .log_error
+        .error
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .take()
     {
-        return Err(host_failed("writing", log, &e));
+        return Err(host_failed("writing", shown, &e));
     }
     Ok(Run {
         exit_code: ended.status.and_then(|status| status.code()),
-        timed_out: ended.timed_out,
+        signal: ended.status.and_then(signal_of),
+        timed_out: ended.end == End::TimedOut,
+        stopped: ended.end == End::Stopped,
         stdout_tail: text(&stdout),
         stderr_tail: text(&stderr),
     })
 }
 
-/// How a command ended: its status, unless it was killed past its timeout.
+/// How a command ended: its status, unless the runner killed it.
 struct Ended {
-    /// Its exit status; none when its timeout killed it.
+    /// Its exit status; none when the runner killed it.
     status: Option<ExitStatus>,
-    /// Whether its timeout ended it.
-    timed_out: bool,
+    /// What ended it.
+    end: End,
 }
 
-/// What the two readers share: the log, and the first error writing it.
-struct Output {
-    /// The log both streams go to.
-    log: Mutex<File>,
-    /// The first error writing the log.
-    log_error: Mutex<Option<io::Error>>,
+/// What ended a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum End {
+    /// It ended on its own.
+    Exited,
+    /// Its timeout: the runner killed it.
+    TimedOut,
+    /// The stop flag: the runner killed it.
+    Stopped,
+}
+
+/// What the two readers share: the output, and the first error writing it.
+struct Shared {
+    /// Where both streams go.
+    output: Arc<Mutex<dyn Output>>,
+    /// The first error writing the output.
+    error: Mutex<Option<io::Error>>,
 }
 
 /// A stream's last [`TAIL_BYTES`], as its reader keeps them.
 type Tail = Arc<Mutex<Vec<u8>>>;
 
-/// Waits for `child` until `deadline`, looking ever less often; past it, kills its group and
-/// reaps it.
-fn wait(child: &mut Child, deadline: Instant) -> io::Result<Ended> {
+/// Waits for `child` until `deadline` or until `stop` is set, looking ever less often; past
+/// it, or once stopped, kills its group and reaps it.
+fn wait(child: &mut Child, deadline: Instant, stop: Option<&AtomicBool>) -> io::Result<Ended> {
     let mut pause = POLL_FIRST;
     loop {
         // 1. Ended on its own.
         if let Some(status) = child.try_wait()? {
             return Ok(Ended {
                 status: Some(status),
-                timed_out: false,
+                end: End::Exited,
             });
         }
 
-        // 2. Past its time: killed, then reaped.
+        // 2. Past its time, or stopped: killed, then reaped.
         let now = Instant::now();
-        if now >= deadline {
+        let stopped = stop.is_some_and(|stop| stop.load(Ordering::SeqCst));
+        if now >= deadline || stopped {
             kill(child);
             child.wait()?;
-            return Ok(Ended {
-                status: None,
-                timed_out: true,
-            });
+            let end = if stopped { End::Stopped } else { End::TimedOut };
+            return Ok(Ended { status: None, end });
         }
 
         // 3. Another look later.
@@ -191,9 +326,9 @@ fn drained(finished: &Receiver<()>, limit: Duration) -> bool {
     true
 }
 
-/// Reads `stream` to its end on a thread of its own, into the shared log and the tail it
-/// returns; says so on `done` when it ends.
-fn read_out<S>(stream: Option<S>, shared: &Arc<Output>, done: &Sender<()>) -> Tail
+/// Reads `stream`, which is `which`, to its end on a thread of its own, into the shared output
+/// and the tail it returns; says so on `done` when it ends.
+fn read_out<S>(stream: Option<S>, which: Stream, shared: &Arc<Shared>, done: &Sender<()>) -> Tail
 where
     S: Read + Send + 'static,
 {
@@ -213,14 +348,11 @@ where
             };
             let bytes = &chunk[..n];
 
-            // 2. Into the log; the first failure is kept for the caller.
+            // 2. Into the output; the first failure is kept for the caller.
             let written =
-                (shared.log.lock().unwrap_or_else(PoisonError::into_inner)).write_all(bytes);
+                (shared.output.lock().unwrap_or_else(PoisonError::into_inner)).write(which, bytes);
             if let Err(e) = written {
-                let mut first = shared
-                    .log_error
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
+                let mut first = shared.error.lock().unwrap_or_else(PoisonError::into_inner);
                 first.get_or_insert(e);
             }
 
@@ -253,6 +385,19 @@ fn new_log(path: &Utf8Path) -> Result<File, OpError> {
         std::fs::create_dir_all(dir).map_err(|e| host_failed("making", dir, &e))?;
     }
     File::create(path).map_err(|e| host_failed("making", path, &e))
+}
+
+/// The signal that ended a command with `status`, if one did.
+#[cfg(unix)]
+fn signal_of(status: ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+/// Windows: no signals.
+#[cfg(not(unix))]
+fn signal_of(_status: ExitStatus) -> Option<i32> {
+    None
 }
 
 /// Starts the command in a process group of its own, so that a timeout kills what it started.
