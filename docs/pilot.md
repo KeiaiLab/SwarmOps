@@ -646,6 +646,7 @@ df80904e9584a7931c4e064929b71c666915a9e1
 | The round trip | Original commits missing from the export, the new commits and their authors, `git fsck`, the second export's head; after step 9 also the person's commit, in the export under the id it was pushed with |
 | The gate and CI | `just check`'s exit code and test counts; the `tests-pass` conclusion of the pushed branch and of `$START` |
 | The host | The load average before and after each step, the store's size and file count |
+| Check runs per landed change (G27, planned) | Not measured yet: the runs of the `before-land` stage and the runner-seconds per landed change over a pilot week, under issue #44; the first baseline sets the runner-seconds target ([goals](goals.md#goals)) |
 
 For comparison, the dry run on 2026-10-20 measured, at a load average of 80 to 130 from other
 work on the same 32-thread host: import 3.8 s for 422 commits; through MCP, a commit in 49 ms and a

@@ -65,10 +65,12 @@
 //! # The tools
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
-//! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `merge_base`, `op_log`,
-//! `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `ref_txn`, `undo`, `commit`, `land`, `revert`, `land_check`, `land_group`, `blob_put`, `blob_has`,
-//! `verify` and the maintenance's `gc`, `repair` and `upgrade` (M6), in `tools/list`'s order; then the git remotes' client-side operations (M13), which
-//! no [`StoreOps`] has: `remote_list`, `fetch`, `push`, `sync` and `sync_status`, run on the
+//! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`,
+//! `merge_base`, `op_log`, `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `ref_txn`, `undo`,
+//! `commit`, `land`, `revert`, `land_check`, `land_group`, `check_list` (M30: a tree's checks,
+//! through the store's own reads), `blob_put`, `blob_has`, `verify` and the maintenance's `gc`,
+//! `repair` and `upgrade` (M6), in `tools/list`'s order; then the git remotes' client-side
+//! operations (M13), which no [`StoreOps`] has: `remote_list`, `fetch`, `push`, `sync` and `sync_status`, run on the
 //! store's own operations ([`operate_local`]) and taking a remote by its name only, never a URL
 //! or a path; then the landing queue's (M22): `queue_enqueue`, `queue_status`, `queue_withdraw`
 //! and `queue_wait`, each running as its `queue` command does on the store's root
@@ -288,7 +290,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 38] = [
+static TOOLS: [Spec; 39] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -582,6 +584,21 @@ static TOOLS: [Spec; 38] = [
                       none clean it is E_NOTHING_TO_LAND, each outcome in details.items. Give \
                       each change an idempotency_key to make a retry safe.",
         effect: Effect::Lands,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::CheckList,
+        name: "check_list",
+        request: "CheckListReq",
+        title: "List a tree's checks",
+        description: "Lists the checks the tree of rev, main by default, describes in \
+                      .swarmops/checks.toml (version 1), or else check.argv of \
+                      .swarmops/workspaces.json as the one check default: each with its argv, \
+                      its directory, its timeout and the digest of its definition, sorted by \
+                      name, with the tree they were read from. Reads only. A tree with neither \
+                      file lists none; a file that does not read is E_CHECK_FILE with its line \
+                      and key. Nothing runs a check.",
+        effect: Effect::Reads,
         result_chars: None,
     },
     Spec {
@@ -1605,6 +1622,7 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::Revert => how.mutate(|ops, who, req| ops.revert(who, req)),
         Tool::LandCheck => how.read(|ops, req| ops.land_check(req)),
         Tool::LandGroup => how.mutate(|ops, who, req| ops.land_group(who, req)),
+        Tool::CheckList => how.read(|ops, req| swarmops_ops::check::list(ops, req)),
         Tool::Rebase => how.mutate(|ops, who, req| ops.rebase(who, req)),
         Tool::BlobPut => how.mutate(|ops, who, req| ops.blob_put(who, req)),
         Tool::BlobHas => how.read(|ops, req| ops.blob_has(req)),
@@ -1953,6 +1971,7 @@ impl Refuse for RefListReq {}
 impl Refuse for RefLogReq {}
 impl Refuse for swarmops_api::LandCheckReq {}
 impl Refuse for swarmops_api::LandGroupReq {}
+impl Refuse for swarmops_api::CheckListReq {}
 impl Refuse for UndoReq {}
 impl Refuse for VerifyReq {}
 impl Refuse for swarmops_api::GcReq {}
@@ -2575,6 +2594,7 @@ enum Tool {
     Revert,
     LandCheck,
     LandGroup,
+    CheckList,
     Rebase,
     BlobPut,
     BlobHas,
@@ -3175,6 +3195,9 @@ mod tests {
             "one tool per operation's request type"
         );
 
+        // `check_list` (M30) is no `StoreOps` method: it reads a tree through the store's own
+        // reads, and the first of them resolves the revision once.
+        let composed = [("check_list", ("resolve_rev", "ResolveRevReq"))];
         for spec in &TOOLS {
             let (called, outcome) = (RefCell::new(Vec::new()), RefCell::new(Vec::new()));
             operate(spec.tool, Probe::new(&called, &outcome));
@@ -3185,12 +3208,10 @@ mod tests {
                 assert_eq!(outcome.into_inner().len(), 1, "the {} tool", spec.name);
                 continue;
             }
-            assert_eq!(
-                called.into_inner(),
-                [(spec.name, spec.request)],
-                "the {} tool",
-                spec.name
-            );
+            let first = (composed.iter())
+                .find(|(name, _)| *name == spec.name)
+                .map_or((spec.name, spec.request), |(_, first)| *first);
+            assert_eq!(called.into_inner(), [first], "the {} tool", spec.name);
         }
         let names: BTreeSet<&str> = TOOLS.iter().map(|spec| spec.name).collect();
         assert_eq!(names.len(), TOOLS.len(), "two tools share a name");

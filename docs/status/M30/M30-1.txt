@@ -1,0 +1,1 @@
+A tree names its checks in .swarmops/checks.toml version 1, and check.argv of workspaces.json still reads as the one check default.

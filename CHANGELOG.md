@@ -37,6 +37,62 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - A22's measurement (`queue_perf`, in `just perf` and the weekly run): 50 processes each enqueue
   and wait on a check of 30 s; every entry lands once and no hold of the store's lock reaches
   1 s (docs/perf.md, "M22").
+- `check list` and the MCP tool `check_list`: the checks a tree names, from the store at a
+  changeset (`main` by default) or, with `check list --dir DIR`, from a directory of this host,
+  which opens no store. Each check comes with its argv, its directory, its timeout and the digest
+  of its definition, sorted by name; the directory form's answer says `vouched: true`, since only
+  the caller stands behind the files. The digest's recipe is provisional and may change in a later
+  release. Nothing runs the checks yet: `ws land --check` still runs `check.argv` of
+  `.swarmops/workspaces.json`.
+- The check file, `.swarmops/checks.toml`, version 1: `version = 1`, then one `[check.<name>]`
+  table a check, with `argv` (one command, run with no shell), `dir` and `timeout_s`. Any other
+  key is refused at its line, so a build refuses a file whose keys it does not know instead of
+  reading less of it. In a tree without it, `check.argv` of `.swarmops/workspaces.json` reads as
+  the one check `default`.
+- `E_CHECK_FILE` (exit 1, not retryable): a check file that does not read, `.swarmops/checks.toml`
+  or, in a tree without one, `.swarmops/workspaces.json`; `details` name the `file`, the `reason`,
+  whether the caller `vouched` for it, and its `line` and `key` when known. Golden envelopes now
+  pin 57 of the 58 error codes.
+- API types `CheckListReq`, `CheckListResp` and `CheckOut`, the request and result of
+  `check list`. `swarmops schema` prints them (201 types).
+
+### Changed
+
+- Docs: the roadmap gains a section, "Checks and delivery": a role beside the three topologies in
+  which SwarmOps describes a tree's checks, plans what a change needs, runs the checks on the
+  caller's host or on runners that ask for work, records each result against its tree, gates a
+  land on the records and delivers from a store. It is planned as M30 to M40, in 169 units listed
+  one table per milestone, with twelve slices proposed to the plans of M7, M22, M11 and M26, the
+  first steps in this repository's own checks, and what stays on GitHub meanwhile. Nothing of it
+  is built and no figure of it is measured; the units of M30 and M31 behind the first eight steps
+  start now. Known limitations gain six items on checks, each with its target milestone.
+- Docs: docs/goals.md adds G25 (checks as records), G26 (admission before a runner), G27 (check
+  cost per landed change), G28 (an agent's feedback loop), G29 (untrusted changes) and G30 (the
+  project checks itself). The reason: SwarmOps takes on a role beside its three topologies,
+  checks and delivery, planned as M30 to M40, and each row gives that role a target of its own.
+  Nothing of the role is built and no target is measured: the rows say "Not built" or "Not
+  measured yet", and the targets of G26 to G28 are confirmed or replaced by the first baseline.
+- Docs: the non-goal "A general-purpose git replacement" says that a check is not a hook: it runs
+  outside every store operation and reaches the store only as a recorded result. The reason:
+  without the sentence, "no user hooks" reads as "no checks on a land".
+- Docs: the non-goal "A cluster" says that the store does not scale horizontally, names
+  `swarmops serve` as it is and no longer as planned, and says that checks add no daemon: a runner
+  is a client, the host's own timer starts scheduled work, and the store's records are the only
+  queue. The reason: "it does not scale horizontally" is true of the store and not of runners,
+  and `serve` is released.
+- Docs: the non-goal "A cache or relay tier between hosts" says that a runner's cache of build
+  output is not such a tier. The reason: the planned caches on runners (M39) hold derived files on
+  the runner's host, never store objects, and no store reads them.
+- Docs: a new non-goal, "A workflow language": a check is one command with declared inputs, and
+  GitHub's workflow files are imported once, not run. The reason: it says where the planned role
+  stops.
+- Docs: a new non-goal, "A forge": no issue tracker, registry, site hosting, code scanner or
+  dependency-update bot. The reason: it says where the planned role stops, and that a store
+  refusing content by an operator's own patterns is not a scanner.
+- Docs: "Who it is for" says what is planned for a team that decides to move its CI and
+  deployment: checks described in the tree, lands gated on their recorded results, delivery from
+  the store. The reason: the sentence before it already names that decision, and this one says
+  what the answer will be.
 
 ## [0.12.0] - 2026-11-18
 

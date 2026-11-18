@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 216 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 219 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -30,6 +30,9 @@ The 216 request, response and value types of the API, as `swarmops schema` print
 | [`ChangeOut`](#changeout) | object | One entry of a changeset's changes. |
 | [`ChangesetDetail`](#changesetdetail) | object | `show`: a changeset's header, changes and metadata. |
 | [`ChangesetSummary`](#changesetsummary) | object | One changeset of a log. |
+| [`CheckListReq`](#checklistreq) | object | `check_list` (CLI `check list`): the checks the tree of `rev` describes. |
+| [`CheckListResp`](#checklistresp) | object | `check_list`: the checks a tree describes, sorted by name. |
+| [`CheckOut`](#checkout) | object | One check: a command run with no shell, in a directory of the tree, for at most its time. |
 | [`CloneReq`](#clonereq) | object | `clone`: a new store in a directory of the caller's host, holding a git remote's history, with the remote recorded and its followed branch imported into `main`. |
 | [`CloneResp`](#cloneresp) | object | `clone`: the store made, the remote recorded, its fetch, and where `main` stands. |
 | [`CommitReq`](#commitreq) | object | `commit`: record a changeset from an explicit change list. |
@@ -512,6 +515,45 @@ Kind: object. `swarmops schema ChangesetSummary` prints its JSON Schema.
 | `parents` | array of `string` | yes | The parents' ids, mainline parent first. |
 | `title` | `string` | yes | The message's first line. |
 
+## CheckListReq
+
+`check_list` (CLI `check list`): the checks the tree of `rev` describes. Reads only: no lock, no identity, nothing written.
+
+Kind: object. `swarmops schema CheckListReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `rev` | [`Rev`](#rev) | no | The changeset whose tree's checks to list; `main` when omitted. Default: `"main"`. |
+
+## CheckListResp
+
+`check_list`: the checks a tree describes, sorted by name. The same tree gives the same answer byte for byte, whichever changeset names it.
+
+Kind: object. `swarmops schema CheckListResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `checks` | array of [`CheckOut`](#checkout) | yes | The checks, sorted by name, bytewise; empty when the tree describes none. |
+| `file` | `string` or `null` | no | The file the checks came from: `.swarmops/checks.toml`, or `.swarmops/workspaces.json` for the one check `default`. Omitted when the tree holds neither, or a `workspaces.json` with no `check.argv`. |
+| `tree` | `string` or `null` | no | The root tree the file was read from: 64 hex digits. Omitted for a directory. |
+| `version` | `integer` (uint32) or `null` | no | The check file's `version`, 1. Omitted unless `file` is `.swarmops/checks.toml`. |
+| `vouched` | `boolean` | yes | Whether only the caller stands behind the file: `true` when it was read from a directory the caller named (`check list --dir`), which no gate accepts; `false` when it was read from the store, at `tree`. |
+
+## CheckOut
+
+One check: a command run with no shell, in a directory of the tree, for at most its time.
+
+Kind: object. `swarmops schema CheckOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `argv` | array of `string` | yes | The program and its arguments, run with no shell: at least the program. |
+| `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not its name): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
+| `dir` | `string` | yes | The directory of the tree it runs in, as a repository path; `.` is the root. |
+| `line` | `integer` (uint64) or `null` | no | The line of `.swarmops/checks.toml` that starts its table. Omitted for the check `default` read from `.swarmops/workspaces.json`. |
+| `name` | `string` | yes | Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit. |
+| `timeout_s` | `integer` (uint64) | yes | The most seconds it may run, its default (900) filled in. For the check `default` of `.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does not read it, and takes its own `--check-timeout`. |
+
 ## CloneReq
 
 `clone`: a new store in a directory of the caller's host, holding a git remote's history, with the remote recorded and its followed branch imported into `main`. It needs an identity, as `git import` does: it moves `main`.
@@ -859,6 +901,7 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_CHECK_FAILED"` | A workspace's check or bootstrap command failed or ran past its time (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`). Nothing was landed. |
 | `"E_STORE_TOO_NEW"` | The store is of a later format than this build reads, or lists a feature it lacks (`details.format`, and `details.features`, the features it lacks, none for a later format). Nothing was written; a newer swarmops reads the store. |
 | `"E_QUEUE_WAIT_TIMEOUT"` | `queue wait` reached its timeout with the entry still open (`details.entry`, and `details.state`, `waiting` or `checking`). The entry stays queued; waiting again can see it land. |
+| `"E_CHECK_FILE"` | A check file does not read: `.swarmops/checks.toml` (or, in a tree without one, `.swarmops/workspaces.json`) is too large, not text, not a file, not TOML (JSON), not version 1, or holds a key, a name or a value version 1 does not take (`details.file`, `details.reason`, `details.vouched`, and `details.line` and `details.key` when known). Nothing was listed; the hint says what the file takes. |
 
 ## FetchReq
 

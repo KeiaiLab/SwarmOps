@@ -33,6 +33,9 @@ fi
 # `--version` in a build stamped with SWARMOPS_BUILD_COMMIT, each pin required to run, and a
 # malformed one refused; target/debug's binaries are linked again unstamped after.
 python3 -I scripts/check-stamped.py
+# This repository's checks, listed by the build under test in the directory form: a
+# .swarmops/checks.toml that does not parse fails here.
+cargo run --locked --quiet -p swarmops-cli --bin swarmops --all-features -- --human check list --dir .
 # Both doc runs write to a fresh directory below the target directory, removed on exit, as in
 # `just check`; the step refuses a target directory that is empty, not absolute or the root
 # however written, such as `//`, which scripts/test-doc-clean.py shows. Twice: the second run,

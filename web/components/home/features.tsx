@@ -41,7 +41,7 @@ const FEATURES: { title: string; text: ReactNode; guide: string; url: string }[]
     title: 'An MCP server',
     text: (
       <>
-        <C>swarmops mcp</C> serves the store to an agent over stdio: 50 tools, one per operation, each returning the
+        <C>swarmops mcp</C> serves the store to an agent over stdio: 51 tools, one per operation, each returning the
         CLI&apos;s envelope.
       </>
     ),

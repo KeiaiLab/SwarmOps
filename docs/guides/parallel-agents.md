@@ -384,6 +384,15 @@ hooks make `claude --worktree` sessions and `isolation: worktree` subagents use 
 place of a git worktree ([Workspaces for worktree sessions and subagents](claude-code.md#workspaces-for-worktree-sessions-and-subagents),
 [Build and test a change](../operate/build-and-test.md)).
 
+### A tree's checks
+
+A repository names its checks in `.swarmops/checks.toml`, in its tree: one command each, run with
+no shell, with the directory it runs in and a timeout. `so check list` lists them from the store at
+a changeset, and `so check list --dir .` from a checkout, each with the digest of its definition;
+a key the file's version does not take is refused at its line. Nothing runs these checks yet:
+`so ws land --check` still runs the one command of `.swarmops/workspaces.json`
+([`check list`](../reference/commands/check-list.md)).
+
 ### Git at both ends
 
 `so git import` brings a git repository's history into a store, and `so git export` writes the
@@ -403,7 +412,7 @@ platform policy.
 | **Refs** | Multi-ref transactions, tags, free-form branch names and symbolic refs. | `main` and `release/<name>` only, moved one per call. |
 | **Reading** | Batch reads, `git grep <tree>` and sparse checkouts. | One file or one directory per call, with a byte offset or a range of lines for a file and a depth for a directory; `blob get` reads blobs by id in batches, and a workspace puts the files on disk. |
 | **Storage on disk** | Packs. | One file per object, zstd-compressed when that makes it smaller; no packs, no delta compression. |
-| **Review and the ecosystem** | Patch-review tools, with Gerrit and GitHub adding review on top; hooks, signing, submodules and LFS. | No user hooks, signing, submodules or LFS. Review, with change requests, approvals and a landing gate, is planned for M7. |
+| **Review and the ecosystem** | Patch-review tools, with Gerrit and GitHub adding review on top; hooks, signing, submodules and LFS. | No user hooks, signing, submodules or LFS. Review, with change requests, approvals and a landing gate, is planned for M7; checks and delivery are planned too ([roadmap](../roadmap.md#checks-and-delivery)). |
 | **Between hosts** | Clone, fetch and push over any transport, and bundles without one. | One host. Between hosts, a git remote carries the history, one writing host at a time. Offline-first sync is planned for M11. |
 | **Platforms** | Linux, macOS and Windows. | Linux, and from 0.12.0 on macOS on Apple silicon; Windows next. A store must live on a native Linux filesystem or, on macOS, an APFS or journaled HFS+ volume. |
 | **Maturity** | Git has hosted itself since 2005. | Pre-1.0; the first commit is dated 2026-10-15. |

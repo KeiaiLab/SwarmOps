@@ -20,6 +20,18 @@ Commands and outputs here follow the
   {"check": {"argv": ["./check.sh"]}}
   ```
 
+- Optionally, the project's checks named in `.swarmops/checks.toml`, one command each, run with
+  no shell. `swarmops check list` lists them from the store, and `swarmops check list --dir .`
+  from a directory; nothing runs them yet, and `ws land --check` still runs `check.argv` above
+  ([`check list`](../reference/commands/check-list.md)):
+
+  ```toml
+  version = 1
+
+  [check.test]
+  argv = ["./check.sh"]
+  ```
+
 A workspace is a directory holding a changeset's tree, or only the paths under `--prefix`, and
 `.swarmws/`, its private state. The agent edits, builds and tests in it with the project's own
 tools; `ws land --check` then lands exactly the tree the check ran on.

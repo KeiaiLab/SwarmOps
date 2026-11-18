@@ -14,6 +14,8 @@ lists them all, each with the milestone that takes it.
   ([Building and testing a change](build-and-test.md)).
 - **No review** (M7): SwarmOps does not hold a landing for a person's approval. The loop puts the
   review in git, between the review branch and the trunk ([step 5](daily-loop.md#5-review-then-move-the-trunk)).
+  A gate on recorded check results is planned with it, and checks and delivery around it
+  ([roadmap](../roadmap.md#checks-and-delivery)).
 - **No object is collected**: `swarmops gc` removes leftovers and counts the objects no changeset
   reaches, but deletes none, and `meta/derived/` keeps every value of the current versions. A store
   only grows, but for what [Making room](making-room.md) removes.

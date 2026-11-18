@@ -16,7 +16,7 @@ use crate::support::{self, BIN, SO};
 const SETTING: &str = r#"  $ export SWARMOPS_REPO="$PWD/acme" SWARMOPS_AGENT=person/ada"#;
 
 /// The command families, in the order the program's screen lists them.
-const FAMILIES: [&str; 7] = ["ws", "blob", "ref", "op", "git", "remote", "auth"];
+const FAMILIES: [&str; 8] = ["ws", "blob", "check", "ref", "op", "git", "remote", "auth"];
 
 /// The one example no test runs: it asks the remote it names, so it is only read
 /// (`the_examples_are_lines_the_grammar_reads`).

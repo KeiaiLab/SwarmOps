@@ -327,6 +327,13 @@ error_codes! {
     /// `details.state`, `waiting` or `checking`). The entry stays queued; waiting again can see
     /// it land.
     QueueWaitTimeout => "E_QUEUE_WAIT_TIMEOUT", EXIT_RETRYABLE, true;
+    // Checks (M30).
+    /// A check file does not read: `.swarmops/checks.toml` (or, in a tree without one,
+    /// `.swarmops/workspaces.json`) is too large, not text, not a file, not TOML (JSON), not
+    /// version 1, or holds a key, a name or a value version 1 does not take (`details.file`,
+    /// `details.reason`, `details.vouched`, and `details.line` and `details.key` when known).
+    /// Nothing was listed; the hint says what the file takes.
+    CheckFile => "E_CHECK_FILE", EXIT_ERROR, false;
 }
 
 impl ErrorCode {

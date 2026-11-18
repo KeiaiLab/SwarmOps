@@ -7,8 +7,8 @@ why it happens and the command that fixes it.
 [Concepts](concepts.md); the envelope the failing command printed.
 
 It covers the installer, the MCP server, where a store may live, a busy store, a damaged store, git
-import and export, remotes, workspaces, and every `E_*` error code that a command or a tool call can
-return.
+import and export, remotes, workspaces, checks, and every `E_*` error code that a command or a tool
+call can return.
 
 Every example was run on 2026-10-22: the commands with the binary built from this repository
 (`swarmops 0.1.0`), in a scratch directory that holds the store `acme` (`SWARMOPS_REPO=acme`); the
@@ -45,7 +45,7 @@ the process aborts, and says why on stderr ([The server exits](#the-server-exits
 ## Every error code
 
 `ErrorCode` in `crates/swarmops-api/src/error.rs` is the one table of codes, exit codes and
-retry advice; this is that table, all 55 codes, each raised by some command.
+retry advice; this is that table, all 57 codes, each raised by some command.
 
 | Code | Exit | Retryable | Means | Section |
 | --- | --- | --- | --- | --- |
@@ -101,6 +101,7 @@ retry advice; this is that table, all 55 codes, each raised by some command.
 | `E_WS_OUTSIDE_PREFIXES` | 1 | no | A sparse workspace holds edits outside its prefixes. | [Workspaces](#e_ws_outside_prefixes) |
 | `E_WS_STALE` | 1 | no | A workspace's base is gone from its target's history. | [Workspaces](#e_ws_stale) |
 | `E_CHECK_FAILED` | 1 | no | A workspace's check or bootstrap command failed or timed out. | [Workspaces](#e_check_failed) |
+| `E_CHECK_FILE` | 1 | no | A check file does not read; `details.line` names where. | [Checks](#e_check_file) |
 | `E_REF_NOT_FOUND` | 6 | no | `ref log` names a ref the journal records no move of, or an OpenCode hook a start the store does not hold. | [Arguments and revisions](#e_ref_not_found) |
 | `E_AUTH` | 5 | no | `swarmops serve` names no caller, or no grant of the store's `access.toml` names it; or GitHub refused a login by the device flow. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees), [A login that fails](#a-login-that-fails) |
 | `E_POLICY_DENIED` | 5 | no | The store's `access.toml` grants the caller no such action, or the file is invalid. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees) |
@@ -1518,11 +1519,45 @@ the workspace. After a failed check nothing landed, and the workspace stands on 
 changeset (`details.changeset`), where the failure reproduces: fix, `ws commit`, and land again.
 A check that needs more than 900 s takes `--check-timeout`.
 
+## Checks
+
+A tree names its checks in `.swarmops/checks.toml`, or, without that file, `check.argv` of
+`.swarmops/workspaces.json` is its one check, `default`.
+
+### `E_CHECK_FILE`
+
+Exit 1, not retryable. The tree's check file does not read, so `check list` listed nothing: the
+command line was right, the file is not.
+
+```text
+{"ok":false,"op":"check_list","api":1,"error":{"code":"E_CHECK_FILE","message":".swarmops/checks.toml has an unknown key check.lint.stage (line 11)","retryable":false,"exit":1,"details":{"file":".swarmops/checks.toml","key":"check.lint.stage","line":11,"reason":"unknown_key","vouched":true},"hint":"version 1 of .swarmops/checks.toml takes version and [check.<name>] tables of argv, dir and timeout_s; a newer swarmops may read this key"},"meta":{"elapsed_ms":0,"resolved":{},"auth":"trust"}}
+```
+ `details.file` names the file, `details.reason` what is wrong,
+`details.line` the line (1 is the first) when the fault has one, and `details.key` the key at
+fault as a dotted path, such as `check.lint.stage`. `details.vouched` is `true` when the file was
+read from a directory the caller named, not from the store.
+
+| `reason` | What is wrong | Fix |
+| --- | --- | --- |
+| `too_large` | More than the file's limit (`details.bytes`, `details.limit`). | Shorten the file. |
+| `not_text` | Not UTF-8, from the line named. | Save it as UTF-8. |
+| `not_a_file` | A symbolic link, a directory or another kind of entry at the path, or `.swarmops` itself a symbolic link. | Make it a file in a directory `.swarmops`. |
+| `syntax` | Not TOML (JSON for `workspaces.json`), or a key or table given twice. | Fix the line named. |
+| `version` | No `version`, or one that is not the integer `1`. | Write `version = 1`. |
+| `unknown_key` | A key version 1 does not take. | Remove it, or use a build that reads it. |
+| `name` | A check name outside `a-z`, `0-9`, `-`, `_`, or longer than 64 bytes. | Rename the check. |
+| `value` | A value of the wrong type, or outside its limits. | Fix the value named. |
+| `too_many` | More checks than the file may hold. | Remove checks. |
+
+A key that a later version of SwarmOps adds is `unknown_key` to an older build, which refuses the
+file rather than list it without that key: the hint says so. Without `.swarmops/checks.toml`,
+the file is `.swarmops/workspaces.json`, which `ws land --check` refuses as `E_INVALID_ARG`.
+
 ## Codes a client does not know
 
-Every code is raised by some command: `E_REF_NOT_FOUND` by `ref log` since M18, and `E_AUTH` and
-`E_POLICY_DENIED` by `swarmops serve` since M14
-([Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees)). A client that meets a code
+Every code is raised by some command: `E_CHECK_FILE` by `check list` since M30,
+`E_REF_NOT_FOUND` by `ref log` since M18, and `E_AUTH` and `E_POLICY_DENIED` by `swarmops serve`
+since M14 ([Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees)). A client that meets a code
 newer than its own table reads `exit` and `retryable` from the error itself.
 
 ## Next

@@ -324,8 +324,10 @@ Before the first push, check the remote's branch rules: a commit made in the sto
 (SwarmOps has no signing), and its author is an agent's name with a `swarmops.local` address.
 
 SwarmOps has no review of its own yet: change requests, approvals and a landing gate are planned
-(M7). Whatever agents land is what the next export writes. To put a person in between, export to
-another branch, such as `review` (`--branch review`), and move the trunk with git after the review.
+(M7), and so are checks described in the tree and delivery from a store
+([roadmap](../roadmap.md#checks-and-delivery)). Whatever agents land is what the next export
+writes. To put a person in between, export to another branch, such as `review`
+(`--branch review`), and move the trunk with git after the review.
 
 ## Run it again
 
@@ -569,7 +571,8 @@ the repository lacks is `E_GIT_READ`.
 - **Pre-1.0.** A minor version may break a public surface other than the hash contract, and stores
   are not migrated between pre-release formats: a store made before a format change may be refused
   afterwards and need creating again.
-- **No review yet.** Change requests, approvals and a landing gate are planned (M7).
+- **No review yet.** Change requests, approvals and a landing gate are planned (M7), and checks
+  and delivery after them ([roadmap](../roadmap.md#checks-and-delivery)).
 - **Not yet measured.** The tests read fixtures that real git made; a round trip on real
   repositories and the export's measurements come after the pilot. No git baseline has been
   measured, and landing is not measured under a swarm's load.

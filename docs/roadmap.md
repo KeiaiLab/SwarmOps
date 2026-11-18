@@ -108,6 +108,14 @@ Native sync is M11, planned.
 | Remotes, remote state and `sync` | 2, 3 | Built for git remotes (M13): `remotes.toml`, the mirror's refs, `so sync` | M13 (done), M11 (store remotes) |
 | Ref names beyond `main` and `release/<name>`, and tags | 1, 3 | Built (M6): free-form branches, `tags/<path>` and `remote/<remote>/<path>` in a `FORMAT 2` store; the git side maps them (M14): `git import`, `git export` and `serve` take branches and lightweight tags | M6 (done), M14 (done) |
 | Access control and identities for remote callers | 1, 3 | Built (M14): the store's `access.toml`, the caller named by the key line or the web server, `E_AUTH` and `E_POLICY_DENIED` | M14 (done), M11 |
+| Checks: a description of what runs for a tree | — | `.swarmops/checks.toml` and `check list` (M30-1, M30-2); a checked land runs one command, the `check.argv` of `.swarmops/workspaces.json` | M30, M31 |
+| Checks: results on a tree | — | Not built | M7, M32 |
+| Checks: triggers | — | Not built | M33 |
+| Checks: runners | — | Not built | M34 |
+| Checks: secrets | — | Not built | M35 |
+| Checks: logs and artifacts | — | Not built | M36 |
+| Checks: rules beyond who may land | — | Not built | M37 |
+| Delivery: deployments | — | Not built | M38 |
 | A server that refuses `{"file": "<path>"}` content and never passes on a host path | 1, 3 | Built for `serve` (M14), but git's own side-band lines ([known limitations](known-limitations.md#serving-requests)); M11's server reuses its guard | M14 (done), M11 |
 
 ## To usable
@@ -167,6 +175,12 @@ against 1 s and 1.5× (49.6 s in v0.7.0;
 [perf.md](perf.md#m18-first-sync-after-a-clone--2026-11-08)). M19's workspace changes are in
 v0.11.0; G9's update and commit rows wait for a quiet run, and the commit row stays missed until a
 change feed exists. The benchmark gate (condition 3) runs in the weekly Scheduled run.
+[Checks and delivery](#checks-and-delivery) (M30 to M40) is planned; of it, the check file and
+`check list` (M30-1 and M30-2, step 1 of the first steps) are on `stable` and in no release yet,
+and nothing else is built. It
+is deferred past usable but for the units of M30 and M31 behind steps 1 to 8 of its
+[first steps](#first-steps), which start now: they write nothing to a store, touch no data-safety
+path and freeze nothing in the hash contract.
 
 **Condition 5 (M15, in v0.8.0, and M16).** Not met yet. M15 closes the in-scope acceptance of the twelve
 data-safety and contract rows the 2026-10-30 completeness report put on condition 5: 54 of the 55
@@ -199,6 +213,7 @@ Deferred past usable, with what stands in until then:
 | M24, rewriting with lineage | Its lineage id needs `FORMAT 3` | `rebase` and `op undo` |
 | M25, moving onto a store without a pause | It needs M17's serve path | Follow a git remote, then switch (M13) |
 | M26, an identity per agent from a short-lived credential | After 1.0, only when a pilot asks | ssh keys and web logins, one per identity |
+| M30 to M40, checks and delivery | No condition needs it, and M32 onward need M7's check record. One exception: the units of M30 and M31 behind steps 1 to 8 of the [first steps](#first-steps) start now, because they write nothing to a store, touch no data-safety path and freeze nothing in the hash contract | Checks run by GitHub on the pushed branch (topology 2); `ws land --check` in each process |
 
 ## What the three share
 
@@ -655,11 +670,754 @@ client).
 
 Several upstreams merging with each other, partial replicas and a caching tier.
 
+## Checks and delivery
+
+**Planned: nothing in this section is built.** SwarmOps takes on a role beside its three
+topologies; the role is not a fourth one. SwarmOps describes what must be checked for a tree,
+decides what a given change needs, runs those checks on the caller's host or on runners that ask
+for work, records each result against the tree it is for, admits a land only on recorded results,
+and delivers from a store. Until then, checks run on GitHub for the pushed branch (topology 2),
+and `ws land --check` runs one command in each process
+([Build and test a change](operate/build-and-test.md)).
+
+Five properties hold across the role, and each is something a reader can test:
+
+- a result is keyed by tree, so identical trees are checked once;
+- "not applicable" is an answer that satisfies a gate, so nothing waits for a result that will not
+  come;
+- admission is decided before any runner starts;
+- a land is checked on the tree it will produce;
+- every answer is one JSON envelope with a code, `retryable` and `hint`.
+
+**What is settled.** The maintainers decided on 2026-11-18: the milestone ids M30 to M40 and the
+goal numbers G25 to G30; the check file's place and version, `.swarmops/checks.toml` with
+`version = 1`; four command families, `check`, `runner`, `policy` and `deploy` (`queue` is M22's);
+that no daemon is added; what the open-source program holds and what a hosted service holds
+([The hosted service](#the-hosted-service)); and that M30 and M31 start now, with steps 1 to 8 of
+the [first steps](#first-steps). The rest of the design below is what each milestone's plan
+confirms or replaces before its first unit is built. Three questions are open, and one point waits
+for the maintainers ([Risks and open questions](#risks-and-open-questions-3)).
+
+### What people and agents type
+
+Planned and provisional: none of these commands exists, and each milestone's plan fixes its names.
+
+```sh
+so check plan my-change                        # which checks this change needs, and why
+so check run --stage before-land               # in a workspace: run the plan's checks on this host
+so check status my-change                      # the roll-up: what a land still waits for
+so check wait my-change                        # one blocking call; the exit status is the verdict
+so runner run --follow                         # on a runner's host: ask the store for work
+```
+
+Where no store is at hand, `check list`, `check lint`, `check plan` and `check run` take
+`--dir <path>`: they read the check file from that directory, and the caller gives the changed
+paths. Every answer of this directory form says that the caller vouched for the file and the
+paths, and a gate never accepts one.
+
+### How it works
+
+**Definitions.** A tree says what its checks are in one versioned file, `.swarmops/checks.toml`,
+read from the store at the tree being judged; `swarmops schema` gives its JSON form. A check is
+one command: an argv with no shell, with declared inputs, a stage, the checks it needs first,
+variants and the labels its runner must hold. Steps, conditions and composition inside a check
+stay in the repository's own task runner, as with `ws land --check` today. That has a price:
+reuse, running again and selection work per check, so a gate that is one recipe gets none of them
+until its repository splits it. The `check.argv` key of `.swarmops/workspaces.json` keeps working,
+with the environment it has today. SwarmOps does not run GitHub's workflow files: an importer
+reads them once, as a public file format, writes a check file for the part that maps, and lists
+the rest.
+
+**Plans and inputs.** A check declares the paths it depends on; one that declares nothing takes
+the whole tree. For a change, `check plan` answers which checks must run and which are not
+applicable, with one reason each, from the store alone and before anything starts. A plan fails
+closed: inputs it cannot resolve, or a definition the candidate changed, turn the check to `run`.
+No second mechanism filters triggers by path. Selection may skip a required check only after
+evidence: `not_applicable` satisfies a gate on a target once that target has run in shadow mode
+for a number of lands the operator sets and counted no miss. Until then a plan informs, and reuse
+of an identical key is the only saving.
+
+**Results and reuse.** Results live in three layers. The verdict is M7's Check record, keyed by
+the tree and by a check key. The key is built from a version, the check's name, its definition
+digest, its input digest, its variant values, its image digest, its declared variables' values,
+its labels and an environment stamp the runner's operator sets. It is a new derived kind of the
+hash recipe, with golden vectors: nothing existing changes, a different recipe later is a new
+kind, and the kind is frozen with M32-1, not earlier. The execution (wanted, claimed, started,
+finished, cancelled) is a record kind of its own. Logs and artifacts are files beside the store,
+addressed by digest and synced to disk before the record that names them. A passing result under
+the same key is taken in place of a run; a failed or cancelled result is never reused, and a
+result is reusable only when a granted recorder wrote it. Only journal records decide: the run
+lines a check run leaves are diagnostics, as the serve records are. For an agent, `check status`
+gives the roll-up and `check wait` blocks until every required check is final; findings come back
+as data, bounded, in the envelope; and the outcomes that are not failures are each distinct:
+`superseded`, `not_applicable`, `reused`, `expired`, `stalled`.
+
+**Triggers.** Six things make a run wanted. A land is proposed: its wanted runs are written in
+the same operation as the queue attempt, so a land never waits on a pass. The other five are read
+from the journal or the clock by `check tick`, a pass over records: a ref moved, a tag was
+created, a change request has a new revision, a schedule is due, someone asked by hand. No command
+runs inside the write path. A replaced candidate is never run, and bounds per identity refuse a
+request before anything is written. Every command that asks for something takes `--key`, as
+`land --key` does, so a retry is a replay. The store host's clock decides leases, maximum ages,
+schedules and waits.
+
+**Runners.** A runner is a client: it claims a wanted run under a lease, runs it and records the
+result, over the native wire that `serve --stdio` answers, from the store's host or from any host
+that reaches `serve`. The store never calls out, and the process that answers a connection runs no
+command a repository defines. No daemon is added. A runner and `check tick --follow` are
+long-running clients an operator starts, as `derive --follow` is; schedules come from the host's
+own timer; the store's records are the only queue; no SwarmOps process listens on a socket. What a
+stopped client looks like is part of the contract: the roll-up names the last pass's frame and age
+and each waiting run's age, `check wait` ends `stalled`, and an alert rule fires. An ask that
+finds nothing takes no writer lock. A check's use of the host is bounded: its time, with a maximum
+beside the store that a candidate cannot raise; memory, processes and disk through the container
+runtime, and for a host-run check as far as the platform allows without `unsafe`, with the answer
+listing what was not applied. A runner refuses a work directory on the store's file system,
+because a full disk fails the journal's sync and stops every land.
+
+**Trust and secrets.** The access file sorts identities into trust classes. An untrusted run gets
+the target's check definitions, not its own; only a runner whose grant gives `isolated` may claim
+it; it gets no secret, no kept state and no network. A held class waits for approval. Secrets live
+only on the runner's host, in a file outside every store: a check file declares names, a value is
+released when check, target, environment and trust class all match, and values are masked before
+anything leaves the runner. A secret never enters an object, a record or a log, and until M35-5
+exists no secret is put on a SwarmOps runner at all. The promise is bounded: the candidate's own
+scripts still run, the container is the host runtime's, and the `isolated` label is not offered on
+macOS. The program alone does not defend a host against hostile code; a machine per job, behind
+`runner run --once` and the operator's commands, is the way to run a stranger's code.
+
+**Delivery.** A rules file beside the access file names environments: each a delivery target with
+the refs allowed to reach it, its approvers, its wait and the scope of its secrets. A deployment
+is a record, a check with an environment becomes claimable only once that environment's rules
+pass, and its secrets are released then. A release is an immutable tag with notes and assets kept
+by digest. A build record in the program is unsigned: it shows that a file is the one the store's
+record names, not who built it.
+
+**The bridge to GitHub.** Where a repository's checks still run on GitHub, a store can offer a
+queue attempt there as a candidate branch (`check offer`), read GitHub's verdict into its own
+records (`check fetch`), and write its own roll-up back as a commit status (`check publish`). So
+the first gate that a store decides can be run by GitHub's runners: the store holds the queue, the
+attempt and the verdict, and the landed commit is the one that was checked. Whether this
+repository takes that path depends on two of the open questions below.
+
+**Where the gate defends and where it guides.** Only a result recorded by an identity the access
+file grants for that check name counts. The gate *defends* only when three things hold: the
+recorder is granted; the recorder reaches the store through `serve` with its own key, not through
+the files; and the checked code runs as another OS user or in a container, so that it can read
+neither that key nor the store's directory. `runner check` says which of the three hold. Where one
+is missing, an identity is whatever `--as` says, and the gate *guides*.
+
+### What it builds on
+
+- **M5** (done): workspaces, `.swarmops/workspaces.json` and `ws land --check`, which already runs
+  one argv with no shell.
+- **M7** (planned): the Check record and the landing gate that reads results. This role extends
+  them and does not define them.
+- **M13** (done): the git remote. The three bridge commands and `release publish` are its clients.
+- **M14** (done): `serve`, its entrances and the access file, which gains the `check` and `run`
+  grants.
+- **M18**: `land-check`, which a plan reads.
+- **M19**: the second round of workspaces. Its change feed is not built, so the two loops poll
+  until it exists.
+- **M20**: `FORMAT 3`, whose named features hold the new record kinds (`check`, `run`, `deploy`).
+- **M21**: health windows, alert rules and the metrics output. M40 adds figures and rules to them;
+  there is no second metrics path.
+- **M22** (planned): the landing queue, its `enqueue` and its attempt.
+
+Nothing is planned a second time: where the role needs work from M7, M22, M11 or M26, it proposes
+a slice to that milestone's plan ([below](#proposed-slices-of-existing-milestones)) and waits for
+the answer.
+
+### Deliverables
+
+One unit is what one slice ships: one command, one record kind, one file format, one protocol or
+one guide. A unit's id is its slice id. It lands when what it depends on is in, and its record is
+then the status file `docs/status/<milestone>/<slice-id>.txt`. The eleven tables below hold the
+169 units of M30 to M40; the twelve proposed slices of M7, M22, M11 and M26 follow, and are not
+counted among the 169. "Depends on" names milestones, proposed slices and units that must exist
+first. Every unit's state is `planned`, `on stable` once it lands, and the release that first
+holds it once one does.
+
+What holds for every unit:
+
+- Its acceptance is a test in `just check`, offline. The three bridge units that talk to GitHub
+  (M32-10, M32-11, M38-13) have an offline half against recorded answers and a live half that
+  runs weekly with a token.
+- No acceptance states a speed or a duration: order is tested by the order of events or records,
+  and the targets are those of [Targets](#targets-3), not measured.
+- Every reader of input a stranger may write (the check file, a check's report file, a JUnit
+  file, a SARIF file, a schedule, the files the importer reads) gets a fuzz target, as G14 asks.
+- A refusal by a rule is `E_POLICY_DENIED` with the rule in `details`. Five error codes are
+  proposed, each fixed by its milestone's plan: `E_CHECK_FILE`, `E_CHECK_PENDING`, `E_RUN_HELD`,
+  `E_RUN_LIMIT` and `E_RUNNER_NONE`.
+- Every command of M30 and M31 also has the directory form.
+- The tables use some longer provisional spellings (`release …`, `notify …`); they are placed
+  under the four command families when built, as `deploy release` and `check notify`.
+
+#### M30: Check definitions and plans
+
+What a tree says should run, and what a given change would start. It reads; it writes nothing to a
+store and freezes nothing in the hash contract. 17 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M30-1 | The check file `.swarmops/checks.toml`, `version = 1`: named checks, each one argv with no shell, a directory and a timeout; read from the store at a named changeset, or with `--dir` from a directory, in which case every answer says the caller vouched for the file | M5 | on stable |
+| M30-2 | `check list`: the checks of a changeset's file, or of a directory's, each with the digest of its definition | M30-1 | on stable |
+| M30-3 | Declared inputs: a check's path patterns, in the access file's `*` and `**` grammar, resolve against a tree to the entries they match; no pattern means the whole tree | M30-1 | planned |
+| M30-4 | `check plan`: for a changeset against its target, a workspace's edits, a `land-check` item or, in the directory form, a list of changed paths, each check marked `run` or `not_applicable` with one reason from a closed set; no lock, nothing written | M30-3, M18 | planned |
+| M30-5 | Planning fails closed: unresolvable inputs, an unreadable path, a renamed or deleted definition, or a definition that differs from the one at the target's head widen the check to `run`, with the reason `widened` or `definition_changed`; a check whose definition changed is never `not_applicable` or `reused` for that land; an error never yields an empty plan | M30-4 | planned |
+| M30-6 | Stages: a check names when its answer is needed, `before-land`, `after-land`, `scheduled`, `release`, `manual` or `deploy`; `check plan --stage` | M30-1 | planned |
+| M30-7 | Order between checks: `needs` lists the checks that go first; a failed need skips its dependants unless they say `always`; a cycle is refused at parse | M30-1 | planned |
+| M30-8 | Variants: a check expands over declared value lists into named variants, with exclusions, added combinations, a cap on the count and a stop-at-first-failure switch | M30-1 | planned |
+| M30-9 | Runner requirements: a check names the labels its runner must hold and a size hint; `check plan` reports them | M30-1 | planned |
+| M30-10 | The owner map: path patterns mapped to the checks a change there also runs, and checks that always run, for dependencies no input pattern expresses | M30-4 | planned |
+| M30-11 | The selection switch: a flag, or a setting beside the store, forces every check to `run`, and each plan says so | M30-4 | planned |
+| M30-12 | `check plan --explain <check>`: which changed paths matched which input or owner pattern | M30-10 | planned |
+| M30-13 | `check import`: reads the GitHub workflow files of a tree and writes a check file for what it can express (commands, order, variants, timeouts, paths), listing every key it could not; schedules are listed as untranslated until M33-7 exists | M30-3, M30-7, M30-8 | planned |
+| M30-14 | Guide "Describe a repository's checks", with this repository's file as the example | M30-4 | planned |
+| M30-15 | Includes: a check file takes definitions from other files of the same tree by path; nothing crosses an include but definitions | M30-1 | planned |
+| M30-16 | `check lint`: reports definitions that cannot work: a need that names nothing, an input pattern that matches no path, a directory the tree lacks | M30-3, M30-7 | planned |
+| M30-17 | Parameters: a check declares named, typed parameters with defaults that a start by hand may set; each reaches the check as an environment variable | M30-1 | planned |
+
+#### M31: Checks run where the caller is
+
+One host, and no store writes beyond diagnostics. It builds on M5's and M19's workspaces and on `ws
+land --check`. 22 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M31-1 | `check run`: runs the checks of a stage (all of them, or a plan's once M30-4 exists) in a workspace or, in the directory form, in a directory, each with no shell and no stdin, in its own process group, under its timeout; one envelope names every check's outcome | M30-1, M30-6, M19 | planned |
+| M31-2 | The environment a check gets: the check's name, tree, stage and attempt, the paths for its report, outputs, summary and artifacts, a file listing the changed paths of its plan, and the values it declared; nothing else is inherited unless listed; the older `check.argv` form keeps the inherited environment it has today | M31-1 | planned |
+| M31-3 | The captured log: both streams with a time per line, and sections a check opens with a marker line; `check log --follow` on the same host reads it while it grows; the envelope keeps the existing tails | M31-1 | planned |
+| M31-4 | Findings: a check writes path, line range, level, title and message as JSON lines to its report file; the envelope returns them, bounded, in `details.findings` | M31-2 | planned |
+| M31-5 | Intake of test and scanner reports: a check declares a JUnit or SARIF file, and its failed cases and results become findings and counts | M31-4 | planned |
+| M31-6 | Outputs: a check writes key and value pairs to its outputs file; a dependant reads its needs' outputs as environment variables; sizes bounded | M30-7, M31-2 | planned |
+| M31-7 | `check run --jobs N`: independent checks run at once; variants honour their cap and their stop switch | M30-8, M31-1 | planned |
+| M31-8 | Exclusive groups on a host: a check names a group with the scope `host`; one check of a group runs on the host at a time, the others wait up to a bound; the lock's directory is an operator's setting, so that it can span several accounts of one machine | M31-1 | planned |
+| M31-9 | The stop contract: interrupt, then terminate after a grace, then kill the group; an `always` check still runs; the outcome is `cancelled`; a check that left its group is named in the outcome | M31-1 | planned |
+| M31-10 | `ws land --check` runs the `before-land` plan in place of one command; the tree landed is the tree every check ran on; `check.argv` keeps working | M31-1, M30-4, M5 | planned |
+| M31-11 | Run lines: each check run appends one line to a diagnostics file (beside the store, in the workspace's private state, or at a path the caller names): name, tree, stage, wait, duration, outcome, labels, peak memory; diagnostics, as the serve records are: nothing decides from them | M31-1 | planned |
+| M31-12 | `check runs`: the run lines, and from M33-1 on the run records, which are then the source; filtered by check, tree, outcome and time, paged | M31-11 | planned |
+| M31-13 | `check log <run>`: one check's log, or with `--failed` only the failed checks', with `--tail N` | M31-3, M31-11 | planned |
+| M31-14 | Run again: `check run --again <run>` runs every check of a run again, `--failed` what failed and its dependants, `--check <name>` one; each is the run's next attempt, and earlier attempts stay listed | M31-12 | planned |
+| M31-15 | A check marked `may-fail` reports its failure without failing the plan | M31-1 | planned |
+| M31-16 | Container checks: a check names an image by digest; the host's container runtime runs it with the workspace mounted, unprivileged, with no network unless declared; Linux hosts | M31-1 | planned |
+| M31-17 | Companion containers: a check declares images started before it and removed after it, reachable by name | M31-16 | planned |
+| M31-18 | The summary: a check writes a bounded Markdown file that is kept with the run and read back by `check runs --summary` | M31-2 | planned |
+| M31-19 | `check run --debug`: one attempt with a debug variable set and the names of its environment recorded, no values | M31-2 | planned |
+| M31-20 | Shadow selection: `check run --shadow` runs every check, records beside each what the plan said, and counts as a miss a failed check the plan marked `not_applicable`; `check runs --selection` gives the runs, the would-be skips and the misses | M30-4, M31-11 | planned |
+| M31-21 | Variables: settings that are not secret, per store and per target, in a file beside the store (or given by the caller in the directory form); a check reads the ones it declares; `check list` shows which | M31-2 | planned |
+| M31-22 | Limits per check: memory, process count and the disk its workspace may use; a container check is held to them by the runtime; a host-run check gets the limits the platform gives without `unsafe`, and its answer lists the ones not applied | M31-1, M31-16 | planned |
+
+#### M32: Results on a tree: the key, the required list, reuse, status, and the bridge to GitHub
+
+It extends M7's check records and does not define them. M32-2 onward need M7-C1, and M32-7 needs
+M7-C2. 15 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M32-1 | The check key and the input digest, version 1: one id from a version, the check's name, its definition digest, its input digest, its variant values, its image digest, its declared variables' values, its labels and the runner's environment stamp, under a new derived kind of the hash recipe; a changed recipe is a new kind | M30-3 | planned |
+| M32-2 | `check record`: writes a result for a key as M7's Check record: a state, a summary and a report blob (findings, counts, the log's digest, timings) | M7-C1, M32-1 | planned |
+| M32-3 | `check status <rev or tree>`: the roll-up for a stage and a target: each required and optional check's latest counting state, who recorded it, what it waits on and for how long, and the frame and age of the last trigger pass; no runner takes part | M32-2 | planned |
+| M32-4 | `check wait <rev or tree>`: returns when every required check of the stage is final; the exit status says pass, fail or timeout; it ends with the reason `stalled` when nothing was claimed or recorded within a bound | M32-3 | planned |
+| M32-5 | Reuse (issue #43): `check run`, the gate, the queue and runners take a passing record under the same key in place of a run; the plan says `reused` and names the record | M32-2 | planned |
+| M32-6 | Reuse rules: a result counts only when it passed, came from a granted recorder, carries the same definition digest, is for the rule's stage and is younger than the check's maximum age | M32-5, M32-8 | planned |
+| M32-7 | "Not applicable" is an answer: a required check the plan marks `not_applicable` or `reused` satisfies the gate; a required check that the candidate's file no longer defines refuses the land; nothing waits for a result that will not come | M7-C2, M32-5, M30-5, M30-11 | planned |
+| M32-8 | The `check` grant: the access file says which identities may record results for which check names; through `serve` anyone else's record is refused, and a record from anyone else that reached the journal another way is kept and does not count | M32-2 | planned |
+| M32-9 | Expired results: a result past its maximum age, or recorded under a definition since replaced, reads `expired`, never `passed` | M32-6 | planned |
+| M32-10 | `check publish --remote <name>`: writes a tree's roll-up to GitHub as a commit status on the exported commit, under one context name; meant for a host that runs no repository code | M32-3, M13 | planned |
+| M32-11 | `check fetch --remote <name> <rev>`: reads GitHub's checks and statuses for the exported commit and records them as results under a name of their own, so a store's gate can require a check GitHub ran | M32-2, M13 | planned |
+| M32-12 | `check offer --remote <name>`: pushes a queue attempt's prepared changeset to a candidate branch on the remote, so that the remote's checks run on the tree the land would have, and removes the branch when the attempt ends | M22-C1, M13 | planned |
+| M32-13 | Result retention: results older than a period leave the roll-ups; the records stay until M23 erases them | M32-3 | planned |
+| M32-14 | Guide "Gate a land on recorded checks", which says where the gate defends and where it only guides (D12) | M32-7 | planned |
+| M32-15 | The required list: a rules file beside the access file, `version = 1`: per target pattern, the names of the checks a land needs with their stage, and the longest timeout any check of that target may set; an invalid file refuses every land with its line | M14 | planned |
+
+#### M33: Triggers and admission
+
+What makes a run wanted, decided from the store's records before any runner exists. No process
+stays: a pass is a command. 19 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M33-1 | Run records in the journal: a record kind under a feature `run`: wanted, claimed, started, finished (with its duration and attempt) and cancelled, each naming the check key, the tree, the stage and who asked; from here the journal, not the run lines, is the source for attempts, `check runs`, the cost ledger and budgets | M20, M32-1 | planned |
+| M33-2 | `check start`: asks for runs of a tree and stage by hand, with the parameters a check declares and a `--key` that makes a retry a replay; returns the run ids | M33-1, M30-17 | planned |
+| M33-3 | `check tick`: one pass that reads the journal from where the last pass stopped and writes the run records its events call for; idempotent, resumable by frame number; a pass that finds nothing takes no writer lock | M33-1 | planned |
+| M33-4 | `check tick --follow`: the same pass in a loop, one line per pass that did something, as `derive --follow` does | M33-3 | planned |
+| M33-5 | Trigger: a ref moved or was deleted, by target pattern, starts the `after-land` stage on the new head's tree | M33-3 | planned |
+| M33-6 | Trigger: a tag was created, by pattern, starts the `release` stage | M33-3 | planned |
+| M33-7 | Trigger: a schedule: a check names a five-field schedule and a zone; a pass starts it once per due instant on the target's head, records the instant and how late it ran; the host's own timer calls the pass, and the store host's clock decides | M33-3 | planned |
+| M33-8 | Supersession: a wanted run whose candidate was replaced, or whose target moved under it, is never claimed, and a running one is stopped; the outcome is `superseded`, not a failure | M33-1 | planned |
+| M33-9 | The settle window: a target or an identity may set a wait before a wanted run becomes claimable, so that a burst costs one run | M33-8 | planned |
+| M33-10 | Serial groups: a check names a group with the scope `store` and what a newcomer does: wait in order, replace the one waiting, or stop the one running; the waiting line is bounded; the key is the one M31-8 reads with the scope `host` | M33-1 | planned |
+| M33-11 | No loops: a land made by a run does not start that run's own check again unless the check says so; chains are bounded in depth | M33-5 | planned |
+| M33-12 | Chained checks: a check names another check's final state on the same tree as its trigger | M33-3 | planned |
+| M33-13 | Off and on: a switch beside the store stops a named check from being wanted, with who and why recorded; `check list` shows it | M33-3 | planned |
+| M33-14 | A skip request: a land's trailer asks that its `after-land` checks not run; honoured only for granted identities, never for `before-land` | M33-5 | planned |
+| M33-15 | Bounds: a cap on wanted runs per identity and per store, and on the attempts of one run; beyond it a request is refused with `E_RUN_LIMIT` and the reset | M33-1 | planned |
+| M33-16 | Admission reasons: a request that was not admitted (reused, not applicable, over a bound) leaves one diagnostics line with its reason and writes no journal frame; `superseded` and `held` are states of run records; `check runs --not-admitted` reads both | M33-8, M31-11 | planned |
+| M33-17 | `check cancel <run>`: stops a wanted or running run; needs a grant; a `--key` makes a retry a replay | M33-1 | planned |
+| M33-18 | Lint for triggers: `check lint` reports a stage that no trigger of the store reaches | M30-16, M33-5 | planned |
+| M33-19 | `check request <tree> <check>`: asks for a result again without a new changeset; needs a grant; a `--key` makes a retry a replay; the new run keeps the first requester's trust class and names who asked again | M32-2, M33-1 | planned |
+
+#### M34: Runners that ask for work
+
+A runner is a client. It asks a store for work, as `derive --follow` asks it for changesets, over
+the native wire `serve --stdio` answers since v0.12.0. 16 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M34-1 | The claim: a compare-and-swap record with a lease measured on the store host's clock; an expired lease makes the run claimable again; a result under a lost lease is refused | M33-1 | planned |
+| M34-2 | `runner run --once`: claims one wanted run its labels satisfy, writes the tree out as a sparse workspace covering the check's inputs, runs it as `check run` does, records the result, removes the workspace and exits | M34-1, M32-2, M30-9, M31-1 | planned |
+| M34-3 | The check commands over the native wire: `serve --stdio` answers `check status`, `wait` and `record` with the identity of the key line; every later command marked W joins by its own unit | M32-4, M14 | planned |
+| M34-4 | `runner run --follow`: stays, asks at an interval with a backoff, runs up to `--jobs` at once, and writes its own record lines; an ask that finds nothing takes no writer lock | M34-2 | planned |
+| M34-5 | A runner over ssh: the claim, the tree, the log and the result travel the native wire, so a runner needs no file access to the store and no inbound port | M34-1, M34-3 | planned |
+| M34-6 | The `run` grant: the access file says which identities may claim which checks on which targets, and which labels each holds; `isolated` is a label only a grant gives | M34-1 | planned |
+| M34-7 | Routing: a run is claimable only by a runner holding every label its check names; a run nobody can take is reported with `E_RUNNER_NONE` after a bound, not left silent | M34-6 | planned |
+| M34-8 | `runner list`: the runners seen, their labels, their last contact and what each holds | M34-4 | planned |
+| M34-9 | Lease renewal and loss: a runner renews while its check runs and stops the check when renewal fails; renewals are not journal frames | M34-1 | planned |
+| M34-10 | A cancel reaches the runner: a cancelled or superseded run's check is stopped by the stop contract at the runner's next renewal | M34-9, M31-9, M33-17 | planned |
+| M34-11 | A runner over the HTTP entry: the same wire through the CGI program | M34-5 | planned |
+| M34-12 | The operator's commands before and after every job, set on the runner, outside the repository's control | M34-2 | planned |
+| M34-13 | Drain and a minimum version: on a signal a runner finishes its job and stops; a store may refuse runners older than a version, with `E_POLICY_DENIED` and the version to reach in `details` | M34-4 | planned |
+| M34-14 | Unit files for `runner run --follow` and a timer for `check tick`, for systemd; a property list for launchd | M34-4, M33-3 | planned |
+| M34-15 | Guide "Run checks on your own hosts" | M34-6 | planned |
+| M34-16 | `runner check`: tests the store's entry, the grant, the container runtime, the clock against the store's within a bound, and that the work directory is not on the store's file system; one pass or fail line each | M34-6 | planned |
+
+#### M35: Trust, isolation and secrets
+
+Who may make what run where, and what a run may see. 12 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M35-1 | Trust classes: the access file sorts identities into `trusted`, `held` and `untrusted` for checks; every wanted run carries its requester's class | M33-1 | planned |
+| M35-2 | Definitions a change cannot edit: for an untrusted candidate the check file is read at the target's head, not at the candidate | M35-1 | planned |
+| M35-3 | Held runs: a `held` class's run waits for `check approve` by a granted identity and expires after a period, reported as expired | M35-1 | planned |
+| M35-4 | The isolated pool: untrusted runs are claimable only by runners whose grant gives `isolated`: a container, no network, no secrets, no kept state; the label is not offered on macOS | M35-1, M31-16, M34-6 | planned |
+| M35-5 | Secrets on the runner: a file outside every store names each secret and the checks, targets, environments and classes it is for; a check declares names; a value reaches the check only when all match, the narrowest scope winning | M34-2, M35-1 | planned |
+| M35-6 | Masking: every secret value a run received is replaced in logs, findings, summaries and outputs before they leave the runner; a check may register more values | M35-5 | planned |
+| M35-7 | `runner secret set`, `list`, `remove`: values go in and never come out; the list shows names, scopes and ages; each change is a line in the runner's own records (per host, not an audit record of the store) | M35-5 | planned |
+| M35-8 | The check user: a runner's setting names a launcher that starts every check under another OS user, or in a container; the runner's credential and the store's directory are out of that user's reach, and `runner check` gains a line that proves it | M34-2, M34-16 | planned |
+| M35-9 | Least access for a run: during a job a runner's own access to the store is read-only unless the check declares that it lands or records; `serve` enforces it from the grant | M34-6 | planned |
+| M35-10 | A network list for a container check: the hosts a check may reach, where the runtime can enforce a list; where it cannot, the check is refused, not run open | M31-16 | planned |
+| M35-11 | Lint for trust: `check lint` reports a check that would give a secret, kept state or write access to a class that may change the check's definition | M30-16, M35-5 | planned |
+| M35-12 | Guide "Run changes you do not trust", and the matching paragraph of SECURITY.md: the program alone does not defend a host against hostile code; a machine per job behind `runner run --once` does; a candidate's own scripts still run when its definitions come from the target | M35-4 | planned |
+
+#### M36: Logs, reports and artifacts
+
+What a run leaves behind, and for how long. 13 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M36-1 | The log store: finished logs kept beside the store by digest, compressed, bounded per run, and synced to disk before the record that names them; a result names its log's digest | M31-3 | planned |
+| M36-2 | `check log` selection: by run, check and attempt; a line range, a pattern, or every log of a run as one archive | M36-1 | planned |
+| M36-3 | Artifacts: a check declares the paths to keep; the runner stores them as one tree under a name, synced before the record that names it, and the result names it | M34-2 | planned |
+| M36-4 | `check artifacts list` and `get`: a run's artifacts, written out to a directory, locally and through `serve` | M36-3, M34-3 | planned |
+| M36-5 | Artifacts for dependants: a check finds its needs' artifacts in a directory before it starts | M36-3, M30-7 | planned |
+| M36-6 | Retention: a period per store and per artifact; `check prune` removes expired logs and artifacts, or a named run's, and records what it removed; a later read answers `expired`, `removed` or `lost`, never a bare not-found | M36-1, M36-3 | planned |
+| M36-7 | Size bounds per log, per artifact and per run; past a bound the check's outcome stands and the truncation is recorded | M36-1 | planned |
+| M36-8 | The build record: an artifact's record names the tree, the check key, the definition digest and the runner's identity and labels; `check artifacts verify <file>` answers from the file's digest; it shows the file is the one the store's record names, not who built it | M36-3 | planned |
+| M36-9 | `check report <run> --html <dir>`: a page for people, written as files; nothing serves it | M36-2 | planned |
+| M36-10 | `check badge <target>`: an image of a target's roll-up, written as a file | M32-3 | planned |
+| M36-11 | `check findings <rev>`: a change's findings beside the changed lines they touch | M31-4 | planned |
+| M36-12 | A section of the agents' page: "Read a failed check" | M36-11 | planned |
+| M36-13 | The log while it runs, over the wire: a runner sends the log in pieces; `check log --follow` reads them from another host | M34-5, M36-1 | planned |
+
+#### M37: The gate's rules
+
+M7 builds the gate, and M32-15 gives it the list of required checks. These units are the rest of the
+rules a trunk with many agents needs. The queue's controls are proposed slices of M22, not units
+here. 18 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M37-1 | Rule sets: the rules file holds several sets per target pattern, each naming required checks with their stage and the options below; several may match, and the strictest of each rule wins | M32-15 | planned |
+| M37-2 | `policy show <target>`: the rules in force for a target, merged; any reader may ask | M32-15 | planned |
+| M37-3 | Evaluate mode: a rule set so marked is computed and recorded for every land and refuses none | M37-1 | planned |
+| M37-4 | Bypass by grant: named identities may land past a rule, always or only through the queue; each bypass is a record with its reason; nobody bypasses without a grant | M32-15, M7-C2 | planned |
+| M37-5 | `policy log`: every evaluation that refused, would have refused or was bypassed: who, which rule, which land | M37-3, M37-4 | planned |
+| M37-6 | The source of a required check: a rule names the identity pattern whose result counts for it | M32-15, M32-8 | planned |
+| M37-7 | Which tree a result must be for: the tree the land produces (the default before a land), or the candidate's own | M32-15, M7-C2 | planned |
+| M37-8 | Patterns a target may require of a land's message, identity and source branch name; a refusal is `E_POLICY_DENIED` with the rule in `details` | M32-15 | planned |
+| M37-9 | Grants to create and to delete, per ref pattern, for branches, `release/*` and tags | M32-15 | planned |
+| M37-10 | A guard on the check file: a rule may require that a land which changes the check file or the owner map come from a named class of identities | M32-15, M7-C2 | planned |
+| M37-11 | Intake rules on paths and sizes: a store may refuse a land or a push by path pattern, file size or path length, before any check runs; each refusal names its rule | M32-15, M14 | planned |
+| M37-12 | An intake rule on credential-shaped text: a store may refuse a land or a push whose added lines match a pattern of the operator's list (a short default list ships); an identity granted the bypass passes with a recorded reason | M37-11, M37-4 | planned |
+| M37-13 | A threshold on findings: a rule may refuse a land when a named check's findings reach a level | M32-15, M31-4, M7-C2 | planned |
+| M37-14 | A threshold on an output: a rule may refuse a land when a named numeric output crosses a bound | M32-15, M31-6, M7-C2 | planned |
+| M37-15 | A threshold against the target: a rule may refuse a land when a named numeric output moves the wrong way against the value recorded for the target's head | M37-14 | planned |
+| M37-16 | History of the rules: each change of the rules file and the access file is recorded with who, when and its digest; `policy history` | M32-15 | planned |
+| M37-17 | `check lint --target <target>`: reports a required name that no check of the tree defines, and a `before-land` check that no rule requires | M32-15, M30-16 | planned |
+| M37-18 | Guide "Rules for a trunk that agents land on" | M37-5 | planned |
+
+#### M38: Delivery: environments, deployments and releases
+
+Environments in the rules file, deployment records, approvals and waits, releases with assets, and
+publishing a release to GitHub. 16 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M38-1 | Environments in the rules file: a named delivery target with the refs allowed to reach it, its approvers, its wait and the scope of its secrets | M32-15 | planned |
+| M38-2 | Deployment records: a record kind under a feature `deploy`: tree, ref, environment, state, a URL and the run | M20, M33-1 | planned |
+| M38-3 | The `deploy` stage: a check with an environment becomes claimable only once the environment's rules pass, and its secrets are released then; an option uses the environment's scope with no record | M38-1, M38-2, M35-5 | planned |
+| M38-4 | `deploy approve` and `deploy reject`, with a comment; the requester cannot approve where the rule says so; the history is kept | M38-3 | planned |
+| M38-5 | The wait: a deployment becomes claimable a set time after its request, by the store host's clock | M38-3 | planned |
+| M38-6 | `deploy log [environment]`: what is live where, and the history | M38-2 | planned |
+| M38-7 | Replaced and temporary deployments: a newer success marks the older one of an environment inactive; a preview environment is marked temporary and can be marked removed | M38-2 | planned |
+| M38-8 | Trigger: a deployment's success starts the checks that name it (a probe of what is live) | M38-2, M33-12 | planned |
+| M38-9 | An outside gate: an environment may wait for a result that a named outside identity records | M38-1, M32-8 | planned |
+| M38-10 | A required deployment: a rule may ask for a successful deployment record of the tree to a named environment before a land | M32-15, M38-2, M7-C2 | planned |
+| M38-11 | `release create <tag>`: the immutable tag and its notes, from the changelog's section or from the lands since the last release | M6 | planned |
+| M38-12 | Release assets: named artifacts kept without expiry, recorded with their digests and fetched by `release get`; an asset cannot be replaced | M38-11, M36-3 | planned |
+| M38-13 | `release publish --remote <name>`: creates GitHub's release with the notes and the assets | M38-12, M13 | planned |
+| M38-14 | The release gate: a tag, or a `ref txn` that moves `release/x` with it, is refused unless the tree's `release`-stage results pass | M32-15, M33-6 | planned |
+| M38-15 | Guide "Take a deployment back": `revert`, then deploy the earlier tree as a new record | M38-6 | planned |
+| M38-16 | Guide "Deliver from a store" | M38-13 | planned |
+
+#### M39: Caches and set-up time
+
+Kept directories and their scopes, kept workspaces, keyed caches, groups fitted to recorded timings,
+size advice. 9 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M39-1 | Kept directories: a check names directories that outlive a run on a runner, one copy per scope of M39-9 | M34-2 | planned |
+| M39-2 | A keyed cache on a runner: a key built from the blob ids of named files and from labels; an exact hit restores; a pass saves | M39-1 | planned |
+| M39-3 | Fallback prefixes: ordered prefixes restore the newest entry that matches | M39-2 | planned |
+| M39-4 | Eviction: a size per runner, least recently used first, and an age limit | M39-2 | planned |
+| M39-5 | `runner cache list` and `remove`: keys, sizes, last use, totals | M39-2 | planned |
+| M39-6 | Kept workspaces: a runner keeps a workspace per check and updates it to the next tree instead of writing every file again; a file that did not change keeps its modification time | M34-2, M19 | planned |
+| M39-7 | Groups fitted to timings: `check plan` splits a variant list into N groups of near-equal recorded duration | M31-11, M30-8 | planned |
+| M39-8 | Size advice: `check stats --sizing` reports each check's peak memory and processor use against its runner's size | M31-11 | planned |
+| M39-9 | Scopes of kept state: per target, a `landed` copy that only runs of landed trees write, and a `candidate` copy that candidates' runs write and landed runs never read; a candidate may start from the landed copy, read-only; an untrusted run gets neither | M39-1 | planned |
+
+#### M40: Figures, cost and events
+
+It builds on M21's windows, rules and metrics output, and adds figures, not a second path. 12 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M40-1 | Check figures in `health`: wait before a claim, claim to start, duration, failure rate, the cancelled and superseded shares, the age of the last trigger pass and of the oldest waiting run, per check and label, in M21's windows and metric names | M21, M33-1 | planned |
+| M40-2 | `check stats --per-land`: runs, reused results and runner-seconds for each landed change (the figure issue #44 measures) | M33-1 | planned |
+| M40-3 | The runner-seconds ledger, from the run records: per check, identity, target and day, as JSON and CSV; seconds, no prices | M33-1 | planned |
+| M40-4 | Budgets: a store may cap runner-seconds per identity or target per period; past it, runs other than `before-land` are refused with `E_RUN_LIMIT` and the reset | M40-3, M33-15 | planned |
+| M40-5 | Alert rules for checks in M21's rule set: drift of the wait and of the failure rate; no trigger pass, or no claim, within a bound | M40-1 | planned |
+| M40-6 | `notify --follow`: posts run, result, queue and deployment events to the subscribers a file beside the store lists, each signed with a shared key and carrying its own id, through the user's curl | M33-3 | planned |
+| M40-7 | The delivery log: `notify log` and `notify resend <id>`; a failed delivery is tried again with a backoff, a bounded number of times | M40-6 | planned |
+| M40-8 | `check events --after <frame>`: run, result and queue events as JSON lines, resumable, for a client that polls; a run that becomes wanted is one of them | M33-1 | planned |
+| M40-9 | `check stats --flaky`: lists the checks that both passed and failed under one key | M32-2 | planned |
+| M40-10 | One automatic second attempt: a rule may allow a named check one more attempt after a failure, recorded as such | M40-9, M32-15, M33-15 | planned |
+| M40-11 | A recipe in the checks guide: a check that bounds the growth of tests per change, from the plan's changed paths | M30-14 | planned |
+| M40-12 | Guide "What checks cost", citing the first measured figures that issue #44 records | M40-2 | planned |
+
+#### Proposed slices of existing milestones
+
+Work this role needs from milestones that already exist. Each row is a proposal to the owning
+milestone's plan, which may accept it, change it or refuse it; until that plan answers, every unit
+that names the slice waits. The `C` in an id keeps it apart from the ids those plans use.
+
+**Proposed to M7, blame and review.**
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M7-C1 | The `check` feature is released ahead of change requests and blame: a Check record carries the check's name, the check key, the root tree it is for, a state, a one-line summary and a report blob | M20 | proposed |
+| M7-C2 | The landing gate reads recorded results: a land onto a target with required checks (M32-15) is refused unless each has a counting result for the tree the land produces; the refusal names what is missing, under a code M7's plan names; the land's result names the results that admitted it | M7-C1, M32-15, M32-8 | proposed |
+| M7-C3 | Trigger: a change request's new revision starts the `before-land` stage on its tree; drafts by option | M7, M33-3 | proposed |
+
+**Proposed to M22, the landing queue.**
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M22-C1 | An attempt prepares the land: a queue attempt writes the changeset the land would produce and an attempt record, and moves no ref, so that the tree can be written out, exported and checked before anything lands | M22, M18 | proposed |
+| M22-C2 | An attempt asks for its checks: the attempt and the wanted runs of its tree's `before-land` plan are one operation, so a land in the queue waits on no trigger pass; a push to `refs/land/` on a queued target enters the queue | M22-C1, M33-1, M30-4 | proposed |
+| M22-C3 | Land when the results are final: an entry lands by itself once every required result for its attempt's tree counts, and leaves the queue with a reason when one fails; whoever enqueued it need not wait | M22-C1, M7-C2 | proposed |
+| M22-C4 | Stacked attempts: the queue prepares each entry on the target plus the entries ahead of it; a failed entry leaves, and those behind are prepared again | M22-C1 | proposed |
+| M22-C5 | Queue bounds: how many attempts are checked at once, the smallest and largest batch that lands as one `land-group`, how long to wait for a batch and for results | M22-C4 | proposed |
+| M22-C6 | The batch verdict: every entry must pass, or only the batch's head; a failed batch is split until the failing entry is found | M22-C5 | proposed |
+| M22-C7 | `queue jump <entry>`: puts an entry first; the entries behind it are prepared again; `queue list` gives each entry's reason for waiting | M22-C4 | proposed |
+
+**Proposed to M11, native sync.**
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M11-C1 | Results between stores: a synced result counts on the receiving store only if that store's access file grants its recorder; wanted runs and claims do not sync | M11, M32-8 | proposed |
+
+**Proposed to M26, an identity from a short-lived credential.**
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M26-C1 | A credential for one claim: `runner once-token` gives a machine made for one job a credential that claims exactly one run and then is void | M26, M34-6 | proposed |
+
+#### The hosted service
+
+A hosted service is built around the program and uses only its public surfaces: the wire, the
+commands and the records. The open-source program holds everything a team needs to run checks on
+its own hosts; the service holds what needs machines, money or an always-on process. Its fourteen
+pieces belong to the service's own plan and are not units of the program:
+
+| Piece | What it is |
+| --- | --- |
+| Hosted runners | A fresh machine per job, Linux first, in set sizes |
+| Pools that follow demand | Pools that grow with wanted runs and shrink to none, with a cap per account |
+| More platforms | arm64 and macOS machines |
+| Managed secrets | Write-only, encrypted by the client, per account and per repository |
+| Job identity for clouds | Short-lived tokens that name the store, target, check and tree, which a cloud can exchange for its own credential |
+| Web pages | Pages for runs, logs, the queue and deployments |
+| An HTTPS API and event delivery | An HTTPS API and an always-on service that delivers events |
+| Plans and metering | Prices, plans, metered storage, budgets with a hard stop, usage export |
+| Account-wide rules | Rules, required checks and runner policy across an account's repositories |
+| Shared storage | Shared cache and artifact storage with quotas |
+| Prepared machine images | Machine images prepared ahead, with their contents published |
+| Dashboards | Usage and performance dashboards |
+| Notifications | Notifications by mail and chat |
+| Signed build records | Build records signed by the service as the builder |
+
+Hosted runners need a credential for one job (the proposed slice M26-C1), and M26 is deferred
+until after 1.0, only when a pilot asks. So hosted runners wait on M26.
+
+### First steps
+
+Each step ends with something in this repository's own way of working running through SwarmOps.
+Runners and jobs use a build pinned by commit that already passed the gate, so a step is in use
+one land after it lands.
+
+**Where this repository stands today**, read from its workflow files and CONTRIBUTING.md, not
+measured. The gate is `just check`, started by GitHub on runners on the maintainers' host, with
+build directories that persist; the `check` job of `ci.yml` has a 30-minute limit; a pull request
+from a fork runs on GitHub's own machines. A rule on `stable` requires the result `tests-pass`. A
+hand-made landing queue, whose code is not in the repository, pushes candidates to `feat/lq-<n>-<n>`
+branches and moves `stable` after `ci.yml` is green there, so each landed change is gated twice.
+`site.yml` decides its scope with `scripts/freshness.py`, and the weekly suite takes a host-wide
+lock. This repository is not developed in a SwarmOps store: the repository on GitHub stays the
+source of truth ([pilot.md](pilot.md)); its `.swarmops/` directory holds step 1's check file
+alone.
+
+**Two tracks.** Track A, steps 1 to 8, runs inside the jobs GitHub starts, with no store: it uses
+the directory form, writes nothing to any store, needs no new record kind and freezes nothing in
+the hash contract, and it is adoption, not a gate, because GitHub still triggers, reports and
+decides. Track B, steps 9 to 12, is the store recording and then deciding; steps 10 to 12 wait on
+questions that are open.
+
+The first wave is twelve steps and 32 units. Every dependency of every unit in a step is an
+existing milestone or a unit of an earlier step.
+
+| Step | Track | Units | What this repository uses after it | Waits on |
+| --- | --- | --- | --- | --- |
+| 1 | A | M30-1, M30-2 | The repository has a check file, `.swarmops/checks.toml`, that names its gate's commands (`just check`, `just check-compare`, the lint of the workflow files, the site and server checks). `just check` runs `check list` in the directory form with the build under test, so a file that does not parse fails the gate | Nothing; starts now |
+| 2 | A | M31-1, M30-6, M31-2, M31-3 | On the runners on the maintainers' host, the `check` job of `ci.yml` starts the gate with `check run --dir . --stage before-land`, using the pinned build; maintainers and agents start it the same way before pushing. GitHub is the trigger and the reporter. A fork's job keeps calling `just check` directly. The check file's timeout is the job's 30 minutes | Nothing; starts now |
+| 3 | A | M31-4, M31-5 | A red gate answers with the test runner's failed cases as findings in its envelope, and an agent repairing it reads those. The existing upload of the JUnit file stays | Nothing; starts now |
+| 4 | A | M31-11, M31-12, M31-13 | Every gate run on the runners leaves a run line in the operator's directory; `check runs` and `check log --failed` read them. The baseline for G27, runs and seconds per pushed commit, is read from these lines | Nothing; starts now |
+| 5 | A | M30-4, M30-3, M30-5 | The `scope` job of `site.yml` and the path list of `server.yml` are answered by `check plan` in the directory form over the changed paths, and `freshness.py scope` retires from that duty. The use is advisory: it decides whether a job that is not required runs | Nothing; starts now |
+| 6 | A | M30-7, M30-16 | The gate becomes several checks with declared inputs and one build check they need (repository work, not a unit); `check lint` in `just check` proves that every dependency and pattern resolves. The split gate's total time is measured against the single recipe before the split is kept; while the checks share one build directory they run one at a time | Nothing; starts now. Before it, the gate's real duration is measured |
+| 7 | A | M31-20 | The gate runs with `--shadow`: every check still runs, and each run records what the plan would have skipped. This is the evidence asked for before anything is skipped | Nothing; starts now |
+| 8 | A | M31-8 | The `bench-gate` and `perf-cases` jobs of `scheduled.yml` take the host's heavy lock as an exclusive group, in place of the lock taken in the workflow file | Nothing; starts now. Before it, how many machines the maintainers' runners are is settled: it decides where the lock's directory lives |
+| 9 | B | none | Not a unit, and no trunk moves: the maintainers' host keeps a store that follows `stable` and the candidate branches with `so sync` and `so fetch` (M13, as it is today). Agents read from it and plan against it; nothing lands in it. The rule on `stable`, `ci.yml` and the hand-made queue are unchanged | Nothing in this plan; an operator's step |
+| 10 | B | M32-11, M7-C1, M32-1, M32-2, M32-8 | A timer on the store's host runs `check fetch` for each commit the store follows: GitHub's green or red `tests-pass` becomes a recorded result on that commit's tree, written by an identity that runs no repository code. The store holds a verdict per tree. The check key's kind is frozen here | **Open:** whether M7's check record ships ahead of the rest of M7 |
+| 11 | B | M32-5, M32-3, M32-6 | A tree that passed is not checked again: the `check` job of `ci.yml` first asks `check status` for the changeset its commit names, a read of the store that needs no key, and ends green from the recorded result when it counts. The second gate run of every landed change stops, and the `feat/lq-*` skip in `site.yml` and `freshness.py` is deleted. Before it, how a job on a git checkout names the changeset of its commit is settled against the code | **Open:** the same question, through step 10 |
+| 12 | B | M22-C3, M22-C1, M7-C2, M32-15, M32-12, M32-4 | The trunk moves into the store, and the hand-made queue retires in the same step, so the store never holds a land its gate could not refuse. A land is a queue entry (M22's own `enqueue`); its attempt is offered to GitHub as a candidate branch under `feat/`; GitHub's runners check the tree the land will produce; `check fetch` records the verdict; the entry lands by itself, and `so sync` moves `stable` forward to the commit that was checked. An agent waits with `check wait` | **Open:** whether this repository's trunk moves into a store; whether M7's and M22's first slices ship early; the facts of the hand-made queue |
+
+After step 8 the first half is in use with no format change and no store. After step 11 a landed
+change is gated once, not twice. After step 12 the trunk, the queue and the verdicts are SwarmOps',
+the runners GitHub's, and the store's gate refuses a land that has no result. Through step 12 the
+gate *guides*: the rule GitHub enforces on `stable` is still what defends it.
+
+**Wave 2: SwarmOps runners on this repository's hosts**, landed trees first and candidates last.
+All of it stands behind the question of M7's and M22's first slices, and step 16 also behind the
+other two.
+
+| Step | Units | What then runs through SwarmOps here | Entry condition |
+| --- | --- | --- | --- |
+| 13 | M33-1, M33-2, M30-17, M30-9, M34-1, M34-2, M34-6, M34-16, M35-8, M31-9 | One runner on the store's host, as an OS user of its own with a launcher that starts checks under another, runs the weekly slow job when someone asks with `check start`. The run is of a landed tree; `scheduled.yml` still runs | The `run` feature is switched on only after every client is updated; `runner check` passes every line |
+| 14 | M34-3, M34-4, M34-5, M34-7, M34-8, M34-9, M34-10, M35-9, M33-3, M33-4, M33-5, M33-11, M33-15, M33-17 | The Linux runner accounts run `runner run --follow` through `serve` with keys of their own; the `after-land` checks (the server suite, on its paths) run on them after each land. The push trigger of `server.yml` retires for trusted work | G4 and G18 measured again with run records and the runners polling; no target that was met is missed |
+| 15 | M33-7, M34-14, M30-8, M31-7, M31-16, M31-22 | The weekly suite (slow cases, fuzzing, the git matrix in its pinned image, the bench gate under the exclusive group) starts from `check tick` under the host's timer. The live job against GitHub stays on GitHub: it needs a secret | None |
+| 16 | M22-C2, M22-C4, M22-C5, M33-8, M33-9, M33-16, M33-19, M39-1, M39-6, M39-9, M32-7, M32-9, M30-11, M31-14, M32-10, M37-2, M37-6, M37-10, M37-17 | The gate for trusted identities runs on SwarmOps runners with no job on GitHub; `check publish` writes `tests-pass` to GitHub from the store's host. `ci.yml` remains for pull requests from forks | The gate defends on every runner; the rule on `stable` accepts a commit status as the source of `tests-pass`, or the maintainers change it; the shadow evidence exists before `not_applicable` is honoured; the gate's time on kept workspaces is measured against today's |
+
+Also in wave 2, with no step of their own: the guides M30-14, M32-14 and M34-15, and M31-10,
+`ws land --check` running the plan, which serves repositories whose gate is short. It is not this
+repository's path: a gate of tens of minutes on a busy target would rebase and run again until
+`--max-attempts`, the known limitation the queue removes
+([known limitations](known-limitations.md#workspaces)).
+
+**Later waves, in brief.**
+
+| Wave | Units | What moves |
+| --- | --- | --- |
+| 3 | M36-1 to M36-7, M36-11 to M36-13; M35-1, M35-5 to M35-7; M34-11 to M34-13; M40-1, M40-2, M40-5, M40-8, M40-9; M30-10, M30-12, M30-13; M31-6, M31-15, M31-18, M31-21; M33-10, M33-13, M33-18 | Test reports, benchmark results and the built site become artifacts; logs are kept by digest; the site-deployment and live-run tokens become runner secrets, so the live job moves; a stopped runner or pass raises an alert; G27's figure is read from run records |
+| 4 | M38-1 to M38-8, M38-15; M37-1, M37-3 to M37-5, M37-7 to M37-9, M37-11, M37-12, M37-16, M37-18; M33-6, M33-12, M33-14; M22-C6, M22-C7; M30-15, M31-17, M31-19, M32-13 | The deployment of `site.yml` and its probe of the live site become a deployment with an environment and a check after it; the meaning of the rule on `stable` is also held in the store's rules, with bypass records and intake rules |
+| 5 | M38-9 to M38-14, M38-16; M36-8 to M36-10; M39-2 to M39-5, M39-7, M39-8; M40-3, M40-4, M40-6, M40-7, M40-10 to M40-12; M37-13 to M37-15; M7-C3 | The build and packaging of `release.yml` run on runners with build records, the Mac joining as a runner over ssh for the macOS build; the publish step uses `release publish`; caches, the ledger, budgets and event delivery follow |
+| 6 | M35-2 to M35-4, M35-10 to M35-12; M11-C1 | Pull requests from forks can be taken off GitHub's own machines once G29 is measured and met, on machines made per job |
+| 7 | M26-C1; the hosted service's pieces | A credential for one claim, and the hosted service |
+
+**What stays on GitHub for now.**
+
+- The public repository and its `stable` branch, as the mirror people clone (topology 2).
+- The rule on `stable`. It keeps requiring `tests-pass`; GitHub's own runs feed it through step
+  15, and `check publish` from step 16 on.
+- All gating of candidates through step 15: the queue is SwarmOps' from step 12, the runners are
+  GitHub's.
+- Pull requests from forks and their checks on GitHub's own machines, so that the maintainers'
+  host never runs a stranger's code, until wave 6.
+- Every job that needs a secret (the live job against GitHub, the site's deployment,
+  `status.yml`), until wave 3 or 4.
+- Releases as the download location: the installer and `update` read GitHub's release answers.
+- The dependency-update automation GitHub runs for this repository, and the lints over whatever
+  workflow files remain.
+- The five-minute probe of `status.yml`: a prober should not live on the host it probes.
+- Issues.
+
+### Acceptance criteria
+
+Each runs in CI, offline. They are the exit criteria of M30 to M40; the goal rows they name are
+in [Targets](#targets-3).
+
+1. A plan is the same for the same tree and fails closed, and this repository's gate is described
+   in its own check file (M30).
+2. The tree landed is the tree every named check ran on, and this repository's gate starts through
+   `check run` (M31).
+3. Every land onto a gated target names the results that admitted it, no check runs under the
+   writer lock, an unchanged key starts no run, and no result of an ungranted recorder admits a
+   land (G25's counts); a check that is not applicable never leaves a gate waiting (M32).
+4. No candidate replaced inside its settle window is claimed, and a request that is not admitted
+   writes no frame (G26's counts); every crash, power-loss and kill sweep passes with run records
+   (M33).
+5. Every wanted run finishes exactly once over the kill sweep (M34).
+6. Each of G29's planted attempts is refused with a named reason, and `runner check` says whether
+   the gate defends (M35).
+7. What a run kept reads back by digest, expires on time, and is on disk before any record names
+   it (M36).
+8. Every refusal and every bypass is a record (M37).
+9. A secret is released only after its environment's rules pass, and a release's assets match
+   their digests (M38).
+10. A candidate cannot change what a trunk run restores (M39).
+
+Four exit criteria are measurements and run outside CI: the plan's time in G26 and G4 and G18
+measured again with run records (M33), G28 (M34), and G27, which is M40's whole exit criterion.
+
+### Targets
+
+**None is measured, and nothing here is built.** Each is a number SwarmOps sets for itself, in
+[docs/goals.md](goals.md); the targets of G26 to G28 are confirmed or replaced by the first
+baseline, in each milestone's plan. No section of [docs/perf.md](perf.md) holds a figure for this
+role yet, and this page gives no speed or saving for it.
+
+| Goal | Target | Measured |
+| --- | --- | --- |
+| G25, checks as records | Every land onto a gated target names the results that admitted it; no check runs under the writer lock; 0 runs for an unchanged key; 0 lands admitted by an ungranted recorder | Not built |
+| G26, admission before a runner | 0 claims for a candidate replaced inside its settle window; 0 frames for a request that is not admitted; a plan is decided from the store alone; a plan for a change of 10 files on a tree of 50,000 in under 100 ms | Not built |
+| G27, check cost per landed change | At most 1.2 runs of the `before-land` stage per landed change over a pilot week; the runner-seconds target is set from the first baseline | Not measured yet |
+| G28, an agent's feedback loop | With an idle runner: wanted to started, p95 under 5 s; last result to `check wait` returning, p95 under 1 s; every failure carries a code, `retryable` and its findings; with no runner, `check wait` ends `stalled` within its bound | Not built |
+| G29, untrusted changes | In the acceptance suite's planted attempts an untrusted run reaches none of: a secret, kept state, its own check definitions, the network, the runner's credential, the store's directory. A count of refused attempts, not a proof of a boundary | Not built |
+| G30, the project checks itself | This repository's gate, scheduled suite and release build run through SwarmOps for trusted identities, with the gate defending; GitHub keeps pull requests from forks and the published release | Not built |
+
+G4 (landing under a swarm's load) and G18 (short writer holds) keep their targets and are
+measured again with run records and polling runners.
+
+### Risks and open questions
+
+Three questions are open, and the page presents what depends on them as open:
+
+- **Whether this repository's trunk moves into a store.** Step 12 and step 16 wait on it. If the
+  answer is no, steps 1 to 11 still stand: SwarmOps then starts, plans, reports and measures this
+  repository's gate, records GitHub's verdicts by tree and spares the second run of each landed
+  change, and decides no land. If it is yes, the entry condition is that condition 1 of
+  [To usable](#to-usable) holds on this repository, or that the maintainers name this repository
+  the pilot. The way back: `stable` on GitHub stays a complete mirror through `so sync`, so
+  stopping the sync and landing by merge returns to today's flow.
+- **Whether M7 ships its check record and gate (M7-C1, M7-C2), and M22 its queue with M22-C1 and
+  M22-C3, ahead of the rest of M7, M9 and M23.** Steps 10 to 16 wait on it; steps 1 to 8 do not.
+  If the answer is no, they wait for all of M7 and M22. Of the 181 rows of the tables above, 68
+  depend on one of those four slices, directly or through other rows.
+- **The facts of the hand-made landing queue this repository uses today**: what its candidate
+  branch names encode, whether it batches, how long the gate takes, how many machines the runners
+  are, and whether the rule on `stable` pins its required result to one source. Steps 8, 12 and 16
+  wait on parts of it. If the queue batches, M22-C4 and M22-C5 move from step 16 into step 12;
+  otherwise the new queue may land fewer changes a day than the one it retires.
+
+One point waits for the maintainers: which build checks the project itself. As written here, the
+project's checks are run by a build of a commit that already passed the gate on `stable`, pinned
+by commit id on the runners, and not by the build under test, with two exceptions: `check list`
+and `check lint` inside `just check` use the build under test, and a fork's job keeps calling
+`just check` directly. A feature (`check`, `run`, `deploy`) is switched on in a store only after
+every client of that store runs a build that knows it, because a store that lists a feature
+answers `E_STORE_TOO_NEW` to an older build and there is no way back. Steps 2 to 8 are built to
+this text until the maintainers decide.
+
+Not measured:
+
+- every target of G25 to G30;
+- the gate's real duration (the job limit in `ci.yml` is 30 minutes; the time a run takes is not
+  measured), and so every timeout the first check file sets;
+- the split gate against the single recipe (step 6), and the gate's time on kept workspaces
+  against today's (step 16);
+- G4 and G18 with run records and polling runners;
+- the cost of a plan, of a trigger pass and of an ask that finds nothing.
+
+Not verified yet, each to be checked by whoever builds the unit that rests on it:
+
+- whether M22's plan already holds any of the proposed slices, and how many states M7 intends for
+  the Check record;
+- how a job on a git checkout names the changeset of its commit (step 11);
+- whether `ws create --base` accepts a changeset that no ref names (M22-C1);
+- whether an offered candidate's commit id equals the landed one's (M32-12 pins it by a test);
+- the `health` command that M40-1 adds figures to, and the page that M36-12 extends.
+
+Promises that are bounded:
+
+- The gate defends only under the three conditions of
+  [How it works](#how-it-works-3); otherwise it guides. Through step 12 it guides.
+- G29 counts refused attempts in a test suite; it does not prove a boundary.
+- A build record shows that a file is the one the store's record names, not who built it.
+- `not_applicable` satisfies a gate only after shadow evidence on that target.
+- The proposed slices of M7, M22, M11 and M26 are proposals until those plans accept them.
+
+### Non-goals
+
+The role keeps SwarmOps' [non-goals](goals.md#non-goals). A check is not a user hook: it runs
+outside every store operation and reaches the store only as a record a gate reads. The store stays
+on one host; runners are clients and may be many. A runner's cache holds derived files, never
+store objects, and no store reads it. A runner's checkout is a sparse workspace of real files. A
+verdict that admits a land is a journal record with a full sync.
+
+In this role SwarmOps will not be or have:
+
+- **A workflow language.** No steps, expressions or conditions beyond "always run" inside a
+  check, no packaged steps from third parties and no catalogue of them. Nothing crosses an include
+  between check files but definitions.
+- **A forge.** No issue tracker, package or container registry, site hosting, code scanner or
+  dependency-update bot. A check may run such a tool and a deployment may publish to such a host;
+  intake rules match an operator's own patterns and are not a scanning product.
+- **Signing.** No signed commits and no signed build records in the program, and no separate
+  record kind for a bill of materials.
+- **A web interface in the program.** No hosted machines, web pages, HTTPS API or managed secrets:
+  those are the hosted service's. `check report` writes files; nothing serves them. No second API
+  beside the JSON envelope, the schema and the MCP tools, and no action buttons on a finished
+  result.
+- **A credential per job before M26.** Until then a runner's identity is a long-lived key,
+  narrowed during a job (M35-9) and kept from the check (M35-8).
+
+Also not in the role:
+
+- a defence of a runner's host against hostile code by the program alone: it offers another OS
+  user, a container, and a recipe for a machine per job;
+- a hierarchy of organisations or accounts above a store, or a bypass that one person requests and
+  another grants: a bypass is by grant, with a recorded reason;
+- a trigger on the text of a comment, which would be a path for injecting instructions into
+  agents, or a trigger that runs a stranger's change with a trusted run's access;
+- a scaler (an operator's own may read the event feed, M40-8) or an operator for a container
+  cluster;
+- a Windows runner before M12 delivers Windows, or an `isolated` label on macOS;
+- an environment that comes into being because a check names it: an environment exists only in
+  the rules file, which a change cannot edit;
+- observation of which files a check reads: inputs are declared, and a runner's workspace holds
+  only the declared inputs, so an undeclared read fails (M34-2);
+- the agent's or the repository's own work: repairing a failed change so that it lands, cleaning
+  up tests, choosing tools, trimming a platform's set-up, proposing dependency updates.
+
 ## Milestones
 
 Milestone ids are never renumbered. M13 (topology 2) and M14 (topology 1) were added for the
-GitHub goal, M15 to M26 by the plan of 2026-11-05; M11 (topology 3) takes `so clone`,
-`so remote` and `so sync`.
+GitHub goal, M15 to M26 by the plan of 2026-11-05, and M30 to M40 on 2026-11-18 for
+[checks and delivery](#checks-and-delivery); M11 (topology 3) takes `so clone`, `so remote` and
+`so sync`.
 
 **Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0, M5 in v0.3.0, M6 in
 v0.4.0, M14 in v0.7.0, M15 in v0.8.0 and M16 in v0.9.0, ahead of M12, which is developed separately.
@@ -679,7 +1437,41 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
         M22  ← M20                        queue entries, the workspace check
         M22-R ← M22, M13                  the local queue, the sync engine
         M11  ← M9, M7, M13, M14, M24      the simulator, approvals, lineage
+
+order   checks and delivery, as planned:
+        … M20 ∥ M21 ∥ M30 → M31 → M7 (its check record and gate: M7-C1, M7-C2) → M32
+        → M22 (its queue, M22-C1, M22-C3) → M33 → M34 → M35 ∥ M36 ∥ M39 → M37 → M38 → M40
+        the rest of M7 after M32; the rest of M22 with M33 and M34; M37 may start once M32 is in
+needs   M30  ← M5, M18
+               the workspace file, land-check
+        M31  ← M5, M19, M30
+               the check file and plans, workspaces
+        M32  ← M7-C1, M7-C2, M13, M14, M22-C1, M30
+               the check record and the gate, the attempt, the git remote, the access file
+        M33  ← M20, M30, M31, M32
+               record kinds, the check key, run lines
+        M34  ← M14, M30, M31, M32, M33
+               wanted runs, results, the entrances and their wire
+        M35  ← M30, M31, M33, M34
+               runners, container checks
+        M36  ← M30, M31, M32, M34
+               captured logs, runners, the wire
+        M37  ← M7-C2, M14, M30, M31, M32
+               the required list, the gate, findings and outputs
+        M38  ← M6, M7-C2, M13, M20, M32, M33, M35, M36
+               the required list, run records, secrets, artifacts, tags
+        M39  ← M19, M30, M31, M34
+               runners, workspaces, run lines
+        M40  ← M21, M30, M32, M33
+               health, run records, results
 ```
+
+The units of M30 to M40 follow their own dependencies, not whole milestones: a unit lands when
+what it depends on is in, and a milestone's row turns to done when its last unit has landed. Each
+`needs` line of M30 to M40 is generated from the [unit tables](#deliverables-3): it is the union
+of what the milestone's units depend on outside it. Where M7's and M22's first slices stand in
+that order is not decided ([Risks and open questions](#risks-and-open-questions-3)); M30 and M31
+do not depend on it and start now.
 
 | Milestone | Topology | Deliverable | Depends on | Exit criteria |
 | --- | --- | --- | --- | --- |
@@ -696,20 +1488,37 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
 | 📋 M19 | — | Workspaces, second round: stale workspaces everywhere, edit snapshots, the update's latency | M16 | G9's misses met. Built, in v0.11.0: `E_WS_STALE` from every command that reads or writes a workspace, along every parent; an update that snapshots edits first and carries them; `ws snapshot`; update obstacles refused before the store; `ws status` listing what a sparse commit refuses; one scan walk on 8 threads; unreadable directories and kind changes named; a kill sweep of `ws land -m` (10 kills per format in `just check`); the OpenCode adapter; the large-tree and many-workspace cases. Not met yet: the update after a land and `ws commit` not measured again since v0.6.0's 116.6 ms and 89.0 ms (the host was never quiet), and the commit row stays missed until a change feed exists (the M19 design, decision D1); the 500-kill sweep and the new cases not recorded yet ([perf.md](perf.md#m19-fan-in--2026-11-09-not-measured)) |
 | 📋 M20 | — | `FORMAT 3`: the sorted views under a manifest, the new record kinds, `upgrade` | its design | G18 at 1,000,000 records. Built, in v0.12.0: FORMAT 3 the default of `init`, its journal frames with a nonce (byte-identical operations get distinct ids), the fact records and their index behind named features, the sorted views as runs built after the lock is released, `upgrade` 2 → 3 keeping every op id, verify and repair on it, every crash, power-loss and kill sweep on all three formats, `E_STORE_TOO_NEW`, the release cut's golden check. Not measured yet: G18 at 1,000,000 records, A5's 1,000,000 commits, A1's commit cost and the 200,000-changeset upgrade ran only as a 20,000-changeset trial under load ([perf.md](perf.md#m20--format-3-at-1000000-records--2026-11-12-not-measured)) |
 | 📋 M21 | — | Health, drift and housekeeping | M17 | G24: a land p99 that climbs from 50 to 120 ms is marked as drift, and a steady run is not; G24 joins [docs/goals.md](goals.md) with its first measurement |
-| 📋 M22 | — | The landing queue | M20 (`FORMAT 3`) | On a local store: entries survive kill and power loss and the queue resumes (C8); candidates checked in parallel, ref moves in queue order, a red isolated by bisection (C2, C4); removal with a machine-readable reason (C3); CLI and MCP control (C9); 50 processes each with a 30 s check measured against A21's numbers, no lock spanning a check (A22). Built, not released yet: `queue enqueue|status|withdraw|wait|run` and the four `queue_*` MCP tools, the kill, power-loss and SIGKILL sweeps of the runner. A22 measured: 50 of 50 landed once in 92.5 s, retries 0 %, the longest hold of the lock 72.4 ms ([perf.md](perf.md#m22--the-landing-queue-under-50-processes--2026-11-18)) |
-| 📋 M7 | — | Blame and review | M20 (`FORMAT 3`) | As the README states it |
+| 📋 M22 | — | The landing queue | M20 (`FORMAT 3`) | On a local store: entries survive kill and power loss and the queue resumes (C8); candidates checked in parallel, ref moves in queue order, a red isolated by bisection (C2, C4); removal with a machine-readable reason (C3); CLI and MCP control (C9); 50 processes each with a 30 s check measured against A21's numbers, no lock spanning a check (A22). Built, not released yet: `queue enqueue|status|withdraw|wait|run` and the four `queue_*` MCP tools, the kill, power-loss and SIGKILL sweeps of the runner. A22 measured: 50 of 50 landed once in 92.5 s, retries 0 %, the longest hold of the lock 72.4 ms ([perf.md](perf.md#m22--the-landing-queue-under-50-processes--2026-11-18)). Further slices proposed to its plan, not accepted yet: an attempt that prepares the land, landing when the results are final, stacked attempts and queue bounds (M22-C1 to M22-C7) |
+| 📋 M7 | — | Blame and review. Proposed to its plan, not accepted yet: its check record and the gate that reads recorded results come first (M7-C1, M7-C2), a change request's new revision becomes a trigger (M7-C3), and its remaining work (change requests, approvals, blame) follows M32 | M20 (`FORMAT 3`) | G11: blame, change requests, their classification, approvals and a landing gate ([docs/goals.md](goals.md)) |
 | 📋 M23 | — | Withdrawal and erasure | M20 | Every id kept |
 | 📋 M22-R | 2 | The queue's remote publish (Forgejo or git remote), postland, the land-direct cutover | M22, M13 | A queued land reaches the remote's branch as the checked tree |
 | 📋 M9 | — | Simulation and a benchmark gate | M20 | As the README states it |
-| 📋 M11 | 3 | Native sync over `so://`, extending M13's sync engine and M14's entry | M3, M4, M6, M7, M8, M9, M13, M14, M24 | Topology 3's acceptance criteria 1 to 3 pass |
+| 📋 M11 | 3 | Native sync over `so://`, extending M13's sync engine and M14's entry. Proposed to its plan, not accepted yet: results between stores (M11-C1) | M3, M4, M6, M7, M8, M9, M13, M14, M24 | Topology 3's acceptance criteria 1 to 3 pass |
 | 📋 M24 | 3 | Rewriting with lineage | M20 | Lineage kept through every rewrite and upstream land |
 | 📋 M25 | 1, 2 | Moving onto a store without a pause: pushes passed on while following, archives | M17 | The switch recorded; archives byte-identical |
+| 📋 M30 | — | Check definitions and plans: the check file, declared inputs, `check list`, `check plan`, stages, order, variants, parameters, `check lint`, the importer | M5, M18 | A plan is the same for the same tree and fails closed; this repository's gate is described in its own check file |
+| 📋 M31 | — | Checks run where the caller is: `check run`, the environment a check gets, findings, run lines, exclusive groups, shadow selection, container checks, limits | M30, M19, M5 | The tree landed is the tree every named check ran on; this repository's gate starts through `check run` |
+| 📋 M32 | 2 | Results on a tree: the check key, `check record`, the required list, reuse and its rules, `check status`, `check wait`, and the three commands that exchange candidates and verdicts with GitHub | M7 (its check record and gate), M22 (its attempt), M30, M13, M14 | G25; a check that is not applicable never leaves a gate waiting |
+| 📋 M33 | — | Triggers and admission: run records, `check start`, `check tick`, schedules, supersession, bounds | M32, M31, M30, M20 | G26; every crash, power-loss and kill sweep passes with run records; G4 and G18 measured again with them |
+| 📋 M34 | 1, 3 | Runners that ask for work: the claim and its lease, `runner run`, the check commands and runners through `serve`, labels and grants | M33, M32, M31, M30, M14 | Every wanted run finishes exactly once over the kill sweep; G28 measured |
+| 📋 M35 | — | Trust, isolation and secrets: the check user, least access for a run, trust classes, held runs, secrets on the runner | M34, M33, M31, M30 | G29; `runner check` says whether the gate defends |
+| 📋 M36 | — | Logs, reports and artifacts: the log store, artifacts, retention, build records | M34, M32, M31, M30 | What a run kept reads back by digest, expires on time, and is on disk before any record names it |
+| 📋 M37 | — | The gate's rules: rule sets, evaluate mode, bypass records, intake rules, thresholds | M32, M31, M30, M14, M7 (its gate) | Every refusal and bypass is a record |
+| 📋 M38 | — | Delivery: environments, deployment records, approvals and waits, releases with assets, publishing a release to GitHub | M36, M35, M33, M32, M20, M13, M6, M7 (its gate) | A secret is released only after its environment's rules pass; a release's assets match their digests |
+| 📋 M39 | — | Caches and set-up time: kept directories and their scopes, kept workspaces, keyed caches, groups fitted to recorded timings, size advice | M34, M31, M30, M19 | A candidate cannot change what a trunk run restores |
+| 📋 M40 | — | Figures, cost and events: check figures in health, runs per landed change, the runner-seconds ledger, budgets, event delivery | M33, M32, M30, M21 | G27 measured |
 
 Why this order: data safety and G4 come first (conditions 5 and 2). Serving under load follows,
 because topology 1's reads queue behind lands today and its first clone is the largest measured
 cost. The take-back and workspace rows need no new format and come next. One `FORMAT 3` then
 serves review, the queue, withdrawal and lineage at once. Topology 3 needs the simulator, so it
 stays after M9. The pilot may move any of these.
+
+Checks and delivery (M30 to M40) stands beside that order. What it needs from M7, M22 and M11 is
+proposed to those milestones' plans as slices
+([Proposed slices of existing milestones](#proposed-slices-of-existing-milestones)), and their
+rows above say so. Whether M7's check record and gate and M22's first queue slices ship ahead of
+the rest of M7 and M22 is not decided; if they do not, M32 onward wait for all of M7 and M22.
 
 ## Open items of the delivered and planned milestones
 
@@ -767,6 +1576,11 @@ fails).
 temp-file error names a host path: a server for other hosts refuses the first and passes on
 neither.
 
+**M30 to M40.** Until checks and delivery is built: a checked land runs one command; a check's
+result is not recorded; every land's push starts a run on GitHub, even for a tree that already
+passed; SwarmOps has no runner, schedule or trigger, handles no secret for a check, and keeps no
+log or artifact of one ([Checks and delivery](known-limitations.md#checks-and-delivery)).
+
 **Unscheduled**, among others: `undo` does not take back a land that later lands built on; history
 follows first parents only; a page cursor does not pin the revisions it pages; a read can give up
 under sustained commits; derived values crafted to agree with each other are read as valid until
@@ -775,7 +1589,8 @@ up to about 15 times its text in memory before an operation refuses it; `verify 
 export oids of native changesets twice.
 
 **Not planned** ([non-goals](goals.md#non-goals)): signed commits, so a GitHub branch that requires
-signatures refuses the store's commits.
+signatures refuses the store's commits; a workflow language; a forge; signed build records in the
+program ([Non-goals](#non-goals-1) of checks and delivery).
 
 ## How progress is reported
 
@@ -784,7 +1599,7 @@ signatures refuses the store's commits.
   move what is built from planned to "Where we are".
 - **[CHANGELOG.md](../CHANGELOG.md)** records each change under **Unreleased**, and the release
   section groups them by milestone.
-- **[docs/goals.md](goals.md)** rows G13, G15, G16 and G17 take their measured values from
-  [docs/perf.md](perf.md) as the targets above are measured.
+- **[docs/goals.md](goals.md)** rows G13, G15, G16, G17 and G25 to G30 take their measured values
+  from [docs/perf.md](perf.md) as the targets above are measured.
 - **The README's roadmap** and the site's roadmap page carry the milestone table and each
   topology's state: today or planned.

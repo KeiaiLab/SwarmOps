@@ -32,6 +32,7 @@ In `tools/list`'s order.
 | [`revert`](revert.md) | Revert a change | [`swarmops revert`](../commands/revert.md) | adds a changeset and moves the target | yes |
 | [`land_check`](land-check.md) | Check a land | [`swarmops land-check`](../commands/land-check.md) | no | no |
 | [`land_group`](land-group.md) | Land a group | [`swarmops land-group`](../commands/land-group.md) | adds a changeset and moves the target | yes |
+| [`check_list`](check-list.md) | List a tree's checks | [`swarmops check list`](../commands/check-list.md) | no | no |
 | [`rebase`](rebase.md) | Rebase a change | [`swarmops rebase`](../commands/rebase.md) | adds to it | yes |
 | [`blob_put`](blob-put.md) | Store a blob | [`swarmops blob put`](../commands/blob-put.md) | adds to it | yes |
 | [`blob_has`](blob-has.md) | Find stored blobs | [`swarmops blob has`](../commands/blob-has.md) | no | no |
@@ -139,7 +140,7 @@ Both are the server's, never a call's; no tool argument names either.
 - The store is `--repo`, else `SWARMOPS_REPO`, opened anew for each call, so that a call sees what other processes committed. A store that is not there is each call's `E_NOT_A_REPO`, and the server serves on.
 - The identity is `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`, as for the CLI. Every change is recorded for it.
 - These tools need it, and without one fail with `E_IDENTITY_REQUIRED`: `ref_set`, `ref_delete`, `ref_txn`, `undo`, `commit`, `land`, `revert`, `land_group`, `rebase`, `blob_put`, `sync`, `queue_enqueue`, `queue_withdraw`.
-- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `merge_base`, `op_log`, `ref_list`, `ref_log`, `land_check`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`, `fetch`, `push`, `sync_status`, `queue_status`, `queue_wait`.
+- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `merge_base`, `op_log`, `ref_list`, `ref_log`, `land_check`, `check_list`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`, `fetch`, `push`, `sync_status`, `queue_status`, `queue_wait`.
 - The output flags (`--json`, `--human`, `--pretty`) do not apply.
 
 ## Result size limits

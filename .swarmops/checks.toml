@@ -1,0 +1,36 @@
+# This repository's checks (M30): the commands its gate runs, one argv each, run with no shell.
+# `just check` lists them with the build under test (`check list --dir .`), so a file that does not
+# parse fails the gate. Nothing runs them through SwarmOps yet: GitHub's workflows run the same
+# commands. Each timeout is its job's `timeout-minutes` in the workflow file; no run was measured.
+version = 1
+
+# ci.yml, job `check`: the definition of done.
+[check.check]
+argv = ["just", "check"]
+timeout_s = 1800
+
+# ci.yml, job `check`, after it: bench/compare still compiles against the store's API.
+[check.check-compare]
+argv = ["just", "check-compare"]
+timeout_s = 1800
+
+# ci.yml, job `zizmor`: actionlint over every workflow, and tests-pass needing every other job.
+# The zizmor audit itself stays a step of that job.
+[check.lint-workflows]
+argv = ["just", "lint-workflows"]
+timeout_s = 600
+
+# site.yml, job `site`: the site built and checked.
+[check.site-check]
+argv = ["just", "site-check"]
+timeout_s = 900
+
+# server.yml, job `entrances`: stock git and so through sshd and nginx.
+[check.server-entrances]
+argv = ["just", "server-entrances"]
+timeout_s = 1800
+
+# server.yml, job `acceptance`: the packages installed and accepted.
+[check.server-acceptance]
+argv = ["just", "server-acceptance"]
+timeout_s = 2700

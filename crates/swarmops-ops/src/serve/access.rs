@@ -12,7 +12,8 @@ use swarmops_store::{FileOp, FsMethod, IoFailure, StoreError, StoreFs};
 use toml::Spanned;
 
 use super::{IdentitySource, refused};
-use crate::{LocalOps, error};
+use crate::LocalOps;
+use crate::error::{self, line_of};
 
 /// The most bytes `access.toml` may hold: a longer one is invalid, `E_POLICY_DENIED`.
 pub const MAX_ACCESS_BYTES: u64 = 1 << 20;
@@ -360,13 +361,6 @@ fn take_capped(from: impl Read, cap: u64) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     from.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
     Ok(bytes)
-}
-
-/// The 1-based line of byte `at` in `bytes`.
-fn line_of(bytes: &[u8], at: usize) -> u64 {
-    let before = bytes.get(..at).unwrap_or(bytes);
-    let lines = before.split(|&b| b == b'\n').count();
-    u64::try_from(lines).unwrap_or(u64::MAX)
 }
 
 /// `E_AUTH` `no_access_file`: the store has no `access.toml`, so no caller may do anything.

@@ -93,7 +93,7 @@ Every command prints one envelope, `ok`, `op`, `api`, `result` or `error`, then 
 ([exceptions](docs/develop/cli-scripting.md#the-envelope)). A failure carries a stable `E_*` code,
 the exit code, `retryable`, `details` and a `hint` ([error reference](docs/reference/errors.md)).
 `swarmops schema` prints the JSON Schema of every request and response, and `swarmops mcp` serves
-the operations to an agent as 50 MCP tools ([MCP integration](docs/develop/mcp.md)).
+the operations to an agent as 51 MCP tools ([MCP integration](docs/develop/mcp.md)).
 
 ### Git and GitHub round trip
 
@@ -154,6 +154,9 @@ Every page, by group: [docs/README.md](docs/README.md).
 
 Each milestone's deliverable and exit criteria are in [docs/roadmap.md](docs/roadmap.md#milestones),
 under "Milestones"; the macOS build ships from 0.12.0 on, and Windows is planned (M12).
+Checks described in the tree, lands gated on their recorded results, and delivery from a store are
+planned; the roadmap's [Checks and delivery](docs/roadmap.md#checks-and-delivery) section says in
+what order.
 [CHANGELOG.md](CHANGELOG.md) says what each release shipped, and
 [docs/known-limitations.md](docs/known-limitations.md) what is still open, with the milestone that
 takes each item.

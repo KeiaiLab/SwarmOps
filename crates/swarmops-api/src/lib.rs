@@ -8,6 +8,7 @@
 //! reviewed.
 
 pub mod auth;
+pub mod check;
 pub mod envelope;
 pub mod error;
 pub mod health;
@@ -22,6 +23,7 @@ pub mod update;
 pub mod wire;
 
 pub use auth::{AuthEntry, AuthLogin, AuthLogout, AuthStatus};
+pub use check::{CheckListReq, CheckListResp, CheckOut};
 pub use envelope::{API_VERSION, Envelope, LogCutOut, Meta, RecoveredOut};
 pub use error::{ErrorCode, OpError};
 pub use identity::Identity;

@@ -122,7 +122,7 @@ SwarmOps records an identity and does not verify it: every envelope's `meta.auth
 treats every agent that runs against a store as a trusted local user acting for the same owner, and
 the store directory's permissions are the access boundary.
 
-## The 50 MCP tools
+## The 51 MCP tools
 
 A changeset is what a commit records, and a ref, such as `main`, is a name that points at one.
 `swarmops mcp` lists one tool for each store operation but `derive`, which `swarmops derive` runs
@@ -133,7 +133,7 @@ A tool's arguments are the operation's request. Its result is the envelope the C
 request, as `structuredContent` and as text, and a failed operation sets `isError`. A tool's
 annotations say whether it changes the store and how.
 
-### Eighteen tools read
+### Nineteen tools read
 
 - **`repo_info`**
 
@@ -200,6 +200,11 @@ annotations say whether it changes the store and how.
   `clean` with the root tree it lands and the paths it changes, `replayed`, `nothing_to_land`, or
   `conflict` with the report `land` gives. It writes nothing; land with `expect_target` set to its
   `onto` to land what it found.
+
+- **`check_list`**
+
+  The checks a changeset's tree names in `.swarmops/checks.toml`, sorted by name: each with its
+  argv, its directory, its timeout and the digest of its definition. Nothing runs them.
 
 - **`blob_has`**
 

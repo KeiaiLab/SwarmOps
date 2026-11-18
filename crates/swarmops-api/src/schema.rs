@@ -21,7 +21,7 @@ macro_rules! schemas {
 pub fn schema_for_all() -> serde_json::Value {
     // The store's operations' types, then ancestry's, ref log's, revert's, the conflict
     // report's touches, the maintenance's, the git remotes', the workspaces', serve's records,
-    // the logins', the program's own update's and the landing queue's.
+    // the logins', the program's own update's, the landing queue's and the checks'.
     let mut all = store_schemas();
     let groups = [
         ancestry_schemas(),
@@ -39,6 +39,7 @@ pub fn schema_for_all() -> serde_json::Value {
         auth_schemas(),
         update_schemas(),
         queue_schemas(),
+        check_schemas(),
     ];
     for more in groups {
         if let (serde_json::Value::Object(all), serde_json::Value::Object(more)) = (&mut all, more)
@@ -344,4 +345,9 @@ fn queue_schemas() -> serde_json::Value {
         QueuePublishStatus,
         QueuePublishResp,
     ]
+}
+
+/// The schemas of the checks' types (M30): `check list`, the checks a tree describes.
+fn check_schemas() -> serde_json::Value {
+    schemas![CheckListReq, CheckListResp, CheckOut]
 }

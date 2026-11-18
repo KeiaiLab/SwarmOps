@@ -9,6 +9,7 @@
 mod support;
 
 mod auth;
+mod check;
 mod cli;
 mod coming_from_git;
 mod contention;

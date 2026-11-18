@@ -1880,6 +1880,7 @@ mod tests {
         "ws",
         "ws resolve",
         "ws hook x",
+        "check",
         "ref",
         "ref set x x",
         "ref txn --move x",

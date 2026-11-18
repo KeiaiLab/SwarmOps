@@ -14,6 +14,10 @@ Targets are milestones of the umbrella spec
 M4 merge and landing · M8 git export · M12 portability · M13 git remotes · M5 workspaces ·
 M6 verify, crash safety and fuzzing · M14 git clients against a store · M7 blame and review ·
 M9 simulation and a benchmark gate · M11 remote sync, offline-first.
+Later milestones are the [roadmap](roadmap.md#milestones)'s: among them M30 check definitions and
+plans · M31 checks run where the caller is · M32 results on a tree · M33 triggers and admission ·
+M34 runners · M35 trust, isolation and secrets · M36 logs, reports and artifacts · M37 the gate's
+rules · M38 delivery · M39 caches and set-up time · M40 figures, cost and events, all planned.
 M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0; M13 makes 0.2.0, M5
 0.3.0 and M6 0.4.0; 0.5.0 adds no milestone: it holds the pilot, the measurements and the first
 v0.6 fixes; 0.6.0 holds the fixes the measurements asked for, M14 makes 0.7.0, and M15, the
@@ -946,8 +950,9 @@ left).
   `E_NOTHING_TO_LAND`, or `E_CAS_RETRY_EXHAUSTED` with a smaller `--max-attempts`, though the land
   is durable and the workspace stands on it; a cut unchecked land run again with `--check` replays
   the unchecked land; a `ws land -m` cut inside its own commit asks for `ws commit` first; the
-  `timeout_s` of `.swarmops/workspaces.json`'s `check` is not read (the request's, 900 s by
-  default, applies), and a `--check-timeout` too large for the clock aborts the command;
+  `timeout_s` of `.swarmops/workspaces.json`'s `check` is not read by `ws land --check` (the
+  request's, 900 s by default, applies), and a `--check-timeout` too large for the clock aborts
+  the command;
   `blob get` takes `--max-bytes 0` as one blob, and caps neither the ids nor the bytes it holds.
   A `ws land -m` cut after the store's land and run again after further edits replays the land
   only while the operation that made the workspace's head is among the journal's newest 10,000;
@@ -1114,6 +1119,44 @@ left).
   second holder is not refused and an expired one is not reclaimed. Only a mutation renews it: an
   agent that only runs `ws status` and `ws diff` keeps the time of its last change. *Unscheduled
   (decision D21 of the M21 design, §10). Found: the M21 design §10.4.*
+
+## Checks and delivery
+
+What SwarmOps does not do for a repository's checks today. Each item is planned; of the work, only
+the check file and `check list` are built ([roadmap](roadmap.md#checks-and-delivery)).
+
+- **One command per checked land.** `ws land --check` runs one argv: the command after `--`, else
+  `check.argv` of `.swarmops/workspaces.json`. A repository that needs several checks, an order
+  between them or a plan of which ones a change needs puts all of that in the one command. The
+  checks `.swarmops/checks.toml` names are listed by `check list` and run by nothing yet, and a
+  tree that holds both files gives `check list` the check file's checks and `ws land --check`
+  the other file's command. *Target: M31. Found: requirement CD-E20.*
+- **`check list` refuses some `workspaces.json` files that `ws land --check` runs.** It holds
+  `check.argv` and `check.timeout_s` to version 1's rules, which the land does not read: a
+  `check.timeout_s` of 0 or past 86,400, an empty program, or an argv past 1,024 strings is
+  `E_CHECK_FILE` to `check list`, while the land accepts the file and runs the argv under its own
+  `--check-timeout`. The `timeout_s` that `check list` gives the check `default` is not the one
+  the land uses. *Target: M31-10. Found: the M30-1 review.*
+- **A check's definition digest can change.** `check list` gives each check the digest of its
+  definition by a provisional recipe, outside the hash contract: a later release may give the
+  same definition another digest, so digests compare only between builds of one release.
+  *Target: M32. Found: the M30 plan.*
+- **A check result is not recorded.** A checked land's result is in the command's envelope and
+  nowhere in the store: no record says which tree passed which check, so no gate and no later
+  land can read it. *Target: M7, M32. Found: requirement CD-E20.*
+- **Every land's push starts a run on GitHub, even for an unchanged tree.** Where the checks run
+  on GitHub (topology 2), a pushed commit is checked again although the same tree already passed,
+  because nothing keys a result by tree (issue #43). *Target: M32. Found: requirement CD-E20.*
+- **No runner, schedule or trigger.** SwarmOps starts a check only inside `ws land --check`, on
+  the caller's host. Nothing starts one after a land, on a tag, on a schedule or on another host.
+  *Target: M33, M34. Found: requirement CD-E20.*
+- **No secrets handling.** A check gets the environment of the process that runs it. SwarmOps
+  neither stores a secret for a check, nor scopes one, nor masks one in output.
+  *Target: M35. Found: requirement CD-E20.*
+- **No logs or artifacts kept.** A check's output comes back as the tails in the envelope and as
+  a log file in its workspace (`.swarmws/checks/`), and the files a check makes stay there.
+  Nothing is kept beside the store, by digest or for a set time.
+  *Target: M36. Found: requirement CD-E20.*
 
 ## Git's verbs on the command line
 
@@ -1425,10 +1468,11 @@ These do not change what SwarmOps does, only how well the tests can see it.
   allocations (the decoder's context and window) can fail there, and the zstd crate reports those
   as `ErrorKind::Other`: the read comes back as `E_STORE_CORRUPT`, not as a failed read.
   *Unscheduled. Found: issue #4 item 14.*
-- **Golden envelopes cover 56 of the 57 error codes.** `error_codes_reach_the_cli` pins the envelope
-  of 43, the nine workspace codes (M5), `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` (M15),
-  `E_FORMAT_REQUIRED` (M6), `E_AUTH` and `E_POLICY_DENIED` (M14) and `E_REF_NOT_FOUND` (`ref log`
-  of a name that never moved, M18) among them; `remote_error_codes_golden` the four `E_REMOTE_*`
+- **Golden envelopes cover 57 of the 58 error codes.** `error_codes_reach_the_cli` pins the
+  envelope of 44, the nine workspace codes (M5), `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` (M15),
+  `E_FORMAT_REQUIRED` (M6), `E_AUTH` and `E_POLICY_DENIED` (M14), `E_REF_NOT_FOUND` (`ref log`
+  of a name that never moved, M18) and `E_CHECK_FILE` (`check list --dir` of a file with a key
+  version 1 does not take, M30) among them; `remote_error_codes_golden` the four `E_REMOTE_*`
   codes over smart HTTP and ssh (M13); the FORMAT 2 goldens `E_TAG_IMMUTABLE` and
   `E_MAINTENANCE_BUSY` (M6); `too_new_maps_to_its_code_and_hint` `E_STORE_TOO_NEW` (M20); and goldens
   of their own six the first test cannot raise (M15):

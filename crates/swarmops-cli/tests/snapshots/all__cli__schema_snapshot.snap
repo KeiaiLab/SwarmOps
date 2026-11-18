@@ -1300,6 +1300,169 @@ expression: s.redact(&all)
       "title": "ChangesetSummary",
       "type": "object"
     },
+    "CheckListReq": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`check_list` (CLI `check list`): the checks the tree of `rev` describes. Reads only: no lock,\nno identity, nothing written.",
+      "properties": {
+        "rev": {
+          "$ref": "#/$defs/Rev",
+          "default": "main",
+          "description": "The changeset whose tree's checks to list; `main` when omitted."
+        }
+      },
+      "title": "CheckListReq",
+      "type": "object"
+    },
+    "CheckListResp": {
+      "$defs": {
+        "CheckOut": {
+          "description": "One check: a command run with no shell, in a directory of the tree, for at most its time.",
+          "properties": {
+            "argv": {
+              "description": "The program and its arguments, run with no shell: at least the program.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "definition_digest": {
+              "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not\nits name): 64 hex digits. Two checks that differ only in name share it. Provisional: the\nrecipe may change in a later release, so compare digests of one release only.",
+              "type": "string"
+            },
+            "dir": {
+              "description": "The directory of the tree it runs in, as a repository path; `.` is the root.",
+              "type": "string"
+            },
+            "line": {
+              "description": "The line of `.swarmops/checks.toml` that starts its table. Omitted for the check\n`default` read from `.swarmops/workspaces.json`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit.",
+              "type": "string"
+            },
+            "timeout_s": {
+              "description": "The most seconds it may run, its default (900) filled in. For the check `default` of\n`.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does\nnot read it, and takes its own `--check-timeout`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "name",
+            "argv",
+            "dir",
+            "timeout_s",
+            "definition_digest"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`check_list`: the checks a tree describes, sorted by name. The same tree gives the same\nanswer byte for byte, whichever changeset names it.",
+      "properties": {
+        "checks": {
+          "description": "The checks, sorted by name, bytewise; empty when the tree describes none.",
+          "items": {
+            "$ref": "#/$defs/CheckOut"
+          },
+          "type": "array"
+        },
+        "file": {
+          "description": "The file the checks came from: `.swarmops/checks.toml`, or `.swarmops/workspaces.json`\nfor the one check `default`. Omitted when the tree holds neither, or a `workspaces.json`\nwith no `check.argv`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tree": {
+          "description": "The root tree the file was read from: 64 hex digits. Omitted for a directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "description": "The check file's `version`, 1. Omitted unless `file` is `.swarmops/checks.toml`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "vouched": {
+          "description": "Whether only the caller stands behind the file: `true` when it was read from a directory\nthe caller named (`check list --dir`), which no gate accepts; `false` when it was read\nfrom the store, at `tree`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "vouched",
+        "checks"
+      ],
+      "title": "CheckListResp",
+      "type": "object"
+    },
+    "CheckOut": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One check: a command run with no shell, in a directory of the tree, for at most its time.",
+      "properties": {
+        "argv": {
+          "description": "The program and its arguments, run with no shell: at least the program.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "definition_digest": {
+          "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not\nits name): 64 hex digits. Two checks that differ only in name share it. Provisional: the\nrecipe may change in a later release, so compare digests of one release only.",
+          "type": "string"
+        },
+        "dir": {
+          "description": "The directory of the tree it runs in, as a repository path; `.` is the root.",
+          "type": "string"
+        },
+        "line": {
+          "description": "The line of `.swarmops/checks.toml` that starts its table. Omitted for the check\n`default` read from `.swarmops/workspaces.json`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit.",
+          "type": "string"
+        },
+        "timeout_s": {
+          "description": "The most seconds it may run, its default (900) filled in. For the check `default` of\n`.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does\nnot read it, and takes its own `--check-timeout`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "argv",
+        "dir",
+        "timeout_s",
+        "definition_digest"
+      ],
+      "title": "CheckOut",
+      "type": "object"
+    },
     "CloneReq": {
       "$defs": {
         "LossyClass": {
@@ -3553,6 +3716,11 @@ expression: s.redact(&all)
         {
           "const": "E_QUEUE_WAIT_TIMEOUT",
           "description": "`queue wait` reached its timeout with the entry still open (`details.entry`, and\n`details.state`, `waiting` or `checking`). The entry stays queued; waiting again can see\nit land.",
+          "type": "string"
+        },
+        {
+          "const": "E_CHECK_FILE",
+          "description": "A check file does not read: `.swarmops/checks.toml` (or, in a tree without one,\n`.swarmops/workspaces.json`) is too large, not text, not a file, not TOML (JSON), not\nversion 1, or holds a key, a name or a value version 1 does not take (`details.file`,\n`details.reason`, `details.vouched`, and `details.line` and `details.key` when known).\nNothing was listed; the hint says what the file takes.",
           "type": "string"
         }
       ],
@@ -12754,6 +12922,11 @@ expression: s.redact(&all)
             {
               "const": "E_QUEUE_WAIT_TIMEOUT",
               "description": "`queue wait` reached its timeout with the entry still open (`details.entry`, and\n`details.state`, `waiting` or `checking`). The entry stays queued; waiting again can see\nit land.",
+              "type": "string"
+            },
+            {
+              "const": "E_CHECK_FILE",
+              "description": "A check file does not read: `.swarmops/checks.toml` (or, in a tree without one,\n`.swarmops/workspaces.json`) is too large, not text, not a file, not TOML (JSON), not\nversion 1, or holds a key, a name or a value version 1 does not take (`details.file`,\n`details.reason`, `details.vouched`, and `details.line` and `details.key` when known).\nNothing was listed; the hint says what the file takes.",
               "type": "string"
             }
           ]

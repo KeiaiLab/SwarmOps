@@ -31,6 +31,7 @@ use swarmops_api::{
     WsMaterializeResp, WsRebaseReq, WsRebaseResp, WsRebasing, WsResolveReq, WsResolveResp, WsState,
     WsStatus, WsStatusReq,
 };
+use swarmops_api::{CheckListReq, CheckListResp, CheckOut};
 use swarmops_api::{SnapshotWrite, WsSnapshotReq, WsSnapshotResp};
 use swarmops_api::{UpdateOut, UpdatePending, UpdatePendingKind};
 
@@ -156,6 +157,7 @@ fn every_response_new_fills_the_serde_defaults() {
     reads_back(&AuthStatus::new(Vec::new()));
     reads_back(&AuthLogout::new("x", "x", true));
     reads_back(&UpdateOut::new("x", true, AutoUpdate::On));
+    reads_back(&CheckListResp::new(true, Vec::new()));
     reads_back(&RemoteRemoveResp::new("x", 7));
     reads_back(&SyncResp::new(
         "x",
@@ -196,6 +198,7 @@ fn every_response_new_fills_the_serde_defaults() {
 fn every_item_new_fills_the_serde_defaults() {
     reads_back(&BlobOut::new("x", 7, ContentEncoding::Utf8, "x"));
     reads_back(&ChangeOut::new("x", ChangeOp::Put));
+    reads_back(&CheckOut::new("x", Vec::new(), "x", 7, "x"));
     reads_back(&DiffLineOut::new(LineOp::Context, "x"));
     reads_back(&FileConflictOut::new("x", ConflictKindOut::Content));
     reads_back(&HunkOut::new(
@@ -309,6 +312,7 @@ fn every_shared_new_fills_the_serde_defaults() {
 /// The requests with no required field.
 #[test]
 fn every_default_is_the_empty_request() {
+    reads_empty::<CheckListReq>();
     reads_empty::<DeriveReq>();
     reads_empty::<InfoReq>();
     reads_empty::<LogReq>();

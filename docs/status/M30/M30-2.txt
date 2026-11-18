@@ -1,0 +1,1 @@
+check list gives the checks of a changeset or a directory, each with its definition's digest; just check fails on a check file that does not parse.

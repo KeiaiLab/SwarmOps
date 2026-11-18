@@ -159,6 +159,14 @@ Queue changes to land on a ref once a check of them passes.
 - [`swarmops queue wait`](commands/queue-wait.md): Wait for entry ID to land, starting its runner when none runs.
 - [`swarmops queue run`](commands/queue-run.md): Run REF's queue until it holds no open entry; exit 0 at once when another runner does.
 
+## Checks
+
+### swarmops check
+
+List the checks a tree names in .swarmops/checks.toml; nothing here runs them.
+
+- [`swarmops check list`](commands/check-list.md): List the checks REV's tree describes, or those of a directory with --dir.
+
 ## Server
 
 - [`swarmops mcp`](commands/mcp.md): Serve the store's operations to an agent as an MCP server on stdin and stdout.

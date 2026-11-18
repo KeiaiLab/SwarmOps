@@ -1,0 +1,214 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "--repo [tmp]/store check list",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "check_list",
+      "api": 1,
+      "result": {
+        "vouched": false,
+        "tree": "[tree_c0]",
+        "file": ".swarmops/checks.toml",
+        "version": 1,
+        "checks": [
+          {
+            "name": "docs",
+            "argv": [
+              "python3",
+              "-I",
+              "scripts/check-docs.py"
+            ],
+            "dir": ".",
+            "timeout_s": 900,
+            "definition_digest": "[docs_digest]",
+            "line": 12
+          },
+          {
+            "name": "lint",
+            "argv": [
+              "cargo",
+              "clippy",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "dir": "crates/app",
+            "timeout_s": 600,
+            "definition_digest": "[lint_digest]",
+            "line": 7
+          },
+          {
+            "name": "unit",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked"
+            ],
+            "dir": ".",
+            "timeout_s": 900,
+            "definition_digest": "[unit_digest]",
+            "line": 4
+          }
+        ]
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c0]": "[c0]",
+          "main": "[c0]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "check list --dir [tmp]/tree",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "check_list",
+      "api": 1,
+      "result": {
+        "vouched": true,
+        "file": ".swarmops/checks.toml",
+        "version": 1,
+        "checks": [
+          {
+            "name": "docs",
+            "argv": [
+              "python3",
+              "-I",
+              "scripts/check-docs.py"
+            ],
+            "dir": ".",
+            "timeout_s": 900,
+            "definition_digest": "[docs_digest]",
+            "line": 12
+          },
+          {
+            "name": "lint",
+            "argv": [
+              "cargo",
+              "clippy",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "dir": "crates/app",
+            "timeout_s": 600,
+            "definition_digest": "[lint_digest]",
+            "line": 7
+          },
+          {
+            "name": "unit",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked"
+            ],
+            "dir": ".",
+            "timeout_s": 900,
+            "definition_digest": "[unit_digest]",
+            "line": 4
+          }
+        ]
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store check list",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "check_list",
+      "api": 1,
+      "result": {
+        "vouched": false,
+        "tree": "[tree_c1]",
+        "checks": []
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store check list",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "check_list",
+      "api": 1,
+      "result": {
+        "vouched": false,
+        "tree": "[tree_c2]",
+        "file": ".swarmops/workspaces.json",
+        "checks": [
+          {
+            "name": "default",
+            "argv": [
+              "./check.sh"
+            ],
+            "dir": ".",
+            "timeout_s": 900,
+            "definition_digest": "[default_digest]"
+          }
+        ]
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c2]": "[c2]",
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "check list --dir [tmp]/tree",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "check_list",
+      "api": 1,
+      "error": {
+        "code": "E_CHECK_FILE",
+        "message": ".swarmops/checks.toml has an unknown key check.lint.stage (line 11)",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "file": ".swarmops/checks.toml",
+          "key": "check.lint.stage",
+          "line": 11,
+          "reason": "unknown_key",
+          "vouched": true
+        },
+        "hint": "version 1 of .swarmops/checks.toml takes version and [check.<name>] tables of argv, dir and timeout_s; a newer swarmops may read this key"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]
