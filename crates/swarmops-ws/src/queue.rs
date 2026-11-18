@@ -400,7 +400,9 @@ impl Runner<'_, '_> {
 
     /// Records the groups of the checks running now, slot by slot, on the lane.
     fn record(&self, groups: &[Option<u32>]) {
-        let running: Vec<u32> = groups.iter().flatten().copied().collect();
+        let running: Vec<(u16, u32)> = (groups.iter().zip(0u16..))
+            .filter_map(|(group, slot)| group.map(|pgid| (slot, pgid)))
+            .collect();
         self.lane.running(&running);
     }
 

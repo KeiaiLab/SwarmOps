@@ -141,12 +141,12 @@ struct Lane {
 }
 
 impl LaneGuard for Lane {
-    /// The lane's `.groups` file, one line per running check, its slot its place in `groups`.
+    /// The lane's `.groups` file, one line per running check, with the slot it runs in.
     /// A group whose leader is gone already is left out; a file that cannot be written leaves
     /// the groups to their timeouts (best effort, as the trait says).
-    fn running(&self, groups: &[u32]) {
-        let lines: Vec<LaneGroup> = (groups.iter().zip(0u16..))
-            .filter_map(|(&pgid, slot)| LaneGroup::of(pgid, slot))
+    fn running(&self, groups: &[(u16, u32)]) {
+        let lines: Vec<LaneGroup> = (groups.iter())
+            .filter_map(|&(slot, pgid)| LaneGroup::of(pgid, slot))
             .collect();
         let _ = self.lock.write_groups(&lines);
     }

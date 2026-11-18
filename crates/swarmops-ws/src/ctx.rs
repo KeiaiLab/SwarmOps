@@ -35,11 +35,11 @@ pub struct Ctx<'a> {
 /// A target's lane, held until dropped: its holder is the target's one queue runner (the M22
 /// core design I-4).
 pub trait LaneGuard {
-    /// Records `groups`, the process group ids of the checks running now, slot by slot, so
+    /// Records `groups`, the slot and process group id of each check running now, so
     /// that the next holder kills what a dead runner left running (design §5 step 5, the
     /// takeover). Best effort: a group not recorded is one a takeover cannot kill, and the
     /// queue's facts are whole either way. The default records nothing.
-    fn running(&self, groups: &[u32]) {
+    fn running(&self, groups: &[(u16, u32)]) {
         let _ = groups;
     }
 }
