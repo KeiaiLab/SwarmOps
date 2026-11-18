@@ -497,3 +497,65 @@ web-build:
 # hashes, the first-load JS budget and the files served beside the pages.
 web-check:
     cd web && npm run check
+
+# The next four recipes are the gate's jobs that are more than one command, so that
+# .swarmops/checks.toml names each by one argv. The workflows still run their own steps, the same
+# commands: a change to one is made to the other in the same commit.
+# The lint of the workflow files, the steps of ci.yml's `zizmor` job after its zizmor audit (which
+# stays an action there: a container action whose online audits use the job's token). actionlint
+# checks what zizmor does not: each workflow's keys, expressions, types and `needs:`. Its release
+# binary runs, checked against the SHA-256 the release lists; bump the version and the digest
+# together in a `ci:` commit, to a release at least 7 days old. The runners' own labels are
+# declared to it, `macos-local` being the release's macOS build's; its shellcheck and pyflakes
+# passes are off, so that what a host has installed does not change the verdict. Then a job added
+# to ci.yml must be one that `tests-pass` needs, or it would never block anything. Linux x86_64
+# alone, as the job runs; it downloads actionlint from github.com and needs curl, sha256sum, tar
+# and yq. .swarmops/checks.toml names it as the check `lint-workflows`.
+# actionlint over every workflow, and tests-pass needing every other job of ci.yml.
+lint-workflows:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version=1.7.12
+    sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    dir="$(mktemp -d)"
+    trap 'rm -rf "$dir"' EXIT
+    archive="$dir/actionlint.tar.gz"
+    base="https://github.com/rhysd/actionlint/releases/download/v$version"
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$archive" \
+        "$base/actionlint_${version}_linux_amd64.tar.gz"
+    echo "$sha256  $archive" | sha256sum -c -
+    tar -xzf "$archive" -C "$dir" actionlint
+    printf 'self-hosted-runner:\n  labels: [swarmops-local, macos-local]\n' > "$dir/config.yaml"
+    "$dir/actionlint" -config-file "$dir/config.yaml" -shellcheck= -pyflakes=
+    diff -u \
+        <(yq '.jobs | keys.[]' .github/workflows/ci.yml | sort) \
+        <({ yq '.jobs.tests-pass.needs.[]' .github/workflows/ci.yml; echo tests-pass; } | sort)
+
+# The site's build and checks, as site.yml's `site` job runs them, but the stamp check against the
+# commit built, which needs the event's commit and stays in the job. `web-install` needs the npm
+# registry. .swarmops/checks.toml names it as the check `site-check`.
+# The website installed, built and checked, with the stamp checker's and the site's own tests.
+site-check: web-install web-build web-check
+    node web/scripts/check-stamp.mjs --selftest
+    node --experimental-strip-types --test 'web/test/*.test.ts'
+
+# server.yml's `entrances` job: swarmops and so built, the test image built unless it is local,
+# then the tests through OpenSSH's sshd and nginx, offline. Needs docker on the host.
+# .swarmops/checks.toml names it as the check `server-entrances`.
+# Stock git and so through sshd and nginx in front of `swarmops serve`, in a container.
+server-entrances:
+    cargo build --locked -p swarmops-cli
+    python3 -I scripts/server-entrance.py build
+    python3 -I scripts/server-entrance.py run --bin-dir "${CARGO_TARGET_DIR:-target}/debug"
+
+# server.yml's `acceptance` job: swarmops and so built, the harness's offline checks, the
+# dependency packages and the previous release fetched unless cached, then the packages installed
+# and accepted on Debian 12, AlmaLinux 9 and the image, offline. Needs docker with BuildKit and the
+# containerd image store. .swarmops/checks.toml names it as the check `server-acceptance`.
+# This build's packages installed and accepted on empty Debian 12 and AlmaLinux 9, and the image.
+server-acceptance:
+    cargo build --locked -p swarmops-cli
+    python3 -I scripts/server-acceptance.py selftest
+    python3 -I scripts/server-acceptance.py fetch
+    python3 -I scripts/server-acceptance.py run --method deb --method rpm --method image \
+        --bin-dir "${CARGO_TARGET_DIR:-target}/debug"
