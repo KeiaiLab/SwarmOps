@@ -112,7 +112,8 @@ A change is done when `just check` passes on it. It runs, in order:
    again without either;
 6. `check list --dir .` with that build, the build under test: this repository's checks
    (`.swarmops/checks.toml`), which a file that does not parse fails, with its
-   `E_CHECK_FILE` line in the log;
+   `E_CHECK_FILE` line in the log (that the file is there with its six checks is pinned by the
+   test `check::this_repository_s_checks_are_its_recipes`, in step 3's run);
 7. `cargo doc` with `RUSTDOCFLAGS="-D warnings"` and `--document-private-items`, which documents
    private items too, so that the CLI's internal docs (its modules are private to its library)
    stay link-checked, run twice: as it stands, and with `--all-features`, which also renders and

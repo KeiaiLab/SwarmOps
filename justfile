@@ -91,7 +91,9 @@ default: check
 # rebuilds that crate alone, incrementally.
 # That build, the build under test, then lists this repository's checks in the directory form
 # (`check list --dir .`, M30): a .swarmops/checks.toml that does not parse fails the gate here,
-# its E_CHECK_FILE line in the log.
+# its E_CHECK_FILE line in the log. That the file is there and names the six checks is the
+# nextest step's to fail: `check::this_repository_s_checks_are_its_recipes` lists it in the same
+# form and pins the names, so a file deleted or moved back to workspaces.json fails that test.
 # Then scripts/test-install.py runs the one-line installer against a fake release on 127.0.0.1,
 # offline, and checks that web/public/install.sh is the same file; scripts/test-packages.py packs
 # fake release archives with scripts/packages.py and reads the .deb and .rpm back, offline.
