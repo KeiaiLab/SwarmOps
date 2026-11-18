@@ -43,10 +43,15 @@ collects the changes on `stable` that no release holds yet, until the next relea
   whether the caller `vouched` for it, and its `line` and `key` when known. Golden envelopes now
   pin 57 of the 57 error codes.
 - API types `CheckListReq`, `CheckListResp`, `CheckOut` and `CheckStage`, the request and
-  result of `check list` and a check's stage. `swarmops schema` prints them (202 types).
+  result of `check list` and a check's stage; `CheckRunReq`, `CheckRunResp`, `CheckRunOut`,
+  `CheckOutcome`, `CheckNotStarted` and `CheckSectionOut`, those of `check run`. `swarmops schema`
+  prints them (208 types).
 
 ### Changed
 
+- `E_CHECK_FAILED` also stands for a run of `check run` where a check did not pass, or that a
+  signal stopped: its `details.run` is the run's whole result. `ws land --check`'s and the
+  bootstrap's details are unchanged (`details.stage` keeps meaning `check` or `bootstrap`).
 - Docs: the roadmap gains a section, "Checks and delivery": a role beside the three topologies in
   which SwarmOps describes a tree's checks, plans what a change needs, runs the checks on the
   caller's host or on runners that ask for work, records each result against its tree, gates a

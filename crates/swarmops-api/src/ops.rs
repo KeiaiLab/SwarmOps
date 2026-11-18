@@ -2594,7 +2594,7 @@ impl GitExportResp {
     clippy::trivially_copy_pass_by_ref,
     reason = "serde's skip_serializing_if passes the field by reference"
 )]
-fn is_zero(count: &u64) -> bool {
+pub(crate) fn is_zero(count: &u64) -> bool {
     *count == 0
 }
 
