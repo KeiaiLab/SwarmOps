@@ -384,6 +384,15 @@ hooks make `claude --worktree` sessions and `isolation: worktree` subagents use 
 place of a git worktree ([Workspaces for worktree sessions and subagents](claude-code.md#workspaces-for-worktree-sessions-and-subagents),
 [Build and test a change](../operate/build-and-test.md)).
 
+### A tree's checks
+
+A repository names its checks in `.swarmops/checks.toml`, in its tree: one command each, run with
+no shell, with the directory it runs in and a timeout. `so check list` lists them from the store at
+a changeset, and `so check list --dir .` from a checkout, each with the digest of its definition;
+a key the file's version does not take is refused at its line. Nothing runs these checks yet:
+`so ws land --check` still runs the one command of `.swarmops/workspaces.json`
+([`check list`](../reference/commands/check-list.md)).
+
 ### Git at both ends
 
 `so git import` brings a git repository's history into a store, and `so git export` writes the
