@@ -71,6 +71,19 @@ pub fn run(
     timeout: Duration,
     log: &Utf8Path,
 ) -> Result<Run, OpError> {
+    run_started(argv, cwd, env, timeout, log, |_| {})
+}
+
+/// [`run`], telling `started` the command's pid once it runs: on Unix its process group's id
+/// too, which a queue runner records so that the next one can kill what it left running.
+pub(crate) fn run_started(
+    argv: &[String],
+    cwd: &Utf8Path,
+    env: &[(&str, &str)],
+    timeout: Duration,
+    log: &Utf8Path,
+    started: impl FnOnce(u32),
+) -> Result<Run, OpError> {
     // 1. A program to run, and the log made anew.
     let Some((program, rest)) = argv.split_first() else {
         return Err(OpError::new(ErrorCode::InvalidArg, "no command to run"));
@@ -88,6 +101,7 @@ pub fn run(
         .stderr(Stdio::piped());
     own_group(&mut command);
     let mut child = command.spawn().map_err(|e| not_started(program, &e))?;
+    started(child.id());
 
     // 3. Each stream read on a thread of its own, into the log and its tail.
     let shared = Arc::new(Output {

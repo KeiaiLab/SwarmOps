@@ -28,6 +28,7 @@ use swarmops_repo::queue::{
     self as repo_queue, EnqueueRequest, Entry, EntryId, EntryState, QueueFold, RemoveRequest,
     RoundRequest, VerdictRequest,
 };
+use swarmops_store::meta::lanes::LaneGroup;
 use swarmops_store::{LaneLock, Layout};
 use swarmops_ws::{LaneGuard, QueueDriver};
 
@@ -136,17 +137,27 @@ pub(crate) fn withdraw(
 
 /// A target's lane, held by a [`LocalOps`] runner until dropped.
 struct Lane {
-    _lock: LaneLock,
+    lock: LaneLock,
 }
 
-impl LaneGuard for Lane {}
+impl LaneGuard for Lane {
+    /// The lane's `.groups` file, one line per running check, with the slot it runs in.
+    /// A group whose leader is gone already is left out; a file that cannot be written leaves
+    /// the groups to their timeouts (best effort, as the trait says).
+    fn running(&self, groups: &[(u16, u32)]) {
+        let lines: Vec<LaneGroup> = (groups.iter())
+            .filter_map(|&(slot, pgid)| LaneGroup::of(pgid, slot))
+            .collect();
+        let _ = self.lock.write_groups(&lines);
+    }
+}
 
 impl QueueDriver for LocalOps {
     fn try_lane(&self, target: &str) -> Result<Option<Box<dyn LaneGuard>>, OpError> {
         self.repo.check_ref_name(target).map_err(error::op)?;
         let layout = Layout::new(self.store_path());
         let lane = LaneLock::try_acquire(&layout, target).map_err(store_error)?;
-        Ok(lane.map(|lane| Box::new(Lane { _lock: lane }) as Box<dyn LaneGuard>))
+        Ok(lane.map(|lane| Box::new(Lane { lock: lane }) as Box<dyn LaneGuard>))
     }
 
     fn lane_free(&self, target: &str) -> Result<bool, OpError> {

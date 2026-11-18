@@ -1323,3 +1323,117 @@ fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning(format) {
     store.assert_clean("after the listings that failed");
 }
 }
+
+/// How many entries the queue crash sweep lands.
+const QUEUED: usize = 3;
+
+/// How many crashed runners the queue sweep runs at once, each on a store of its own.
+const QUEUE_AT_ONCE: u64 = 8;
+
+/// The most calls the queue sweep crashes at before it gives up on the runner ever finishing.
+const QUEUE_MAX_CALLS: u64 = 5_000;
+
+/// A queue runner crashed at each of its filesystem calls, then resumed by the next queue
+/// command (the M22 core design §5, C8): three entries queued with a passing check, then
+/// `queue run` crashed at call k for k = 1, 2, … until a run finishes. The runner opens the
+/// store more than once, each with a call count of its own, so a dry run's count is no bound;
+/// the first k no count reaches is. After each crash the store verifies clean, then
+/// `queue run` (odd k) or `queue status` and the runner it starts (even k) lands every entry
+/// exactly once, and the store verifies clean again.
+#[test]
+fn queue_runner_crashing_at_every_step_lands_each_once() {
+    use crate::support::queue::{TARGET, checked, enqueued, landed_once};
+
+    // 1. The template: three entries no runner has taken.
+    let template = Store::init().with_env(&[(NOW_ENV, &NOW.to_string())]);
+    let base = checked(&template, "exit 0");
+    let entries = enqueued(&template, &base, QUEUED);
+    let run = ["queue", "run", TARGET, "--inflight", "1"];
+
+    // 2. The dry run: its calls counted, every entry landed.
+    let dry = Store::copy_of(&template);
+    let file = calls_file(&dry);
+    dry.run_as(&agent(2), &run, &[(FS_CALLS_ENV, file.to_str().unwrap())])
+        .ok();
+    landed_once(&dry, &base, &entries, "the dry run");
+    let counted = reported_calls(&file);
+    assert!(counted > 20, "a runner makes dozens of calls: {counted}");
+
+    // 3. Each call crashed, a batch at a time, until a run outlives its k.
+    let mut from = 1;
+    let finished = loop {
+        let ks = from..=from + QUEUE_AT_ONCE - 1;
+        let aborted = sweep(ks, |k| crash_queue_at(&template, &base, &entries, k));
+        if let Some(at) = aborted.iter().position(|&aborted| !aborted) {
+            let past = &aborted[at..];
+            assert!(
+                past.iter().all(|&aborted| !aborted),
+                "k from {from}: {aborted:?}"
+            );
+            break from + at as u64;
+        }
+        from += QUEUE_AT_ONCE;
+        assert!(
+            from < QUEUE_MAX_CALLS,
+            "the runner never finished under a crash hook"
+        );
+    };
+    assert!(
+        finished > counted,
+        "every counted call crashed: {finished} > {counted}"
+    );
+    println!("queue crash sweep: {} calls crashed", finished - 1);
+}
+
+/// Crashes `queue run` on a copy of `template` at call `k`, then resumes the queue and asserts
+/// that every entry of `entries` landed once on `base`, the store clean before and after.
+/// Whether the runner aborted: a run that finished made fewer than `k` calls on each store
+/// it opened.
+fn crash_queue_at(template: &Store, base: &str, entries: &[String], k: u64) -> bool {
+    use crate::support::queue::{TARGET, landed_once, runner_gone};
+
+    // 1. The crash.
+    let store = Store::copy_of(template);
+    let run = ["queue", "run", TARGET, "--inflight", "1"];
+    let crash_at = k.to_string();
+    let crashed = store.run_as(&agent(2), &run, &[(CRASH_AT_ENV, &crash_at)]);
+    let aborted = crashed.aborted();
+    if !aborted {
+        assert_eq!(crashed.exit(), 0, "k={k}: {crashed}");
+    }
+    store.assert_clean(&format!("k={k}: after the crash"));
+
+    // 2. Any queue command resumes: a runner, or a status that starts one.
+    if k % 2 == 1 {
+        let resumed = store.run_as(&agent(2), &run, &[]);
+        assert!(!resumed.aborted(), "k={k}: {resumed}");
+        resumed.ok();
+    } else {
+        resume_by_status(&store, entries.len(), k);
+    }
+    runner_gone(&store);
+
+    // 3. Each entry once, and a clean store.
+    landed_once(&store, base, entries, &format!("k={k}"));
+    store.assert_clean(&format!("k={k}: after the resume"));
+    aborted
+}
+
+/// Runs `queue status` until `count` entries landed: each run starts a runner when the queue
+/// has work and none runs.
+fn resume_by_status(store: &Store, count: usize, k: u64) {
+    use crate::support::queue::listed;
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let all = listed(store);
+        let landed = (all.iter())
+            .filter(|entry| entry["state"] == "landed")
+            .count();
+        if landed == count {
+            return;
+        }
+        assert!(Instant::now() < deadline, "k={k}: never resumed: {all:?}");
+        thread::sleep(Duration::from_millis(50));
+    }
+}
