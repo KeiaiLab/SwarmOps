@@ -65,7 +65,7 @@ swarmops-store   core
 swarmops-merge   core
 swarmops-repo    core, merge, store
 swarmops-git     core, repo, store
-swarmops-ops     api, core, git, repo, store
+swarmops-ops     api, core, git, repo, store, ws
 swarmops-ws      api, core, merge, store (FsOps only)
 swarmops-cli     api, ops, ws        (its tests also use core, repo, store and testkit)
 swarmops-testkit core, store, repo   (repo behind its default feature `repo`; a dev-dependency

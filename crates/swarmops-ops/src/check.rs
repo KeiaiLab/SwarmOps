@@ -18,6 +18,7 @@
 
 mod digest;
 mod file;
+pub mod log;
 
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read as _};

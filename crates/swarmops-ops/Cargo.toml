@@ -21,6 +21,7 @@ test-hooks = [
     "swarmops-repo/test-hooks",
     "swarmops-store/test-hooks",
     "swarmops-testkit/test-hooks",
+    "swarmops-ws/test-hooks",
 ]
 # The serve parsers' public wrappers the fuzz targets call (`serve::cgi::fuzz_parse_path`,
 # `serve::hook::fuzz_read_updates`); the parsers stay private. Off unless asked for.
@@ -33,6 +34,10 @@ swarmops-core = { path = "../swarmops-core", version = "0.12.0" }
 swarmops-git = { path = "../swarmops-git", version = "0.12.0" }
 swarmops-repo = { path = "../swarmops-repo", version = "0.12.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.12.0" }
+# `check run` (M31): each check run through the workspaces' process runner, and a workspace held
+# clean and locked for a run. The graph stays one-way: swarmops-ws depends on no crate that
+# depends on this one (its tests take this crate's store, as a dev-dependency).
+swarmops-ws = { path = "../swarmops-ws", version = "0.12.0" }
 base64.workspace = true
 # Native sync's land keys (`native::key`), hashed as `serve`'s are.
 blake3.workspace = true
