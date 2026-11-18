@@ -22,6 +22,7 @@
 mod digest;
 pub mod env;
 mod file;
+pub mod follow;
 pub mod log;
 pub mod run;
 

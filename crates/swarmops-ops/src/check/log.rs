@@ -474,7 +474,7 @@ pub fn parse(text: &str) -> Vec<Line> {
 }
 
 /// The line `n`, `line`, parsed.
-fn parse_line(n: u64, line: &str) -> Line {
+pub(crate) fn parse_line(n: u64, line: &str) -> Line {
     let other = || Line {
         n,
         at_ms: None,

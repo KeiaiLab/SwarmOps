@@ -573,7 +573,7 @@ fn prune(runs: &Utf8Path, current: &str) {
 }
 
 /// Whether the lock on `path` is held by a running run.
-fn held(path: &Utf8Path) -> bool {
+pub(crate) fn held(path: &Utf8Path) -> bool {
     let Ok(file) = OpenOptions::new().write(true).open(path) else {
         return false;
     };
