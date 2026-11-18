@@ -7,10 +7,12 @@
 //! answers it on stdout if it is a request, and reads the next: one at a time, in order. stdout
 //! carries nothing but answers. stderr gets a line for a message that has no answer although it
 //! is neither a request nor a notification (a response from the client), a line for the I/O
-//! error that stops the server, the panic hook's report of a bug, and the reason one of the
-//! store's four documented aborts (storage spec §2; README) writes before
-//! `std::process::abort` ends the process; nothing else. The server exits 0 when stdin ends, 1
-//! if reading stdin or writing stdout fails, and by SIGABRT on those aborts.
+//! error that stops the server, a line for a signal that stops it during a `check_run`, the panic
+//! hook's report of a bug, and the reason one of the store's four documented aborts (storage
+//! spec §2; README) writes before `std::process::abort` ends the process; nothing else. The
+//! server exits 0 when stdin ends, 1 if reading stdin or writing stdout fails, and by SIGABRT on
+//! those aborts. SIGINT, SIGTERM and SIGHUP end it as they end any process, but while a
+//! `check_run` runs: then they cancel the run, the call is answered, and the server exits 0.
 //!
 //! It serves the protocol's revisions each the way its clients open:
 //!
@@ -742,6 +744,9 @@ static TOOLS: [Spec; 35] = [
 /// `global` and `env` name. It prints no envelope: what it returns has nothing for stdout, and
 /// the exit code.
 pub fn serve(global: &Global, env: Env<'_>) -> Printed {
+    if let Err(why) = mcp_ws::catch_signals() {
+        log(&why);
+    }
     let mut server = Server::new(global, env);
     let ended = server.serve(io::stdin().lock(), io::stdout().lock());
     server.reap();
@@ -934,6 +939,12 @@ impl<'a> Server<'a> {
             }
             self.start_after();
             self.step_after();
+
+            // A signal during a check_run: that run is answered, and the server ends.
+            if mcp_ws::stopped() {
+                log("stopped: a signal came while check_run ran; its call was answered");
+                return Ok(());
+            }
         }
     }
 

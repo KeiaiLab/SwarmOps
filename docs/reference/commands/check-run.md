@@ -245,7 +245,8 @@ own; neither is a measured figure of any check.
 `CheckRunReq` (`workspace`, `stage`, `checks`): there is no directory form there, and no `--pass`,
 since the server's environment is not the agent's to hand out; a check gets the fixed list of the
 server's variables. A call holds the server until the run ends, each check bounded by its
-timeout, and no signal stops it. A check that did not pass makes the call's result an error,
+timeout. SIGINT, SIGTERM or SIGHUP to the server stops the run as it stops `check run`: the call is
+answered, and then the server exits. A check that did not pass makes the call's result an error,
 `E_CHECK_FAILED`, with every outcome in `details.run`.
 
 ## Return information

@@ -19,6 +19,9 @@
 //! tests ask for. Until the `swarmops_ws` bodies land, each tool answers `E_INVALID_ARG` naming
 //! the task that builds it.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+
 use camino::Utf8Path;
 use serde_json::{Value, json};
 use swarmops_api::{
@@ -276,16 +279,91 @@ pub(super) fn operate_ws<O: Operate>(tool: WsTool, how: O) -> O::Done {
         WsTool::Info => how.workspace(|store, root, who, _, req| {
             swarmops_ws::info(&ws_ctx(store, root, who), req)
         }),
-        // The server's own environment gives the fixed list; it passes no more, and no signal
-        // stops the run: each check is bounded by its timeout.
+        // The server's own environment gives the fixed list; it passes no more. While the run
+        // runs, SIGINT, SIGTERM and SIGHUP stop it instead of ending the server (`Busy`).
         WsTool::CheckRun => how.workspace(|store, root, who, _, req| {
             let lookup = |name: &str| std::env::var_os(name);
-            let opts = RunOpts::new(&lookup);
+            let mut opts = RunOpts::new(&lookup);
+            let busy = Busy::start();
+            opts.stop = busy.stop();
             swarmops_ops::check::run::run_ws(&ws_ctx(store, root, who), req, &opts)
         }),
         WsTool::CheckLog => how.workspace(|store, root, who, _, req| {
             swarmops_ops::check::follow::log_ws(&ws_ctx(store, root, who), req)
         }),
+    }
+}
+
+/// What SIGINT, SIGTERM and SIGHUP do to the server: while it is idle, what they do to any
+/// process (the server ends at once, as it did before it caught them); while a `check_run` runs,
+/// they only set `stop`, which kills the running check's group and ends the run, and the server
+/// exits once it has answered that call ([`stopped`]). So a check is never left running, unbounded,
+/// when the server is told to end.
+struct Signals {
+    /// Set by a signal that came while a run ran.
+    stop: Arc<AtomicBool>,
+    /// Whether no run runs: a signal then ends the process as its default does.
+    idle: Arc<AtomicBool>,
+}
+
+/// The server's signals, once [`catch_signals`] has registered them.
+static SIGNALS: OnceLock<Signals> = OnceLock::new();
+
+/// Registers what SIGINT, SIGTERM and SIGHUP do to the server ([`Signals`]), once. An error
+/// is the host's, said in a line; the server then serves as before, a `check_run` bounded by its
+/// checks' timeouts alone.
+pub(super) fn catch_signals() -> Result<(), String> {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    use signal_hook::flag;
+
+    if SIGNALS.get().is_some() {
+        return Ok(());
+    }
+    let signals = Signals {
+        stop: Arc::new(AtomicBool::new(false)),
+        idle: Arc::new(AtomicBool::new(true)),
+    };
+    for signal in [SIGINT, SIGTERM, SIGHUP] {
+        // The default first: while idle, the signal ends the process before the flag matters.
+        flag::register_conditional_default(signal, Arc::clone(&signals.idle))
+            .and_then(|_| flag::register(signal, Arc::clone(&signals.stop)))
+            .map_err(|e| format!("signal {signal} not caught: {e}"))?;
+    }
+    let _ = SIGNALS.set(signals);
+    Ok(())
+}
+
+/// Whether a signal came while a `check_run` ran: the server answers that call, then exits.
+pub(super) fn stopped() -> bool {
+    SIGNALS
+        .get()
+        .is_some_and(|signals| signals.stop.load(Ordering::SeqCst))
+}
+
+/// A `check_run` running: the server not idle until it is dropped.
+struct Busy(Option<&'static Signals>);
+
+impl Busy {
+    /// The server busy, if its signals are caught.
+    fn start() -> Busy {
+        let signals = SIGNALS.get();
+        if let Some(signals) = signals {
+            signals.idle.store(false, Ordering::SeqCst);
+        }
+        Busy(signals)
+    }
+
+    /// The flag a signal sets while the server is busy.
+    fn stop(&self) -> Option<&'static AtomicBool> {
+        self.0.map(|signals| &*signals.stop)
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        if let Some(signals) = self.0 {
+            signals.idle.store(true, Ordering::SeqCst);
+        }
     }
 }
 

@@ -32,7 +32,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   the store at the changeset the files stand for, holds the workspace's lock while the checks run
   and never writes the store; the directory form opens no store and says `vouched: true`.
   SIGINT, SIGTERM and SIGHUP kill the running check's process group and end the run. The MCP tool
-  has the workspace form only. `swarmops mcp` lists 49 tools.
+  has the workspace form only; the same signals to `swarmops mcp` while it runs end the run, and
+  the server exits once it has answered the call. `swarmops mcp` lists 49 tools.
 - The environment a check of `check run` gets: `SWARMOPS_CHECK_NAME`, `SWARMOPS_CHECK_STAGE`,
   `SWARMOPS_CHECK_TREE`, `SWARMOPS_CHECK_ATTEMPT`, `SWARMOPS_CHECK_RUN`, the paths
   `SWARMOPS_CHECK_REPORT`, `SWARMOPS_CHECK_OUTPUTS`, `SWARMOPS_CHECK_SUMMARY` and

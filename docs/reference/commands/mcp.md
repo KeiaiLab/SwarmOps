@@ -52,10 +52,14 @@ answer.
 
 - **stdout** carries nothing but answers.
 - **stderr** gets a line, starting `swarmops mcp:`, for a message that is a response from the
-  client, and for the I/O error that stops the server; a bug's panic report; and the reason before
-  one of the store's four documented aborts.
+  client, for the I/O error that stops the server, and for a signal that stops it during a
+  `check_run`; a bug's panic report; and the reason before one of the store's four documented
+  aborts.
 - **The exit code** is 0 when stdin ends, 1 when reading stdin or writing stdout fails. On one of
   the store's aborts the process ends by SIGABRT, and the client has to start it again.
+- **Signals.** SIGINT, SIGTERM and SIGHUP end the server as they end any process, except while a
+  `check_run` runs: then they kill the running check's process group and end the run (`cancelled`),
+  the call is answered, and the server exits 0 instead of reading the next message.
 
 ### Options
 

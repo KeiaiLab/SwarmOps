@@ -2642,14 +2642,19 @@ impl Server {
             .expect("write to the server");
     }
 
+    /// The server's pid.
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Writes `message` as one line.
-    fn send(&mut self, message: &Value) {
+    pub(crate) fn send(&mut self, message: &Value) {
         self.send_line(message.to_string().as_bytes());
     }
 
     /// The next line the server writes, within [`REPLY_TIMEOUT`]: it must be one JSON-RPC
     /// response, never a request or a notification of the server's own.
-    fn reply(&mut self) -> Value {
+    pub(crate) fn reply(&mut self) -> Value {
         let line = self
             .stdout
             .recv_timeout(REPLY_TIMEOUT)
@@ -2772,7 +2777,7 @@ impl Server {
 
     /// Closes the server's stdin and waits, within [`REPLY_TIMEOUT`], for it to exit: its exit
     /// status and what it wrote on stderr. It must write nothing more on stdout.
-    fn finish(mut self) -> (ExitStatus, String) {
+    pub(crate) fn finish(mut self) -> (ExitStatus, String) {
         drop(self.stdin.take());
         let deadline = Instant::now() + REPLY_TIMEOUT;
         let status = loop {

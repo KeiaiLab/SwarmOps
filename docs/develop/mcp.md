@@ -93,7 +93,8 @@ Claude Code asks once, in each project, to approve the servers a `.mcp.json` nam
 
 The transport is JSON-RPC 2.0 over stdio, one message per line. The server reads a message,
 answers it on stdout if it is a request, and reads the next: one at a time, in order. stdout
-carries nothing but answers. It exits 0 when stdin ends.
+carries nothing but answers. It exits 0 when stdin ends. A signal that would end it during a
+`check_run` cancels that run first: the call is answered, then the server exits.
 
 ### A session, start to finish
 

@@ -843,6 +843,72 @@ fn a_follower_ends_when_its_runner_is_gone() {
     assert!(group_gone(group));
 }
 
+/// SIGTERM to `swarmops mcp` while its `check_run` runs a sleeper: the sleeper's group is killed,
+/// the call is answered (`E_CHECK_FAILED`, the check `cancelled`), the run's record says it
+/// ended, and the server exits 0 with a line on stderr instead of reading on. Idle, the server
+/// still ends at once on SIGTERM, as any process does.
+#[test]
+fn a_signal_to_the_mcp_server_stops_its_check_run() {
+    // 1. A workspace whose one check writes its group, then sleeps.
+    let lab = Lab::new();
+    let marks = tempfile::tempdir().unwrap();
+    let group_file = marks.path().join("group");
+    let script = format!(
+        "echo $$ > {0}.tmp && mv {0}.tmp {0}; sleep 600",
+        group_file.display()
+    );
+    let checks = format!("version = 1\n[check.sleeper]\nargv = [\"sh\", \"-c\", {script:?}]\n");
+    lab.publish(".swarmops/checks.toml", &checks);
+    let ws = lab.workspace("w1");
+
+    // 2. The call, sent; SIGTERM once the check runs.
+    let mut server = crate::mcp::Server::start(&["--repo", lab.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let call = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                      "params": {"name": "check_run", "arguments": {"workspace": "w1"}}});
+    server.send(&call);
+    let group = pid_in(marks.path(), "group");
+    let pid = Pid::from_raw(i32::try_from(server.pid()).unwrap()).unwrap();
+    rustix::process::kill_process(pid, Signal::TERM).unwrap();
+
+    // 3. The answer, the group gone, the record ended, the server gone.
+    let reply = server.reply();
+    assert_eq!(reply["id"], 7, "{reply}");
+    let envelope = &reply["result"]["structuredContent"];
+    assert_eq!(envelope["error"]["code"], "E_CHECK_FAILED", "{reply}");
+    let run = &envelope["error"]["details"]["run"];
+    assert_eq!(run["cancelled"], true, "{run}");
+    assert_eq!(check(run, "sleeper")["outcome"], "cancelled", "{run}");
+    assert!(group_gone(group));
+    let record = ws
+        .join(".swarmws/check-runs")
+        .join(run["run"].as_str().unwrap())
+        .join("run.json");
+    let record: Value = serde_json::from_str(&fs::read_to_string(record).unwrap()).unwrap();
+    assert_eq!(record["state"], "ended");
+    let (status, stderr) = server.finish();
+    assert!(status.success(), "{status}: {stderr}");
+    assert!(
+        stderr.contains("a signal came while check_run ran"),
+        "{stderr}"
+    );
+
+    // 4. Idle, SIGTERM ends the server as it ends any process.
+    let mut idle = crate::mcp::Server::start(&["--repo", lab.path(), "--as", AGENT], &[]);
+    idle.initialize();
+    let pid = Pid::from_raw(i32::try_from(idle.pid()).unwrap()).unwrap();
+    rustix::process::kill_process(pid, Signal::TERM).unwrap();
+    // Its stdin is closed only once the signal has had time to end it: an end of stdin first
+    // would end it with exit 0.
+    std::thread::sleep(Duration::from_millis(500));
+    let (status, _) = idle.finish();
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&status),
+        Some(15),
+        "{status}"
+    );
+}
+
 /// `check log` of a workspace's run reads the newest run that ran the check, the `--tail` last
 /// lines, and the MCP tool `check_log` answers as the command does; another check, or a run
 /// that is not there, is refused.
