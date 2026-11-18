@@ -45,7 +45,7 @@ const POLL_MAX: Duration = Duration::from_millis(50);
 
 /// How long the output may stay open after the command ended (a process it left in its group
 /// still writing) before that group is killed, as it then is in any case.
-const GRACE: Duration = Duration::from_secs(1);
+pub const GRACE: Duration = Duration::from_secs(1);
 
 /// How long the readers get to finish once the command's group is killed.
 pub const DRAIN: Duration = Duration::from_secs(5);

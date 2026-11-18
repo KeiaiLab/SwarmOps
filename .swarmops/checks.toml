@@ -10,13 +10,16 @@
 version = 1
 
 # ci.yml, job `check`: the definition of done. Both before-land checks run one after the other in
-# that job's 30 minutes, after its checkout and tool steps: 24 + 5 minutes, one left for those
-# steps, so that a hung check ends with its own timeout, its log and its tails, not with the job's
-# kill. Not measured: if the gate outgrows 24 minutes, this moves, or the job's limit does. The
-# test `check::this_repository_s_gate_fits_its_job` holds the sum to the job.
+# that job's 30 minutes, after its checkout and tool steps: 23 min 40 s + 5 min, plus the runner's
+# grace and drain after each check's kill (6 s each), leaves a minute for those steps, so that a
+# hung check ends with its own timeout, its log and its tails, not with the job's kill. Not
+# measured: neither the gate's time nor the steps' is taken from a run yet; both are to be read
+# from the runners' recent runs before ci.yml switches to `check run`. If the gate outgrows this,
+# it moves, or the job's limit does. The test `check::this_repository_s_gate_fits_its_job` holds
+# the timeouts, the grace and drain and the minute to the job.
 [check.check]
 argv = ["just", "check"]
-timeout_s = 1440
+timeout_s = 1420
 stages = ["before-land"]
 
 # ci.yml, job `check`, after it: bench/compare still compiles against the store's API.

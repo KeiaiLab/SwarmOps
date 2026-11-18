@@ -309,8 +309,9 @@ fn this_repository_s_checks_are_its_recipes() {
 }
 
 /// The gate's checks, the `before-land` ones, run one after the other inside ci.yml's `check` job:
-/// their timeouts together leave the job a minute of its `timeout-minutes` for its checkout and
-/// tool steps, so that a hung check ends with its own timeout, not with the job's kill.
+/// their timeouts, with the runner's grace and drain after each one's kill, leave the job
+/// [`SETUP_S`] of its `timeout-minutes` for its checkout and tool steps, so that a hung check
+/// ends with its own timeout, not with the job's kill.
 #[test]
 fn this_repository_s_gate_fits_its_job() {
     // 1. The job's limit.
@@ -345,13 +346,23 @@ fn this_repository_s_gate_fits_its_job() {
             )
         })
         .collect();
-    assert_eq!(gate, [("check", 1440), ("check-compare", 300)]);
-    let total: u64 = gate.iter().map(|(_, s)| s).sum();
+    assert_eq!(gate, [("check", 1420), ("check-compare", 300)]);
+
+    // 3. Each check's timeout, and past it the kill's grace and drain, plus the steps' allowance.
+    let after_kill = (swarmops_ws::run::GRACE + swarmops_ws::run::DRAIN).as_secs();
+    let total: u64 = gate.iter().map(|(_, s)| s + after_kill).sum();
     assert!(
-        total + 60 <= job_s,
-        "the gate's checks take up to {total} s, the job {job_s} s, less 60 for its steps"
+        total + SETUP_S <= job_s,
+        "the gate's checks take up to {total} s with grace and drain, the job {job_s} s, less \
+         {SETUP_S} for its steps"
     );
 }
+
+/// What the `check` job's steps before the gate (checkout, the toolchain, install-action, the
+/// cache, and after the switch the pinned build's download) are allowed: a minute. Stated, not
+/// measured: it is to be read from the runners' recent runs before ci.yml switches to
+/// `check run`, and this and the check's timeout set from it.
+const SETUP_S: u64 = 60;
 
 /// The four recipes that stand for a workflow job of several steps run the job's own commands, so
 /// that `.swarmops/checks.toml` names what GitHub runs: a change to one side alone fails here.
