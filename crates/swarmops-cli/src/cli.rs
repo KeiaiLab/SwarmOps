@@ -1537,13 +1537,14 @@ pub enum CheckCommand {
     ///
     /// A tree names its checks in .swarmops/checks.toml (version 1): one [check.NAME] table a
     /// check, each one command (argv) run with no shell, with a directory (dir) and a timeout
-    /// (timeout_s); any other key is refused at its line. This reads .swarmops/checks.toml at REV (default main), resolved once; a tree without it lists
-    /// check.argv of .swarmops/workspaces.json as the one check default, and a tree with neither
-    /// lists no check. Each check comes with its argv, its directory, its timeout and the digest
-    /// of its definition, sorted by name. --dir DIR reads the files below DIR on this host
-    /// instead, and opens no store: the answer says vouched, since only the caller stands behind
-    /// them. A file that does not read is E_CHECK_FILE, naming its line and key. Reads only:
-    /// no identity, no lock.
+    /// (timeout_s); any other key is refused at its line. This reads .swarmops/checks.toml at
+    /// REV (default main), resolved once; a tree without it lists check.argv of
+    /// .swarmops/workspaces.json as the one check default, and a tree with neither lists no
+    /// check. Each check comes with its argv, its directory, its timeout and the digest of its
+    /// definition, sorted by name. --dir DIR reads the files below DIR on this host instead, and
+    /// opens no store: the answer says vouched, since only the caller stands behind them. A file
+    /// that does not read is E_CHECK_FILE, naming its line and key. Reads only: no identity, no
+    /// lock.
     List {
         /// The changeset whose tree's checks to list.
         #[arg(value_name = "REV")]

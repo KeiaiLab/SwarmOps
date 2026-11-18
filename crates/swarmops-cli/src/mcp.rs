@@ -65,10 +65,12 @@
 //! # The tools
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
-//! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `merge_base`, `op_log`,
-//! `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `ref_txn`, `undo`, `commit`, `land`, `revert`, `land_check`, `land_group`, `check_list` (M30: a tree's checks, through the store's own reads), `blob_put`, `blob_has`,
-//! `verify` and the maintenance's `gc`, `repair` and `upgrade` (M6), in `tools/list`'s order; then the git remotes' client-side operations (M13), which
-//! no [`StoreOps`] has: `remote_list`, `fetch`, `push`, `sync` and `sync_status`, run on the
+//! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`,
+//! `merge_base`, `op_log`, `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `ref_txn`, `undo`,
+//! `commit`, `land`, `revert`, `land_check`, `land_group`, `check_list` (M30: a tree's checks,
+//! through the store's own reads), `blob_put`, `blob_has`, `verify` and the maintenance's `gc`,
+//! `repair` and `upgrade` (M6), in `tools/list`'s order; then the git remotes' client-side
+//! operations (M13), which no [`StoreOps`] has: `remote_list`, `fetch`, `push`, `sync` and `sync_status`, run on the
 //! store's own operations ([`operate_local`]) and taking a remote by its name only, never a URL
 //! or a path. `clone` and `remote add|remove` have no tool, so that an agent cannot point the
 //! store at a URL of its choosing. A tool's `inputSchema` is its request type's JSON Schema, as
