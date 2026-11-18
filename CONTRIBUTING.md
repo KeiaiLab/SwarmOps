@@ -110,31 +110,34 @@ A change is done when `just check` passes on it. It runs, in order:
    channel that is none and with a commit and the channel together, each of which must fail
    with its compile-time guard's message; last, `swarmops` and `so` in `target/debug` are linked
    again without either;
-6. `cargo doc` with `RUSTDOCFLAGS="-D warnings"` and `--document-private-items`, which documents
+6. `check list --dir .` with that build, the build under test: this repository's checks
+   (`.swarmops/checks.toml`), which a file that does not parse fails, with its
+   `E_CHECK_FILE` line in the log;
+7. `cargo doc` with `RUSTDOCFLAGS="-D warnings"` and `--document-private-items`, which documents
    private items too, so that the CLI's internal docs (its modules are private to its library)
    stay link-checked, run twice: as it stands, and with `--all-features`, which also renders and
    link-checks the code behind `test-hooks` (the order checker and the fault doubles);
-7. `cargo deny check`, advisories, licenses, bans and sources, with `deny.toml`, over both
+8. `cargo deny check`, advisories, licenses, bans and sources, with `deny.toml`, over both
    lockfiles the steps above build: the workspace's and the fuzz crate's, whose one license
    exception is in `fuzz/deny.exceptions.toml`;
-8. `scripts/third-party-licenses.py --check`: `THIRD-PARTY-LICENSES`, the notices that the
+9. `scripts/third-party-licenses.py --check`: `THIRD-PARTY-LICENSES`, the notices that the
    release archives carry for the third-party crates compiled into `swarmops` and `so`, still
    matches `Cargo.lock`, the licenses `deny.toml` allows and the crates' own license files. After
    a dependency change, run `python3 -I scripts/third-party-licenses.py` and commit the file it
    writes with `Cargo.lock`.
-9. `scripts/test-install.py`: the one-line installer, `scripts/install.sh`, run under sh (and
-   dash and busybox sh where installed) against a fake release on 127.0.0.1, with no network;
-   and `web/public/install.sh`, the copy get.swarmops.cc serves, still the same file. After changing the
-   installer, copy it to `web/public/install.sh`.
-10. `scripts/test-packages.py`: the `.deb` and `.rpm` packer, `scripts/packages.py`, run on fake
+10. `scripts/test-install.py`: the one-line installer, `scripts/install.sh`, run under sh (and
+    dash and busybox sh where installed) against a fake release on 127.0.0.1, with no network;
+    and `web/public/install.sh`, the copy get.swarmops.cc serves, still the same file. After changing the
+    installer, copy it to `web/public/install.sh`.
+11. `scripts/test-packages.py`: the `.deb` and `.rpm` packer, `scripts/packages.py`, run on fake
     release archives and its packages read back by readers of the test's own, with no network
     and without dpkg or rpm.
-11. `scripts/check-docs.py`, its `selftest` first: the public Markdown's relative links and
+12. `scripts/check-docs.py`, its `selftest` first: the public Markdown's relative links and
     anchors resolve as GitHub reads them, and it carries no host path or tool attribution;
-12. `scripts/golden-frozen.py selftest`: the release cut's golden check (`just golden-frozen`,
+13. `scripts/golden-frozen.py selftest`: the release cut's golden check (`just golden-frozen`,
     which the release workflow runs on a pushed tag) still catches a changed or deleted golden
     file of the previous release and a tag that does not resolve.
-13. `scripts/release-marks.py selftest`: `just release-marks`, which says after a release which
+14. `scripts/release-marks.py selftest`: `just release-marks`, which says after a release which
     builds may install it automatically ([RELEASE.md](RELEASE.md), step 9), still gives each
     crafted changelog the marks its rules say, and uploads and withdraws them as it should,
     against a stand-in for `gh` and with no network.

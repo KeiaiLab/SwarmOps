@@ -89,6 +89,9 @@ default: check
 # test, then a malformed commit, a channel that is none and the two together, whose builds must
 # fail; last it links target/debug's `swarmops` and `so` again without either. Each value
 # rebuilds that crate alone, incrementally.
+# That build, the build under test, then lists this repository's checks in the directory form
+# (`check list --dir .`, M30): a .swarmops/checks.toml that does not parse fails the gate here,
+# its E_CHECK_FILE line in the log.
 # Then scripts/test-install.py runs the one-line installer against a fake release on 127.0.0.1,
 # offline, and checks that web/public/install.sh is the same file; scripts/test-packages.py packs
 # fake release archives with scripts/packages.py and reads the .deb and .rpm back, offline.
@@ -113,6 +116,7 @@ check:
     cargo nextest run --locked --profile default --release -p swarmops-cli --test test_hooks \
         --no-tests=fail
     python3 -I scripts/check-stamped.py
+    cargo run --locked --quiet -p swarmops-cli --bin swarmops --all-features -- --human check list --dir .
     python3 -I scripts/test-doc-clean.py
     (target="$(cargo metadata --locked --format-version 1 --no-deps | python3 -I -c 'import json, os, sys; t = json.load(sys.stdin)["target_directory"]; n = os.path.normpath(t); print(n if os.path.isabs(t) and n.strip("/") else "")')"; case "$target" in /?*) ;; *) echo "check: cargo metadata gave no absolute target directory below /; no doc run" >&2; exit 1 ;; esac; \
         doc="$(mktemp -d "$target/doc-run.XXXXXX")" || exit 1; trap 'rm -rf "$doc"' EXIT; \
