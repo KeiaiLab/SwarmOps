@@ -336,6 +336,68 @@ fn a_check_s_log_holds_its_sections_in_order() {
     }
 }
 
+/// A log that cannot be written whole (here past a file-size limit, as on a full disk) fails its
+/// check, which still ran to its end, its exit code and tails kept and the reason in `message`;
+/// the checks before and after it keep their outcomes, and the run's record says it ended.
+#[test]
+fn a_log_that_cannot_be_written_fails_its_check_and_the_run_goes_on() {
+    // 1. Three checks; the middle one prints about 200 KB, past a limit of 64 KiB a file.
+    let tree = Tree::new(
+        "[check.a-ok]\nargv = [\"echo\", \"a\"]\n\
+         [check.b-big]\nargv = [\"sh\", \"-c\", \"i=0; while [ $i -lt 4000 ]; do \
+         echo line-of-the-big-check-$i-padded-to-fifty-bytes; i=$((i+1)); done; echo done >&2\"]\n\
+         [check.c-after]\nargv = [\"echo\", \"c\"]\n",
+    );
+    let runs = tree.runs();
+    let dir = tree.dir();
+    let line = ["check", "run", "--dir", dir.to_str().unwrap()];
+    let base = support::swarmops(
+        &line,
+        &[("SWARMOPS_CHECK_RUNS_DIR", runs.to_str().unwrap())],
+    );
+
+    // 2. The binary under a limit of 128 blocks of 512 bytes a file, SIGXFSZ ignored, so that a
+    //    write past it fails with EFBIG.
+    let mut command = std::process::Command::new("sh");
+    command
+        .arg("-c")
+        .arg("trap '' XFSZ; ulimit -f 128 && exec \"$0\" \"$@\"")
+        .arg(base.get_program())
+        .args(base.get_args())
+        .current_dir(tree.tmp());
+    for (name, value) in base.get_envs() {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    let output = command.output().unwrap();
+    let out = Out {
+        exit: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8(output.stdout).unwrap(),
+        stderr: String::from_utf8(output.stderr).unwrap(),
+    };
+
+    // 3. b-big failed with its log's reason, its exit code and tails kept; the others passed.
+    let run = failed_run(&out);
+    assert_eq!(check(&run, "a-ok")["outcome"], "passed", "{run}");
+    assert_eq!(check(&run, "c-after")["outcome"], "passed", "{run}");
+    let big = check(&run, "b-big");
+    assert_eq!(big["outcome"], "failed", "{big}");
+    assert_eq!(big["exit_code"], 0, "{big}");
+    assert_eq!(big["stderr_tail"], "done\n", "{big}");
+    let message = big["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("its log could not be written: "),
+        "{message}"
+    );
+    assert_eq!(run["failed"], json!(["b-big"]));
+    let record = Path::new(run["dir"].as_str().unwrap()).join("run.json");
+    let record: Value = serde_json::from_str(&fs::read_to_string(record).unwrap()).unwrap();
+    assert_eq!(record["state"], "ended");
+    assert_eq!(record["result"]["checks"][1]["outcome"], "failed");
+}
+
 /// A program that does not exist does not start: `not_started`, `program`, its name in the
 /// message.
 #[test]

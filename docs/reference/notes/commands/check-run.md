@@ -43,9 +43,9 @@ fails does not stop the run: every selected check runs. Outcomes:
 | Outcome | When |
 | --- | --- |
 | `passed` | It exited 0. |
-| `failed` | It exited with another code (`exit_code`), or a signal the runner did not send ended it (`signal`). |
+| `failed` | It exited with another code (`exit_code`), or a signal the runner did not send ended it (`signal`), or its log could not be written whole (a full disk, say): then `message` says why, whatever it exited with. |
 | `timed_out` | It ran past `timeout_s`; its process group was killed. |
-| `not_started` | Its `dir` is not a directory here (`not_started: dir`, as a sparse workspace may lack it), or its program did not start (`not_started: program`, with the host's `message`). |
+| `not_started` | Its `dir` is not a directory here (`not_started: dir`, as a sparse workspace may lack it), its program did not start (`not_started: program`, with the host's `message`), or its log or its own directory could not be made (`not_started: log`, with the host's `message`). |
 | `cancelled` | A signal stopped the run while it ran; its process group was killed. |
 | `not_run` | The run was stopped before it started: no process, no log. |
 
@@ -96,7 +96,9 @@ A run's `dir` holds `run.json` (its `state`, `running` then `ended`, and the `re
 Each log holds both streams, a time on every line, and the sections a check opens; `check log`
 reads one, and its page has the format. The newest 20 runs of a directory or a workspace are
 kept, and a run whose lock is held is never removed. Nothing there is synced: the logs and
-records are diagnostics, which nothing decides from.
+records are diagnostics, which nothing decides from. A log that cannot be written is its check's
+outcome, and the run goes on; only a record that cannot be written makes the run `E_IO`, with the
+outcomes so far in `details.run` and a hint naming the run's directory.
 
 `duration_ms` is the run's, from its first check's start to its last's end, and each check's its
 own; neither is a measured figure of any check.

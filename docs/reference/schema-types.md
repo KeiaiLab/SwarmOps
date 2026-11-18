@@ -615,6 +615,7 @@ Kind: enumeration. `swarmops schema CheckNotStarted` prints its JSON Schema.
 | --- | --- |
 | `"dir"` | Its directory is not a directory of the tree on disk (a sparse workspace may lack it). |
 | `"program"` | Its program could not be started: not found, or not executable. |
+| `"log"` | Its log, or its own directory in the run's, could not be made or written (a full disk, say): nothing was run without a log. |
 
 ## CheckOut
 
@@ -660,7 +661,7 @@ Kind: object. `swarmops schema CheckRunOut` prints its JSON Schema.
 | `duration_ms` | `integer` (uint64) | yes | Its milliseconds, from its start to the end of its output; 0 for `not_started` and `not_run`. |
 | `exit_code` | `integer` (int32) or `null` | no | Its exit code, when it exited. |
 | `log` | `string` or `null` | no | Its log's path on the host it ran on, absolute. Omitted for `not_run`, which has none. |
-| `message` | `string` or `null` | no | The host's words for why it did not start, one line, for `not_started`. |
+| `message` | `string` or `null` | no | The host's words for why it did not start, one line, for `not_started`; or, for a check that ran and is `failed` because its log could not be written, why not. |
 | `name` | `string` | yes | Its name. |
 | `not_started` | [`CheckNotStarted`](#checknotstarted) or `null` | no | Why it did not start, for `not_started`. |
 | `outcome` | [`CheckOutcome`](#checkoutcome) | yes | How it ended; only `passed` passes. |

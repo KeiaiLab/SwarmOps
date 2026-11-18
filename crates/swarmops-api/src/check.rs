@@ -358,7 +358,8 @@ pub struct CheckRunOut {
     /// Why it did not start, for `not_started`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_started: Option<CheckNotStarted>,
-    /// The host's words for why it did not start, one line, for `not_started`.
+    /// The host's words for why it did not start, one line, for `not_started`; or, for a check
+    /// that ran and is `failed` because its log could not be written, why not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// Its log's path on the host it ran on, absolute. Omitted for `not_run`, which has none.
@@ -448,6 +449,9 @@ pub enum CheckNotStarted {
     Dir,
     /// Its program could not be started: not found, or not executable.
     Program,
+    /// Its log, or its own directory in the run's, could not be made or written (a full disk,
+    /// say): nothing was run without a log.
+    Log,
 }
 
 /// A section a check opened with a marker line: from its marker to the next one, or to the end

@@ -313,7 +313,7 @@ fn run_checks(
     };
     resp.inherited_all = legacy;
     resp.inherited_env = inherited.iter().map(|(name, _)| name.clone()).collect();
-    write_record(&dir, "running", &resp)?;
+    write_record(&dir, "running", &resp).map_err(|e| record_failed(e, &resp))?;
     prune(&subject.runs, &id);
 
     // 3. Each check in turn, until the run is stopped. It was stopped only if that cancelled a
@@ -323,7 +323,7 @@ fn run_checks(
         if opts.stopped() {
             break;
         }
-        let out = run_one(subject, &id, &dir, check, &inherited, legacy, opts)?;
+        let out = run_one(subject, &id, &dir, check, &inherited, legacy, opts);
         let cancelled = out.outcome == CheckOutcome::Cancelled;
         resp.checks[at] = out;
         if cancelled {
@@ -339,9 +339,10 @@ fn run_checks(
         .collect();
 
     // 4. The record of the end, the lock let go; the answer.
-    write_record(&dir, "ended", &resp)?;
+    let recorded = write_record(&dir, "ended", &resp);
     let _ = lock.unlock();
     drop(lock);
+    recorded.map_err(|e| record_failed(e, &resp))?;
     if resp.failed.is_empty() {
         return Ok(resp);
     }
@@ -350,6 +351,10 @@ fn run_checks(
 
 /// Runs `check` of run `id`, its log and own directory in the run's `dir`, with what it
 /// `inherited` of the caller's environment (or the whole of it, for the `legacy` check).
+///
+/// A log that cannot be written is the check's outcome, never the run's error: before the
+/// program starts, `not_started: log`; once it ran, `failed`, its exit code and tails kept, the
+/// reason in `message`. The run goes on with the next check, as after any outcome.
 fn run_one(
     subject: &Subject,
     id: &str,
@@ -358,7 +363,7 @@ fn run_one(
     inherited: &[(String, OsString)],
     legacy: bool,
     opts: &RunOpts<'_>,
-) -> Result<CheckRunOut, OpError> {
+) -> CheckRunOut {
     // 1. Its log, started; its own directory and its environment.
     let mut out = CheckRunOut::new(
         &check.name,
@@ -368,15 +373,15 @@ fn run_one(
     );
     let log_path = dir.join("logs").join(format!("{}.log", check.name));
     out.log = Some(log_path.to_string());
-    let mut start = Start::new(&check.name, id, subject.stage.as_str());
-    start.tree.clone_from(&subject.tree);
-    start.argv.clone_from(&check.argv);
-    start.dir.clone_from(&check.dir);
-    start.timeout_s = check.timeout_s;
-    let log_file = File::create(&log_path).map_err(|e| io_failed(&log_path, &e))?;
-    let log = LineLog::start(log_file, &start, now_ms()).map_err(|e| io_failed(&log_path, &e))?;
     let own = dir.join("checks").join(&check.name);
-    make_dir(&own.join("artifacts"))?;
+    let log = match start_log(subject, id, check, &log_path, &own) {
+        Ok(log) => log,
+        Err((path, e)) => {
+            out.not_started = Some(CheckNotStarted::Log);
+            out.message = Some(unwritten(&path, &e));
+            return out;
+        }
+    };
     let pinned = Pinned::new(
         &check.name,
         subject.stage.as_str(),
@@ -398,8 +403,8 @@ fn run_one(
             "the check's directory {} is not a directory here",
             check.dir
         ));
-        finish_log(log, End::new(CheckOutcome::NotStarted), &log_path)?;
-        return Ok(out);
+        let _ = log.finish(End::new(CheckOutcome::NotStarted));
+        return out;
     }
 
     // 3. The process runner, its output into the log.
@@ -412,26 +417,27 @@ fn run_one(
         Env::Only(&only)
     };
     spec.stop = opts.stop;
-    let slot = Arc::new(Mutex::new(Slot(Some(log))));
-    let output: Arc<Mutex<dyn Output>> = slot.clone();
-    let ran = run::run_with(&check.argv, &cwd, &spec, &output, &log_path);
-    let log = (slot.lock().unwrap_or_else(PoisonError::into_inner).0.take()).ok_or_else(|| {
-        error::error(
-            ErrorCode::Internal,
-            "a check's log went missing during its run",
-        )
-    })?;
+    let (ran, log, failed) = Slot::run(&check.argv, &cwd, &spec, log, &log_path);
 
-    // 4. Its outcome, and the log's end.
+    // 4. Its outcome, and the log's end. The output is the slot's, whose writes never fail:
+    //    the runner refuses a program that did not start, or fails waiting for one (`failed`).
     let ran = match ran {
         Ok(ran) => ran,
-        Err(e) if e.code == ErrorCode::InvalidArg.as_str() && e.details.contains_key("program") => {
-            out.not_started = Some(CheckNotStarted::Program);
+        Err(e) => {
+            let program = e.details.contains_key("program");
+            let outcome = if program {
+                out.not_started = Some(CheckNotStarted::Program);
+                CheckOutcome::NotStarted
+            } else {
+                out.outcome = CheckOutcome::Failed;
+                CheckOutcome::Failed
+            };
             out.message = Some(error::one_line(e.message));
-            finish_log(log, End::new(CheckOutcome::NotStarted), &log_path)?;
-            return Ok(out);
+            if let Some(log) = log {
+                let _ = log.finish(End::new(outcome));
+            }
+            return out;
         }
-        Err(e) => return Err(e),
     };
     let outcome = match (ran.stopped, ran.timed_out, ran.exit_code) {
         (true, _, _) => CheckOutcome::Cancelled,
@@ -442,41 +448,129 @@ fn run_one(
     let mut end = End::new(outcome);
     end.exit_code = ran.exit_code;
     end.signal = ran.signal;
-    let summary = finish_log(log, end, &log_path)?;
     out.outcome = outcome;
     out.exit_code = ran.exit_code;
     out.signal = ran.signal;
-    out.duration_ms = summary.duration_ms;
-    out.sections = summary.sections;
-    out.dropped_bytes = summary.dropped_bytes;
-    if outcome != CheckOutcome::Passed {
+    match finish(log, failed, end) {
+        Ok(summary) => {
+            out.duration_ms = summary.duration_ms;
+            out.sections = summary.sections;
+            out.dropped_bytes = summary.dropped_bytes;
+        }
+        // 5. A log that could not be written whole: the check fails, whatever it did.
+        Err(e) => {
+            out.outcome = CheckOutcome::Failed;
+            out.message = Some(unwritten(&log_path, &e));
+        }
+    }
+    if out.outcome != CheckOutcome::Passed {
         out.stdout_tail = Some(ran.stdout_tail);
         out.stderr_tail = Some(ran.stderr_tail);
     }
-    Ok(out)
+    out
 }
 
-/// The log a check's run writes into, which the caller takes back once the run is over.
-struct Slot(Option<LineLog<File>>);
+/// The log at `path` of `check` of run `id` on `subject`, its `start` line written, and the
+/// check's own directory `own` with its `artifacts`; else the path that could not be written,
+/// and why.
+fn start_log(
+    subject: &Subject,
+    id: &str,
+    check: &CheckOut,
+    path: &Utf8Path,
+    own: &Utf8Path,
+) -> Result<LineLog<File>, (Utf8PathBuf, io::Error)> {
+    let mut start = Start::new(&check.name, id, subject.stage.as_str());
+    start.tree.clone_from(&subject.tree);
+    start.argv.clone_from(&check.argv);
+    start.dir.clone_from(&check.dir);
+    start.timeout_s = check.timeout_s;
+    let log = (File::create(path))
+        .and_then(|file| LineLog::start(file, &start, now_ms()))
+        .map_err(|e| (path.to_owned(), e))?;
+    let artifacts = own.join("artifacts");
+    std::fs::create_dir_all(&artifacts).map_err(|e| (artifacts, e))?;
+    Ok(log)
+}
 
-impl Output for Slot {
-    fn write(&mut self, stream: Stream, bytes: &[u8]) -> io::Result<()> {
-        match &mut self.0 {
-            Some(log) => log.write(stream, bytes),
-            None => Ok(()),
-        }
+/// Ends `log` as `end`, unless a write to it `failed` during the run: what it says, or the first
+/// write that failed.
+fn finish(
+    log: Option<LineLog<File>>,
+    failed: Option<io::Error>,
+    end: End,
+) -> io::Result<super::log::Summary> {
+    match (log, failed) {
+        (_, Some(e)) => Err(e),
+        (Some(log), None) => log.finish(end).map(|(_, summary)| summary),
+        (None, None) => Err(io::Error::other("the log went missing during the run")),
     }
 }
 
-/// Ends `log` as `end`: what it says, or `E_IO` naming `path`.
-fn finish_log(
-    log: LineLog<File>,
-    end: End,
-    path: &Utf8Path,
-) -> Result<super::log::Summary, OpError> {
-    log.finish(end)
-        .map(|(_, summary)| summary)
-        .map_err(|e| io_failed(path, &e))
+/// The log a check's run writes into, which the caller takes back once the run is over, and the
+/// first write to it that failed. A write never fails to the runner: once one has, the rest of
+/// the output goes only to the tails, and the check keeps running to its end.
+struct Slot {
+    /// The log; none once taken back.
+    log: Option<LineLog<File>>,
+    /// The first write that failed.
+    failed: Option<io::Error>,
+}
+
+impl Slot {
+    /// Runs `argv` in `cwd` as `spec` says, its output into `log` at `path`: what the runner
+    /// says, the log back, and the first write to it that failed.
+    fn run(
+        argv: &[String],
+        cwd: &Utf8Path,
+        spec: &Spec<'_>,
+        log: LineLog<File>,
+        path: &Utf8Path,
+    ) -> (
+        Result<run::Run, OpError>,
+        Option<LineLog<File>>,
+        Option<io::Error>,
+    ) {
+        let slot = Arc::new(Mutex::new(Slot {
+            log: Some(log),
+            failed: None,
+        }));
+        let output: Arc<Mutex<dyn Output>> = slot.clone();
+        let ran = run::run_with(argv, cwd, spec, &output, path);
+        let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        (ran, slot.log.take(), slot.failed.take())
+    }
+}
+
+impl Output for Slot {
+    fn write(&mut self, stream: Stream, bytes: &[u8]) -> io::Result<()> {
+        if self.failed.is_some() {
+            return Ok(());
+        }
+        if let Some(log) = &mut self.log
+            && let Err(e) = log.write(stream, bytes)
+        {
+            self.failed = Some(e);
+        }
+        Ok(())
+    }
+}
+
+/// Why a check's log at `path` could not be written: `e`, in one line.
+fn unwritten(path: &Utf8Path, e: &io::Error) -> String {
+    error::one_line(format!("its log could not be written: {path}: {e}"))
+}
+
+/// `e`, an `E_IO` writing the record of the run `resp`, with the run in `details.run` and a hint:
+/// the checks' outcomes are not lost with the record.
+fn record_failed(mut e: OpError, resp: &CheckRunResp) -> OpError {
+    let run = serde_json::to_value(resp).unwrap_or(Value::Null);
+    e.details.insert("run".to_owned(), run);
+    e.with_hint(format!(
+        "the run's directory {} could not be written: make room there (or set \
+         {CHECK_RUNS_DIR_ENV} elsewhere, for --dir), then run the checks again",
+        resp.dir
+    ))
 }
 
 /// `E_CHECK_FAILED` for the run `resp`: one line naming each check that did not pass, its
@@ -529,6 +623,9 @@ fn failed(resp: &CheckRunResp, at: &str) -> OpError {
 fn why(check: &CheckRunOut) -> String {
     let name = &check.name;
     match (check.outcome, check.exit_code, check.signal) {
+        (CheckOutcome::Failed, _, _) if let Some(message) = &check.message => {
+            format!("{name} failed ({message})")
+        }
         (CheckOutcome::Failed, Some(code), _) => format!("{name} failed (exit {code})"),
         (CheckOutcome::Failed, _, Some(signal)) => format!("{name} failed (signal {signal})"),
         (CheckOutcome::TimedOut, _, _) => format!("{name} timed out ({} s)", check.timeout_s),

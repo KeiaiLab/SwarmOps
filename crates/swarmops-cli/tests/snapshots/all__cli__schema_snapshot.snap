@@ -1872,6 +1872,11 @@ expression: s.redact(&all)
           "const": "program",
           "description": "Its program could not be started: not found, or not executable.",
           "type": "string"
+        },
+        {
+          "const": "log",
+          "description": "Its log, or its own directory in the run's, could not be made or written (a full disk,\nsay): nothing was run without a log.",
+          "type": "string"
         }
       ],
       "title": "CheckNotStarted"
@@ -2023,6 +2028,11 @@ expression: s.redact(&all)
               "const": "program",
               "description": "Its program could not be started: not found, or not executable.",
               "type": "string"
+            },
+            {
+              "const": "log",
+              "description": "Its log, or its own directory in the run's, could not be made or written (a full disk,\nsay): nothing was run without a log.",
+              "type": "string"
             }
           ]
         },
@@ -2124,7 +2134,7 @@ expression: s.redact(&all)
           ]
         },
         "message": {
-          "description": "The host's words for why it did not start, one line, for `not_started`.",
+          "description": "The host's words for why it did not start, one line, for `not_started`; or, for a check\nthat ran and is `failed` because its log could not be written, why not.",
           "type": [
             "string",
             "null"
@@ -2273,6 +2283,11 @@ expression: s.redact(&all)
               "const": "program",
               "description": "Its program could not be started: not found, or not executable.",
               "type": "string"
+            },
+            {
+              "const": "log",
+              "description": "Its log, or its own directory in the run's, could not be made or written (a full disk,\nsay): nothing was run without a log.",
+              "type": "string"
             }
           ]
         },
@@ -2346,7 +2361,7 @@ expression: s.redact(&all)
               ]
             },
             "message": {
-              "description": "The host's words for why it did not start, one line, for `not_started`.",
+              "description": "The host's words for why it did not start, one line, for `not_started`; or, for a check\nthat ran and is `failed` because its log could not be written, why not.",
               "type": [
                 "string",
                 "null"
