@@ -106,7 +106,7 @@ pub fn list_dir(dir: &Utf8Path) -> Result<CheckListResp, OpError> {
     if !std::fs::metadata(dir).is_ok_and(|meta| meta.is_dir()) {
         let mut error = error::error(
             ErrorCode::InvalidArg,
-            error::one_line(format!("--dir {dir} names no directory")),
+            error::one_line(format!("--dir {:?} names no directory", dir.as_str())),
         )
         .with_hint("name the directory whose .swarmops/checks.toml to list: --dir .");
         error.details.insert("reason".to_owned(), "dir".into());

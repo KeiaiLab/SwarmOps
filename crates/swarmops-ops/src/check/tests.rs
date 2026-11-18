@@ -856,6 +856,8 @@ fn the_directory_form_needs_a_directory() {
         assert_eq!(error.code, ErrorCode::InvalidArg.as_str());
         assert_eq!(error.details["reason"], "dir");
     }
+    let error = error_of(list_dir(camino::Utf8Path::new("")));
+    assert_eq!(error.message, "--dir \"\" names no directory");
     let (_dir, root) = dir_with(&[(".swarmops", b"a file")]);
     assert_eq!(list_dir(&root).unwrap().checks, []);
 }
