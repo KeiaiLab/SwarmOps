@@ -48,6 +48,7 @@ pub mod materialize;
 pub mod pending;
 pub mod portable;
 pub mod probe;
+pub mod queue;
 pub mod rebase;
 pub mod registry;
 pub mod resolve;
