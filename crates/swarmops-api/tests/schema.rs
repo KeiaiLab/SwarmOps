@@ -23,6 +23,7 @@ const REQUESTS: &[&str] = &[
     "BlobHasReq",
     "BlobPutReq",
     "ChangeInput",
+    "CheckListReq",
     "CloneReq",
     "CommitReq",
     "DeriveReq",
@@ -100,6 +101,8 @@ const RESPONSES: &[&str] = &[
     "ChangeOut",
     "ChangesetDetail",
     "ChangesetSummary",
+    "CheckListResp",
+    "CheckOut",
     "CloneResp",
     "CommitResp",
     "ConflictReport",
@@ -2119,6 +2122,81 @@ mod update {
         assert_ignores_unknown_fields::<UpdatePending>(
             "UpdatePending",
             json!({"kind": "available", "to": "0.13.0"}),
+        );
+    }
+}
+
+/// `check list`'s request and result (M30).
+mod check {
+    use serde_json::json;
+    use swarmops_api::{CheckListReq, CheckListResp, CheckOut, Rev, schema_for_all};
+
+    use super::assert_ignores_unknown_fields;
+
+    /// The request names a revision, `main` when it names none.
+    #[test]
+    fn a_check_list_request_defaults_to_main() {
+        let read: CheckListReq = serde_json::from_str("{}").unwrap();
+        assert_eq!(read.rev, Rev::from("main"));
+        assert_eq!(
+            serde_json::to_string(&CheckListReq::new("release/1.0")).unwrap(),
+            r#"{"rev":"release/1.0"}"#
+        );
+        assert_eq!(schema_for_all()["CheckListReq"].get("required"), None);
+        assert_ignores_unknown_fields::<CheckListReq>("CheckListReq", json!({}));
+    }
+
+    /// A directory's answer holds `vouched` and its checks, in the documented order; the store's
+    /// also names the tree, the file and its version; a check read from workspaces.json has no
+    /// line.
+    #[test]
+    fn a_check_list_result_omits_what_it_lacks() {
+        let mut check = CheckOut::new("default", vec!["make".to_owned()], ".", 900, "ab");
+        assert_eq!(
+            serde_json::to_string(&CheckListResp::new(true, vec![check.clone()])).unwrap(),
+            [
+                r#"{"vouched":true,"checks":[{"name":"default","argv":["make"],"dir":".","#,
+                r#""timeout_s":900,"definition_digest":"ab"}]}"#,
+            ]
+            .concat()
+        );
+        check.line = Some(4);
+        let mut stored = CheckListResp::new(false, vec![check]);
+        stored.tree = Some("7f".to_owned());
+        stored.file = Some(".swarmops/checks.toml".to_owned());
+        stored.version = Some(1);
+        let text = serde_json::to_string(&stored).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"vouched":false,"tree":"7f","file":".swarmops/checks.toml","version":1,"#,
+                r#""checks":[{"name":"default","argv":["make"],"dir":".","timeout_s":900,"#,
+                r#""definition_digest":"ab","line":4}]}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(
+            serde_json::from_str::<CheckListResp>(&text).unwrap(),
+            stored
+        );
+
+        let all = schema_for_all();
+        assert_eq!(
+            all["CheckListResp"]["required"],
+            json!(["vouched", "checks"])
+        );
+        assert_eq!(
+            all["CheckOut"]["required"],
+            json!(["name", "argv", "dir", "timeout_s", "definition_digest"])
+        );
+        assert_ignores_unknown_fields::<CheckListResp>(
+            "CheckListResp",
+            json!({"vouched": true, "checks": []}),
+        );
+        assert_ignores_unknown_fields::<CheckOut>(
+            "CheckOut",
+            json!({"name": "a", "argv": ["a"], "dir": ".", "timeout_s": 1,
+                   "definition_digest": "ab"}),
         );
     }
 }

@@ -26,6 +26,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   or, in a tree without one, `.swarmops/workspaces.json`; `details` name the `file`, the `reason`,
   whether the caller `vouched` for it, and its `line` and `key` when known. No command raises it
   yet. Golden envelopes now pin 56 of the 57 error codes.
+- API types `CheckListReq`, `CheckListResp` and `CheckOut`, the request and result of a tree's
+  checks: each check's name, argv, directory, timeout and the digest of its definition, sorted by
+  name, and whether the caller vouched for the file. `swarmops schema` prints them (201 types).
+  No command returns them yet.
 
 ### Changed
 
