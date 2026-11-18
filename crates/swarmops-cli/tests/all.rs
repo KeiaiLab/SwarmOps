@@ -253,6 +253,17 @@ fn the_guard_s_release_hook_is_the_program_s() {
     );
 }
 
+/// The isolation names the check runs' directory by the variable the program reads, as the test
+/// kit spells it.
+#[test]
+fn the_isolation_s_runs_directory_is_the_one_the_program_reads() {
+    let isolation = support::isolation();
+    let runs = isolation
+        .iter()
+        .find(|(name, _)| *name == swarmops_ops::check::run::CHECK_RUNS_DIR_ENV);
+    assert!(runs.is_some(), "the isolation names the program's variable");
+}
+
 /// The isolation turns automatic update off in the words the program reads: the test kit, which
 /// names no crate above the repository, spells the variable and its value itself.
 #[test]
