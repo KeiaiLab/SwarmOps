@@ -604,6 +604,28 @@ fn check_log_golden() {
     let other = s.run_env(&env, &["check", "log", "--dir", &dir, "lint"]);
     assert_eq!((other.exit, other.code()), (2, "E_INVALID_ARG"));
     insta::assert_json_snapshot!(s.transcript());
+
+    // 3. With --human, the lines as the log holds them, control characters escaped: a check's
+    //    output cannot drive the terminal of whoever reads its log.
+    let weird = "    0.001 run start {\"check\":\"weird\"}\n    0.028 out \u{1b}[2J\u{1b}]0;a \
+                 title\u{7}\u{1b}[31mred\u{1b}[0m\tand a tab\n    0.030 run end \
+                 {\"outcome\":\"passed\"}\n";
+    fs::write(format!("{run}/logs/weird.log"), weird).unwrap();
+    let mut record = record;
+    let weird_check = json!({"name": "weird", "outcome": "passed", "definition_digest": "cd",
+                             "timeout_s": 900, "duration_ms": 30, "exit_code": 0,
+                             "log": format!("{run}/logs/weird.log")});
+    record["result"]["checks"]
+        .as_array_mut()
+        .unwrap()
+        .push(weird_check);
+    fs::write(format!("{run}/run.json"), record.to_string()).unwrap();
+    let args = ["--human", "check", "log", "--dir", &dir, "weird"];
+    let output = Session::run_raw(&env, &args, None);
+    assert_eq!(output.exit, 0, "{}", output.stdout);
+    assert!(!output.stdout.contains('\u{1b}'), "{}", output.stdout);
+    let text = s.text_step(&env, &args, &output);
+    insta::assert_snapshot!("check_log_golden_human", text);
 }
 
 /// `check list` (M30-1, M30-2), its pinned JSON form: the plan's fixture at main lists its

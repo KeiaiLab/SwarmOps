@@ -64,8 +64,9 @@ line of stdout, flushed at once, as `derive --follow` prints its envelopes. A lo
 nothing prints nothing, and the next is `--interval-ms` later (200 by default). It ends with the
 envelope that holds the log's end, `ended: true`, and exits 0; a follower started before its check
 starts waits for the log to appear while the run runs. With `--human` it prints the log's lines as
-the log holds them, and nothing else. Output it cannot write ends it, exit 1, with a line on
-stderr. A log is followed on its own host only.
+the log holds them, each control character escaped (`\u{1b}` for ESC, `\t` for a tab), so that what
+a check printed cannot drive the terminal; and nothing else. Output it cannot write ends it,
+exit 1, with a line on stderr. A log is followed on its own host only.
 
 ### The MCP tool
 

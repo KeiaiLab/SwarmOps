@@ -1,0 +1,9 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: text
+---
+$ SWARMOPS_CHECK_RUNS_DIR=[tmp]/runs swarmops --human check log --dir [tmp]/tree weird
+[exit 0]
+    0.001 run start {"check":"weird"}
+    0.028 out \u{1b}[2J\u{1b}]0;a title\u{7}\u{1b}[31mred\u{1b}[0m\tand a tab
+    0.030 run end {"outcome":"passed"}

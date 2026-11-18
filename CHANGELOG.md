@@ -55,7 +55,7 @@ collects the changes on `stable` that no release holds yet, until the next relea
   text, and whether the log ended and how (`end` with the outcome, or `runner_gone`).
   `check log --follow` prints one envelope a line as the log grows and exits 0 with the one that
   holds its end, as `derive --follow` prints its envelopes; `--human` prints the lines as the log
-  holds them. The tool has the workspace form only, and no follow.
+  holds them, control characters escaped. The tool has the workspace form only, and no follow.
 - Dependencies: `signal-hook` and `signal-hook-registry` (MIT OR Apache-2.0), for `check run`'s
   signals.
 - `check list` and the MCP tool `check_list`: the checks a tree names, from the store at a

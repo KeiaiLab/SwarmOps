@@ -24,7 +24,7 @@
 //! `check log --follow` prints more than one envelope: the first with the last `--tail` lines,
 //! then one for each look that found whole lines, flushed at once as `derive --follow` writes its
 //! envelopes, the last the one that holds the log's end, exit 0. With `--human` it prints the
-//! lines as the log holds them, and nothing else.
+//! lines as the log holds them, control characters escaped, and nothing else.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write as _};
@@ -46,7 +46,7 @@ use swarmops_ws::workspace::{self, Locate};
 use super::{Ctx, run as commands_run, ws};
 use crate::cli::{CheckCommand, StageArg, WsAt};
 use crate::context;
-use crate::output::{Format, Printed};
+use crate::output::{self, Format, Printed};
 
 /// Runs `check`'s `command`, which names operation `op`.
 pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Printed {
@@ -223,12 +223,13 @@ fn follow_log(
 }
 
 /// The answer of `check log`, printed: in the human format the log's lines as the log holds
-/// them and nothing else; else its envelope.
+/// them, each control character escaped (`output::printable`, so that what a check printed cannot
+/// drive the terminal), and nothing else; else its envelope.
 fn log_printed(ctx: &Ctx<'_>, op: &str, resp: Result<CheckLogResp, OpError>) -> Printed {
     match (ctx.format, resp) {
         (Format::Human, Ok(resp)) => Printed {
             stdout: (resp.lines.iter())
-                .map(|line| as_logged(line) + "\n")
+                .map(|line| output::printable(&as_logged(line)) + "\n")
                 .collect(),
             exit: 0,
         },
