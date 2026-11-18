@@ -20,6 +20,36 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: docs/goals.md adds G25 (checks as records), G26 (admission before a runner), G27 (check
+  cost per landed change), G28 (an agent's feedback loop), G29 (untrusted changes) and G30 (the
+  project checks itself). The reason: SwarmOps takes on a role beside its three topologies,
+  checks and delivery, planned as M30 to M40, and each row gives that role a target of its own.
+  Nothing of the role is built and no target is measured: the rows say "Not built" or "Not
+  measured yet", and the targets of G26 to G28 are confirmed or replaced by the first baseline.
+- Docs: the non-goal "A general-purpose git replacement" says that a check is not a hook: it runs
+  outside every store operation and reaches the store only as a recorded result. The reason:
+  without the sentence, "no user hooks" reads as "no checks on a land".
+- Docs: the non-goal "A cluster" says that the store does not scale horizontally, names
+  `swarmops serve` as it is and no longer as planned, and says that checks add no daemon: a runner
+  is a client, the host's own timer starts scheduled work, and the store's records are the only
+  queue. The reason: "it does not scale horizontally" is true of the store and not of runners,
+  and `serve` is released.
+- Docs: the non-goal "A cache or relay tier between hosts" says that a runner's cache of build
+  output is not such a tier. The reason: the planned caches on runners (M39) hold derived files on
+  the runner's host, never store objects, and no store reads them.
+- Docs: a new non-goal, "A workflow language": a check is one command with declared inputs, and
+  GitHub's workflow files are imported once, not run. The reason: it says where the planned role
+  stops.
+- Docs: a new non-goal, "A forge": no issue tracker, registry, site hosting, code scanner or
+  dependency-update bot. The reason: it says where the planned role stops, and that a store
+  refusing content by an operator's own patterns is not a scanner.
+- Docs: "Who it is for" says what is planned for a team that decides to move its CI and
+  deployment: checks described in the tree, lands gated on their recorded results, delivery from
+  the store. The reason: the sentence before it already names that decision, and this one says
+  what the answer will be.
+
 ## [0.12.0] - 2026-11-18
 
 `init` now makes a FORMAT 3 store, which 0.11.x and older builds do not open; `upgrade` converts

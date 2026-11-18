@@ -19,7 +19,9 @@ milestone delivers it. [docs/perf.md](perf.md) holds every measurement,
 - **Teams that keep git.** The store imports a git history and exports the landed work back to
   git, so a repository's CI, review and deployment keep their source of truth until the team
   decides otherwise. Planned: the store fetches from and pushes to GitHub itself, and people
-  keep stock git against a store ([docs/roadmap.md](roadmap.md)).
+  keep stock git against a store ([docs/roadmap.md](roadmap.md)). Planned: a team that decides
+  otherwise describes its checks in the tree, gates its lands on their recorded results, and
+  delivers from the store ([docs/roadmap.md](roadmap.md)).
 
 ## Goals
 
@@ -52,26 +54,43 @@ milestone delivers it. [docs/perf.md](perf.md) holds every measurement,
 | G21 | Served git traffic under a swarm's load | 50 git clients through `swarmops serve`, each pushing its own branch and fetching the trunk every 2 s, beside 50 landing processes at G4's rate, for 10 minutes: outcomes per 10 s window and command; push and fetch p99 | At least 99.9 % succeed at the first attempt, the rest refused with a retryable code and a hint, other failures 0; `verify --deep` clean; every land on `main` once; push and fetch p99 at most 2× git's own server under the same 50 clients | docs/roadmap.md, "Milestones" (M17) | Not measured yet: `serve_load` has not run under `just perf` (perf.md, "M17-8b") | M17 |
 | G22 | A push checked in bounded memory | Peak resident memory of `swarmops serve` and its children for pushes of 1 GiB and 2 GiB of 1 MiB objects; their times; what a refused push leaves | At most 256 MiB at 2 GiB; the 2 GiB push at most 2.2× the 1 GiB one; a push that fails a check is refused before any ref moves, and a protocol v2 fetch by id of its objects gets git's not-found answer | docs/roadmap.md, "Milestones" (M17); known-limitations, "A served push's hook peaks above one batch" | 1,194.6 MiB at 1 GiB and 3,228.8 MiB at 2 GiB (missed); 46.677 s and 82.230 s, 1.76× (met); the push over git's input bound refused with no ref moved (perf.md, "M17 baselines"); a refused push's objects not found by a protocol v2 fetch (`serve_push` tests in `just check`) | M16 (refusal in the quarantine), M17 |
 | G23 | Served git answers as git's own server | A scripted git session against `swarmops serve` and git's own server holding the same history: each command's exit status, reported refs and the objects the client holds; a model of commit, ref move and land over every interleaving | Every difference outside the documented list fails `just check`, with git 2.39.5, 2.43.0 and 2.56.0; the model of 3 processes doing up to 4 operations each, with a crash at any step, loses no acknowledged land, keeps the trunk's first-parent history linear, lands a key at most once and never has a ref name a changeset with objects missing | docs/roadmap.md, "Milestones" (M17, M9) | The session passes in `just check` with git 2.43.0, with four differences listed ([Serve differences](operate/serve-differences.md)); the weekly git matrix runs it with 2.39.5 and 2.56.0; the model not built | M17 (the session), M9 (the model) |
+| G25 | Checks as records | Which results admitted a land; runs started for a key that already holds a valid passing result; lands admitted by a result whose recorder holds no grant | Every land onto a gated target names the results that admitted it; no check runs under the writer lock; 0 runs for an unchanged key; 0 lands admitted by an ungranted recorder | docs/roadmap.md, "Checks and delivery" | Not built | M7, M22, M32 |
+| G26 | Admission before a runner | Runs claimed for a candidate already replaced; journal frames written by a refused request; what a plan needs | 0 claims for a candidate replaced inside its settle window; 0 frames for a request that is not admitted; a plan is decided from the store alone; a plan for a change of 10 files on a tree of 50,000 in under 100 ms | docs/roadmap.md, "Checks and delivery" | Not built | M30, M33 |
+| G27 | Check cost per landed change | Runs of the `before-land` stage, and runner-seconds, per landed change over a pilot week | At most 1.2 runs per landed change; the runner-seconds target is set from the first baseline (issue #44) | docs/roadmap.md, "Checks and delivery"; docs/pilot.md | Not measured yet | M31, M32, M40 |
+| G28 | An agent's feedback loop | Time the system adds between a request and its verdict, the check's own run time excluded; the form of a failure; what a stopped runner or pass looks like | With an idle runner: wanted to started, p95 under 5 s; last result to `check wait` returning, p95 under 1 s; every failure carries a code, `retryable` and its findings; with no runner, `check wait` ends `stalled` within its bound | docs/roadmap.md, "Checks and delivery" | Not built | M32, M33, M34 |
+| G29 | Untrusted changes | What an untrusted run reaches in the acceptance suite's planted attempts: a secret, kept state, its own check definitions, the network, the runner's credential, the store's directory | 0 of each; every attempt refused with a named reason. A count of refused attempts, not a proof of a boundary | docs/roadmap.md, "Checks and delivery"; SECURITY.md | Not built | M35 |
+| G30 | The project checks itself | Which jobs of this repository's six workflow files run through SwarmOps, and whether the gate defends or guides there | The gate, the scheduled suite and the release build, for trusted identities, with the gate defending; GitHub keeps pull requests from forks and the published release | docs/roadmap.md, "Checks and delivery" | Not built | M30 to M38 |
 
 ## Non-goals
 
 - **A general-purpose git replacement.** Parity with git is not a v1 goal: no user hooks,
-  signing, submodules or LFS.
-- **A cluster.** SwarmOps is one program with no daemon and no external database. It does not
-  scale horizontally, and an always-on RPC server is a follow-up after v1, not a milestone.
-  The planned `swarmops serve` (M14, M11) runs per connection, under ssh or as a CGI program, so
-  it adds no daemon.
+  signing, submodules or LFS. A check is not a hook: it runs outside every store operation, on
+  the caller's host or a runner's, and reaches the store only as a recorded result that the
+  landing gate reads.
+- **A cluster.** SwarmOps is one program with no daemon and no external database. The store does
+  not scale horizontally, and an always-on RPC server is a follow-up after v1, not a milestone.
+  `swarmops serve` (M14, M11) runs per connection, under ssh or as a CGI program, so it adds no
+  daemon. Checks add none either: a runner is a client that asks a store for work, the host's own
+  timer starts scheduled work, and the store's records are the only queue. A service that keeps
+  runners and timers running for its users is built around the program, not into it.
 - **Writes without a lock.** Object writes take no lock; metadata writes take one, which orders
   every commit and ref move.
 - **Speed bought with durability.** No fast mode exists unless a measurement in
   [docs/perf.md](perf.md) justifies it.
 - **A cache or relay tier between hosts.** Stores sync with each other directly; no regional
   cache or relay sits between them, and none runs as a network daemon (the umbrella spec's
-  non-goals, and M11's).
+  non-goals, and M11's). A runner's cache of build output is not such a tier: it holds derived
+  files, never store objects, it stays on the runner's host, and no store reads it.
 - **A virtual (lazy) checkout.** A workspace's files are real files on disk (a sparse one
   holds fewer); no FUSE or virtual file system fetches them on first read (the umbrella spec's non-goals).
 - **A benchmark against git worktrees.** It is not on the roadmap; the README's comparison with
   git is judged from the design and the code.
+- **A workflow language.** A check is one command with declared inputs. Steps, expressions and
+  reusable third-party actions stay in the repository's own task runner; GitHub's workflow files
+  are imported once, not run.
+- **A forge.** No issue tracker, package or container registry, site hosting, code scanner or
+  dependency-update bot. A check may run any of those tools, a deployment may publish to any of
+  those hosts, and a store may refuse content by an operator's own patterns.
 
 ## Engineering principles
 
