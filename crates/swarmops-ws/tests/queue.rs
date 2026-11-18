@@ -106,6 +106,8 @@ struct State {
     links: HashMap<(String, String), (String, String)>,
     /// The tips the publishes moved the target to, in order.
     published: Vec<String>,
+    /// The tree each removal named, by entry.
+    removed_tree: HashMap<String, Option<String>>,
     /// Whether a runner holds the lane.
     lane: bool,
     /// The next publish fails as a runner killed before it would.
@@ -346,6 +348,7 @@ impl QueueDriver for Queue<'_> {
         }
         for removal in &req.removed {
             state.entry(&removal.entry).fate = Fate::Removed(removal.reason);
+            (state.removed_tree).insert(removal.entry.clone(), removal.tree.clone());
         }
         let mut out = QueuePublishResp::new(QueuePublishStatus::Published);
         out.head = self.head();
@@ -596,14 +599,19 @@ fn drain(s: &Setup, q: &Queue<'_>, width: u32) -> RunResp {
 
 // ---- K11b ----
 
-/// K11b: an enqueue whose head names no check is refused before the store is asked, and
-/// nothing is written.
+/// K11b: an enqueue whose target's head names no check is refused before the store is asked,
+/// and nothing is written, even when the change's head adds one.
 #[test]
 fn enqueue_without_check_is_refused() {
-    // 1. A store whose head holds no `.swarmops/workspaces.json`.
+    // 1. A target whose head holds no `.swarmops/workspaces.json`; the change adds one.
     let f = Fixture::new();
     let base = f.commit(None, &[Put::File("README", "no check\n")]);
-    let head = f.side(Some(&base), &[Put::File("a", "a\n")]);
+    f.point(TARGET, &base);
+    let config = serde_json::json!({ "check": { "argv": ["true"] } }).to_string();
+    let head = f.side(
+        Some(&base),
+        &[Put::File(".swarmops/workspaces.json", &config)],
+    );
     let before = f.last_op();
 
     // 2. Refused with the missing check, as `ws land --check` is.
@@ -687,6 +695,14 @@ fn a_red_third_lands_the_green_prefix() {
     assert_eq!(q.fate(&ids[2]), Fate::Removed(RemovalReason::CheckFailed));
     assert_eq!(q.fate(&ids[3]), Fate::Landed);
     assert_eq!(q.verdicts_of(&ids[2]), [VerdictState::Failed]);
+
+    // 3. The removal names the tree its red verdict was on.
+    let state = q.state();
+    let red_tree = (state.log.iter())
+        .find(|(e, _, v)| *e == ids[2] && *v == VerdictState::Failed)
+        .map(|(_, t, _)| t.clone());
+    assert!(red_tree.is_some());
+    assert_eq!(state.removed_tree[&ids[2]], red_tree);
 }
 
 // ---- K14 ----
@@ -1036,6 +1052,7 @@ fn an_entry_enqueued_at_lane_release_is_landed() {
 /// K21: no store lock spans a check: another writer commits while the check waits for a
 /// marker made only after that commit returns.
 #[test]
+#[ignore = "K21: needs LocalOps QueueDriver (M22-5); the in-memory double takes no store lock"]
 fn no_store_lock_is_held_during_a_check() {
     let s = Setup::new(QUICK);
     let q = Queue::new(&s.f);

@@ -83,7 +83,7 @@ pub struct RunResp {
     pub publishes: u32,
 }
 
-/// `queue_enqueue`: refused with `E_INVALID_ARG` (`details.missing` `check`) when the change's
+/// `queue_enqueue`: refused with `E_INVALID_ARG` (`details.missing` `check`) when the target's
 /// head names no check, before the store is asked; else the store's answer.
 pub fn enqueue(ctx: &Ctx<'_>, req: QueueEnqueueReq) -> Result<QueueEnqueueResp, OpError> {
     // 1. Who asks: the entry is a store write.
@@ -95,9 +95,8 @@ pub fn enqueue(ctx: &Ctx<'_>, req: QueueEnqueueReq) -> Result<QueueEnqueueResp, 
         .with_hint("pass --as <family>/<instance>, or set SWARMOPS_AGENT"));
     };
 
-    // 2. A check to run, read from the store at the change's head.
-    let head = req.head.as_str().to_owned();
-    check::configured(ctx.store, &head)?.ok_or_else(check::missing)?;
+    // 2. A check to run, read from the store at the target's head (design §6).
+    check::configured(ctx.store, &req.target)?.ok_or_else(check::missing)?;
 
     // 3. The store's entry.
     ctx.store.queue_enqueue(who, req)
