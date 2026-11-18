@@ -3071,8 +3071,8 @@ mod tests {
         // operations (M5) are tools of their own table, `WS_TOOLS`, but `ws_delete`, which
         // removes a directory tree. `derive` only fills ahead of time a cache that each read
         // fills itself, so it changes no result an agent reads; `blob_get` is a client's
-        // primitive, raw bytes that a workspace writes out. `check_run` (M31) runs a workspace's
-        // checks: it belongs with the workspaces' tools.
+        // primitive, raw bytes that a workspace writes out. `check_run` and `check_log` (M31) run
+        // and read a workspace's checks: they belong with the workspaces' tools.
         let client_side = [
             "InitReq",
             "GitImportReq",
@@ -3092,6 +3092,7 @@ mod tests {
                 name.ends_with("Req")
                     && !name.starts_with("Ws")
                     && *name != "CheckRunReq"
+                    && *name != "CheckLogReq"
                     && !client_side.contains(name)
                     && !no_tool.contains(name)
             })

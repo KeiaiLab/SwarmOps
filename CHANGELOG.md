@@ -71,8 +71,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   pin 57 of the 57 error codes.
 - API types `CheckListReq`, `CheckListResp`, `CheckOut` and `CheckStage`, the request and
   result of `check list` and a check's stage; `CheckRunReq`, `CheckRunResp`, `CheckRunOut`,
-  `CheckOutcome`, `CheckNotStarted` and `CheckSectionOut`, those of `check run`. `swarmops schema`
-  prints them (208 types).
+  `CheckOutcome`, `CheckNotStarted` and `CheckSectionOut`, those of `check run`; `CheckLogReq`,
+  `CheckLogResp`, `CheckLogLineOut`, `CheckLogStream` and `CheckLogEnd`, those of `check log`.
+  `swarmops schema` prints them (213 types).
 
 ### Changed
 

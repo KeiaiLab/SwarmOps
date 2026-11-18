@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 208 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 213 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -32,6 +32,11 @@ The 208 request, response and value types of the API, as `swarmops schema` print
 | [`ChangesetSummary`](#changesetsummary) | object | One changeset of a log. |
 | [`CheckListReq`](#checklistreq) | object | `check_list` (CLI `check list`): the checks the tree of `rev` describes. |
 | [`CheckListResp`](#checklistresp) | object | `check_list`: the checks a tree describes, sorted by name. |
+| [`CheckLogEnd`](#checklogend) | enumeration | How a check's log ended. |
+| [`CheckLogLineOut`](#checkloglineout) | object | One line of a check's log. |
+| [`CheckLogReq`](#checklogreq) | object | `check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. |
+| [`CheckLogResp`](#checklogresp) | object | `check_log`: lines of a check's log, and whether it has ended. |
+| [`CheckLogStream`](#checklogstream) | enumeration | Where a line of a check's log came from. |
 | [`CheckNotStarted`](#checknotstarted) | enumeration | Why a check did not start. |
 | [`CheckOut`](#checkout) | object | One check: a command run with no shell, in a directory of the tree, for at most its time. |
 | [`CheckOutcome`](#checkoutcome) | enumeration | How a check of a run ended. |
@@ -529,6 +534,76 @@ Kind: object. `swarmops schema CheckListResp` prints its JSON Schema.
 | `tree` | `string` or `null` | no | The root tree the file was read from: 64 hex digits. Omitted for a directory. |
 | `version` | `integer` (uint32) or `null` | no | The check file's `version`, 1. Omitted unless `file` is `.swarmops/checks.toml`. |
 | `vouched` | `boolean` | yes | Whether only the caller stands behind the file: `true` when it was read from a directory the caller named (`check list --dir`), which no gate accepts; `false` when it was read from the store, at `tree`. |
+
+## CheckLogEnd
+
+How a check's log ended.
+
+Kind: enumeration. `swarmops schema CheckLogEnd` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"end"` | Its `end` line, or the run's record of a check it never started. |
+| `"runner_gone"` | The run's lock was let go with no `end` line: the runner died. |
+
+## CheckLogLineOut
+
+One line of a check's log.
+
+Kind: object. `swarmops schema CheckLogLineOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `at_ms` | `integer` (uint64) or `null` | no | Its time: milliseconds since the check's start. Omitted for a line of `other`. |
+| `n` | `integer` (uint64) | yes | Its number in the log, from 1. |
+| `stream` | [`CheckLogStream`](#checklogstream) | yes | Where it came from. |
+| `text` | `string` | yes | Its text. |
+
+## CheckLogReq
+
+`check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. Reads only: no lock, nothing written.
+
+Kind: object. `swarmops schema CheckLogReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `check` | `string` | yes | The check whose log to read. |
+| `run` | `string` or `null` | no | The run, by its id; the newest run of the workspace that ran `check` when omitted. |
+| `tail` | `integer` (uint) | no | The most lines to give, the last ones: 1 to 100,000; 1,000 when omitted. Default: `1000`. |
+| `workspace` | `string` | yes | The workspace, by its name in the store's registry. |
+
+## CheckLogResp
+
+`check_log`: lines of a check's log, and whether it has ended. `check log --follow` prints one of these first, then one for each batch of lines the check writes, the last with `ended`.
+
+Kind: object. `swarmops schema CheckLogResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `check` | `string` | yes | The check's name. |
+| `duration_ms` | `integer` (uint64) or `null` | no | The check's milliseconds, when its log's `end` line gives them. |
+| `ended` | `boolean` | yes | Whether the log is complete: no line follows. |
+| `ended_by` | [`CheckLogEnd`](#checklogend) or `null` | no | How it ended, when `ended`. |
+| `first_line` | `integer` (uint64) | yes | The number of the first line given, from 1. |
+| `lines` | array of [`CheckLogLineOut`](#checkloglineout) | yes | The lines given, in order. |
+| `log` | `string` or `null` | no | The log's path on the host it ran on. Omitted for a check the run never started (`not_run`), which has none. |
+| `outcome` | [`CheckOutcome`](#checkoutcome) or `null` | no | The check's outcome, when `ended_by` is `end`. |
+| `run` | `string` | yes | The run's id. |
+| `total_lines` | `integer` (uint64) | yes | The log's lines so far. |
+| `vouched` | `boolean` | yes | As the run's: `true` for a run of the directory form. |
+
+## CheckLogStream
+
+Where a line of a check's log came from.
+
+Kind: enumeration. `swarmops schema CheckLogStream` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"out"` | The check's stdout. |
+| `"err"` | The check's stderr. |
+| `"run"` | The runner's own line: `start`, `section`, `cut` or `end`, and a JSON object. |
+| `"other"` | A line not in the log's format, as a check writing into its own log could leave. |
 
 ## CheckNotStarted
 

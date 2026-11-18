@@ -24,6 +24,7 @@ const REQUESTS: &[&str] = &[
     "BlobPutReq",
     "ChangeInput",
     "CheckListReq",
+    "CheckLogReq",
     "CheckRunReq",
     "CloneReq",
     "CommitReq",
@@ -103,6 +104,8 @@ const RESPONSES: &[&str] = &[
     "ChangesetDetail",
     "ChangesetSummary",
     "CheckListResp",
+    "CheckLogLineOut",
+    "CheckLogResp",
     "CheckOut",
     "CheckRunOut",
     "CheckRunResp",
@@ -199,6 +202,8 @@ const RESPONSES: &[&str] = &[
 const SCALARS: &[&str] = &[
     "AutoUpdate",
     "ChangeOp",
+    "CheckLogEnd",
+    "CheckLogStream",
     "CheckNotStarted",
     "CheckOutcome",
     "CheckStage",
@@ -2137,9 +2142,91 @@ mod update {
 mod check {
     use serde_json::json;
     use swarmops_api::{
-        CheckListReq, CheckListResp, CheckNotStarted, CheckOut, CheckOutcome, CheckRunOut,
-        CheckRunReq, CheckRunResp, CheckSectionOut, CheckStage, Rev, schema_for_all,
+        CheckListReq, CheckListResp, CheckLogEnd, CheckLogLineOut, CheckLogReq, CheckLogResp,
+        CheckLogStream, CheckNotStarted, CheckOut, CheckOutcome, CheckRunOut, CheckRunReq,
+        CheckRunResp, CheckSectionOut, CheckStage, Rev, schema_for_all,
     };
+
+    /// A log's request names the workspace and the check; the newest run and 1,000 lines when
+    /// it names neither.
+    #[test]
+    fn a_check_log_request_defaults_to_the_newest_run() {
+        let read: CheckLogReq =
+            serde_json::from_value(json!({"workspace": "w", "check": "unit"})).unwrap();
+        assert_eq!(read, CheckLogReq::new("w", "unit"));
+        assert_eq!((read.run.as_deref(), read.tail), (None, 1_000));
+        assert_eq!(
+            serde_json::to_string(&read).unwrap(),
+            r#"{"workspace":"w","check":"unit","tail":1000}"#
+        );
+        assert_eq!(
+            schema_for_all()["CheckLogReq"]["required"],
+            json!(["workspace", "check"])
+        );
+        assert_ignores_unknown_fields::<CheckLogReq>(
+            "CheckLogReq",
+            json!({"workspace": "w", "check": "unit"}),
+        );
+    }
+
+    /// A log's answer in the documented order: a running one without its end; an ended one with
+    /// how and its outcome; a line of `other` without a time.
+    #[test]
+    fn a_check_log_result_says_how_it_ended() {
+        let mut running = CheckLogResp::new(false, "0193", "unit");
+        running.log = Some("/w/.swarmws/check-runs/0193/logs/unit.log".to_owned());
+        running.first_line = 2;
+        running.total_lines = 3;
+        let mut line = CheckLogLineOut::new(2, CheckLogStream::Out, "a");
+        line.at_ms = Some(12);
+        running.lines = vec![line, CheckLogLineOut::new(3, CheckLogStream::Other, "b")];
+        let text = serde_json::to_string(&running).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"vouched":false,"run":"0193","check":"unit","#,
+                r#""log":"/w/.swarmws/check-runs/0193/logs/unit.log","ended":false,"#,
+                r#""first_line":2,"total_lines":3,"lines":[{"n":2,"at_ms":12,"stream":"out","#,
+                r#""text":"a"},{"n":3,"stream":"other","text":"b"}]}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(
+            serde_json::from_str::<CheckLogResp>(&text).unwrap(),
+            running
+        );
+        let mut ended = CheckLogResp::new(true, "0193", "unit");
+        ended.ended = true;
+        ended.ended_by = Some(CheckLogEnd::End);
+        ended.outcome = Some(CheckOutcome::Passed);
+        ended.duration_ms = Some(5);
+        let text = serde_json::to_string(&ended).unwrap();
+        assert!(
+            text.contains(r#""ended":true,"ended_by":"end","outcome":"passed","duration_ms":5,"#),
+            "{text}"
+        );
+        assert_eq!(
+            serde_json::to_value(CheckLogEnd::RunnerGone).unwrap(),
+            json!("runner_gone")
+        );
+        let all = schema_for_all();
+        assert_eq!(
+            all["CheckLogResp"]["required"],
+            json!([
+                "vouched",
+                "run",
+                "check",
+                "ended",
+                "first_line",
+                "total_lines",
+                "lines"
+            ])
+        );
+        assert_ignores_unknown_fields::<CheckLogLineOut>(
+            "CheckLogLineOut",
+            json!({"n": 1, "stream": "run", "text": "start {}"}),
+        );
+    }
 
     /// A run's request names a workspace; its stage is `before-land` and its checks every one
     /// of the stage when omitted.

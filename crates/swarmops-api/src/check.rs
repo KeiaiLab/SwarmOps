@@ -19,6 +19,9 @@
 //!                 checks: [CheckRunOut {name, outcome, …} in run order]}
 //! ```
 //!
+//! `check log` reads one check's log of a run ([`CheckLogResp`]): its lines, each with its time
+//! and stream, and whether it has ended.
+//!
 //! No request carries a path of the caller's host: a directory the caller names is read and
 //! run by the CLI alone, and its answer is the same type with `vouched` set. A result names the
 //! host's paths of its run directory and logs: a run happens on one host, and its logs stay
@@ -468,6 +471,151 @@ impl CheckSectionOut {
             duration_ms,
         }
     }
+}
+
+/// `check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. Reads
+/// only: no lock, nothing written.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckLogReq {
+    /// The workspace, by its name in the store's registry.
+    pub workspace: String,
+    /// The check whose log to read.
+    pub check: String,
+    /// The run, by its id; the newest run of the workspace that ran `check` when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// The most lines to give, the last ones: 1 to 100,000; 1,000 when omitted.
+    #[serde(default = "default_log_tail")]
+    pub tail: usize,
+}
+
+impl CheckLogReq {
+    /// The last lines of `check`'s log of the newest run of `workspace` that ran it.
+    pub fn new(workspace: impl Into<String>, check: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            check: check.into(),
+            run: None,
+            tail: DEFAULT_CHECK_LOG_TAIL,
+        }
+    }
+}
+
+/// The default [`CheckLogReq::tail`]: 1,000 lines.
+pub const DEFAULT_CHECK_LOG_TAIL: usize = 1_000;
+
+/// The most lines [`CheckLogReq::tail`] may ask for.
+pub const MAX_CHECK_LOG_TAIL: usize = 100_000;
+
+/// `check_log`: lines of a check's log, and whether it has ended. `check log --follow` prints one
+/// of these first, then one for each batch of lines the check writes, the last with `ended`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckLogResp {
+    /// As the run's: `true` for a run of the directory form.
+    pub vouched: bool,
+    /// The run's id.
+    pub run: String,
+    /// The check's name.
+    pub check: String,
+    /// The log's path on the host it ran on. Omitted for a check the run never started
+    /// (`not_run`), which has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<String>,
+    /// Whether the log is complete: no line follows.
+    pub ended: bool,
+    /// How it ended, when `ended`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_by: Option<CheckLogEnd>,
+    /// The check's outcome, when `ended_by` is `end`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<CheckOutcome>,
+    /// The check's milliseconds, when its log's `end` line gives them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// The number of the first line given, from 1.
+    pub first_line: u64,
+    /// The log's lines so far.
+    pub total_lines: u64,
+    /// The lines given, in order.
+    pub lines: Vec<CheckLogLineOut>,
+}
+
+impl CheckLogResp {
+    /// The log of `check` of run `run`, vouched for or not; not ended, no line.
+    pub fn new(vouched: bool, run: impl Into<String>, check: impl Into<String>) -> Self {
+        Self {
+            vouched,
+            run: run.into(),
+            check: check.into(),
+            log: None,
+            ended: false,
+            ended_by: None,
+            outcome: None,
+            duration_ms: None,
+            first_line: 1,
+            total_lines: 0,
+            lines: Vec::new(),
+        }
+    }
+}
+
+/// One line of a check's log.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckLogLineOut {
+    /// Its number in the log, from 1.
+    pub n: u64,
+    /// Its time: milliseconds since the check's start. Omitted for a line of `other`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<u64>,
+    /// Where it came from.
+    pub stream: CheckLogStream,
+    /// Its text.
+    pub text: String,
+}
+
+impl CheckLogLineOut {
+    /// Line `n` of `stream`, `text`, with no time.
+    pub fn new(n: u64, stream: CheckLogStream, text: impl Into<String>) -> Self {
+        Self {
+            n,
+            at_ms: None,
+            stream,
+            text: text.into(),
+        }
+    }
+}
+
+/// Where a line of a check's log came from.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckLogStream {
+    /// The check's stdout.
+    Out,
+    /// The check's stderr.
+    Err,
+    /// The runner's own line: `start`, `section`, `cut` or `end`, and a JSON object.
+    Run,
+    /// A line not in the log's format, as a check writing into its own log could leave.
+    Other,
+}
+
+/// How a check's log ended.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckLogEnd {
+    /// Its `end` line, or the run's record of a check it never started.
+    End,
+    /// The run's lock was let go with no `end` line: the runner died.
+    RunnerGone,
+}
+
+fn default_log_tail() -> usize {
+    DEFAULT_CHECK_LOG_TAIL
 }
 
 fn default_rev() -> Rev {
