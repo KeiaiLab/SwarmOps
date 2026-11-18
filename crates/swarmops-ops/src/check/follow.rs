@@ -5,6 +5,8 @@
 //!   the runs of a directory or a workspace ─▶ the run: --run, else the newest that lists the
 //!                                             check (with --follow, the newest running first)
 //!   <run>/logs/<check>.log ─▶ whole lines from the last offset ─▶ check::log::parse
+//!   (a regular file, not followed if a link; read as a stream, at most READ_LIMIT bytes, only
+//!    the lines a look gives kept)
 //!   ended: its `end` line; or the run's lock free and no `end` line (the runner gone); or the
 //!          run ended and its record says the check never started (`not_run`)
 //! ```
@@ -12,8 +14,9 @@
 //! Reads only: no lock is taken, nothing is written, no store operation is called.
 
 use std::collections::VecDeque;
-use std::fs::File;
-use std::io::{self, Read as _, Seek as _, SeekFrom};
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufRead as _, BufReader, Read as _, Seek as _, SeekFrom};
+use std::os::unix::fs::OpenOptionsExt as _;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::Value;
@@ -24,12 +27,19 @@ use swarmops_api::{
 use swarmops_ws::registry::Registry;
 use swarmops_ws::workspace::{self, Locate};
 
-use super::log::{Kind, Line, dir_key, parse_line};
+use super::log::{Kind, Line, MAX_CHECK_LOG_BYTES, dir_key, parse_line};
 use super::run::{RUN_FILE, RUN_LOCK, WS_RUNS_DIR, held};
 use crate::error;
 
 /// The most lines one look of a follower gives; the rest come with the next looks.
 pub const MAX_FOLLOW_LINES: usize = 1_000;
+
+/// The most bytes of a log a reader reads: the writer's bound, and a MiB for its `cut` and `end`
+/// lines. A file longer than that was not written by a run, and its rest is never read.
+pub const READ_LIMIT: u64 = MAX_CHECK_LOG_BYTES + (1 << 20);
+
+/// The size of one read of a log.
+const READ_CHUNK: usize = 64 * 1024;
 
 /// A run found on this host: its id, its directory, and its record.
 #[derive(Debug, Clone)]
@@ -110,6 +120,17 @@ pub struct Follower {
     queued: VecDeque<Line>,
     /// How the log ended, once a look has seen it.
     ended: Option<Ended>,
+    /// The log's `end` line, once a read has passed it, whether or not it was kept.
+    end_line: Option<Ended>,
+}
+
+/// What one read of a log found: the last lines of those it read, as many as it was to keep, and
+/// whether it read up to the end of what the log holds now.
+struct Read {
+    /// The lines kept.
+    lines: VecDeque<Line>,
+    /// Whether no whole line is left past them.
+    at_end: bool,
 }
 
 /// How a log ended.
@@ -158,13 +179,15 @@ impl Follower {
             lines: 0,
             queued: VecDeque::new(),
             ended: None,
+            end_line: None,
         };
 
-        // 2. Every whole line so far; the last `tail` of them given.
-        let mut read = follower.read_on()?;
-        follower.settle(&mut read)?;
-        let first = read.len().saturating_sub(tail);
-        let given = read.split_off(first);
+        // 2. Every whole line so far, the last `tail` of them kept and given.
+        let mut read = follower.read_on(tail, usize::MAX)?;
+        let last = follower.settle(read.at_end, tail)?;
+        read.lines.extend(last);
+        let first = read.lines.len().saturating_sub(tail);
+        let given: Vec<Line> = read.lines.into_iter().skip(first).collect();
         let resp = follower.answer(given, follower.ended.is_some());
         Ok((follower, resp))
     }
@@ -186,12 +209,14 @@ impl Follower {
     ///
     /// `E_IO` for a log or a record that cannot be read.
     pub fn look(&mut self) -> Result<Option<CheckLogResp>, OpError> {
-        // 1. New lines, and whether the log ended.
+        // 1. New lines, at most a look's, once those queued are given; and whether the log
+        //    ended.
         let was_ended = self.ended.is_some();
-        if !was_ended {
-            let mut read = self.read_on()?;
-            self.settle(&mut read)?;
-            self.queued.extend(read);
+        if !was_ended && self.queued.is_empty() {
+            let read = self.read_on(MAX_FOLLOW_LINES, MAX_FOLLOW_LINES)?;
+            self.queued.extend(read.lines);
+            let last = self.settle(read.at_end, usize::MAX)?;
+            self.queued.extend(last);
         }
         let newly_ended = !was_ended && self.ended.is_some();
         if self.queued.is_empty() && !newly_ended {
@@ -205,56 +230,70 @@ impl Follower {
         Ok(Some(self.answer(given, ended)))
     }
 
-    /// The whole lines the log holds past the last offset, numbered on from the last line read.
-    fn read_on(&mut self) -> Result<Vec<Line>, OpError> {
+    /// The whole lines the log holds past the last offset, at most `most` of them, numbered on
+    /// from the last line read; of them the last `keep`. The log is read as a stream, up to
+    /// [`READ_LIMIT`] bytes from its start: memory holds the lines kept and one line being read.
+    fn read_on(&mut self, keep: usize, most: usize) -> Result<Read, OpError> {
         // 1. The bytes past the offset; none while the log is not there.
-        let mut file = match File::open(&self.log) {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(io_failed(&self.log, &e)),
+        let mut read = Read {
+            lines: VecDeque::new(),
+            at_end: true,
         };
+        let Some(mut file) = open_log(&self.log)? else {
+            return Ok(read);
+        };
+        (file.seek(SeekFrom::Start(self.offset))).map_err(|e| io_failed(&self.log, &e))?;
+        let left = READ_LIMIT.saturating_sub(self.offset);
+        let mut stream = BufReader::with_capacity(READ_CHUNK, file.take(left));
+
+        // 2. Each whole line: a line still being written waits for the next look.
         let mut bytes = Vec::new();
-        (file.seek(SeekFrom::Start(self.offset)))
-            .and_then(|_| file.read_to_end(&mut bytes))
-            .map_err(|e| io_failed(&self.log, &e))?;
-
-        // 2. Up to the last `\n`: a line still being written waits for the next look.
-        let Some(end) = bytes.iter().rposition(|&b| b == b'\n') else {
-            return Ok(Vec::new());
-        };
-        let whole = &bytes[..=end];
-        self.offset += u64::try_from(whole.len()).unwrap_or(u64::MAX);
-        let text = String::from_utf8_lossy(whole);
-        let lines: Vec<Line> = (text.lines())
-            .map(|line| {
-                self.lines += 1;
-                parse_line(self.lines, line)
-            })
-            .collect();
-        Ok(lines)
-    }
-
-    /// Whether the log ended, given the lines just `read`: its `end` line among them; else, with
-    /// the run's lock free, the lines once more and then the run's record.
-    fn settle(&mut self, read: &mut Vec<Line>) -> Result<(), OpError> {
-        // 1. Its end line.
-        if let Some(end) = read.iter().find_map(|line| line.event("end")) {
-            self.ended = Some(ended_by_line(&end));
-            return Ok(());
+        let mut count = 0;
+        while count < most {
+            bytes.clear();
+            let n = (stream.read_until(b'\n', &mut bytes)).map_err(|e| io_failed(&self.log, &e))?;
+            let Some(text) = bytes.strip_suffix(b"\n") else {
+                return Ok(read);
+            };
+            let text = text.strip_suffix(b"\r").unwrap_or(text);
+            self.offset += u64::try_from(n).unwrap_or(u64::MAX);
+            self.lines += 1;
+            count += 1;
+            let line = parse_line(self.lines, &String::from_utf8_lossy(text));
+            if let Some(end) = line.event("end") {
+                self.end_line = Some(ended_by_line(&end));
+            }
+            read.lines.push_back(line);
+            if read.lines.len() > keep {
+                read.lines.pop_front();
+            }
         }
 
-        // 2. The runner still running: more may come.
-        if held(&self.run.dir.join(RUN_LOCK)) {
-            return Ok(());
+        // 3. Stopped at `most`: whether a whole line is left.
+        read.at_end = !(stream.fill_buf()).is_ok_and(|rest| rest.contains(&b'\n'));
+        Ok(read)
+    }
+
+    /// Whether the log ended: its `end` line read; else, once a read reached the end of what the
+    /// log holds (`at_end`) and the run's lock is free, the lines the runner wrote last (of them
+    /// the last `keep`, which it gives) and then the run's record.
+    fn settle(&mut self, at_end: bool, keep: usize) -> Result<VecDeque<Line>, OpError> {
+        // 1. Its end line.
+        if let Some(end) = self.end_line {
+            self.ended = Some(end);
+            return Ok(VecDeque::new());
+        }
+
+        // 2. More to read, or the runner still running: more may come.
+        if !at_end || held(&self.run.dir.join(RUN_LOCK)) {
+            return Ok(VecDeque::new());
         }
 
         // 3. The runner gone: the last lines it wrote, then its record.
-        let mut last = self.read_on()?;
-        let end = last.iter().find_map(|line| line.event("end"));
-        read.append(&mut last);
-        if let Some(end) = end {
-            self.ended = Some(ended_by_line(&end));
-            return Ok(());
+        let last = self.read_on(keep, usize::MAX)?.lines;
+        if let Some(end) = self.end_line {
+            self.ended = Some(end);
+            return Ok(last);
         }
         let record = read_record(&self.run.dir)?;
         let outcome = (record.as_ref())
@@ -273,7 +312,7 @@ impl Follower {
                 duration_ms: None,
             },
         });
-        Ok(())
+        Ok(last)
     }
 
     /// The answer of `lines`, which end the log when `ended`.
@@ -359,6 +398,38 @@ fn found_at(id: &str, dir: &Utf8Path) -> Result<Option<FoundRun>, OpError> {
         result,
         ended,
     }))
+}
+
+/// The log at `path`, opened to read if it is a regular file: none while it is not there. A link
+/// is not followed and a FIFO does not block the open (`O_NOFOLLOW | O_NONBLOCK`); anything but a
+/// regular file is `E_IO`, since a check could put one at its log's path.
+fn open_log(path: &Utf8Path) -> Result<Option<File>, OpError> {
+    let file = match (OpenOptions::new().read(true))
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(not_a_log(path)),
+        Err(e) => return Err(io_failed(path, &e)),
+    };
+    let meta = file.metadata().map_err(|e| io_failed(path, &e))?;
+    if !meta.is_file() {
+        return Err(not_a_log(path));
+    }
+    Ok(Some(file))
+}
+
+/// `E_IO` for a log at `path` that is not a regular file.
+fn not_a_log(path: &Utf8Path) -> OpError {
+    let mut error = error::error(
+        ErrorCode::Io,
+        format!("{path} is not a regular file: no run wrote it as a log"),
+    );
+    error
+        .details
+        .insert("path".to_owned(), path.as_str().into());
+    error
 }
 
 /// The record of the run in `dir`: its result and whether it ended; none when there is no record

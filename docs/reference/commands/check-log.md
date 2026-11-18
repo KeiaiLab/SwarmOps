@@ -206,6 +206,10 @@ output before the first belongs to none. A title past 200 bytes is cut at a char
 **Bounds.** A log holds at most 64 MiB: past it one `cut` line is written and later output is
 counted in the `end` line's `dropped_bytes`, not written; the outcome stands. A line keeps at most
 16 KiB of text, the rest counted the same way. The answer's tails come from all of the output.
+A reader reads a log as a stream, keeping only the lines it gives, and no further than 65 MiB
+from its start, which no run writes past: a longer file, which a check writing to its own log's
+path could leave, counts only the lines within that. A log that is not a regular file (a link,
+which is not followed, a FIFO, a device) is `E_IO`.
 
 The format is SwarmOps' own and provisional: it may change before logs are kept beside the store.
 

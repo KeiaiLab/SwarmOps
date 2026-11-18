@@ -184,3 +184,48 @@ fn a_follower_gives_what_was_written_since() {
     assert!(follower.done());
     drop(lock);
 }
+
+/// A log is read up to [`READ_LIMIT`] bytes and no further, as a stream of which only the lines
+/// given are kept: a file longer than any run writes (a check may write its own log's path)
+/// counts the lines within the limit, and `--tail` gives the last of those.
+#[test]
+fn a_log_is_read_no_further_than_its_limit() {
+    let (_tmp, dir, runs) = tree("[check.a]\nargv = [\"/usr/bin/true\"]\n");
+    let id = ran(&dir, &runs);
+    let log = runs.join(&id).join("logs/a.log");
+    let line = format!("    0.001 out {}\n", "x".repeat(1_024 - 15));
+    assert_eq!(line.len(), 1_024);
+    let within = usize::try_from(READ_LIMIT / 1_024).unwrap();
+    let mut file = std::fs::File::create(&log).unwrap();
+    let block = line.repeat(1_024);
+    for _ in 0..=(within / 1_024) {
+        file.write_all(block.as_bytes()).unwrap();
+    }
+    drop(file);
+    let (_, resp) = Follower::start(&runs, "a", None, 5, false).unwrap();
+    assert_eq!(resp.total_lines, u64::try_from(within).unwrap());
+    assert_eq!(resp.lines.len(), 5);
+    assert_eq!(resp.lines[4].n, resp.total_lines);
+}
+
+/// A log that is not a regular file, as a check could put at its own log's path, is `E_IO` at
+/// once: a link (to `/dev/zero`, which would never end) is not followed, and a FIFO does not
+/// block the open.
+#[test]
+fn a_log_that_is_not_a_regular_file_is_refused() {
+    let (_tmp, dir, runs) = tree("[check.a]\nargv = [\"/usr/bin/true\"]\n");
+    let id = ran(&dir, &runs);
+    let log = runs.join(&id).join("logs/a.log");
+    std::fs::remove_file(&log).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", &log).unwrap();
+    let linked = Follower::start(&runs, "a", None, 5, false).unwrap_err();
+    assert_eq!(linked.code, "E_IO", "{linked:?}");
+    std::fs::remove_file(&log).unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(&log)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let fifo = Follower::start(&runs, "a", None, 5, false).unwrap_err();
+    assert_eq!(fifo.code, "E_IO", "{fifo:?}");
+}
