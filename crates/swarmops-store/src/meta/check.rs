@@ -1,6 +1,7 @@
 //! The metadata checks of verify, in the store (the M6 design §6): the sorted views and the
 //! index read in blocks, the journal's frames and offsets, and FORMAT 2's seq, previous CRC
-//! and entry checksums. Damage is a finding of the report, not an error.
+//! and entry checksums. Damage is a finding of the report, not an error. The land queue's lane
+//! files (`meta/lanes/`) are runners' IPC, no projection of the journal: none is read here.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;

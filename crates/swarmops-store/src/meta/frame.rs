@@ -400,14 +400,22 @@ const ANNOTATION: &[&[Field]] = &[
     &[Field::Str(64), Field::ZeroId],
 ];
 const CHECK: &[&[Field]] = &[CHECK_BODY; 7];
+/// A Queue's bodies, as the M22 core design §3 edits them in place while `queue` is not yet
+/// supported: Enqueue carries an idempotency key, type 2 is Verdict (passed, failed, timed out,
+/// cancelled) in place of Checking, and Removed's reason gains cancelled.
 const QUEUE: &[&[Field]] = {
-    use Field::{Blob, Enum, Id, U16, U32, Zero32};
+    use Field::{Blob, Enum, Id, Str, U16, U32, Zero32};
     &[
-        &[Zero32, STR, Id, Id],
+        // 0 Enqueue: target, head, base, key.
+        &[Zero32, STR, Id, Id, Str(128)],
+        // 1 Candidate: candidate, tree, on head, ahead.
         &[U32, Id, Id, Id, U16],
-        &[U32, STR],
+        // 2 Verdict: tree, state, check, output.
+        &[U32, Id, Enum(4), STR, Blob],
+        // 3 Landed: the landed changeset.
         &[U32, Id],
-        &[U32, Enum(5), STR, Id, Blob],
+        // 4 Removed: reason, check, tree, report.
+        &[U32, Enum(6), STR, Id, Blob],
     ]
 };
 const WITHDRAWAL: &[&[Field]] = {
@@ -1562,7 +1570,7 @@ mod tests {
         let revise = cat(&[&[0; 8], &id(20), &id(21), &id(22), &[0]]);
         assert_eq!(blobs(FactKind::Review, 1, revise), Vec::<u8>::new());
 
-        // 2. Annotation's value, Check's output, Queue's report, Provenance's doc.
+        // 2. Annotation's value, Check's output, Queue's report and output, Provenance's doc.
         let set = cat(&[&[1, b'k'], &id(27)]);
         assert_eq!(blobs(FactKind::Annotation, 0, set), [27]);
         let remove = cat(&[&[1, b'k'], &[0; 32]]);
@@ -1571,6 +1579,8 @@ mod tests {
         assert_eq!(blobs(FactKind::Check, 2, check), [28]);
         let removed = cat(&[&[0; 4], &[1], &[0], &id(20), &id(29)]);
         assert_eq!(blobs(FactKind::Queue, 4, removed), [29]);
+        let verdict = cat(&[&[0; 4], &id(20), &[1], &[0], &id(32)]);
+        assert_eq!(blobs(FactKind::Queue, 2, verdict), [32]);
         let provenance = cat(&[&[1], &[0; 24], &[1, b'm'], &id(30)]);
         assert_eq!(blobs(FactKind::Provenance, 0, provenance), [30]);
 

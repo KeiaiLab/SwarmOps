@@ -7,6 +7,7 @@
 //!   metadata file is a projection of it.
 //! - [`Record`] and [`Frame`]: what the journal holds, in a fixed byte layout.
 //! - [`MetaLock`] (`meta/lock`): the flock that serializes writers and committed readers.
+//! - [`LaneLock`] (`meta/lanes/`): the land queue's lane of a target, its one runner's flock.
 //! - [`queue`] (`meta/queue/`): the write queue, which batches the transactions of writers that
 //!   find the lock taken into their next holder's ([`MetaStore::take_turn`]).
 //! - [`Index`] (`meta/idx/*.col`, `meta/parents.log`, `meta/sorted/`): the columnar
@@ -41,6 +42,7 @@ pub mod frame;
 pub mod fsck;
 pub mod index;
 pub mod journal;
+pub mod lanes;
 pub mod lock;
 mod parents;
 pub mod queue;
@@ -66,6 +68,7 @@ pub use frame::{BadRecord, Frame, Record};
 pub use fsck::Rebuilt;
 pub use index::{ChangesetMeta, Index, LookupHits};
 pub use journal::{Journal, LogCut, TailRepair};
+pub use lanes::LaneLock;
 pub use lock::MetaLock;
 pub use queue::{Answer, FrameUse, Lead, Outcome, Planned, Request, RequestId, Serve, Turn, Whose};
 pub use refs::{RefFile, RefKind, RefState};
