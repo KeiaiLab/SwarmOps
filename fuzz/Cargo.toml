@@ -29,7 +29,7 @@ swarmops-api = { path = "../crates/swarmops-api", version = "0.12.0" }
 swarmops-git = { path = "../crates/swarmops-git", version = "0.12.0" }
 # The native wire's link (`wire_chunk`), the one public way to its chunk reader; `fuzzing`, the
 # serve parsers' wrappers (`serve_entry`, `serve_hook_input`); the check file's reader
-# (`check_file`).
+# (`check_file`); a check's log, its writer and its reader (`check_log`).
 swarmops-ops = { path = "../crates/swarmops-ops", version = "0.12.0", features = ["fuzzing"] }
 swarmops-store = { path = "../crates/swarmops-store", version = "0.12.0" }
 # The filesystem doubles only (`NoSyncFs`): without its default features, which hold the CLI
@@ -145,6 +145,13 @@ bench = false
 [[bin]]
 name = "check_file"
 path = "fuzz_targets/check_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "check_log"
+path = "fuzz_targets/check_log.rs"
 test = false
 doc = false
 bench = false

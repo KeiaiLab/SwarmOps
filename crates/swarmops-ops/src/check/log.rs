@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use camino::Utf8Path;
 use serde_json::{Map, Value, json};
 use swarmops_api::{CheckOutcome, CheckSectionOut};
-use swarmops_ws::run::{Output, Stream};
+pub use swarmops_ws::run::{Output, Stream};
 
 /// The most bytes a check's log holds: 64 MiB. Past it one `run cut` line is written, and later
 /// output is counted in `dropped_bytes`, not written; the `end` line is still written.
