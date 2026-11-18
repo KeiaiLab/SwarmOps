@@ -22,6 +22,14 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Changed
 
+- Docs: the roadmap gains a section, "Checks and delivery": a role beside the three topologies in
+  which SwarmOps describes a tree's checks, plans what a change needs, runs the checks on the
+  caller's host or on runners that ask for work, records each result against its tree, gates a
+  land on the records and delivers from a store. It is planned as M30 to M40, in 169 units listed
+  one table per milestone, with twelve slices proposed to the plans of M7, M22, M11 and M26, the
+  first steps in this repository's own checks, and what stays on GitHub meanwhile. Nothing of it
+  is built and no figure of it is measured; the units of M30 and M31 behind the first eight steps
+  start now. Known limitations gain six items on checks, each with its target milestone.
 - Docs: docs/goals.md adds G25 (checks as records), G26 (admission before a runner), G27 (check
   cost per landed change), G28 (an agent's feedback loop), G29 (untrusted changes) and G30 (the
   project checks itself). The reason: SwarmOps takes on a role beside its three topologies,

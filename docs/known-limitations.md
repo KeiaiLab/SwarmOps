@@ -14,6 +14,10 @@ Targets are milestones of the umbrella spec
 M4 merge and landing · M8 git export · M12 portability · M13 git remotes · M5 workspaces ·
 M6 verify, crash safety and fuzzing · M14 git clients against a store · M7 blame and review ·
 M9 simulation and a benchmark gate · M11 remote sync, offline-first.
+Later milestones are the [roadmap](roadmap.md#milestones)'s: among them M30 check definitions and
+plans · M31 checks run where the caller is · M32 results on a tree · M33 triggers and admission ·
+M34 runners · M35 trust, isolation and secrets · M36 logs, reports and artifacts · M37 the gate's
+rules · M38 delivery · M39 caches and set-up time · M40 figures, cost and events, all planned.
 M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0; M13 makes 0.2.0, M5
 0.3.0 and M6 0.4.0; 0.5.0 adds no milestone: it holds the pilot, the measurements and the first
 v0.6 fixes; 0.6.0 holds the fixes the measurements asked for, M14 makes 0.7.0, and M15, the
@@ -1114,6 +1118,32 @@ left).
   second holder is not refused and an expired one is not reclaimed. Only a mutation renews it: an
   agent that only runs `ws status` and `ws diff` keeps the time of its last change. *Unscheduled
   (decision D21 of the M21 design, §10). Found: the M21 design §10.4.*
+
+## Checks and delivery
+
+What SwarmOps does not do for a repository's checks today. Each item is planned, and none of the
+work is built ([roadmap](roadmap.md#checks-and-delivery)).
+
+- **One command per checked land.** `ws land --check` runs one argv: the command after `--`, else
+  `check.argv` of `.swarmops/workspaces.json`. A repository that needs several checks, an order
+  between them or a plan of which ones a change needs puts all of that in the one command.
+  *Target: M31. Found: requirement CD-E20.*
+- **A check result is not recorded.** A checked land's result is in the command's envelope and
+  nowhere in the store: no record says which tree passed which check, so no gate and no later
+  land can read it. *Target: M7, M32. Found: requirement CD-E20.*
+- **Every land's push starts a run on GitHub, even for an unchanged tree.** Where the checks run
+  on GitHub (topology 2), a pushed commit is checked again although the same tree already passed,
+  because nothing keys a result by tree (issue #43). *Target: M32. Found: requirement CD-E20.*
+- **No runner, schedule or trigger.** SwarmOps starts a check only inside `ws land --check`, on
+  the caller's host. Nothing starts one after a land, on a tag, on a schedule or on another host.
+  *Target: M33, M34. Found: requirement CD-E20.*
+- **No secrets handling.** A check gets the environment of the process that runs it. SwarmOps
+  neither stores a secret for a check, nor scopes one, nor masks one in output.
+  *Target: M35. Found: requirement CD-E20.*
+- **No logs or artifacts kept.** A check's output comes back as the tails in the envelope and as
+  a log file in its workspace (`.swarmws/checks/`), and the files a check makes stay there.
+  Nothing is kept beside the store, by digest or for a set time.
+  *Target: M36. Found: requirement CD-E20.*
 
 ## Git's verbs on the command line
 
