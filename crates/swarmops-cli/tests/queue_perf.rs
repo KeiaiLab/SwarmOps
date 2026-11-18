@@ -52,6 +52,10 @@ mod perf {
     /// The kernel's table of file locks.
     const PROC_LOCKS: &str = "/proc/locks";
 
+    /// How many immediate re-reads must also miss a holder before its hold ends: a read of
+    /// [`PROC_LOCKS`] can skip the line at a page boundary (testkit `LockHolders`).
+    const RECHECKS: usize = 2;
+
     /// What one process saw.
     struct Lane {
         /// Its entry's id.
@@ -241,12 +245,28 @@ mod perf {
             // 1. Who holds it now; a holder no longer listed ends its hold.
             let now = Instant::now();
             let stopping = stop.load(Ordering::Relaxed);
-            let holders = if stopping {
-                Vec::new()
-            } else {
-                let table = std::fs::read_to_string(PROC_LOCKS).expect("read /proc/locks");
-                holders_of(&table, ino)
+            let read = || {
+                std::fs::read_to_string(PROC_LOCKS)
+                    .ok()
+                    .map(|t| holders_of(&t, ino))
             };
+            let mut holders = Vec::new();
+            if !stopping {
+                // A failed read tells nothing: skip the sample.
+                let Some(seen) = read() else {
+                    thread::sleep(SAMPLE_EVERY);
+                    continue;
+                };
+                holders = seen;
+
+                // A tracked holder missing may be a torn read: re-read before ending its hold.
+                for _ in 0..RECHECKS {
+                    if holding.keys().all(|pid| holders.contains(pid)) {
+                        break;
+                    }
+                    holders.extend(read().unwrap_or_default());
+                }
+            }
             holding.retain(|pid, since| {
                 let held = holders.contains(pid);
                 if !held {
