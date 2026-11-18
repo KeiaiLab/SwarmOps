@@ -93,7 +93,7 @@ pub(crate) fn run(
 
 /// A queue runner's check (the M22 core design §5 step 6): `argv` run in the workspace at
 /// `dir`, named `name`, on candidate tree `tree`, for at most `timeout`; its verdict and the
-/// tail of its output.
+/// tail of its output. `started` is told the check's pid, its process group's id, once it runs.
 ///
 /// ```text
 ///  exit 0                         passed
@@ -107,13 +107,14 @@ pub(crate) fn verdict(
     name: &str,
     tree: &str,
     timeout: Duration,
+    started: impl FnOnce(u32),
 ) -> Result<(VerdictState, String), OpError> {
     // 1. Its environment and its log, as a checked land's first attempt.
     let env = [(ENV_WS, name), (ENV_TREE, tree), (ENV_ATTEMPT, "1")];
     let log = dir.join(SWARMWS_DIR).join(CHECKS_DIR).join("1.log");
 
     // 2. Run; a command that cannot start fails the candidate, a host failure is the caller's.
-    let done = match run::run(argv, dir, &env, timeout, &log) {
+    let done = match run::run_started(argv, dir, &env, timeout, &log, started) {
         Ok(done) => done,
         Err(e) if e.code == ErrorCode::InvalidArg.as_str() => {
             return Ok((VerdictState::Failed, e.message));

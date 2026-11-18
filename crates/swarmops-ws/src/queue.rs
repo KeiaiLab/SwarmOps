@@ -31,7 +31,7 @@ use swarmops_api::{
 };
 
 use crate::probe::{self, End, Known};
-use crate::{Ctx, QueueDriver, check, create, delete};
+use crate::{Ctx, LaneGuard, QueueDriver, check, create, delete};
 
 /// How many candidates a runner checks at once unless told otherwise (the prototype's batch).
 pub const QUEUE_INFLIGHT_DEFAULT: u32 = 4;
@@ -131,6 +131,7 @@ pub fn run(ctx: &Ctx<'_>, req: &RunReq) -> Result<RunResp, OpError> {
         let drained = Runner {
             ctx,
             driver,
+            lane: &*lane,
             req,
             out: &mut out,
         }
@@ -161,6 +162,7 @@ fn has_open(ctx: &Ctx<'_>, target: &str) -> Result<bool, OpError> {
 struct Runner<'r, 'a> {
     ctx: &'r Ctx<'a>,
     driver: &'a dyn QueueDriver,
+    lane: &'r dyn LaneGuard,
     req: &'r RunReq,
     out: &'r mut RunResp,
 }
@@ -171,6 +173,18 @@ struct Runner<'r, 'a> {
 struct Suspect {
     head: String,
     entry: String,
+}
+
+/// What a check's thread tells the runner: its pid once it runs, then its verdict.
+enum Event<'j> {
+    /// The check of slot `slot` runs as process (and process group) `pid`.
+    Started { slot: usize, pid: u32 },
+    /// The check of slot `slot`, `job`, ended.
+    Ended {
+        slot: usize,
+        job: &'j Job,
+        verdict: Result<(VerdictState, String), OpError>,
+    },
 }
 
 /// One check to run: the prefix ending at `place`, from 1, of a round's chain.
@@ -320,24 +334,43 @@ impl Runner<'_, '_> {
         }
         self.out.rounds += 1;
 
-        // 2. Run at once, outside any store lock; each verdict recorded as it comes.
+        // 2. Run at once, outside any store lock; each check's group recorded on the lane while
+        //    it runs (the takeover kills it if this runner dies), each verdict as it comes.
         let mut ran: Vec<(u32, VerdictState)> = Vec::new();
         let mut failed = None;
+        let mut groups: Vec<Option<u32>> = vec![None; jobs.len()];
         let (done_tx, done_rx) = mpsc::channel();
         thread::scope(|scope| {
-            for job in &jobs {
+            for (slot, job) in jobs.iter().enumerate() {
                 let done = done_tx.clone();
                 let timeout = self.req.check_timeout;
                 scope.spawn(move || {
+                    let started = |pid| {
+                        let _ = done.send(Event::Started { slot, pid });
+                    };
                     let verdict = match &job.argv {
-                        Some(argv) => check::verdict(argv, &job.dir, &job.name, &job.tree, timeout),
+                        Some(argv) => {
+                            check::verdict(argv, &job.dir, &job.name, &job.tree, timeout, started)
+                        }
                         None => Ok((VerdictState::Failed, check::missing().message)),
                     };
-                    let _ = done.send((job, verdict));
+                    let _ = done.send(Event::Ended { slot, job, verdict });
                 });
             }
             drop(done_tx);
-            for (job, verdict) in done_rx {
+            for event in done_rx {
+                let (job, verdict) = match event {
+                    Event::Started { slot, pid } => {
+                        groups[slot] = Some(pid);
+                        self.record(&groups);
+                        continue;
+                    }
+                    Event::Ended { slot, job, verdict } => {
+                        groups[slot] = None;
+                        self.record(&groups);
+                        (job, verdict)
+                    }
+                };
                 self.out.checks += 1;
                 let recorded = verdict.and_then(|(state, output)| {
                     ran.push((job.place, state));
@@ -363,6 +396,12 @@ impl Runner<'_, '_> {
 
         // 4. A cancel before any red prefix: counted on its entry when it is the next one.
         self.weigh(items, &jobs, &ran)
+    }
+
+    /// Records the groups of the checks running now, slot by slot, on the lane.
+    fn record(&self, groups: &[Option<u32>]) {
+        let running: Vec<u32> = groups.iter().flatten().copied().collect();
+        self.lane.running(&running);
     }
 
     /// The shortest prefix of `ran` cancelled from outside, unless a red one is shorter; its

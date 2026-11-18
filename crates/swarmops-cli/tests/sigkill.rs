@@ -1866,3 +1866,120 @@ fn a_lander_killed_unasked_or_failed_otherwise_fails() {
     let silent = ended(0, "");
     fires(|| drop(landed_as(3, &silent, false)), "no envelope");
 }
+
+/// How long the queue test's first check sleeps, in seconds: far past the test, so that only a
+/// kill ends it.
+const CHECK_SLEEP_S: u64 = 120;
+
+/// The most the queue test waits for its check to start, or for a killed check to be gone.
+const CHECK_WITHIN: Duration = Duration::from_secs(60);
+
+/// A process the queue test's check started, by its recorded pid: killed with its group when
+/// the test ends with it still running, so that a failing test leaves nothing behind.
+struct Leftover(u32);
+
+impl Drop for Leftover {
+    fn drop(&mut self) {
+        if !running(self.0) {
+            return;
+        }
+        let group = format!("-{}", self.0);
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &group])
+            .status();
+    }
+}
+
+/// Whether process `pid` runs: it exists and is no zombie (`/proc/<pid>/stat`'s state `Z`).
+fn running(pid: u32) -> bool {
+    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let state = stat.rsplit_once(')').map(|(_, rest)| rest.trim_start());
+    !state.is_some_and(|rest| rest.starts_with('Z'))
+}
+
+/// A queue runner SIGKILLed while its check runs (the M22 core design §5 takeover, C8): the
+/// entry's check, a process group of its own, outlives the runner. The next queue command
+/// (`queue wait`) starts a runner that takes the lane over: it kills that leftover group, runs
+/// the check again (which now passes) without counting the killed one cancelled, and lands
+/// the entry once; the store verifies clean.
+///
+/// ```text
+///   queue run ── check #1: record pid, sleep ── SIGKILL the runner (check #1 still runs)
+///   queue wait ── runner #2: kill check #1's group ── check #2: pass ── landed
+/// ```
+#[test]
+fn queue_runner_sigkilled_mid_check_resumes() {
+    use swarmops_repo::LocalRepo;
+    use swarmops_repo::queue::{EntryId, EntryState};
+
+    use crate::support::queue::{TARGET, checked, enqueued, landed_once, runner_gone};
+
+    // 1. A check that records its pid, and sleeps the first time.
+    let store = Store::init();
+    let runs = store.tmp().join("check-runs");
+    let mark = store.tmp().join("check-mark");
+    let check = format!(
+        "echo $$ >> '{runs}'; if [ ! -e '{mark}' ]; then touch '{mark}'; exec sleep {CHECK_SLEEP_S}; fi; exit 0",
+        runs = runs.display(),
+        mark = mark.display(),
+    );
+    let base = checked(&store, &check);
+    let entries = enqueued(&store, &base, 1);
+
+    // 2. A runner, killed once its check runs.
+    let run = store.args(&agent(2), &["queue", "run", TARGET]);
+    let mut runner = Child::spawn(&mut swarmops(&run, &[]));
+    let first = check_pids(&runs, 1)[0];
+    let _leftover = Leftover(first);
+    let (output, killed) = runner.finish(Instant::now());
+    assert!(killed, "the runner ended before its check: {output:?}");
+    assert_eq!(output.status.signal(), Some(SIGKILL), "{output:?}");
+    assert!(running(first), "the check outlives its runner");
+
+    // 3. The next queue command: the leftover check killed, the check run again, the entry
+    //    landed.
+    let waited = store.read(&["queue", "wait", &entries[0], "--timeout", "60"]);
+    assert_eq!(waited.ok()["state"], "landed", "{waited}");
+    runner_gone(&store);
+    let deadline = Instant::now() + CHECK_WITHIN;
+    while running(first) {
+        assert!(Instant::now() < deadline, "check {first} still runs");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(check_pids(&runs, 2).len(), 2, "the check ran again");
+
+    // 4. No cancel counted, one landing, a clean store.
+    let repo = LocalRepo::open(camino::Utf8Path::new(store.path())).expect("open the store");
+    let fold = repo.queue_fold(TARGET).expect("the queue");
+    let id = EntryId::from_hex(&entries[0]).expect("an entry id");
+    let entry = fold.entry(id).expect("the entry");
+    assert_eq!(
+        (entry.state, entry.cancelled),
+        (EntryState::Landed, 0),
+        "{entry:?}"
+    );
+    landed_once(&store, &base, &entries, "after the takeover");
+    store.assert_clean("after the takeover");
+}
+
+/// The pids the check recorded in `runs`, once it holds at least `at_least` of them.
+fn check_pids(runs: &Path, at_least: usize) -> Vec<u32> {
+    let deadline = Instant::now() + CHECK_WITHIN;
+    loop {
+        let text = fs::read_to_string(runs).unwrap_or_default();
+        let pids: Vec<u32> = (text.lines())
+            .map(|line| line.trim().parse().expect("a pid"))
+            .collect();
+        if pids.len() >= at_least {
+            return pids;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the check ran {} times",
+            pids.len()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
