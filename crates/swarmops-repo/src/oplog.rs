@@ -560,7 +560,10 @@ fn protected(e: RepoError, id: OpId, recovered: Recovered) -> RepoError {
 
 /// `frame` as an operation.
 fn operation(frame: Frame) -> Result<Operation, RepoError> {
-    let records = frame.records.into_iter().map(|record| match record {
+    // A fact is no ref or changeset record: its frame is still an operation (M22 I-3).
+    let records = frame.records.into_iter();
+    let records = records.filter(|record| !matches!(record, Record::Fact(_)));
+    let records = records.map(|record| match record {
         Record::Changeset { id, parents, .. } => Ok(OpRecord::Changeset { id, parents }),
         Record::RefMove {
             name,

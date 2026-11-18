@@ -7,6 +7,7 @@
 //! Every test owns a fresh FORMAT 3 store (`tempfile::tempdir()`), the feature `queue` enabled
 //! with the test hooks' `supported_for_tests`.
 
+use std::sync::Barrier;
 use std::thread;
 
 use camino::Utf8PathBuf;
@@ -29,6 +30,9 @@ const MAIN: &str = "main";
 /// The concurrent writers of the version CAS test, and the verdicts each records.
 const WRITERS: usize = 4;
 const VERDICTS: usize = 10;
+
+/// The entries the version CAS test races a withdraw on.
+const RACES: usize = 8;
 
 /// A store set up for the queue: its directory, its root, the repo, and the seams it holds.
 struct Store {
@@ -94,6 +98,12 @@ fn frames(repo: &LocalRepo) -> u64 {
     repo.snapshot().expect("snapshot").next_seq()
 }
 
+/// The seq of the op log's newest operation.
+fn newest_op(repo: &LocalRepo) -> u64 {
+    let (ops, _) = repo.op_log(None, 1).expect("op log");
+    ops[0].seq
+}
+
 /// The Queue facts about entry `id`: each one's type and the version its body leads with.
 fn facts_of(repo: &LocalRepo, id: EntryId) -> Vec<(u8, u32)> {
     let read = repo.snapshot().expect("snapshot");
@@ -130,6 +140,7 @@ fn enqueue_is_idempotent_by_key() {
     assert!(!first.replayed);
     assert_eq!(frames(repo), before + 1, "one frame");
     assert_eq!(first.op, Some(before), "the frame's seq is the operation");
+    assert_eq!(newest_op(repo), before, "one op in the op log");
     let reopened = LocalRepo::open(&store.root).expect("open again");
     let found = fold(&reopened);
     let again = found
@@ -289,6 +300,7 @@ fn queue_writes_are_version_cas() {
     let built = repo.queue_round(&round).expect("round");
     assert_eq!(frames(repo), before + 1, "a round is one operation");
     assert_eq!(built.op, Some(before));
+    assert_eq!(newest_op(repo), before, "one op in the op log");
 
     // 2. A removal at the stale version: a mismatch, nothing written.
     let stale = RemoveRequest::new(MAIN, id, version, RemovalReason::Withdrawn, ACTOR);
@@ -299,44 +311,76 @@ fn queue_writes_are_version_cas() {
     assert_eq!(frames(repo), before + 1, "a mismatch writes nothing");
     assert_eq!(facts_of(repo, id), [(0, 0), (1, 1)]);
 
-    // 3. Writers racing a withdraw: every verdict and the withdraw land, once each.
+    // 3. Verdict writers and rounds racing a withdraw, all released at once, on RACES
+    //    entries: every verdict and the withdraw land once each, every fact (Candidates too)
+    //    at its own version, one frame each.
     let tree = built.items[0].tree;
+    for n in 0..RACES {
+        let id = if n == 0 {
+            id
+        } else {
+            let head = change(repo, base, &format!("r{n}.txt"), b"r\n");
+            (repo.queue_enqueue(&enqueue_req(head, None)))
+                .expect("enqueue")
+                .entry
+                .id
+        };
+        let (frames_before, facts_before) = (frames(repo), facts_of(repo, id).len());
+        race(repo, &round, id, tree);
+        let facts = facts_of(repo, id);
+        let total = facts.len();
+        let versions: Vec<u32> = facts.iter().map(|&(_, version)| version).collect();
+        let places: Vec<u32> = (0..u32::try_from(total).expect("few")).collect();
+        assert_eq!(versions, places, "each fact at its own version");
+        let verdicts = facts.iter().filter(|&&(ty, _)| ty == 2).count();
+        assert_eq!(verdicts, WRITERS * VERDICTS, "none lost, none twice");
+        assert_eq!(facts.iter().filter(|&&(ty, _)| ty == 4).count(), 1);
+        let written = u64::try_from(total - facts_before).expect("few");
+        assert_eq!(frames(repo), frames_before + written, "one frame each");
+        let (ops, _) = repo.op_log(None, total - facts_before).expect("op log");
+        let seqs: Vec<u64> = ops.iter().map(|op| op.seq).rev().collect();
+        let after = frames_before + written;
+        assert_eq!(
+            seqs,
+            (frames_before..after).collect::<Vec<_>>(),
+            "each an op"
+        );
+    }
+
+    // 4. A withdraw of a removed entry writes nothing more.
+    let total = facts_of(repo, id).len();
+    let again = repo.queue_withdraw(id, ACTOR).expect("withdraw again");
+    assert_eq!(again.state, EntryState::Removed);
+    assert_eq!(facts_of(repo, id).len(), total);
+}
+
+/// Releases at once WRITERS verdict writers, a round runner and a withdraw of entry `id`.
+fn race(repo: &LocalRepo, round: &RoundRequest, id: EntryId, tree: swarmops_core::TreeId) {
+    let start = Barrier::new(WRITERS + 2);
     thread::scope(|scope| {
         for _ in 0..WRITERS {
             scope.spawn(|| {
+                start.wait();
                 for _ in 0..VERDICTS {
-                    let req = VerdictRequest::new(
-                        MAIN,
-                        id,
-                        tree,
-                        VerdictState::Cancelled,
-                        "just check",
-                        ACTOR,
-                    );
+                    let state = VerdictState::Cancelled;
+                    let req = VerdictRequest::new(MAIN, id, tree, state, "just check", ACTOR);
                     repo.queue_verdict(&req).expect("verdict");
                 }
             });
         }
+        scope.spawn(|| {
+            start.wait();
+            for _ in 0..VERDICTS {
+                match repo.queue_round(round) {
+                    Ok(_) | Err(RepoError::QueueContended { .. }) => {}
+                    Err(e) => panic!("round: {e:?}"),
+                }
+            }
+        });
+        start.wait();
         let withdrawn = repo.queue_withdraw(id, ACTOR).expect("withdraw");
         assert_eq!(withdrawn.state, EntryState::Removed);
     });
-    let facts = facts_of(repo, id);
-    let total = 2 + WRITERS * VERDICTS + 1;
-    assert_eq!(facts.len(), total, "none lost, none twice");
-    let versions: Vec<u32> = facts.iter().map(|&(_, version)| version).collect();
-    let places: Vec<u32> = (0..u32::try_from(total).expect("few")).collect();
-    assert_eq!(versions, places, "each fact at its own version");
-    assert_eq!(facts.iter().filter(|&&(ty, _)| ty == 4).count(), 1);
-    assert_eq!(
-        frames(repo),
-        before + 1 + u64::try_from(total - 2).expect("few"),
-        "one frame each"
-    );
-
-    // 4. A withdraw of a removed entry writes nothing more.
-    let again = repo.queue_withdraw(id, ACTOR).expect("withdraw again");
-    assert_eq!(again.state, EntryState::Removed);
-    assert_eq!(facts_of(repo, id).len(), total);
 }
 
 /// K9: a round's chain passes over a conflicting entry, removing it with reason conflict and a
