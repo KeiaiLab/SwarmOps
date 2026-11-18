@@ -1,0 +1,2 @@
+The queue commands enqueue, status, withdraw, wait and run, and four queue_* MCP tools, are in the CLI.
+commit 0828ff9083269d6fa4d3fe1251ae3698dd39bf67

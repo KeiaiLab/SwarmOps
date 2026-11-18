@@ -1,0 +1,2 @@
+The landing queue has its API types and store operations, and queue wait raises E_QUEUE_WAIT_TIMEOUT.
+commit c354ae6a3455833f5d1ee506625c6cdda52806ab

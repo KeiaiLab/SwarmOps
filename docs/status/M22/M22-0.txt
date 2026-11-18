@@ -1,0 +1,2 @@
+The landing queue's core moves ahead of M7: it needs only FORMAT 3's queue records and the workspace check.
+commit f685e63647181bc2657d6cfec1f8ff531c94cb4b

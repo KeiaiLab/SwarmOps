@@ -1,0 +1,2 @@
+A queue runner checks entries in parallel and an enqueue runs the workspace check at the target's head.
+commit 46a9c0d2d471f1f1b10cc23ae1cd652c5180f989

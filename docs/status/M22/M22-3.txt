@@ -1,0 +1,2 @@
+A queue is folded from its records; an enqueue and a round of checked entries are written to them.
+commit 3f6cdca25ca9dd6896751899627b02a309a75838

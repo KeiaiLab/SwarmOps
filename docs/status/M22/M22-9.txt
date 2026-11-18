@@ -1,0 +1,2 @@
+50 processes with 30 s checks land 50 of 50 once, with no retries and no lock held across a check.
+commit 093f982366868604460eb2aefc2ab8d8f964ee98

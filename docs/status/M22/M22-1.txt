@@ -1,0 +1,2 @@
+The store has a lane lock for the land queue, and its Queue fact bodies are edited to the shapes the queue records.
+commit bcc3b19bc1dd4c7e474e75748bf44cf0a1f531e8

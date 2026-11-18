@@ -63,7 +63,7 @@ The first steps happen in this repository's own checks:
     M7 ships ahead of the rest of M7.
 11. A tree that passed is not checked again. Waits on the same question.
 12. The trunk moves into the store and its queue. Waits on three open questions: whether this
-    repository's trunk moves into a store, whether the first slices of M7 and M22 ship early, and
+    repository's trunk moves into a store, whether the first slices of M7 ship early, and
     the facts of the queue this repository uses today.
 
 Steps 1 to 8 use no store and write to none. No figure for this role is measured.

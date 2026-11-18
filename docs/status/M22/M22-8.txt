@@ -1,0 +1,2 @@
+The queue runner survives a kill, a power cut under a queue of 32 and SIGKILL, and the queue resumes.
+commit 2ef8a819edc2f03a1b31e8357629c4f3bec90085

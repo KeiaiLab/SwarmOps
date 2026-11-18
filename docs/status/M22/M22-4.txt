@@ -1,0 +1,2 @@
+A queue's green prefix lands exactly, each entry's tree in queue order, and a red entry stops the prefix.
+commit 75425ee4422d200c7cf9bbf0c16f55c4e5890cd8
