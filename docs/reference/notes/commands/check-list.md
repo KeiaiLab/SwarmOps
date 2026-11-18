@@ -18,7 +18,7 @@ names it: the store follows no link either, and such a tree is not listed as one
 
 ### The check file, version 1
 
-`.swarmops/checks.toml` at the tree's root, in TOML:
+`.swarmops/checks.toml` at the tree's root, in TOML 1.1 (which also reads every TOML 1.0 file):
 
 ```toml
 version = 1

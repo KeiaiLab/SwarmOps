@@ -7,9 +7,10 @@
 //!   any key but those ─▶ unknown_key at its line (a later key fails closed here)
 //! ```
 //!
-//! The walk reads the document with the span of every key and value, so each refusal names its
-//! key and line from the document itself, never from a parser's wording. Faults are found in
-//! file order after the version: the first one is the refusal.
+//! The file is TOML 1.1, as the locked `toml` crate reads it (`\e`, `\xHH`, an inline table over
+//! several lines). The walk reads the document with the span of every key and value, so each
+//! refusal names its key and line from the document itself, never from a parser's wording.
+//! Faults are found in file order after the version: the first one is the refusal.
 
 use std::fmt::Write as _;
 

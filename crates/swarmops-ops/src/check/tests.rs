@@ -112,6 +112,18 @@ fn every_table_syntax_reads_alike() {
     );
 }
 
+/// The file is TOML 1.1, as the locked `toml` crate reads it: the escapes `\e` and `\xHH`, and an
+/// inline table over several lines with a trailing comma, read. A change of the crate that reads
+/// another TOML shows here.
+#[test]
+fn the_file_is_toml_1_1() {
+    let text = "version = 1\ncheck = {\n  a = { argv = [\"x\\e[1m\", \"\\xff\"] },\n}\n";
+    let read = checks(text);
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].argv, ["x\u{1b}[1m", "\u{ff}"]);
+    assert_eq!(read[0].line, Some(3));
+}
+
 /// Moving a table changes nothing but the lines.
 #[test]
 fn file_order_does_not_matter() {
