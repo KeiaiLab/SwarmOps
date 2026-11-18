@@ -1,14 +1,14 @@
-// The first commands after the install, with what the 0.11.0 build printed in an empty
+// The first commands after the install, with what the 0.12.0 build printed in an empty
 // temporary directory, then the MCP registration command of docs/develop/mcp.md, byte for byte.
 import { SelectFigure } from '@/components/markdown-page';
 import { C, H2, LINK, PARA, Section } from './parts';
 import { OutputText } from './sample';
 
-// Pasted from the 0.11.0 build; ids cut to eight hex digits and `meta` to `{…}`.
+// Pasted from the 0.12.0 build; ids cut to eight hex digits and `meta` to `{…}`.
 const COMMANDS = ['swarmops --version', 'swarmops init /tmp/dev-guide/acme --name acme'];
 const OUTPUT = [
-  'swarmops 0.11.0',
-  '{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"7325b237…","name":"acme","store_version":2,"changesets":0,"refs":0},"meta":{…}}',
+  'swarmops 0.12.0',
+  '{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"584f6a14…","name":"acme","store_version":3,"changesets":0,"refs":0},"meta":{…}}',
 ];
 
 // docs/develop/mcp.md, "Register the server with Claude Code".

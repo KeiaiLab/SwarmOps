@@ -14,7 +14,7 @@ SwarmOps is version control for swarms of coding agents: many agent processes co
 [Documentation](https://swarmops.cc/docs) · [Install](#install) · [Quick start](#quick-start) ·
 [Roadmap](#roadmap) · [Contributing](CONTRIBUTING.md)
 
-SwarmOps is pre-release, at v0.11.0 (2026-11-09). It is designed for large pools of coding agents
+SwarmOps is pre-release, at v0.12.0 (2026-11-18). It is designed for large pools of coding agents
 that commit, land and sync with git. It is measured today at 50 agents landing on one host: 25.0
 lands/s, nothing lost ([perf.md](docs/perf.md#d2-8-gated-runs--2026-11-09)). The
 [roadmap](docs/roadmap.md) says what comes next.
@@ -32,7 +32,7 @@ curl -fsSL https://get.swarmops.cc/install.sh | bash
 
 It installs `swarmops` and `so` into `~/.local/bin` from the latest
 [release](https://github.com/KeiaiLab/SwarmOps/releases), checked against its `SHA256SUMS`, and
-running it again updates. From the first release after 0.11.0 on, such an install also updates
+running it again updates. From 0.12.0 on, such an install also updates
 itself: after a command, at most once a day, it asks GitHub's releases page for a newer release
 and installs one the maintainers marked for it. `so update --auto off` turns that off, as does
 installing with `--no-auto-update` or a named `--version`; `so update` updates by hand
@@ -54,13 +54,13 @@ so --repo ./acme --as agent/worker-1 commit -m "Add hello" --changes change.json
 so --repo ./acme cat main:hello.txt
 ```
 
-Output of a 0.11.0 build of `stable` at 6e9dac27, on a busy host:
+Output of a 0.12.0 build, on a Mac:
 
 ```text
-swarmops 0.11.0+6e9dac27f0ad5098b91fd2156a7e826c9bc5676a
-{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"e6092c987a444fdf107662f9ec67c1be","name":"acme","store_version":2,"changesets":0,"refs":0},"meta":{"repo":"./acme","elapsed_ms":906,"resolved":{},"auth":"trust"}}
-{"ok":true,"op":"commit","api":1,"result":{"changeset":"5d6a7b500a60e85d18f6ffd05d7c62836086a34afd57a1f3d706dca00397692e","root":"df3040af7381e7e412c6a0c5e9ab8b490ab80d92dedad94530d98340ced54a6e","files_changed":1,"blobs_written":1,"advanced":{"name":"main","new":"5d6a7b500a60e85d18f6ffd05d7c62836086a34afd57a1f3d706dca00397692e","already_applied":false},"replayed":false},"meta":{"repo":"./acme","elapsed_ms":267,"resolved":{},"auth":"trust"}}
-{"ok":true,"op":"read_file","api":1,"result":{"blob":"464418f5a53907c921906843e6f1f4f984f144067b3bf32d69c1ff4c13627464","size":6,"kind":"file","encoding":"utf8","content":"hello\n","truncated":false},"meta":{"repo":"./acme","elapsed_ms":1,"resolved":{"main":"5d6a7b500a60e85d18f6ffd05d7c62836086a34afd57a1f3d706dca00397692e"},"auth":"trust"}}
+swarmops 0.12.0
+{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"e3da399bcfad53399c50a4e8f2911efe","name":"acme","store_version":3,"changesets":0,"refs":0},"meta":{"repo":"./acme","elapsed_ms":107,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"commit","api":1,"result":{"changeset":"cde4ddd2713232360f56460a421c727f12b5186e1edc5503d3835673a22e9a8e","root":"df3040af7381e7e412c6a0c5e9ab8b490ab80d92dedad94530d98340ced54a6e","files_changed":1,"blobs_written":1,"advanced":{"name":"main","new":"cde4ddd2713232360f56460a421c727f12b5186e1edc5503d3835673a22e9a8e","already_applied":false},"replayed":false},"meta":{"repo":"./acme","elapsed_ms":50,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"read_file","api":1,"result":{"blob":"464418f5a53907c921906843e6f1f4f984f144067b3bf32d69c1ff4c13627464","size":6,"kind":"file","encoding":"utf8","content":"hello\n","truncated":false},"meta":{"repo":"./acme","elapsed_ms":6,"resolved":{"main":"cde4ddd2713232360f56460a421c727f12b5186e1edc5503d3835673a22e9a8e"},"auth":"trust"}}
 ```
 
 Each store command prints one JSON envelope. `--advance main` moved `main` to the new changeset in the

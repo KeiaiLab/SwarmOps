@@ -11,13 +11,43 @@ and FORMAT 2 (M6), 0.5.0 the fifth, with the pilot on a real repository and the 
 0.6.0 the sixth, with the fixes those measurements asked for, 0.7.0 the seventh, with stock git
 against a store (M14), 0.8.0 the eighth, with data safety and the contract (M15),
 0.9.0 the ninth, with safety and load (M16), 0.10.0 the tenth, with serving under load (M17),
-and 0.11.0 the eleventh, with taking back and workspace safety (M18's and M19's slices);
+0.11.0 the eleventh, with taking back and workspace safety (M18's and M19's slices), and 0.12.0
+the twelfth, with FORMAT 3 (M20's slices), the program's own update and the first macOS build;
 no crate is published (`publish = false`). The 0.1.0 section holds every
 change up to it, grouped by milestone of the design (umbrella spec §13). From here, **Unreleased**
 collects the changes on `stable` that no release holds yet, until the next release
 ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
+
+## [0.12.0] - 2026-11-18
+
+`init` now makes a FORMAT 3 store, which 0.11.x and older builds do not open; `upgrade` converts
+an older store. An installer's install now updates itself unless told not to; `so update` does
+it by hand. This is the first release with a macOS build, for Apple silicon. Also new: logins,
+git's verbs and `so://` remotes.
+
+### Changed (breaking, no automatic update)
+
+- `init` makes a FORMAT 3 store when no `--format` is given, and `init --format 3` names it (the
+  FORMAT 3 design §0, D3); `--format 1` and `--format 2` still make those formats. A store `init`
+  makes now is unreadable by v0.11.x and older, which refuse it as no store; `upgrade` takes an
+  older store to FORMAT 3. An `init` that resumes a crashed `init` of another format sets that
+  one's metadata aside, FORMAT 2's and FORMAT 3's told apart by their checkpoints. What to do:
+  give `init --format 2` where a 0.11.x build must still open the new store. A store made before
+  keeps its format under the new binaries until someone runs `upgrade`. For this change the
+  release is not installed unasked.
+- `remote add` and `clone` refuse an `http://` or `https://` URL with any user part
+  (`https://user@host/repo.git`), with `E_INVALID_ARG` and `details.reason` `credential_in_url`,
+  where they took a user that did not look like a token. A remote stored as `https://user@host`
+  is refused by `fetch`, `push` and `sync` until it is removed and added again without the user,
+  and `remote list` shows its user as `***`. An ssh URL keeps its user; a token goes by
+  `--token-env` or git's credential helper. What to do: remove such a remote, add it again
+  without the user, and pass a token with `--token-env`.
+- `git import` and `git export` refuse an empty `git_path` with `E_INVALID_ARG`
+  (`details.reason` `git_path_empty`), before any repository is opened. It was read as the
+  working directory: at a work tree's root the commands read or wrote that repository. What to
+  do: name the repository's directory; `.` is the working directory.
 
 ### Added
 
@@ -85,7 +115,7 @@ collects the changes on `stable` that no release holds yet, until the next relea
   (`run_crc`), a frame without its nonce (`missing_nonce`), a lost `journal3.ckpt`
   (`base_seq_lost`) and a fact written before its feature (`feature_unlisted`), and looks for the
   blobs facts name as it looks for those trees name. Repair rebuilds the fact rows and the runs,
-  and finds a lost base seq in the journal again. No release makes a FORMAT 3 store yet.
+  and finds a lost base seq in the journal again.
 - `upgrade` takes a FORMAT 2 store to FORMAT 3, and a FORMAT 1 store through FORMAT 2 to FORMAT 3
   in the same call, keeping every operation id (the FORMAT 3 design §3). Irreversible: v0.11.x and
   older do not open the store afterwards. `gc` removes what an upgrade to FORMAT 3 that stopped
@@ -165,7 +195,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 - The workspace builds and its test suite passes on macOS (aarch64, APFS), M12's first step. A
   store's volume is checked there as on Linux: APFS and journaled HFS+ are taken, any other volume
-  is refused with `E_UNSUPPORTED_FS` before a file is made. No release ships a macOS build yet.
+  is refused with `E_UNSUPPORTED_FS` before a file is made. This release is the first with a
+  macOS build.
 - The installer (`curl -fsSL https://get.swarmops.cc/install.sh | bash`) installs on an Apple
   silicon Mac: the `aarch64-apple-darwin` archive, checked against `SHA256SUMS`, into
   `~/.local/bin`, with zsh's and login bash's startup files in the `PATH` hint; `--version`, `--dir`, an update and
@@ -263,26 +294,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   login's token; its `auth` and `not_found` hints, the `credential_in_url` hint and `clone`'s help
   name the login. The MCP tools `fetch`, `push` and `sync` use the login file of the user the
   server runs as.
-- `git import` and `git export` refuse an empty `git_path` with `E_INVALID_ARG`
-  (`details.reason` `git_path_empty`), before any repository is opened. It was read as the
-  working directory: at a work tree's root the commands read or wrote that repository.
 - `--human` prints `ws status`, `log`, `diff`, `ws diff`, `ws commit` and `clone` in git's shape
   (the git-familiar command design, §3 "Text shapes"): `## <name> <head>` and one `<letter>  <path>`
   line a change, `<id> <title>` a changeset, a patch, `--numstat` or `--name-status` lines by the
   diff's format, `[<id>] <n> files changed`. Ids are cut to 12 hex digits. git's shape flags
   (`so status -s`, `so log --oneline`, `so diff --stat`) print this text. The JSON envelope is
   unchanged; scripts that read `--human` text of these operations read the envelope instead.
-- `init` makes a FORMAT 3 store when no `--format` is given, and `init --format 3` names it (the
-  FORMAT 3 design §0, D3); `--format 1` and `--format 2` still make those formats. A store `init`
-  makes now is unreadable by v0.11.x and older, which refuse it as no store; `upgrade` takes an
-  older store to FORMAT 3. An `init` that resumes a crashed `init` of another format sets that
-  one's metadata aside, FORMAT 2's and FORMAT 3's told apart by their checkpoints.
-- `remote add` and `clone` refuse an `http://` or `https://` URL with any user part
-  (`https://user@host/repo.git`), with `E_INVALID_ARG` and `details.reason` `credential_in_url`,
-  where they took a user that did not look like a token. A remote stored as `https://user@host`
-  is refused by `fetch`, `push` and `sync` until it is removed and added again without the user,
-  and `remote list` shows its user as `***`. An ssh URL keeps its user; a token goes by
-  `--token-env` or git's credential helper.
 - `git import` and `git export` refuse a partial clone (`E_GIT_UNSUPPORTED`, `reason`
   `partial_clone`, `details.remote`) and a repository that needs an extension they do not know
   (`reason` `extension`, `details.extension`) as they open it, before anything is written; a partial
@@ -2885,7 +2902,8 @@ fixes the measurements and the pilot asked for.
   ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
   head's whole tree, and onto a native head the whole history below it").
 
-[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.11.0...stable
+[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.12.0...stable
+[0.12.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.8.0...v0.9.0
