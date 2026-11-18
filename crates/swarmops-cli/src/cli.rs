@@ -10,6 +10,7 @@ use clap::{
     ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
 };
 use swarmops_api::remote::{DEFAULT_REMOTE, DEFAULT_SYNC_STATUS_LIMIT};
+use swarmops_api::{CheckStage, RefTxnMoveIn, Rev};
 use swarmops_api::{
     DEFAULT_ANCESTRY_LIMIT, DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES,
     DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_MAX_CHANGESETS,
@@ -18,7 +19,6 @@ use swarmops_api::{
 };
 use swarmops_api::{DEFAULT_BLOB_GET_MAX_BYTES, DEFAULT_CHECK_TIMEOUT_S, DEFAULT_WS_STATUS_LIMIT};
 use swarmops_api::{DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_CONFLICT_BYTES};
-use swarmops_api::{RefTxnMoveIn, Rev};
 
 use crate::{help, output};
 
@@ -1330,6 +1330,38 @@ pub enum LandModeArg {
     Exact,
 }
 
+/// A check's stage, as `check list --stage` and `check run --stage` name it.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StageArg {
+    /// Before a change lands: the gate.
+    #[default]
+    BeforeLand,
+    /// After a change has landed.
+    AfterLand,
+    /// On a schedule.
+    Scheduled,
+    /// Before a release is cut.
+    Release,
+    /// Only when someone asks for it.
+    Manual,
+    /// Before a deployment.
+    Deploy,
+}
+
+impl StageArg {
+    /// The API's stage.
+    pub fn stage(self) -> CheckStage {
+        match self {
+            StageArg::BeforeLand => CheckStage::BeforeLand,
+            StageArg::AfterLand => CheckStage::AfterLand,
+            StageArg::Scheduled => CheckStage::Scheduled,
+            StageArg::Release => CheckStage::Release,
+            StageArg::Manual => CheckStage::Manual,
+            StageArg::Deploy => CheckStage::Deploy,
+        }
+    }
+}
+
 /// A kind of file, as `ws commit --mode` gives it.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModeArg {
@@ -1536,15 +1568,16 @@ pub enum CheckCommand {
     /// List the checks REV's tree describes, or those of a directory with --dir.
     ///
     /// A tree names its checks in .swarmops/checks.toml (version 1): one [check.NAME] table a
-    /// check, each one command (argv) run with no shell, with a directory (dir) and a timeout
-    /// (timeout_s); any other key is refused at its line. This reads .swarmops/checks.toml at
-    /// REV (default main), resolved once; a tree without it lists check.argv of
-    /// .swarmops/workspaces.json as the one check default, and a tree with neither lists no
-    /// check. Each check comes with its argv, its directory, its timeout and the digest of its
-    /// definition, sorted by name. --dir DIR reads the files below DIR on this host instead, and
-    /// opens no store: the answer says vouched, since only the caller stands behind them. A file
-    /// that does not read is E_CHECK_FILE, naming its line and key. Reads only: no identity, no
-    /// lock.
+    /// check, each one command (argv) run with no shell, with a directory (dir), a timeout
+    /// (timeout_s) and the stages its answer is wanted at (stages, default before-land); any
+    /// other key is refused at its line. This reads .swarmops/checks.toml at REV (default main),
+    /// resolved once; a tree without it lists check.argv of .swarmops/workspaces.json as the one
+    /// check default, and a tree with neither lists no check. Each check comes with its argv,
+    /// its directory, its timeout, the digest of its definition and its stages, sorted by name;
+    /// --stage lists only the checks of one stage. --dir DIR reads the files below DIR on this
+    /// host instead, and opens no store: the answer says vouched, since only the caller stands
+    /// behind them. A file that does not read is E_CHECK_FILE, naming its line and key. Reads
+    /// only: no identity, no lock.
     List {
         /// The changeset whose tree's checks to list.
         #[arg(value_name = "REV")]
@@ -1552,6 +1585,9 @@ pub enum CheckCommand {
         /// Read the check file below DIR on this host, not from the store.
         #[arg(long, value_name = "DIR", conflicts_with = "rev")]
         dir: Option<Utf8PathBuf>,
+        /// List only the checks of this stage.
+        #[arg(long, value_enum, value_name = "STAGE")]
+        stage: Option<StageArg>,
     },
 }
 

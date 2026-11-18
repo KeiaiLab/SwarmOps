@@ -79,6 +79,13 @@ never reads `check.timeout_s` at all, and takes its own `--check-timeout`; the `
 for `default` is the one a later runner will use. A tree with neither file, or with an empty or
 missing `check.argv`, lists no check and exits 0.
 
+### One stage
+
+`--stage STAGE` (the request's `stage`) lists only the checks whose `stages` hold `STAGE`, still
+sorted by name, in either form, and the result echoes `stage`; without it every check is listed
+and the result has no `stage`. A stage no check names lists none and exits 0. `--stage
+before-land` lists what `check run` runs by default.
+
 A tree that holds `.swarmops/checks.toml` is listed from it alone, whatever `workspaces.json`
 says. `ws land --check` does not read the check file yet, so in such a tree the two can disagree
 until checks run through SwarmOps.

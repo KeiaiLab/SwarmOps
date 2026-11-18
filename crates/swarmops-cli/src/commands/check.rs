@@ -8,22 +8,33 @@ use std::collections::BTreeMap;
 use swarmops_api::{CheckListReq, Rev};
 
 use super::Ctx;
-use crate::cli::CheckCommand;
+use crate::cli::{CheckCommand, StageArg};
 use crate::output::Printed;
 
 /// Runs `check`'s `command`, which names operation `op`.
 pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Printed {
     match command {
-        CheckCommand::List { dir: Some(dir), .. } => {
+        CheckCommand::List {
+            dir: Some(dir),
+            stage,
+            ..
+        } => {
             let no_store = (None, BTreeMap::new(), None);
-            ctx.finish(op, no_store, swarmops_ops::check::list_dir(&dir, None))
+            let stage = stage.map(StageArg::stage);
+            ctx.finish(op, no_store, swarmops_ops::check::list_dir(&dir, stage))
         }
-        CheckCommand::List { rev, dir: None } => ctx.on_store(
+        CheckCommand::List {
+            rev,
+            dir: None,
+            stage,
+        } => ctx.on_store(
             op,
             || {
-                Ok(rev.map_or_else(CheckListReq::default, |rev| {
+                let mut req = rev.map_or_else(CheckListReq::default, |rev| {
                     CheckListReq::new(Rev::from(rev))
-                }))
+                });
+                req.stage = stage.map(StageArg::stage);
+                Ok(req)
             },
             |ops, req| swarmops_ops::check::list(ops, req),
         ),

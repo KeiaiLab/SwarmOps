@@ -4,7 +4,7 @@
 
 List the checks REV's tree describes, or those of a directory with --dir.
 
-A tree names its checks in .swarmops/checks.toml (version 1): one \[check.NAME\] table a check, each one command (argv) run with no shell, with a directory (dir) and a timeout (timeout\_s); any other key is refused at its line. This reads .swarmops/checks.toml at REV (default main), resolved once; a tree without it lists check.argv of .swarmops/workspaces.json as the one check default, and a tree with neither lists no check. Each check comes with its argv, its directory, its timeout and the digest of its definition, sorted by name. --dir DIR reads the files below DIR on this host instead, and opens no store: the answer says vouched, since only the caller stands behind them. A file that does not read is E\_CHECK\_FILE, naming its line and key. Reads only: no identity, no lock.
+A tree names its checks in .swarmops/checks.toml (version 1): one \[check.NAME\] table a check, each one command (argv) run with no shell, with a directory (dir), a timeout (timeout\_s) and the stages its answer is wanted at (stages, default before-land); any other key is refused at its line. This reads .swarmops/checks.toml at REV (default main), resolved once; a tree without it lists check.argv of .swarmops/workspaces.json as the one check default, and a tree with neither lists no check. Each check comes with its argv, its directory, its timeout, the digest of its definition and its stages, sorted by name; --stage lists only the checks of one stage. --dir DIR reads the files below DIR on this host instead, and opens no store: the answer says vouched, since only the caller stands behind them. A file that does not read is E\_CHECK\_FILE, naming its line and key. Reads only: no identity, no lock.
 
 ```yaml
 title: "swarmops check list"
@@ -45,6 +45,12 @@ The changeset whose tree's checks to list.
 Syntax: `--dir <DIR>`.
 
 Read the check file below DIR on this host, not from the store.
+
+### `--stage`
+
+Syntax: `--stage <STAGE>`.
+
+List only the checks of this stage. Values: `before-land`: Before a change lands: the gate; `after-land`: After a change has landed; `scheduled`: On a schedule; `release`: Before a release is cut; `manual`: Only when someone asks for it; `deploy`: Before a deployment.
 
 ## Examples
 
@@ -215,6 +221,13 @@ the size a workspace reads it in, at most 64 KiB of JSON, so `check list` refuse
 never reads `check.timeout_s` at all, and takes its own `--check-timeout`; the `timeout_s` listed
 for `default` is the one a later runner will use. A tree with neither file, or with an empty or
 missing `check.argv`, lists no check and exits 0.
+
+### One stage
+
+`--stage STAGE` (the request's `stage`) lists only the checks whose `stages` hold `STAGE`, still
+sorted by name, in either form, and the result echoes `stage`; without it every check is listed
+and the result has no `stage`. A stage no check names lists none and exits 0. `--stage
+before-land` lists what `check run` runs by default.
 
 A tree that holds `.swarmops/checks.toml` is listed from it alone, whatever `workspaces.json`
 says. `ws land --check` does not read the check file yet, so in such a tree the two can disagree

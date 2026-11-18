@@ -25,7 +25,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - `check list` and the MCP tool `check_list`: the checks a tree names, from the store at a
   changeset (`main` by default) or, with `check list --dir DIR`, from a directory of this host,
   which opens no store. Each check comes with its argv, its directory, its timeout, the digest
-  of its definition and its stages, sorted by name; the directory form's answer says `vouched: true`, since only
+  of its definition and its stages, sorted by name; `--stage STAGE` (the request's `stage`) lists
+  only the checks of one stage; the directory form's answer says `vouched: true`, since only
   the caller stands behind the files. The digest's recipe is provisional and may change in a later
   release. Nothing runs the checks yet: `ws land --check` still runs `check.argv` of
   `.swarmops/workspaces.json`.

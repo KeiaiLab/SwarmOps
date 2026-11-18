@@ -480,7 +480,8 @@ fn commit_to_main(s: &mut Session, store: &str, changes: &Value, name: &str) -> 
 /// the store (`vouched: false`, the tree named); the same file in a directory lists the same
 /// checks, vouched for by the caller; a tree without a check file lists no check, exit 0; a
 /// tree whose `.swarmops/workspaces.json` alone names `check.argv` lists it as the one check
-/// `default`; and the fixture with `stage` added is E_CHECK_FILE at line 11, exit 1.
+/// `default`; and the fixture with `stage` added is E_CHECK_FILE at line 11, exit 1. With
+/// `--stage after-land`, both forms list `docs` alone, the one check of two stages (M30-6).
 #[test]
 fn check_list_golden() {
     let mut s = Session::new();
@@ -520,6 +521,14 @@ fn check_list_golden() {
     assert_eq!(vouched["result"]["vouched"], true);
     assert!(vouched["result"].get("tree").is_none(), "{}", vouched.json);
     assert!(vouched["meta"].get("repo").is_none(), "{}", vouched.json);
+
+    // 2b. One stage, in both forms: after-land is docs' alone.
+    let after = s.run(&["--repo", &store, "check", "list", "--stage", "after-land"]);
+    assert_eq!(after.exit, 0, "{}", after.json);
+    assert_eq!(after["result"]["stage"], "after-land");
+    assert_eq!(after["result"]["checks"], json!([result["checks"][0]]));
+    let after_dir = s.run(&["check", "list", "--dir", &dir, "--stage", "after-land"]);
+    assert_eq!(after_dir["result"]["checks"], after["result"]["checks"]);
 
     // 3. No check file: no check, exit 0, and the tree named.
     let readme = json!([
