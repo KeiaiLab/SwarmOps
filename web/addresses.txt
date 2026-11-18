@@ -49,6 +49,7 @@
 /docs/reference/commands/blob-has
 /docs/reference/commands/blob-put
 /docs/reference/commands/cat
+/docs/reference/commands/check-list
 /docs/reference/commands/clone
 /docs/reference/commands/commit
 /docs/reference/commands/derive
@@ -70,6 +71,11 @@
 /docs/reference/commands/op-log
 /docs/reference/commands/op-undo
 /docs/reference/commands/push
+/docs/reference/commands/queue-enqueue
+/docs/reference/commands/queue-run
+/docs/reference/commands/queue-status
+/docs/reference/commands/queue-wait
+/docs/reference/commands/queue-withdraw
 /docs/reference/commands/rebase
 /docs/reference/commands/ref-delete
 /docs/reference/commands/ref-list
@@ -111,6 +117,7 @@
 /docs/reference/mcp-tools/ancestry
 /docs/reference/mcp-tools/blob-has
 /docs/reference/mcp-tools/blob-put
+/docs/reference/mcp-tools/check-list
 /docs/reference/mcp-tools/commit
 /docs/reference/mcp-tools/diff
 /docs/reference/mcp-tools/fetch
@@ -123,6 +130,10 @@
 /docs/reference/mcp-tools/op-log
 /docs/reference/mcp-tools/path-history
 /docs/reference/mcp-tools/push
+/docs/reference/mcp-tools/queue-enqueue
+/docs/reference/mcp-tools/queue-status
+/docs/reference/mcp-tools/queue-wait
+/docs/reference/mcp-tools/queue-withdraw
 /docs/reference/mcp-tools/read-file
 /docs/reference/mcp-tools/read-tree
 /docs/reference/mcp-tools/rebase
