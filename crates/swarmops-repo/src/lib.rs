@@ -38,6 +38,11 @@
 //! return plain values with no filesystem paths in them, so that they can move behind an RPC
 //! boundary later; only [`LocalRepo::create`] and [`LocalRepo::open`] take the store's path.
 //!
+//! A target's landing queue is its Queue facts: an enqueue idempotent by its key, a fold of the
+//! entries' states, version compare-and-swap writes of withdrawals, removals and verdicts, and a
+//! round that builds the open entries into a chain on the target's head ([`Repo::queue_enqueue`],
+//! [`RepoRead::queue`], [`Repo::queue_round`]; the [`queue`] module).
+//!
 //! Values derived from the immutable objects are made when they are asked for, and cached in the
 //! store ([`Repo::derived`]; the [`derive`](mod@derive) module). A path's history chases one of
 //! them, the changeset that last touched the path ([`LastModified`]; the [`path_history`] module).
@@ -55,6 +60,7 @@ pub mod merge;
 pub mod oplog;
 pub mod path_history;
 pub mod protect;
+pub mod queue;
 pub mod raw;
 pub mod read;
 pub mod rebase;

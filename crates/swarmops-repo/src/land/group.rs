@@ -242,7 +242,7 @@ impl<O: ObjectStore> Repo<O> {
 /// The changeset a group land of `req` makes of `item`, planned `clean`, on `parent` and
 /// its root: as a land of the item would make it there, written into `staged`, which holds
 /// the trees and merged contents the plan made, and not yet put. Its root is the plan's.
-fn link<O: ObjectStore>(
+pub(crate) fn link<O: ObjectStore>(
     read: &RepoRead<'_, O>,
     staged: &Staged<'_, O>,
     req: &LandGroupRequest,
