@@ -32,6 +32,7 @@ The limits of the SwarmOps contract: what a request may hold, with the error a r
 | [Check argv strings](#check-argv-strings) | 1,024 strings | `swarmops_ops::check::MAX_ARGV_ITEMS` | [`E_CHECK_FILE`](errors.md#e_check_file) |
 | [Check argv size](#check-argv-size) | 65,536 bytes (64 KiB) | `swarmops_ops::check::MAX_ARGV_BYTES` | [`E_CHECK_FILE`](errors.md#e_check_file) |
 | [Check timeout](#check-timeout) | 86,400 s | `swarmops_ops::check::MAX_CHECK_TIMEOUT_S` | [`E_CHECK_FILE`](errors.md#e_check_file) |
+| [Check reports](#check-reports) | 16 reports | `swarmops_ops::check::MAX_CHECK_REPORTS` | [`E_CHECK_FILE`](errors.md#e_check_file) |
 | [Variables passed](#variables-passed) | 64 names | `swarmops_ops::check::env::MAX_PASS` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
 | [Variable name passed](#variable-name-passed) | 128 bytes | `swarmops_ops::check::env::MAX_PASS_NAME_BYTES` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
 | [Check log tail](#check-log-tail) | 100,000 lines | `swarmops_api::MAX_CHECK_LOG_TAIL` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
@@ -248,6 +249,15 @@ A check's `timeout_s`, from 1: a longer one, or 0, is refused with `details.reas
 
 - Value: 86,400 s.
 - Constant: `swarmops_ops::check::MAX_CHECK_TIMEOUT_S`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
+- Error: [`E_CHECK_FILE`](errors.md#e_check_file).
+
+### Check reports
+
+The reports one check's `reports` declares, from 1: more are refused with `details.reason` `value` at the line of the first past it.
+
+- Value: 16 reports.
+- Constant: `swarmops_ops::check::MAX_CHECK_REPORTS`, in `crates/swarmops-ops/src/check.rs`.
 - Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 

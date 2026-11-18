@@ -79,10 +79,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
   release. Nothing runs the checks yet: `ws land --check` still runs `check.argv` of
   `.swarmops/workspaces.json`.
 - The check file, `.swarmops/checks.toml`, version 1: `version = 1`, then one `[check.<name>]`
-  table a check, with `argv` (one command, run with no shell), `dir`, `timeout_s` and `stages`
+  table a check, with `argv` (one command, run with no shell), `dir`, `timeout_s`, `stages`
   (when its answer is wanted: one or more of `before-land`, the default, `after-land`,
   `scheduled`, `release`, `manual` and `deploy`; an unknown stage is refused at its line; the
-  stages are not part of the definition's digest). Any other
+  stages are not part of the definition's digest) and `reports` (the JUnit and SARIF files the
+  check leaves in its tree: 1 to 16 tables of `format`, `junit` or `sarif`, and `path`, a
+  repository path relative to the check's `dir`, none twice; part of the definition's digest,
+  which is unchanged for a check that declares none; `check list` gives them). Any other
   key is refused at its line, so a build refuses a file whose keys it does not know instead of
   reading less of it. In a tree without it, `check.argv` of `.swarmops/workspaces.json` reads as
   the one check `default`.

@@ -193,7 +193,7 @@ const fn internal_value(
 // ---- The tables ----
 
 /// The limits a request is refused past, with the error it gets.
-static CONTRACT: [Limit; 27] = [
+static CONTRACT: [Limit; 28] = [
     Limit {
         name: "Request text",
         constant: code(
@@ -570,6 +570,20 @@ static CONTRACT: [Limit; 27] = [
         errors: &[ErrorCode::CheckFile],
         what: "A check's `timeout_s`, from 1: a longer one, or 0, is refused with \
                    `details.reason` `value`. `check run` kills a check's process group past it.",
+    },
+    Limit {
+        name: "Check reports",
+        constant: code(
+            "swarmops_ops::check::MAX_CHECK_REPORTS",
+            CHECK,
+            "pub const MAX_CHECK_REPORTS: usize = 16;",
+            || bytes::to_u64(swarmops_ops::check::MAX_CHECK_REPORTS),
+        ),
+        unit: Unit::Count("reports"),
+        commands: &["check list", "check run"],
+        errors: &[ErrorCode::CheckFile],
+        what: "The reports one check's `reports` declares, from 1: more are refused with \
+                   `details.reason` `value` at the line of the first past it.",
     },
     Limit {
         name: "Variables passed",

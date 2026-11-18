@@ -85,7 +85,7 @@ swarmops --repo [tmp]/store check list
           "before-land",
           "after-land"
         ],
-        "line": 12
+        "line": 13
       },
       {
         "name": "lint",
@@ -102,7 +102,7 @@ swarmops --repo [tmp]/store check list
         "stages": [
           "before-land"
         ],
-        "line": 7
+        "line": 8
       },
       {
         "name": "unit",
@@ -116,6 +116,12 @@ swarmops --repo [tmp]/store check list
         "definition_digest": "[unit_digest]",
         "stages": [
           "before-land"
+        ],
+        "reports": [
+          {
+            "format": "junit",
+            "path": "target/nextest/default/junit.xml"
+          }
         ],
         "line": 4
       }
@@ -174,6 +180,10 @@ argv = ["cargo", "clippy", "--", "-D", "warnings"]
 dir = "crates/app"
 timeout_s = 600
 stages = ["before-land", "after-land"]
+
+[check.test]
+argv = ["cargo", "nextest", "run", "--profile", "ci"]
+reports = [{ format = "junit", path = "target/nextest/ci/junit.xml" }]
 ```
 
 | Key | Required | Default | Rule |
@@ -184,10 +194,11 @@ stages = ["before-land", "after-land"]
 | `dir` | no | `"."` | The directory of the tree it runs in: `.` or a repository path (no empty, `.` or `..` part, no leading or trailing `/`). Whether the tree holds it is not checked. |
 | `timeout_s` | no | `900` | The most seconds it may run, 1 to 86,400. |
 | `stages` | no | `["before-land"]` | When its answer is wanted: 1 to 6 of `before-land`, `after-land`, `scheduled`, `release`, `manual` and `deploy`, none twice. An unknown stage, an empty array, an item that is not a string, or a stage given twice is refused as `value`, at the line of the item (or the array) at fault. The key is `stages`, plural: `stage` is refused as an unknown key. |
+| `reports` | no | none | The JUnit and SARIF reports the check leaves in its tree, which `check run` reads into findings once it has ended ([check run](../commands/check-run.md)): 1 to 16 tables, each of `format` (`junit` or `sarif`) and `path` (a repository path relative to the check's `dir`, no path twice in one check), as an inline table or a `[[check.<name>.reports]]` table. Not an array, an empty one, a 17th report or an item that is not a table is refused as `value` with `details.key` `check.<name>.reports`; a format or path outside its rule, or a table without one of them, as `value` with `details.key` `check.<name>.reports.format` or `.path`; any other key in a table as `unknown_key`. Each at the line at fault. |
 
-The file holds at most 1 MiB and 1,000 checks. Any TOML table syntax reads alike: a header, dotted
-keys (`check.unit.argv = [...]`) or an inline table. The [limits](../limits.md) page lists each
-bound with its constant.
+The file holds at most 1 MiB and 1,000 checks, and a check at most 16 reports. Any TOML table syntax
+reads alike: a header, dotted keys (`check.unit.argv = [...]`) or an inline table. The
+[limits](../limits.md) page lists each bound with its constant.
 
 **Any other key is refused**, at its line, as `unknown_key`. Later releases add keys to version 1
 (what a check reads, when it runs, what it needs first); a build that does not know a key refuses
@@ -196,14 +207,15 @@ existing key means is a new version.
 
 ### The answer
 
-The checks come sorted by name, so moving a table in the file changes nothing but their `line`.
-Each has its `argv`, its `dir`, its `timeout_s` and its `stages` with the defaults filled in, the
-`line` its table starts on, and `definition_digest`, a digest of `argv`, `dir` and `timeout_s`
-(not of the name, nor of the stages, which say when an answer is wanted, not what the command
-computes): two checks that differ only in name or stages, or a check renamed, share a digest, and
-a default written out gives the same digest as one left out. `stages` come in the stages' own
-order (`before-land`, `after-land`, `scheduled`, `release`, `manual`, `deploy`), whatever order
-the file wrote them in. The same tree gives the same `result` byte for
+The checks come sorted by name, so moving a table in the file changes nothing but their `line`. Each
+has its `argv`, its `dir`, its `timeout_s` and its `stages` with the defaults filled in, the `line`
+its table starts on, its `reports` in declared order when it declares any, and `definition_digest`,
+a digest of `argv`, `dir`, `timeout_s` and `reports` (not of the name, nor of the stages, which say
+when an answer is wanted, not what the command computes): two checks that differ only in name or
+stages, or a check renamed, share a digest, and a default written out gives the same digest as one
+left out; a check that declares no report has the digest it had before the key existed. `stages`
+come in the stages' own order (`before-land`, `after-land`, `scheduled`, `release`, `manual`,
+`deploy`), whatever order the file wrote them in. The same tree gives the same `result` byte for
 byte, whichever changeset names it.
 
 **The digest is provisional.** Its recipe is not part of the hash contract and may change in a

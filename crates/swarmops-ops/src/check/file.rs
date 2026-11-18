@@ -3,7 +3,8 @@
 //!
 //! ```text
 //!   bytes ─ size ─ UTF-8 ─ TOML (spans kept) ─ version = 1 ─ [check.<name>] each:
-//!                                                      name, argv, dir, timeout_s, stages
+//!                                                      name, argv, dir, timeout_s, stages,
+//!                                                      reports: [{format, path}, …]
 //!   any key but those ─▶ unknown_key at its line (a later key fails closed here)
 //! ```
 //!
@@ -16,7 +17,10 @@ use std::fmt::Write as _;
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use swarmops_api::{CheckOut, CheckStage, DEFAULT_CHECK_TIMEOUT_S, ErrorCode, OpError};
+use swarmops_api::{
+    CheckOut, CheckReportFormat, CheckReportOut, CheckStage, DEFAULT_CHECK_TIMEOUT_S, ErrorCode,
+    OpError,
+};
 use swarmops_core::RepoPath;
 use toml::Spanned;
 use toml::de::{DeTable, DeValue};
@@ -24,7 +28,8 @@ use toml::de::{DeTable, DeValue};
 use super::digest;
 use super::{
     CHECK_FILE, CHECK_FILE_VERSION, LEGACY_FILE, MAX_ARGV_BYTES, MAX_ARGV_ITEMS,
-    MAX_CHECK_FILE_BYTES, MAX_CHECK_NAME_BYTES, MAX_CHECK_TIMEOUT_S, MAX_CHECKS, MAX_LEGACY_BYTES,
+    MAX_CHECK_FILE_BYTES, MAX_CHECK_NAME_BYTES, MAX_CHECK_REPORTS, MAX_CHECK_TIMEOUT_S, MAX_CHECKS,
+    MAX_LEGACY_BYTES,
 };
 use crate::error::{line_of, one_line};
 
@@ -42,11 +47,13 @@ const VERSION_KEY: &str = "version";
 
 /// What the hint of a refused check file says it takes.
 const CHECK_FILE_HINT: &str = "version 1 of .swarmops/checks.toml takes version = 1, then one \
-[check.<name>] table a check, with argv (required), dir, timeout_s and stages";
+[check.<name>] table a check, with argv (required), dir, timeout_s, stages and reports (tables \
+of format, junit or sarif, and path)";
 
 /// What the hint of a key version 1 does not take says.
 const UNKNOWN_KEY_HINT: &str = "version 1 of .swarmops/checks.toml takes version and \
-[check.<name>] tables of argv, dir, timeout_s and stages; a newer swarmops may read this key";
+[check.<name>] tables of argv, dir, timeout_s, stages and reports (of format and path); a newer \
+swarmops may read this key";
 
 /// What the hint of a refused `workspaces.json` says it takes.
 const LEGACY_HINT: &str = "check.argv of .swarmops/workspaces.json is an array of strings, the \
@@ -63,8 +70,8 @@ pub struct CheckFile {
     pub checks: Vec<Check>,
 }
 
-/// One check, its defaults filled in: its definition is `argv`, `dir` and `timeout_s`; its
-/// `stages` say when its answer is wanted.
+/// One check, its defaults filled in: its definition is `argv`, `dir`, `timeout_s` and
+/// `reports`; its `stages` say when its answer is wanted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Check {
@@ -79,15 +86,39 @@ pub struct Check {
     /// When its answer is wanted: one to six stages, none twice, in their own order (that of
     /// [`CheckStage::ALL`]); `before-land` when the file names none.
     pub stages: Vec<CheckStage>,
+    /// The JUnit and SARIF reports it leaves in its tree, in the order the file declares them;
+    /// none when it declares none.
+    pub reports: Vec<Report>,
     /// The line its table starts at; none for [`LEGACY_CHECK`].
     pub line: Option<u64>,
 }
 
+/// A report a check declares: a file it leaves in its tree, read into findings once it has
+/// ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Report {
+    /// Its format: [`CheckReportFormat::Junit`] or [`CheckReportFormat::Sarif`].
+    pub format: CheckReportFormat,
+    /// Where it is: a repository path relative to the check's `dir`.
+    pub path: String,
+}
+
+impl Report {
+    /// The report of `format` at `path`.
+    pub fn new(format: CheckReportFormat, path: impl Into<String>) -> Report {
+        Report {
+            format,
+            path: path.into(),
+        }
+    }
+}
+
 impl Check {
     /// The digest of its definition: 64 hex digits, by a provisional recipe that names the
-    /// program, its arguments, the directory and the timeout, not the check.
+    /// program, its arguments, the directory, the timeout and the reports, not the check.
     pub fn definition_digest(&self) -> String {
-        digest::definition(&self.argv, &self.dir, self.timeout_s)
+        digest::definition(&self.argv, &self.dir, self.timeout_s, &self.reports)
     }
 
     /// The check as `check list` gives it.
@@ -100,6 +131,9 @@ impl Check {
             self.definition_digest(),
         );
         out.stages.clone_from(&self.stages);
+        out.reports = (self.reports.iter())
+            .map(|report| CheckReportOut::new(report.format, report.path.clone()))
+            .collect();
         out.line = self.line;
         out
     }
@@ -364,6 +398,7 @@ pub fn parse_legacy(bytes: &[u8]) -> Result<Option<Check>, Refusal> {
         dir: ROOT_DIR.to_owned(),
         timeout_s,
         stages: vec![CheckStage::BeforeLand],
+        reports: Vec::new(),
         line: None,
     }))
 }
@@ -504,6 +539,7 @@ fn check_of(lines: &Lines, name: &str, at: u64, fields: &DeTable<'_>) -> Result<
     let mut dir = None;
     let mut timeout_s = None;
     let mut stages = None;
+    let mut reports = None;
     for (key, value) in in_file_order(fields) {
         let field: &str = key.get_ref();
         let path = dotted(&[CHECKS_KEY, name, field]);
@@ -523,6 +559,7 @@ fn check_of(lines: &Lines, name: &str, at: u64, fields: &DeTable<'_>) -> Result<
             "stages" => {
                 stages = Some(stages_of(value).map_err(|(what, span)| refused(what, span))?);
             }
+            "reports" => reports = Some(reports_of(lines, name, value)?),
             _ => return Err(unknown_key(path, line(key.span()))),
         }
     }
@@ -539,8 +576,114 @@ fn check_of(lines: &Lines, name: &str, at: u64, fields: &DeTable<'_>) -> Result<
         dir: dir.unwrap_or_else(|| ROOT_DIR.to_owned()),
         timeout_s: timeout_s.unwrap_or(DEFAULT_CHECK_TIMEOUT_S),
         stages: stages.unwrap_or_else(|| vec![CheckStage::BeforeLand]),
+        reports: reports.unwrap_or_default(),
         line: Some(at),
     })
+}
+
+/// The reports of check `name`'s `reports`, in declared order, or the refusal of the first
+/// fault: not an array, empty, more than [`MAX_CHECK_REPORTS`], an item that is not a table, a
+/// table without `format` or `path` or with another key, a format that is not one a check may
+/// declare, a path that is not a repository path or given twice (at the second).
+fn reports_of(
+    lines: &Lines,
+    name: &str,
+    value: &Spanned<DeValue<'_>>,
+) -> Result<Vec<Report>, Refusal> {
+    let line = |span: std::ops::Range<usize>| lines.line(span.start);
+    let refused = |field: Option<&str>, what: String, span: std::ops::Range<usize>| {
+        let key = match field {
+            Some(field) => dotted(&[CHECKS_KEY, name, "reports", field]),
+            None => dotted(&[CHECKS_KEY, name, "reports"]),
+        };
+        let what = format!("has {key} {what}");
+        Refusal::new(CHECK_FILE, Reason::Value, what)
+            .at(line(span))
+            .key(key)
+    };
+
+    // 1. An array of 1 to MAX_CHECK_REPORTS items.
+    let DeValue::Array(items) = value.get_ref() else {
+        let what = format!("{}, not an array of report tables", shown(value.get_ref()));
+        return Err(refused(None, what, value.span()));
+    };
+    if items.is_empty() {
+        let what = "empty: declare one report or more, or leave the key out".to_owned();
+        return Err(refused(None, what, value.span()));
+    }
+    let mut reports: Vec<Report> = Vec::with_capacity(items.len().min(MAX_CHECK_REPORTS));
+    for item in items {
+        if reports.len() == MAX_CHECK_REPORTS {
+            let what = format!("holding more than {MAX_CHECK_REPORTS} reports");
+            return Err(refused(None, what, item.span()));
+        }
+
+        // 2. Each a table of `format` and `path`, in file order.
+        let DeValue::Table(fields) = item.get_ref() else {
+            let what = format!("holding {}, not a table", shown(item.get_ref()));
+            return Err(refused(None, what, item.span()));
+        };
+        let mut format = None;
+        let mut path = None;
+        for (key, value) in in_file_order(fields) {
+            let field: &str = key.get_ref();
+            match field {
+                "format" => {
+                    let word = match value.get_ref() {
+                        DeValue::String(word) => Some(word.as_ref()),
+                        _ => None,
+                    };
+                    let known = (CheckReportFormat::DECLARED.into_iter())
+                        .find(|format| Some(format.as_str()) == word);
+                    let Some(known) = known else {
+                        let what = format!(
+                            "{}, not a report format: junit or sarif",
+                            shown(value.get_ref())
+                        );
+                        return Err(refused(Some("format"), what, value.span()));
+                    };
+                    format = Some(known);
+                }
+                "path" => {
+                    let DeValue::String(text) = value.get_ref() else {
+                        let what = format!("{}, not a string", shown(value.get_ref()));
+                        return Err(refused(Some("path"), what, value.span()));
+                    };
+                    let Ok(repo_path) = RepoPath::new(text.as_ref()) else {
+                        let what = format!(
+                            "{}, not a repository path below the check's dir",
+                            quoted(text)
+                        );
+                        return Err(refused(Some("path"), what, value.span()));
+                    };
+                    if reports
+                        .iter()
+                        .any(|report| report.path == repo_path.as_str())
+                    {
+                        let what = format!("{} twice", quoted(text));
+                        return Err(refused(Some("path"), what, value.span()));
+                    }
+                    path = Some(repo_path.as_str().to_owned());
+                }
+                _ => {
+                    let path = dotted(&[CHECKS_KEY, name, "reports", field]);
+                    return Err(unknown_key(path, line(key.span())));
+                }
+            }
+        }
+
+        // 3. Both given.
+        let (Some(format), Some(path)) = (format, path) else {
+            let field = if format.is_none() { "format" } else { "path" };
+            let key = dotted(&[CHECKS_KEY, name, "reports", field]);
+            let what = format!("has no {key}: a report names its format and its path");
+            return Err(Refusal::new(CHECK_FILE, Reason::Value, what)
+                .at(line(item.span()))
+                .key(key));
+        };
+        reports.push(Report::new(format, path));
+    }
+    Ok(reports)
 }
 
 /// `stages`' stages, in their own order, or what is wrong with them and where: not an array,

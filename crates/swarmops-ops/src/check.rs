@@ -43,7 +43,7 @@ use swarmops_api::{
     ReadFileReq, ResolveRevReq, ShowReq, StoreOps,
 };
 
-pub use self::file::{Check, CheckFile, LEGACY_CHECK, ROOT_DIR, Reason, Refusal};
+pub use self::file::{Check, CheckFile, LEGACY_CHECK, ROOT_DIR, Reason, Refusal, Report};
 pub use self::file::{parse, parse_legacy};
 use crate::error;
 
@@ -71,6 +71,9 @@ pub const MAX_ARGV_ITEMS: usize = 1_024;
 
 /// The most bytes of a check's `argv`, its strings together: 64 KiB.
 pub const MAX_ARGV_BYTES: u64 = 64 * 1024;
+
+/// The most reports a check's `reports` may declare.
+pub const MAX_CHECK_REPORTS: usize = 16;
 
 /// The most seconds a check's `timeout_s` may give: 24 hours.
 pub const MAX_CHECK_TIMEOUT_S: u64 = 86_400;
