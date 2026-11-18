@@ -102,7 +102,7 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: QueueCommand) -> Pri
                     req.timeout_s = timeout;
                     Ok(req)
                 },
-                |ops, root, req| wait(&ops, root, req),
+                |ops, root, req| wait(&ops, root, &req),
             ),
             ctx.format,
         ),
@@ -186,7 +186,7 @@ pub(crate) fn withdraw(
 pub(crate) fn wait(
     ops: &dyn StoreOps,
     root: &Utf8Path,
-    req: QueueWaitReq,
+    req: &QueueWaitReq,
 ) -> Result<QueueEntryOut, OpError> {
     let deadline = req
         .timeout_s

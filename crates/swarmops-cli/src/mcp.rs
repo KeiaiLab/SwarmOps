@@ -1636,7 +1636,7 @@ fn operate_queue<O: Operate>(tool: QueueTool, how: O) -> O::Done {
             how.workspace(|ops, root, who, _, req| commands::queue::withdraw(ops, root, who, req))
         }
         QueueTool::Wait => {
-            how.workspace(|ops, root, _, _, req| commands::queue::wait(ops, root, req))
+            how.workspace(|ops, root, _, _, req| commands::queue::wait(ops, root, &req))
         }
     }
 }
