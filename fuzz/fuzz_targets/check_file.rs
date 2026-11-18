@@ -7,7 +7,8 @@
 //! accepted: names unique, sorted, of the grammar; argv, dir and timeout_s inside their rules;
 //!           each digest the one its definition gives; written back by this target as TOML,
 //!           read as the same checks
-//! refused:  E_CHECK_FILE, a known reason, a line from 1 to the input's lines + 1
+//! refused:  E_CHECK_FILE, a known reason, a line from 1 to the input's lines + 1, a message
+//!           of one line and at most 512 bytes
 //! ```
 #![no_main]
 
@@ -147,6 +148,7 @@ fn refused(refusal: &Refusal, bytes: &[u8], file: &str) {
     assert_eq!(error.code, "E_CHECK_FILE");
     assert_eq!((error.exit, error.retryable), (1, false));
     assert!(!error.message.contains('\n'), "{error:?}");
+    assert!(error.message.len() <= 512, "{} bytes", error.message.len());
     assert_eq!(error.details["reason"], refusal.reason.as_str());
     assert_eq!(error.details["vouched"], true);
 }

@@ -587,7 +587,8 @@ fn in_file_order<'t, 'i>(
     entries
 }
 
-/// The dotted path of `keys`: a bare key as it is, any other quoted.
+/// The dotted path of `keys`: a bare key as it is, any other quoted; each cut as [`clipped`]
+/// cuts it.
 fn dotted(keys: &[&str]) -> String {
     let bare = |key: &&str| {
         !key.is_empty()
@@ -596,7 +597,7 @@ fn dotted(keys: &[&str]) -> String {
     let parts: Vec<String> = (keys.iter())
         .map(|key| {
             if bare(key) {
-                (*key).to_owned()
+                as_written(key)
             } else {
                 quoted(key)
             }
@@ -605,24 +606,46 @@ fn dotted(keys: &[&str]) -> String {
     parts.join(".")
 }
 
-/// `text` quoted, its control characters escaped: at most 64 characters of it.
+/// The most characters of a string, a key or a number that a refusal repeats, escapes counted.
+const SHOWN: usize = 64;
+
+/// The start of `text` that a refusal repeats: as many characters as fit in [`SHOWN`] once
+/// escaped as a quoted string escapes them; and whether that is less than all of it.
+fn clipped(text: &str) -> (&str, bool) {
+    let mut width = 0;
+    for (at, c) in text.char_indices() {
+        width += c.escape_debug().count();
+        if width > SHOWN {
+            return (&text[..at], true);
+        }
+    }
+    (text, false)
+}
+
+/// `text` as written, at most [`SHOWN`] characters of it, `…` after a cut.
+fn as_written(text: &str) -> String {
+    match clipped(text) {
+        (shown, true) => format!("{shown}…"),
+        (shown, false) => shown.to_owned(),
+    }
+}
+
+/// `text` quoted, its control characters escaped: at most [`SHOWN`] characters of it, escapes
+/// counted, `…` after a cut.
 fn quoted(text: &str) -> String {
-    const SHOWN: usize = 64;
-    let cut: String = text.chars().take(SHOWN).collect();
-    if cut.len() < text.len() {
-        format!("{cut:?}…")
-    } else {
-        format!("{cut:?}")
+    match clipped(text) {
+        (shown, true) => format!("{shown:?}…"),
+        (shown, false) => format!("{shown:?}"),
     }
 }
 
 /// What `value` is, for a refusal: a string quoted, a number or boolean as written, else its
-/// kind.
+/// kind; a string or number cut as [`clipped`] cuts it, never repeated whole.
 fn shown(value: &DeValue<'_>) -> String {
     match value {
         DeValue::String(text) => quoted(text),
-        DeValue::Integer(integer) => integer.to_string(),
-        DeValue::Float(float) => float.to_string(),
+        DeValue::Integer(integer) => as_written(&integer.to_string()),
+        DeValue::Float(float) => as_written(&float.to_string()),
         DeValue::Boolean(b) => b.to_string(),
         DeValue::Datetime(_) => "a date".to_owned(),
         DeValue::Array(_) => "an array".to_owned(),

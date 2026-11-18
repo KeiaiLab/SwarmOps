@@ -422,6 +422,48 @@ fn a_refusal_is_one_line() {
     assert_eq!(error.details["key"], "check.\"a\\nb\"");
 }
 
+/// A refusal repeats at most the first 64 characters of a number, a string or a key, however
+/// long the file writes it: the message stays short whatever the 1 MiB holds.
+#[test]
+fn a_refusal_cuts_what_it_repeats() {
+    let long = |c: &str| c.repeat(1 << 19);
+    let texts = [
+        format!("version = 1{}\n", long("0")),
+        format!("version = 1.{}\n", long("0")),
+        format!("version = 1\ncheck.a.timeout_s = 1{}\n", long("0")),
+        format!("version = 1\ncheck.a.argv = 1.{}\n", long("5")),
+        format!("version = 1\ncheck.a.dir = \"{}\"\n", long("\\u001b")),
+        format!("version = 1\n{} = 1\n", long("k")),
+        format!("version = 1\ncheck.a.{} = 1\n", long("k")),
+        format!("version = 1\ncheck.{} = {{ argv = [\"x\"] }}\n", long("a")),
+        format!(
+            "version = 1\ncheck.\"{}\".argv = [\"x\"]\n",
+            long("\\u0007")
+        ),
+        format!("version = 1\n{k} = 1\n{k} = 2\n", k = long("k")),
+        format!("version = 1\nx = \"{}\n", long("y")),
+    ];
+    for text in texts {
+        let error = refused(text.as_bytes()).into_error(true);
+        assert!(
+            error.message.len() < 300,
+            "{} bytes: {}",
+            error.message.len(),
+            error.message
+        );
+        let details = serde_json::to_string(&error.details).unwrap();
+        assert!(details.len() < 400, "{} bytes", details.len());
+    }
+    let error = refused(format!("version = 1{}\n", long("0")).as_bytes()).into_error(true);
+    assert_eq!(
+        error.message,
+        format!(
+            ".swarmops/checks.toml has version 1{}…, not 1 (line 1)",
+            "0".repeat(63)
+        )
+    );
+}
+
 // The legacy file.
 
 /// `check.argv` of `workspaces.json` is the one check `default`, at the root.
