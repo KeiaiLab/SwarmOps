@@ -296,3 +296,22 @@ fn a_reader_keeps_what_it_is_asked_to() {
     let read = read_keeping(NEXTEST, ".", 1).unwrap();
     assert_eq!((read.findings.len(), read.failed), (1, 2));
 }
+
+/// An entity other than XML's five is refused in any attribute of a suite or a case, as in one
+/// this reader takes.
+#[test]
+fn an_unknown_entity_in_any_attribute_is_refused() {
+    for xml in [
+        "<testsuite><testcase name=\"a\" time=\"&x;\"/></testsuite>",
+        "<testsuite id=\"&x;\"><testcase name=\"a\"/></testsuite>",
+    ] {
+        assert_eq!(
+            refused(xml.as_bytes()),
+            (
+                CheckReportFault::Syntax,
+                "an attribute holds an entity that is not one of XML's five".to_owned()
+            ),
+            "{xml}"
+        );
+    }
+}

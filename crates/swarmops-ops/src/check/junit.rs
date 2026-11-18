@@ -318,6 +318,7 @@ impl<'d> Walk<'d> {
         match name {
             "testsuite" => {
                 let suite = attribute(element, "name")?;
+                attributes_read(element)?;
                 self.suites.push((self.depth, suite));
             }
             "testcase" => {
@@ -325,14 +326,16 @@ impl<'d> Walk<'d> {
                     Some(class) => Some(class),
                     None => self.suites.iter().rev().find_map(|(_, name)| name.clone()),
                 };
-                self.cases.push(Case {
+                let case = Case {
                     depth: self.depth,
                     name: attribute(element, "name")?,
                     group,
                     file: attribute(element, "file")?,
                     line: attribute(element, "line")?,
                     ..Case::default()
-                });
+                };
+                attributes_read(element)?;
+                self.cases.push(case);
             }
             "failure" | "error" | "skipped" | "system-err" => self.child(element, name)?,
             _ => attributes_read(element)?,
