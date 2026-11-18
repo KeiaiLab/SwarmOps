@@ -95,8 +95,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   `CheckOutcome`, `CheckNotStarted` and `CheckSectionOut`, those of `check run`; `CheckLogReq`,
   `CheckLogResp`, `CheckLogLineOut`, `CheckLogStream` and `CheckLogEnd`, those of `check log`;
   `CheckFindingOut`, `CheckFindingLevel`, `CheckReportReadOut`, `CheckReportFormat`,
-  `CheckReportState` and `CheckReportFault`, a check's findings and the reports they came from.
-  `swarmops schema` prints them (219 types).
+  `CheckReportState` and `CheckReportFault`, a check's findings and the reports they came from;
+  `CheckReportOut`, a report a check declares. `swarmops schema` prints them (220 types).
 
 ### Changed
 

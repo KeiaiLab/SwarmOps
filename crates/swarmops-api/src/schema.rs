@@ -330,6 +330,7 @@ fn check_schemas() -> serde_json::Value {
         CheckListResp,
         CheckOut,
         CheckStage,
+        CheckReportOut,
         CheckRunReq,
         CheckRunResp,
         CheckRunOut,

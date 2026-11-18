@@ -108,6 +108,7 @@ const RESPONSES: &[&str] = &[
     "CheckLogResp",
     "CheckOut",
     "CheckFindingOut",
+    "CheckReportOut",
     "CheckReportReadOut",
     "CheckRunOut",
     "CheckRunResp",
@@ -2150,8 +2151,9 @@ mod check {
     use swarmops_api::{
         CheckFindingLevel, CheckFindingOut, CheckListReq, CheckListResp, CheckLogEnd,
         CheckLogLineOut, CheckLogReq, CheckLogResp, CheckLogStream, CheckNotStarted, CheckOut,
-        CheckOutcome, CheckReportFault, CheckReportFormat, CheckReportReadOut, CheckReportState,
-        CheckRunOut, CheckRunReq, CheckRunResp, CheckSectionOut, CheckStage, Rev, schema_for_all,
+        CheckOutcome, CheckReportFault, CheckReportFormat, CheckReportOut, CheckReportReadOut,
+        CheckReportState, CheckRunOut, CheckRunReq, CheckRunResp, CheckSectionOut, CheckStage, Rev,
+        schema_for_all,
     };
 
     /// A log's request names the workspace and the check; the newest run and 1,000 lines when
@@ -2417,7 +2419,7 @@ mod check {
             alternatives.into_iter().map(str::to_owned).collect()
         };
         assert_eq!(words("CheckFindingLevel"), ["error", "warning", "notice"]);
-        assert_eq!(words("CheckReportFormat"), ["findings"]);
+        assert_eq!(words("CheckReportFormat"), ["findings", "junit", "sarif"]);
         assert_eq!(
             words("CheckReportState"),
             ["read", "missing", "stale", "refused"]
@@ -2440,9 +2442,42 @@ mod check {
             assert_eq!(CheckFindingLevel::parse(level.as_str()), Some(level));
         }
         assert_eq!(CheckFindingLevel::parse("info"), None);
+        for format in [
+            CheckReportFormat::Findings,
+            CheckReportFormat::Junit,
+            CheckReportFormat::Sarif,
+        ] {
+            assert_eq!(
+                serde_json::to_value(format).unwrap(),
+                json!(format.as_str())
+            );
+        }
         assert_eq!(
-            serde_json::to_value(CheckReportFormat::Findings).unwrap(),
-            json!(CheckReportFormat::Findings.as_str())
+            CheckReportFormat::DECLARED,
+            [CheckReportFormat::Junit, CheckReportFormat::Sarif]
+        );
+
+        // A JUnit report's counts and a SARIF report's, after `cut`.
+        let mut junit = CheckReportReadOut::new(
+            CheckReportFormat::Junit,
+            "target/junit.xml",
+            CheckReportState::Read,
+        );
+        junit.findings = Some(2);
+        junit.tests = Some(5);
+        junit.failed = Some(2);
+        junit.skipped = Some(1);
+        assert_eq!(
+            serde_json::to_string(&junit).unwrap(),
+            r#"{"format":"junit","path":"target/junit.xml","state":"read","findings":2,"tests":5,"failed":2,"skipped":1}"#
+        );
+        let mut sarif =
+            CheckReportReadOut::new(CheckReportFormat::Sarif, "a.sarif", CheckReportState::Read);
+        sarif.findings = Some(1);
+        sarif.results = Some(3);
+        assert_eq!(
+            serde_json::to_string(&sarif).unwrap(),
+            r#"{"format":"sarif","path":"a.sarif","state":"read","findings":1,"results":3}"#
         );
         assert_ignores_unknown_fields::<CheckFindingOut>(
             "CheckFindingOut",
@@ -2595,6 +2630,10 @@ mod check {
         );
         check.line = Some(4);
         check.stages = vec![CheckStage::BeforeLand, CheckStage::Manual];
+        check.reports = vec![
+            CheckReportOut::new(CheckReportFormat::Junit, "out/junit.xml"),
+            CheckReportOut::new(CheckReportFormat::Sarif, "out/a.sarif"),
+        ];
         let mut stored = CheckListResp::new(false, vec![check]);
         stored.tree = Some("7f".to_owned());
         stored.file = Some(".swarmops/checks.toml".to_owned());
@@ -2607,7 +2646,8 @@ mod check {
                 r#"{"vouched":false,"tree":"7f","file":".swarmops/checks.toml","version":1,"#,
                 r#""stage":"manual","checks":[{"name":"default","argv":["make"],"dir":".","#,
                 r#""timeout_s":900,"definition_digest":"ab","stages":["before-land","manual"],"#,
-                r#""line":4}]}"#,
+                r#""reports":[{"format":"junit","path":"out/junit.xml"},"#,
+                r#"{"format":"sarif","path":"out/a.sarif"}],"line":4}]}"#,
             ]
             .concat()
         );
@@ -2634,11 +2674,17 @@ mod check {
             json!({"name": "a", "argv": ["a"], "dir": ".", "timeout_s": 1,
                    "definition_digest": "ab"}),
         );
+        assert_eq!(all["CheckReportOut"]["required"], json!(["format", "path"]));
+        assert_ignores_unknown_fields::<CheckReportOut>(
+            "CheckReportOut",
+            json!({"format": "junit", "path": "a.xml"}),
+        );
 
         // An answer of a build before stages reads as before-land.
         let older: CheckOut = serde_json::from_value(json!({"name": "a", "argv": ["a"],
             "dir": ".", "timeout_s": 1, "definition_digest": "ab"}))
         .unwrap();
         assert_eq!(older.stages, [CheckStage::BeforeLand]);
+        assert_eq!(older.reports, []);
     }
 }

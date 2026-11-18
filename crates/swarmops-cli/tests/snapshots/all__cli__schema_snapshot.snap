@@ -1489,7 +1489,7 @@ expression: s.redact(&all)
               "type": "array"
             },
             "definition_digest": {
-              "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not\nits name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
+              "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled\nin; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
               "type": "string"
             },
             "dir": {
@@ -1508,6 +1508,13 @@ expression: s.redact(&all)
             "name": {
               "description": "Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit.",
               "type": "string"
+            },
+            "reports": {
+              "description": "The JUnit and SARIF reports it leaves in its tree, which `check run` reads into findings\nonce it has ended, in the order the file declares them. Omitted when it declares none.",
+              "items": {
+                "$ref": "#/$defs/CheckReportOut"
+              },
+              "type": "array"
             },
             "stages": {
               "default": [
@@ -1532,6 +1539,44 @@ expression: s.redact(&all)
             "dir",
             "timeout_s",
             "definition_digest"
+          ],
+          "type": "object"
+        },
+        "CheckReportFormat": {
+          "description": "The format of a report a check's findings come from.",
+          "oneOf": [
+            {
+              "const": "findings",
+              "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`. Never\ndeclared.",
+              "type": "string"
+            },
+            {
+              "const": "junit",
+              "description": "A JUnit XML report of test cases: each case that failed or ended in an error is a\nfinding.",
+              "type": "string"
+            },
+            {
+              "const": "sarif",
+              "description": "A SARIF 2.1.0 log of results: each result of kind `fail` is a finding.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckReportOut": {
+          "description": "A report a check declares: a file in its tree, of a format `check run` reads into findings.",
+          "properties": {
+            "format": {
+              "$ref": "#/$defs/CheckReportFormat",
+              "description": "Its format: `junit` or `sarif`."
+            },
+            "path": {
+              "description": "Where the check leaves it: a repository path relative to the check's `dir`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "format",
+            "path"
           ],
           "type": "object"
         },
@@ -1993,6 +2038,44 @@ expression: s.redact(&all)
     },
     "CheckOut": {
       "$defs": {
+        "CheckReportFormat": {
+          "description": "The format of a report a check's findings come from.",
+          "oneOf": [
+            {
+              "const": "findings",
+              "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`. Never\ndeclared.",
+              "type": "string"
+            },
+            {
+              "const": "junit",
+              "description": "A JUnit XML report of test cases: each case that failed or ended in an error is a\nfinding.",
+              "type": "string"
+            },
+            {
+              "const": "sarif",
+              "description": "A SARIF 2.1.0 log of results: each result of kind `fail` is a finding.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckReportOut": {
+          "description": "A report a check declares: a file in its tree, of a format `check run` reads into findings.",
+          "properties": {
+            "format": {
+              "$ref": "#/$defs/CheckReportFormat",
+              "description": "Its format: `junit` or `sarif`."
+            },
+            "path": {
+              "description": "Where the check leaves it: a repository path relative to the check's `dir`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "format",
+            "path"
+          ],
+          "type": "object"
+        },
         "CheckStage": {
           "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
           "oneOf": [
@@ -2040,7 +2123,7 @@ expression: s.redact(&all)
           "type": "array"
         },
         "definition_digest": {
-          "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not\nits name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
+          "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled\nin; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
           "type": "string"
         },
         "dir": {
@@ -2059,6 +2142,13 @@ expression: s.redact(&all)
         "name": {
           "description": "Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit.",
           "type": "string"
+        },
+        "reports": {
+          "description": "The JUnit and SARIF reports it leaves in its tree, which `check run` reads into findings\nonce it has ended, in the order the file declares them. Omitted when it declares none.",
+          "items": {
+            "$ref": "#/$defs/CheckReportOut"
+          },
+          "type": "array"
         },
         "stages": {
           "default": [
@@ -2177,11 +2267,63 @@ expression: s.redact(&all)
       "oneOf": [
         {
           "const": "findings",
-          "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`.",
+          "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`. Never\ndeclared.",
+          "type": "string"
+        },
+        {
+          "const": "junit",
+          "description": "A JUnit XML report of test cases: each case that failed or ended in an error is a\nfinding.",
+          "type": "string"
+        },
+        {
+          "const": "sarif",
+          "description": "A SARIF 2.1.0 log of results: each result of kind `fail` is a finding.",
           "type": "string"
         }
       ],
       "title": "CheckReportFormat"
+    },
+    "CheckReportOut": {
+      "$defs": {
+        "CheckReportFormat": {
+          "description": "The format of a report a check's findings come from.",
+          "oneOf": [
+            {
+              "const": "findings",
+              "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`. Never\ndeclared.",
+              "type": "string"
+            },
+            {
+              "const": "junit",
+              "description": "A JUnit XML report of test cases: each case that failed or ended in an error is a\nfinding.",
+              "type": "string"
+            },
+            {
+              "const": "sarif",
+              "description": "A SARIF 2.1.0 log of results: each result of kind `fail` is a finding.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A report a check declares: a file in its tree, of a format `check run` reads into findings.",
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/CheckReportFormat",
+          "description": "Its format: `junit` or `sarif`."
+        },
+        "path": {
+          "description": "Where the check leaves it: a repository path relative to the check's `dir`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "format",
+        "path"
+      ],
+      "title": "CheckReportOut",
+      "type": "object"
     },
     "CheckReportReadOut": {
       "$defs": {
@@ -2235,7 +2377,17 @@ expression: s.redact(&all)
           "oneOf": [
             {
               "const": "findings",
-              "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`.",
+              "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`. Never\ndeclared.",
+              "type": "string"
+            },
+            {
+              "const": "junit",
+              "description": "A JUnit XML report of test cases: each case that failed or ended in an error is a\nfinding.",
+              "type": "string"
+            },
+            {
+              "const": "sarif",
+              "description": "A SARIF 2.1.0 log of results: each result of kind `fail` is a finding.",
               "type": "string"
             }
           ]
@@ -2272,6 +2424,15 @@ expression: s.redact(&all)
         "cut": {
           "description": "Whether the report file was past 64 MiB: its lines up to the bound were read, the rest\nnot. Omitted when false.",
           "type": "boolean"
+        },
+        "failed": {
+          "description": "Those of them that failed or ended in an error, each a finding, for a JUnit report\n`read`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "fault": {
           "anyOf": [
@@ -2311,12 +2472,39 @@ expression: s.redact(&all)
           ]
         },
         "path": {
-          "description": "Where it was: the report file's absolute path on the host the check ran on.",
+          "description": "Where it was: the report file's absolute path on the host the check ran on; a declared\nreport's path as its check declares it, relative to the check's `dir`.",
           "type": "string"
+        },
+        "results": {
+          "description": "A SARIF report's results, every kind, for `read`; those of kind `fail` are its findings.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "skipped": {
+          "description": "Those of them skipped, for a JUnit report `read`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "state": {
           "$ref": "#/$defs/CheckReportState",
           "description": "What came of it."
+        },
+        "tests": {
+          "description": "A JUnit report's test cases, for `read`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2545,7 +2733,17 @@ expression: s.redact(&all)
           "oneOf": [
             {
               "const": "findings",
-              "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`.",
+              "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`. Never\ndeclared.",
+              "type": "string"
+            },
+            {
+              "const": "junit",
+              "description": "A JUnit XML report of test cases: each case that failed or ended in an error is a\nfinding.",
+              "type": "string"
+            },
+            {
+              "const": "sarif",
+              "description": "A SARIF 2.1.0 log of results: each result of kind `fail` is a finding.",
               "type": "string"
             }
           ]
@@ -2556,6 +2754,15 @@ expression: s.redact(&all)
             "cut": {
               "description": "Whether the report file was past 64 MiB: its lines up to the bound were read, the rest\nnot. Omitted when false.",
               "type": "boolean"
+            },
+            "failed": {
+              "description": "Those of them that failed or ended in an error, each a finding, for a JUnit report\n`read`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "fault": {
               "anyOf": [
@@ -2595,12 +2802,39 @@ expression: s.redact(&all)
               ]
             },
             "path": {
-              "description": "Where it was: the report file's absolute path on the host the check ran on.",
+              "description": "Where it was: the report file's absolute path on the host the check ran on; a declared\nreport's path as its check declares it, relative to the check's `dir`.",
               "type": "string"
+            },
+            "results": {
+              "description": "A SARIF report's results, every kind, for `read`; those of kind `fail` are its findings.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "skipped": {
+              "description": "Those of them skipped, for a JUnit report `read`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "state": {
               "$ref": "#/$defs/CheckReportState",
               "description": "What came of it."
+            },
+            "tests": {
+              "description": "A JUnit report's test cases, for `read`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
@@ -3044,7 +3278,17 @@ expression: s.redact(&all)
           "oneOf": [
             {
               "const": "findings",
-              "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`.",
+              "description": "The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`. Never\ndeclared.",
+              "type": "string"
+            },
+            {
+              "const": "junit",
+              "description": "A JUnit XML report of test cases: each case that failed or ended in an error is a\nfinding.",
+              "type": "string"
+            },
+            {
+              "const": "sarif",
+              "description": "A SARIF 2.1.0 log of results: each result of kind `fail` is a finding.",
               "type": "string"
             }
           ]
@@ -3055,6 +3299,15 @@ expression: s.redact(&all)
             "cut": {
               "description": "Whether the report file was past 64 MiB: its lines up to the bound were read, the rest\nnot. Omitted when false.",
               "type": "boolean"
+            },
+            "failed": {
+              "description": "Those of them that failed or ended in an error, each a finding, for a JUnit report\n`read`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "fault": {
               "anyOf": [
@@ -3094,12 +3347,39 @@ expression: s.redact(&all)
               ]
             },
             "path": {
-              "description": "Where it was: the report file's absolute path on the host the check ran on.",
+              "description": "Where it was: the report file's absolute path on the host the check ran on; a declared\nreport's path as its check declares it, relative to the check's `dir`.",
               "type": "string"
+            },
+            "results": {
+              "description": "A SARIF report's results, every kind, for `read`; those of kind `fail` are its findings.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "skipped": {
+              "description": "Those of them skipped, for a JUnit report `read`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "state": {
               "$ref": "#/$defs/CheckReportState",
               "description": "What came of it."
+            },
+            "tests": {
+              "description": "A JUnit report's test cases, for `read`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [

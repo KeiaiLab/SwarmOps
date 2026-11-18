@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 219 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 220 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -44,6 +44,7 @@ The 219 request, response and value types of the API, as `swarmops schema` print
 | [`CheckOutcome`](#checkoutcome) | enumeration | How a check of a run ended. |
 | [`CheckReportFault`](#checkreportfault) | enumeration | Why a report was not read. |
 | [`CheckReportFormat`](#checkreportformat) | enumeration | The format of a report a check's findings come from. |
+| [`CheckReportOut`](#checkreportout) | object | A report a check declares: a file in its tree, of a format `check run` reads into findings. |
 | [`CheckReportReadOut`](#checkreportreadout) | object | A report a check's findings were read from, as one run read it, after the check ended. |
 | [`CheckReportState`](#checkreportstate) | enumeration | What came of a report after its check. |
 | [`CheckRunOut`](#checkrunout) | object | One check of a run: how it ended, and where its log is. |
@@ -661,10 +662,11 @@ Kind: object. `swarmops schema CheckOut` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `argv` | array of `string` | yes | The program and its arguments, run with no shell: at least the program. |
-| `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
+| `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
 | `dir` | `string` | yes | The directory of the tree it runs in, as a repository path; `.` is the root. |
 | `line` | `integer` (uint64) or `null` | no | The line of `.swarmops/checks.toml` that starts its table. Omitted for the check `default` read from `.swarmops/workspaces.json`. |
 | `name` | `string` | yes | Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit. |
+| `reports` | array of [`CheckReportOut`](#checkreportout) | no | The JUnit and SARIF reports it leaves in its tree, which `check run` reads into findings once it has ended, in the order the file declares them. Omitted when it declares none. |
 | `stages` | array of [`CheckStage`](#checkstage) | no | When its answer is wanted: one to six stages, in the stages' own order (`before-land`, `after-land`, `scheduled`, `release`, `manual`, `deploy`), whatever order the file wrote them in; `before-land` by default, and for the check `default` of `.swarmops/workspaces.json`. Default: `["before-land"]`. |
 | `timeout_s` | `integer` (uint64) | yes | The most seconds it may run, its default (900) filled in. For the check `default` of `.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does not read it, and takes its own `--check-timeout`. |
 
@@ -708,7 +710,20 @@ Kind: enumeration. `swarmops schema CheckReportFormat` prints its JSON Schema.
 
 | Value | Description |
 | --- | --- |
-| `"findings"` | The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`. |
+| `"findings"` | The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`. Never declared. |
+| `"junit"` | A JUnit XML report of test cases: each case that failed or ended in an error is a finding. |
+| `"sarif"` | A SARIF 2.1.0 log of results: each result of kind `fail` is a finding. |
+
+## CheckReportOut
+
+A report a check declares: a file in its tree, of a format `check run` reads into findings.
+
+Kind: object. `swarmops schema CheckReportOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `format` | [`CheckReportFormat`](#checkreportformat) | yes | Its format: `junit` or `sarif`. |
+| `path` | `string` | yes | Where the check leaves it: a repository path relative to the check's `dir`. |
 
 ## CheckReportReadOut
 
@@ -719,13 +734,17 @@ Kind: object. `swarmops schema CheckReportReadOut` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `cut` | `boolean` | no | Whether the report file was past 64 MiB: its lines up to the bound were read, the rest not. Omitted when false. |
+| `failed` | `integer` (uint64) or `null` | no | Those of them that failed or ended in an error, each a finding, for a JUnit report `read`. |
 | `fault` | [`CheckReportFault`](#checkreportfault) or `null` | no | Why it was not read, for `refused`. |
 | `findings` | `integer` (uint64) or `null` | no | The findings it gave, returned or not, for `read`. |
 | `format` | [`CheckReportFormat`](#checkreportformat) | yes | Its format. |
 | `invalid_lines` | `integer` (uint64) | no | The report file's lines that are no finding, each skipped. Omitted when 0. |
 | `message` | `string` or `null` | no | One line: for `refused`, why, in the host's words where they apply; for the report file, its first invalid line and why, or that it was cut. Omitted otherwise. |
-| `path` | `string` | yes | Where it was: the report file's absolute path on the host the check ran on. |
+| `path` | `string` | yes | Where it was: the report file's absolute path on the host the check ran on; a declared report's path as its check declares it, relative to the check's `dir`. |
+| `results` | `integer` (uint64) or `null` | no | A SARIF report's results, every kind, for `read`; those of kind `fail` are its findings. |
+| `skipped` | `integer` (uint64) or `null` | no | Those of them skipped, for a JUnit report `read`. |
 | `state` | [`CheckReportState`](#checkreportstate) | yes | What came of it. |
+| `tests` | `integer` (uint64) or `null` | no | A JUnit report's test cases, for `read`. |
 
 ## CheckReportState
 

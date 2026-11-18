@@ -320,6 +320,7 @@ expression: s.transcript()
             "CheckOutcome",
             "CheckReportFault",
             "CheckReportFormat",
+            "CheckReportOut",
             "CheckReportReadOut",
             "CheckReportState",
             "CheckRunOut",
