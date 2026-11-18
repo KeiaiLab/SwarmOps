@@ -323,5 +323,5 @@ fn update_schemas() -> serde_json::Value {
 
 /// The schemas of the checks' types (M30): `check list`, the checks a tree describes.
 fn check_schemas() -> serde_json::Value {
-    schemas![CheckListReq, CheckListResp, CheckOut]
+    schemas![CheckListReq, CheckListResp, CheckOut, CheckStage]
 }

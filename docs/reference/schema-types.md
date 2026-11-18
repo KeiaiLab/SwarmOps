@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 201 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 202 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -33,6 +33,7 @@ The 201 request, response and value types of the API, as `swarmops schema` print
 | [`CheckListReq`](#checklistreq) | object | `check_list` (CLI `check list`): the checks the tree of `rev` describes. |
 | [`CheckListResp`](#checklistresp) | object | `check_list`: the checks a tree describes, sorted by name. |
 | [`CheckOut`](#checkout) | object | One check: a command run with no shell, in a directory of the tree, for at most its time. |
+| [`CheckStage`](#checkstage) | enumeration | When a check's answer is wanted. |
 | [`CloneReq`](#clonereq) | object | `clone`: a new store in a directory of the caller's host, holding a git remote's history, with the remote recorded and its followed branch imported into `main`. |
 | [`CloneResp`](#cloneresp) | object | `clone`: the store made, the remote recorded, its fetch, and where `main` stands. |
 | [`CommitReq`](#commitreq) | object | `commit`: record a changeset from an explicit change list. |
@@ -506,6 +507,7 @@ Kind: object. `swarmops schema CheckListReq` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `rev` | [`Rev`](#rev) | no | The changeset whose tree's checks to list; `main` when omitted. Default: `"main"`. |
+| `stage` | [`CheckStage`](#checkstage) or `null` | no | Only the checks of this stage; every check when omitted. |
 
 ## CheckListResp
 
@@ -515,8 +517,9 @@ Kind: object. `swarmops schema CheckListResp` prints its JSON Schema.
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
-| `checks` | array of [`CheckOut`](#checkout) | yes | The checks, sorted by name, bytewise; empty when the tree describes none. |
+| `checks` | array of [`CheckOut`](#checkout) | yes | The checks, sorted by name, bytewise; empty when the tree describes none (or none of `stage`). |
 | `file` | `string` or `null` | no | The file the checks came from: `.swarmops/checks.toml`, or `.swarmops/workspaces.json` for the one check `default`. Omitted when the tree holds neither, or a `workspaces.json` with no `check.argv`. |
+| `stage` | [`CheckStage`](#checkstage) or `null` | no | The stage asked for: `checks` holds only the checks of it. Omitted when every check is listed. |
 | `tree` | `string` or `null` | no | The root tree the file was read from: 64 hex digits. Omitted for a directory. |
 | `version` | `integer` (uint32) or `null` | no | The check file's `version`, 1. Omitted unless `file` is `.swarmops/checks.toml`. |
 | `vouched` | `boolean` | yes | Whether only the caller stands behind the file: `true` when it was read from a directory the caller named (`check list --dir`), which no gate accepts; `false` when it was read from the store, at `tree`. |
@@ -530,11 +533,27 @@ Kind: object. `swarmops schema CheckOut` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `argv` | array of `string` | yes | The program and its arguments, run with no shell: at least the program. |
-| `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not its name): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
+| `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
 | `dir` | `string` | yes | The directory of the tree it runs in, as a repository path; `.` is the root. |
 | `line` | `integer` (uint64) or `null` | no | The line of `.swarmops/checks.toml` that starts its table. Omitted for the check `default` read from `.swarmops/workspaces.json`. |
 | `name` | `string` | yes | Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit. |
+| `stages` | array of [`CheckStage`](#checkstage) | no | When its answer is wanted: one to six stages, in the stages' own order (`before-land`, `after-land`, `scheduled`, `release`, `manual`, `deploy`), whatever order the file wrote them in; `before-land` by default, and for the check `default` of `.swarmops/workspaces.json`. Default: `["before-land"]`. |
 | `timeout_s` | `integer` (uint64) | yes | The most seconds it may run, its default (900) filled in. For the check `default` of `.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does not read it, and takes its own `--check-timeout`. |
+
+## CheckStage
+
+When a check's answer is wanted. A check names one or more; `check run` runs one stage's checks.
+
+Kind: enumeration. `swarmops schema CheckStage` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"before-land"` | Before a change lands: the gate. The default. |
+| `"after-land"` | After a change has landed. |
+| `"scheduled"` | On a schedule. |
+| `"release"` | Before a release is cut. |
+| `"manual"` | Only when someone asks for it. |
+| `"deploy"` | Before a deployment. |
 
 ## CloneReq
 

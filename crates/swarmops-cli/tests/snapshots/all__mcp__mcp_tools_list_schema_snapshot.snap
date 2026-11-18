@@ -1,5 +1,6 @@
 ---
 source: crates/swarmops-cli/tests/mcp.rs
+assertion_line: 317
 expression: listed
 ---
 {
@@ -1599,6 +1600,49 @@ expression: listed
             "default": "main",
             "description": "The changeset whose tree's checks to list; `main` when omitted. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
             "type": "string"
+          },
+          "stage": {
+            "anyOf": [
+              {
+                "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+                "oneOf": [
+                  {
+                    "const": "before-land",
+                    "description": "Before a change lands: the gate. The default.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "after-land",
+                    "description": "After a change has landed.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "scheduled",
+                    "description": "On a schedule.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "release",
+                    "description": "Before a release is cut.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "manual",
+                    "description": "Only when someone asks for it.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "deploy",
+                    "description": "Before a deployment.",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only the checks of this stage; every check when omitted."
           }
         },
         "title": "CheckListReq",

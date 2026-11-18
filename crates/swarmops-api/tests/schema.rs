@@ -195,6 +195,7 @@ const RESPONSES: &[&str] = &[
 const SCALARS: &[&str] = &[
     "AutoUpdate",
     "ChangeOp",
+    "CheckStage",
     "ConflictKindOut",
     "ContentEncoding",
     "ContentInput",
@@ -2129,7 +2130,7 @@ mod update {
 /// `check list`'s request and result (M30).
 mod check {
     use serde_json::json;
-    use swarmops_api::{CheckListReq, CheckListResp, CheckOut, Rev, schema_for_all};
+    use swarmops_api::{CheckListReq, CheckListResp, CheckOut, CheckStage, Rev, schema_for_all};
 
     use super::assert_ignores_unknown_fields;
 
@@ -2144,6 +2145,48 @@ mod check {
         );
         assert_eq!(schema_for_all()["CheckListReq"].get("required"), None);
         assert_ignores_unknown_fields::<CheckListReq>("CheckListReq", json!({}));
+
+        // A stage, when one is asked for.
+        let mut staged = CheckListReq::default();
+        staged.stage = Some(CheckStage::AfterLand);
+        assert_eq!(
+            serde_json::to_string(&staged).unwrap(),
+            r#"{"rev":"main","stage":"after-land"}"#
+        );
+    }
+
+    /// The six stages, written as the check file writes them, in their own order; `before-land`
+    /// the default; a name outside them refused.
+    #[test]
+    fn the_stages_are_six_words_in_their_order() {
+        let names: Vec<&str> = CheckStage::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "before-land",
+                "after-land",
+                "scheduled",
+                "release",
+                "manual",
+                "deploy"
+            ]
+        );
+        for stage in CheckStage::ALL {
+            let text = serde_json::to_string(&stage).unwrap();
+            assert_eq!(text, format!("\"{stage}\""));
+            assert_eq!(serde_json::from_str::<CheckStage>(&text).unwrap(), stage);
+            assert_eq!(CheckStage::parse(stage.as_str()), Some(stage));
+        }
+        let mut sorted = CheckStage::ALL;
+        sorted.sort();
+        assert_eq!(sorted, CheckStage::ALL, "Ord is the stages' own order");
+        assert_eq!(CheckStage::default(), CheckStage::BeforeLand);
+        assert_eq!(CheckStage::parse("nightly"), None);
+        assert!(serde_json::from_str::<CheckStage>(r#""nightly""#).is_err());
+        let all = schema_for_all();
+        let alts = all["CheckStage"]["oneOf"].as_array().unwrap();
+        let one_of: Vec<&str> = alts.iter().filter_map(|alt| alt["const"].as_str()).collect();
+        assert_eq!(one_of, names);
     }
 
     /// A directory's answer holds `vouched` and its checks, in the documented order; the store's
@@ -2156,22 +2199,25 @@ mod check {
             serde_json::to_string(&CheckListResp::new(true, vec![check.clone()])).unwrap(),
             [
                 r#"{"vouched":true,"checks":[{"name":"default","argv":["make"],"dir":".","#,
-                r#""timeout_s":900,"definition_digest":"ab"}]}"#,
+                r#""timeout_s":900,"definition_digest":"ab","stages":["before-land"]}]}"#,
             ]
             .concat()
         );
         check.line = Some(4);
+        check.stages = vec![CheckStage::BeforeLand, CheckStage::Manual];
         let mut stored = CheckListResp::new(false, vec![check]);
         stored.tree = Some("7f".to_owned());
         stored.file = Some(".swarmops/checks.toml".to_owned());
         stored.version = Some(1);
+        stored.stage = Some(CheckStage::Manual);
         let text = serde_json::to_string(&stored).unwrap();
         assert_eq!(
             text,
             [
                 r#"{"vouched":false,"tree":"7f","file":".swarmops/checks.toml","version":1,"#,
-                r#""checks":[{"name":"default","argv":["make"],"dir":".","timeout_s":900,"#,
-                r#""definition_digest":"ab","line":4}]}"#,
+                r#""stage":"manual","checks":[{"name":"default","argv":["make"],"dir":".","#,
+                r#""timeout_s":900,"definition_digest":"ab","stages":["before-land","manual"],"#,
+                r#""line":4}]}"#,
             ]
             .concat()
         );
@@ -2198,5 +2244,11 @@ mod check {
             json!({"name": "a", "argv": ["a"], "dir": ".", "timeout_s": 1,
                    "definition_digest": "ab"}),
         );
+
+        // An answer of a build before stages reads as before-land.
+        let older: CheckOut = serde_json::from_value(json!({"name": "a", "argv": ["a"],
+            "dir": ".", "timeout_s": 1, "definition_digest": "ab"}))
+        .unwrap();
+        assert_eq!(older.stages, [CheckStage::BeforeLand]);
     }
 }

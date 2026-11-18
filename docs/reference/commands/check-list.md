@@ -75,6 +75,9 @@ swarmops --repo [tmp]/store check list
         "dir": ".",
         "timeout_s": 900,
         "definition_digest": "[docs_digest]",
+        "stages": [
+          "before-land"
+        ],
         "line": 12
       },
       {
@@ -89,6 +92,9 @@ swarmops --repo [tmp]/store check list
         "dir": "crates/app",
         "timeout_s": 600,
         "definition_digest": "[lint_digest]",
+        "stages": [
+          "before-land"
+        ],
         "line": 7
       },
       {
@@ -101,6 +107,9 @@ swarmops --repo [tmp]/store check list
         "dir": ".",
         "timeout_s": 900,
         "definition_digest": "[unit_digest]",
+        "stages": [
+          "before-land"
+        ],
         "line": 4
       }
     ]
@@ -232,8 +241,9 @@ an agent's request should name.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `checks` | `array of CheckOut` | yes | The checks, sorted by name, bytewise; empty when the tree describes none. |
+| `checks` | `array of CheckOut` | yes | The checks, sorted by name, bytewise; empty when the tree describes none (or none of `stage`). |
 | `file` | `string or null` | no | The file the checks came from: `.swarmops/checks.toml`, or `.swarmops/workspaces.json` for the one check `default`. Omitted when the tree holds neither, or a `workspaces.json` with no `check.argv`. |
+| `stage` | `CheckStage or null` | no | The stage asked for: `checks` holds only the checks of it. Omitted when every check is listed. |
 | `tree` | `string or null` | no | The root tree the file was read from: 64 hex digits. Omitted for a directory. |
 | `version` | `integer or null` | no | The check file's `version`, 1. Omitted unless `file` is `.swarmops/checks.toml`. |
 | `vouched` | `boolean` | yes | Whether only the caller stands behind the file: `true` when it was read from a directory the caller named (`check list --dir`), which no gate accepts; `false` when it was read from the store, at `tree`. |

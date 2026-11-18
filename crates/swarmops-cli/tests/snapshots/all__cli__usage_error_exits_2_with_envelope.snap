@@ -309,6 +309,7 @@ expression: s.transcript()
             "CheckListReq",
             "CheckListResp",
             "CheckOut",
+            "CheckStage",
             "CloneReq",
             "CloneResp",
             "CommitReq",

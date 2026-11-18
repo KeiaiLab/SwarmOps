@@ -38,8 +38,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   or, in a tree without one, `.swarmops/workspaces.json`; `details` name the `file`, the `reason`,
   whether the caller `vouched` for it, and its `line` and `key` when known. Golden envelopes now
   pin 57 of the 57 error codes.
-- API types `CheckListReq`, `CheckListResp` and `CheckOut`, the request and result of
-  `check list`. `swarmops schema` prints them (201 types).
+- API types `CheckListReq`, `CheckListResp`, `CheckOut` and `CheckStage`, the request and
+  result of `check list` and a check's stage. `swarmops schema` prints them (202 types).
 
 ### Changed
 

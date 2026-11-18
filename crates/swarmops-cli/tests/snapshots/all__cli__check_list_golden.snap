@@ -26,6 +26,9 @@ expression: s.transcript()
             "dir": ".",
             "timeout_s": 900,
             "definition_digest": "[docs_digest]",
+            "stages": [
+              "before-land"
+            ],
             "line": 12
           },
           {
@@ -40,6 +43,9 @@ expression: s.transcript()
             "dir": "crates/app",
             "timeout_s": 600,
             "definition_digest": "[lint_digest]",
+            "stages": [
+              "before-land"
+            ],
             "line": 7
           },
           {
@@ -52,6 +58,9 @@ expression: s.transcript()
             "dir": ".",
             "timeout_s": 900,
             "definition_digest": "[unit_digest]",
+            "stages": [
+              "before-land"
+            ],
             "line": 4
           }
         ]
@@ -89,6 +98,9 @@ expression: s.transcript()
             "dir": ".",
             "timeout_s": 900,
             "definition_digest": "[docs_digest]",
+            "stages": [
+              "before-land"
+            ],
             "line": 12
           },
           {
@@ -103,6 +115,9 @@ expression: s.transcript()
             "dir": "crates/app",
             "timeout_s": 600,
             "definition_digest": "[lint_digest]",
+            "stages": [
+              "before-land"
+            ],
             "line": 7
           },
           {
@@ -115,6 +130,9 @@ expression: s.transcript()
             "dir": ".",
             "timeout_s": 900,
             "definition_digest": "[unit_digest]",
+            "stages": [
+              "before-land"
+            ],
             "line": 4
           }
         ]
@@ -168,7 +186,10 @@ expression: s.transcript()
             ],
             "dir": ".",
             "timeout_s": 900,
-            "definition_digest": "[default_digest]"
+            "definition_digest": "[default_digest]",
+            "stages": [
+              "before-land"
+            ]
           }
         ]
       },

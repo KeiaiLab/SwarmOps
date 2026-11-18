@@ -22,7 +22,7 @@ pub mod update;
 pub mod wire;
 
 pub use auth::{AuthEntry, AuthLogin, AuthLogout, AuthStatus};
-pub use check::{CheckListReq, CheckListResp, CheckOut};
+pub use check::{CheckListReq, CheckListResp, CheckOut, CheckStage};
 pub use envelope::{API_VERSION, Envelope, LogCutOut, Meta, RecoveredOut};
 pub use error::{ErrorCode, OpError};
 pub use identity::Identity;

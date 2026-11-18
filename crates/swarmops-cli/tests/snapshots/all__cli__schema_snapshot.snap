@@ -1,5 +1,6 @@
 ---
 source: crates/swarmops-cli/tests/cli.rs
+assertion_line: 1926
 expression: s.redact(&all)
 ---
 {
@@ -1302,6 +1303,41 @@ expression: s.redact(&all)
     },
     "CheckListReq": {
       "$defs": {
+        "CheckStage": {
+          "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+          "oneOf": [
+            {
+              "const": "before-land",
+              "description": "Before a change lands: the gate. The default.",
+              "type": "string"
+            },
+            {
+              "const": "after-land",
+              "description": "After a change has landed.",
+              "type": "string"
+            },
+            {
+              "const": "scheduled",
+              "description": "On a schedule.",
+              "type": "string"
+            },
+            {
+              "const": "release",
+              "description": "Before a release is cut.",
+              "type": "string"
+            },
+            {
+              "const": "manual",
+              "description": "Only when someone asks for it.",
+              "type": "string"
+            },
+            {
+              "const": "deploy",
+              "description": "Before a deployment.",
+              "type": "string"
+            }
+          ]
+        },
         "Rev": {
           "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
           "type": "string"
@@ -1314,6 +1350,17 @@ expression: s.redact(&all)
           "$ref": "#/$defs/Rev",
           "default": "main",
           "description": "The changeset whose tree's checks to list; `main` when omitted."
+        },
+        "stage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckStage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only the checks of this stage; every check when omitted."
         }
       },
       "title": "CheckListReq",
@@ -1332,7 +1379,7 @@ expression: s.redact(&all)
               "type": "array"
             },
             "definition_digest": {
-              "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not\nits name): 64 hex digits. Two checks that differ only in name share it. Provisional: the\nrecipe may change in a later release, so compare digests of one release only.",
+              "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not\nits name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
               "type": "string"
             },
             "dir": {
@@ -1352,6 +1399,16 @@ expression: s.redact(&all)
               "description": "Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit.",
               "type": "string"
             },
+            "stages": {
+              "default": [
+                "before-land"
+              ],
+              "description": "When its answer is wanted: one to six stages, in the stages' own order (`before-land`,\n`after-land`, `scheduled`, `release`, `manual`, `deploy`), whatever order the file wrote\nthem in; `before-land` by default, and for the check `default` of\n`.swarmops/workspaces.json`.",
+              "items": {
+                "$ref": "#/$defs/CheckStage"
+              },
+              "type": "array"
+            },
             "timeout_s": {
               "description": "The most seconds it may run, its default (900) filled in. For the check `default` of\n`.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does\nnot read it, and takes its own `--check-timeout`.",
               "format": "uint64",
@@ -1367,13 +1424,48 @@ expression: s.redact(&all)
             "definition_digest"
           ],
           "type": "object"
+        },
+        "CheckStage": {
+          "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+          "oneOf": [
+            {
+              "const": "before-land",
+              "description": "Before a change lands: the gate. The default.",
+              "type": "string"
+            },
+            {
+              "const": "after-land",
+              "description": "After a change has landed.",
+              "type": "string"
+            },
+            {
+              "const": "scheduled",
+              "description": "On a schedule.",
+              "type": "string"
+            },
+            {
+              "const": "release",
+              "description": "Before a release is cut.",
+              "type": "string"
+            },
+            {
+              "const": "manual",
+              "description": "Only when someone asks for it.",
+              "type": "string"
+            },
+            {
+              "const": "deploy",
+              "description": "Before a deployment.",
+              "type": "string"
+            }
+          ]
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`check_list`: the checks a tree describes, sorted by name. The same tree gives the same\nanswer byte for byte, whichever changeset names it.",
       "properties": {
         "checks": {
-          "description": "The checks, sorted by name, bytewise; empty when the tree describes none.",
+          "description": "The checks, sorted by name, bytewise; empty when the tree describes none (or none of\n`stage`).",
           "items": {
             "$ref": "#/$defs/CheckOut"
           },
@@ -1385,6 +1477,17 @@ expression: s.redact(&all)
             "string",
             "null"
           ]
+        },
+        "stage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckStage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The stage asked for: `checks` holds only the checks of it. Omitted when every check is\nlisted."
         },
         "tree": {
           "description": "The root tree the file was read from: 64 hex digits. Omitted for a directory.",
@@ -1415,6 +1518,43 @@ expression: s.redact(&all)
       "type": "object"
     },
     "CheckOut": {
+      "$defs": {
+        "CheckStage": {
+          "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+          "oneOf": [
+            {
+              "const": "before-land",
+              "description": "Before a change lands: the gate. The default.",
+              "type": "string"
+            },
+            {
+              "const": "after-land",
+              "description": "After a change has landed.",
+              "type": "string"
+            },
+            {
+              "const": "scheduled",
+              "description": "On a schedule.",
+              "type": "string"
+            },
+            {
+              "const": "release",
+              "description": "Before a release is cut.",
+              "type": "string"
+            },
+            {
+              "const": "manual",
+              "description": "Only when someone asks for it.",
+              "type": "string"
+            },
+            {
+              "const": "deploy",
+              "description": "Before a deployment.",
+              "type": "string"
+            }
+          ]
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "One check: a command run with no shell, in a directory of the tree, for at most its time.",
       "properties": {
@@ -1426,7 +1566,7 @@ expression: s.redact(&all)
           "type": "array"
         },
         "definition_digest": {
-          "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not\nits name): 64 hex digits. Two checks that differ only in name share it. Provisional: the\nrecipe may change in a later release, so compare digests of one release only.",
+          "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not\nits name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
           "type": "string"
         },
         "dir": {
@@ -1446,6 +1586,16 @@ expression: s.redact(&all)
           "description": "Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit.",
           "type": "string"
         },
+        "stages": {
+          "default": [
+            "before-land"
+          ],
+          "description": "When its answer is wanted: one to six stages, in the stages' own order (`before-land`,\n`after-land`, `scheduled`, `release`, `manual`, `deploy`), whatever order the file wrote\nthem in; `before-land` by default, and for the check `default` of\n`.swarmops/workspaces.json`.",
+          "items": {
+            "$ref": "#/$defs/CheckStage"
+          },
+          "type": "array"
+        },
         "timeout_s": {
           "description": "The most seconds it may run, its default (900) filled in. For the check `default` of\n`.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does\nnot read it, and takes its own `--check-timeout`.",
           "format": "uint64",
@@ -1462,6 +1612,43 @@ expression: s.redact(&all)
       ],
       "title": "CheckOut",
       "type": "object"
+    },
+    "CheckStage": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+      "oneOf": [
+        {
+          "const": "before-land",
+          "description": "Before a change lands: the gate. The default.",
+          "type": "string"
+        },
+        {
+          "const": "after-land",
+          "description": "After a change has landed.",
+          "type": "string"
+        },
+        {
+          "const": "scheduled",
+          "description": "On a schedule.",
+          "type": "string"
+        },
+        {
+          "const": "release",
+          "description": "Before a release is cut.",
+          "type": "string"
+        },
+        {
+          "const": "manual",
+          "description": "Only when someone asks for it.",
+          "type": "string"
+        },
+        {
+          "const": "deploy",
+          "description": "Before a deployment.",
+          "type": "string"
+        }
+      ],
+      "title": "CheckStage"
     },
     "CloneReq": {
       "$defs": {

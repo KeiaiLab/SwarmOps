@@ -84,6 +84,7 @@ swarmops schema NoSuchType
         "CheckListReq",
         "CheckListResp",
         "CheckOut",
+        "CheckStage",
         "CloneReq",
         "CloneResp",
         "CommitReq",

@@ -3,9 +3,9 @@
 //! `.swarmops/workspaces.json` as the one check `default`.
 //!
 //! ```text
-//!   CheckListReq {rev} ──▶ the tree rev names ──▶ .swarmops/checks.toml (version 1)
-//!                                                   or workspaces.json's check.argv
-//!   CheckListResp {vouched, tree, file, version, checks: [CheckOut sorted by name]}
+//!   CheckListReq {rev, stage?} ──▶ the tree rev names ──▶ .swarmops/checks.toml (version 1)
+//!                                                         or workspaces.json's check.argv
+//!   CheckListResp {vouched, tree, file, version, stage, checks: [CheckOut sorted by name]}
 //! ```
 //!
 //! No type here carries a path of the caller's host: a directory the caller names is read by
@@ -24,19 +24,28 @@ pub struct CheckListReq {
     /// The changeset whose tree's checks to list; `main` when omitted.
     #[serde(default = "default_rev")]
     pub rev: Rev,
+    /// Only the checks of this stage; every check when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<CheckStage>,
 }
 
 impl Default for CheckListReq {
-    /// The request a JSON object without fields reads: `main`'s checks.
+    /// The request a JSON object without fields reads: `main`'s checks, every stage.
     fn default() -> Self {
-        Self { rev: default_rev() }
+        Self {
+            rev: default_rev(),
+            stage: None,
+        }
     }
 }
 
 impl CheckListReq {
-    /// The checks of `rev`'s tree.
+    /// The checks of `rev`'s tree, every stage.
     pub fn new(rev: impl Into<Rev>) -> Self {
-        Self { rev: rev.into() }
+        Self {
+            rev: rev.into(),
+            stage: None,
+        }
     }
 }
 
@@ -60,7 +69,12 @@ pub struct CheckListResp {
     /// The check file's `version`, 1. Omitted unless `file` is `.swarmops/checks.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
-    /// The checks, sorted by name, bytewise; empty when the tree describes none.
+    /// The stage asked for: `checks` holds only the checks of it. Omitted when every check is
+    /// listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<CheckStage>,
+    /// The checks, sorted by name, bytewise; empty when the tree describes none (or none of
+    /// `stage`).
     pub checks: Vec<CheckOut>,
 }
 
@@ -72,6 +86,7 @@ impl CheckListResp {
             tree: None,
             file: None,
             version: None,
+            stage: None,
             checks,
         }
     }
@@ -92,9 +107,16 @@ pub struct CheckOut {
     /// not read it, and takes its own `--check-timeout`.
     pub timeout_s: u64,
     /// The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not
-    /// its name): 64 hex digits. Two checks that differ only in name share it. Provisional: the
-    /// recipe may change in a later release, so compare digests of one release only.
+    /// its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.
+    /// Provisional: the recipe may change in a later release, so compare digests of one release
+    /// only.
     pub definition_digest: String,
+    /// When its answer is wanted: one to six stages, in the stages' own order (`before-land`,
+    /// `after-land`, `scheduled`, `release`, `manual`, `deploy`), whatever order the file wrote
+    /// them in; `before-land` by default, and for the check `default` of
+    /// `.swarmops/workspaces.json`.
+    #[serde(default = "default_stages")]
+    pub stages: Vec<CheckStage>,
     /// The line of `.swarmops/checks.toml` that starts its table. Omitted for the check
     /// `default` read from `.swarmops/workspaces.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,7 +124,7 @@ pub struct CheckOut {
 }
 
 impl CheckOut {
-    /// Takes the required fields; `line` is none.
+    /// Takes the required fields; `stages` is `before-land` alone, `line` none.
     pub fn new(
         name: impl Into<String>,
         argv: Vec<String>,
@@ -116,11 +138,82 @@ impl CheckOut {
             dir: dir.into(),
             timeout_s,
             definition_digest: definition_digest.into(),
+            stages: default_stages(),
             line: None,
         }
     }
 }
 
+/// When a check's answer is wanted. A check names one or more; `check run` runs one stage's
+/// checks.
+#[derive(
+    Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum CheckStage {
+    /// Before a change lands: the gate. The default.
+    BeforeLand,
+    /// After a change has landed.
+    AfterLand,
+    /// On a schedule.
+    Scheduled,
+    /// Before a release is cut.
+    Release,
+    /// Only when someone asks for it.
+    Manual,
+    /// Before a deployment.
+    Deploy,
+}
+
+impl CheckStage {
+    /// Every stage, in the order an answer gives them.
+    pub const ALL: [CheckStage; 6] = [
+        CheckStage::BeforeLand,
+        CheckStage::AfterLand,
+        CheckStage::Scheduled,
+        CheckStage::Release,
+        CheckStage::Manual,
+        CheckStage::Deploy,
+    ];
+
+    /// Its name, as the check file and the wire write it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckStage::BeforeLand => "before-land",
+            CheckStage::AfterLand => "after-land",
+            CheckStage::Scheduled => "scheduled",
+            CheckStage::Release => "release",
+            CheckStage::Manual => "manual",
+            CheckStage::Deploy => "deploy",
+        }
+    }
+
+    /// The stage named `name`, if it is one.
+    pub fn parse(name: &str) -> Option<CheckStage> {
+        CheckStage::ALL
+            .into_iter()
+            .find(|stage| stage.as_str() == name)
+    }
+}
+
+impl Default for CheckStage {
+    /// `before-land`: the stage a check is of when its file names none.
+    fn default() -> Self {
+        CheckStage::BeforeLand
+    }
+}
+
+impl std::fmt::Display for CheckStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 fn default_rev() -> Rev {
     Rev::from("main")
+}
+
+fn default_stages() -> Vec<CheckStage> {
+    vec![CheckStage::BeforeLand]
 }
