@@ -365,6 +365,7 @@ fn make(
         who: Some(making.who),
         fs: Arc::clone(&ctx.fs),
         host: Arc::clone(&ctx.host),
+        queue: ctx.queue,
     };
 
     // 2. Made; the same request again is the workspace there, not bootstrapped again.

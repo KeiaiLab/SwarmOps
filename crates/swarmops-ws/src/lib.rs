@@ -47,6 +47,7 @@ pub mod markers;
 pub mod materialize;
 pub mod pending;
 pub mod portable;
+pub mod probe;
 pub mod rebase;
 pub mod registry;
 pub mod resolve;
@@ -60,7 +61,7 @@ pub mod workspace;
 
 pub use commit::commit;
 pub use create::create;
-pub use ctx::Ctx;
+pub use ctx::{Ctx, LaneGuard, QueueDriver};
 pub use delete::delete;
 pub use diff::diff;
 pub use discard::discard;
