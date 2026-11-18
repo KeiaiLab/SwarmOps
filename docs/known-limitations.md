@@ -1132,10 +1132,12 @@ check file with its stages, `check list` and `check run` are built
   and `check run` the check file's checks and `ws land --check` the other file's command, and a
   land is gated by that one command alone. *Target: M31-10. Found: requirement CD-E20.*
 - **A process that leaves a check's group outlives it.** `check run` kills a check's process
-  group at once (SIGKILL) past its timeout or on a signal; a process the check started in a
+  group at once (SIGKILL) past its timeout or on a signal, and once the check has exited and its
+  output has ended, whatever it left running in the group. A process the check started in a
   group or session of its own keeps running, and so does the running check when `swarmops`
   itself is killed with SIGKILL, which it cannot catch. There is no grace before the kill, and
-  the outcome does not name a process that left. *Target: M31-9. Found: the M31 plan.*
+  the outcome does not name a process that left. *Target: M31-9. Found: the M31 plan; the
+  M31-1 review.*
 - **A check is told no changed paths.** `SWARMOPS_CHECK_CHANGED` is set and empty: with no plan,
   a check takes the whole tree as changed. *Target: M30-4. Found: the M31 plan.*
 - **A check's report, outputs, summary and artifacts are read by nothing.** `check run` gives

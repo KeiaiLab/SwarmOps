@@ -86,6 +86,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - `E_CHECK_FAILED` also stands for a run of `check run` where a check did not pass, or that a
   signal stopped: its `details.run` is the run's whole result. `ws land --check`'s and the
   bootstrap's details are unchanged (`details.stage` keeps meaning `check` or `bootstrap`).
+- `ws land --check` and the bootstrap kill what their command left running in its process group
+  once it has exited and its output has ended (or a second after it exits, if a process holds the
+  output), whatever the outcome: a server or helper sent to the background with its output
+  elsewhere no longer outlives the land, nor writes into the workspace once its lock is let go.
+  `check run` does the same for each check.
 - Docs: the roadmap gains a section, "Checks and delivery": a role beside the three topologies in
   which SwarmOps describes a tree's checks, plans what a change needs, runs the checks on the
   caller's host or on runners that ask for work, records each result against its tree, gates a

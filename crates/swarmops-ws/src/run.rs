@@ -1,13 +1,17 @@
 //! The process runner (§5.4 of the M5 design) of a check and of the bootstrap: argv without a
 //! shell, stdin null, a timeout that kills the command's process group on Unix, the last 8 KiB of
-//! each stream kept.
+//! each stream kept. However the command ends, nothing it left in its group outlives the run.
 //!
 //! ```text
 //!   run_with ──spawn──▶ child (own process group on Unix; env inherited + extra, or only given)
 //!    │                    ├─ stdout ─▶ reader ─┬─▶ the Output (RawLog: both streams as they come;
 //!    │                    └─ stderr ─▶ reader ─┘    or the caller's), and each stream's last 8 KiB
-//!    └─ waits until the exit, the timeout or the stop flag; past either, kills the group
+//!    ├─ waits until the exit, the timeout or the stop flag; past either, kills the group
+//!    └─ the output to its end (the grace), then the group killed however it ended, then reaped
 //! ```
+//!
+//! On Unix the command is reaped only after its group is killed: until then it is a zombie that
+//! keeps its pid, which is its group's id, from being given to another process.
 //!
 //! [`run`] is what `ws land --check` and the bootstrap use: the caller's environment plus a few
 //! variables, the output as it came into a raw log. [`run_with`] hands the caller the output
@@ -40,7 +44,7 @@ const POLL_FIRST: Duration = Duration::from_millis(5);
 const POLL_MAX: Duration = Duration::from_millis(50);
 
 /// How long the output may stay open after the command ended (a process it left in its group
-/// still writing) before that group is killed too.
+/// still writing) before that group is killed, as it then is in any case.
 const GRACE: Duration = Duration::from_secs(1);
 
 /// How long the readers get to finish once the command's group is killed.
@@ -174,7 +178,10 @@ pub fn run(
 /// Runs `argv` in `cwd` as `spec` says, without a shell, stdin null, each chunk of both streams
 /// to `output` as it comes and the last [`TAIL_BYTES`] of each to the [`Run`]. Past the timeout,
 /// or once the stop flag is set, the command is killed: on Unix with its whole process group,
-/// which it was started in. `shown` names the output in an `E_IO`.
+/// which it was started in. A command that ends on its own has its group killed too, once its
+/// output has ended or a second (the grace) is over: a process it left running in the group (a
+/// server sent to the background, its output sent elsewhere) does not outlive it. `shown` names
+/// the output in an `E_IO`.
 ///
 /// `E_INVALID_ARG` for an empty `argv` or a command that cannot start (`details.program`), with
 /// nothing written to `output`; `E_IO` for output that cannot be written or a wait that fails.
@@ -221,17 +228,21 @@ pub fn run_with(
     let stderr = read_out(child.stderr.take(), Stream::Stderr, &shared, &done);
     drop(done);
 
-    // 4. The exit, or the timeout or the stop and the group killed.
+    // 4. The exit, or the timeout or the stop and the group killed; not reaped yet.
     let deadline = Instant::now() + spec.timeout;
-    let ended =
+    let end =
         wait(&mut child, deadline, spec.stop).map_err(|e| host_failed("waiting for", shown, &e))?;
 
-    // 5. The output to its end: a process left in the group holding it is killed after the
-    //    grace, and the readers then get the drain.
-    if !drained(&finished, GRACE) {
-        kill(&mut child);
+    // 5. The output to its end within the grace; then the group killed, whatever is left in it,
+    //    the readers given the drain if they had not finished, and only then the command reaped.
+    let quiet = drained(&finished, GRACE);
+    kill(&mut child);
+    if !quiet {
         drained(&finished, DRAIN);
     }
+    let reaped = child.wait();
+    let status = reaped.map_err(|e| host_failed("waiting for", shown, &e))?;
+    let status = (end == End::Exited).then_some(status);
 
     // 6. The output written whole, and the outcome.
     if let Some(e) = shared
@@ -243,21 +254,13 @@ pub fn run_with(
         return Err(host_failed("writing", shown, &e));
     }
     Ok(Run {
-        exit_code: ended.status.and_then(|status| status.code()),
-        signal: ended.status.and_then(signal_of),
-        timed_out: ended.end == End::TimedOut,
-        stopped: ended.end == End::Stopped,
+        exit_code: status.and_then(|status| status.code()),
+        signal: status.and_then(signal_of),
+        timed_out: end == End::TimedOut,
+        stopped: end == End::Stopped,
         stdout_tail: text(&stdout),
         stderr_tail: text(&stderr),
     })
-}
-
-/// How a command ended: its status, unless the runner killed it.
-struct Ended {
-    /// Its exit status; none when the runner killed it.
-    status: Option<ExitStatus>,
-    /// What ended it.
-    end: End,
 }
 
 /// What ended a command.
@@ -283,26 +286,21 @@ struct Shared {
 type Tail = Arc<Mutex<Vec<u8>>>;
 
 /// Waits for `child` until `deadline` or until `stop` is set, looking ever less often; past
-/// it, or once stopped, kills its group and reaps it.
-fn wait(child: &mut Child, deadline: Instant, stop: Option<&AtomicBool>) -> io::Result<Ended> {
+/// it, or once stopped, kills its group. The child is not reaped: the caller does that.
+fn wait(child: &mut Child, deadline: Instant, stop: Option<&AtomicBool>) -> io::Result<End> {
     let mut pause = POLL_FIRST;
     loop {
         // 1. Ended on its own.
-        if let Some(status) = child.try_wait()? {
-            return Ok(Ended {
-                status: Some(status),
-                end: End::Exited,
-            });
+        if exited(child)? {
+            return Ok(End::Exited);
         }
 
-        // 2. Past its time, or stopped: killed, then reaped.
+        // 2. Past its time, or stopped: killed.
         let now = Instant::now();
         let stopped = stop.is_some_and(|stop| stop.load(Ordering::SeqCst));
         if now >= deadline || stopped {
             kill(child);
-            child.wait()?;
-            let end = if stopped { End::Stopped } else { End::TimedOut };
-            return Ok(Ended { status: None, end });
+            return Ok(if stopped { End::Stopped } else { End::TimedOut });
         }
 
         // 3. Another look later.
@@ -410,6 +408,21 @@ fn own_group(command: &mut Command) {
 /// Windows: no process group; only the child is killed.
 #[cfg(not(unix))]
 fn own_group(_command: &mut Command) {}
+
+/// Whether `child` has exited, looked at without reaping it: its pid, and so its group's id,
+/// stays its own until the caller waits for it.
+#[cfg(unix)]
+fn exited(child: &Child) -> io::Result<bool> {
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+    let how = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+    Ok(waitid(WaitId::Pid(Pid::from_child(child)), how)?.is_some())
+}
+
+/// Whether `child` has exited. Windows has no process group whose id could be given away.
+#[cfg(not(unix))]
+fn exited(child: &mut Child) -> io::Result<bool> {
+    Ok(child.try_wait()?.is_some())
+}
 
 /// Kills `child`'s process group, which it leads, with every process in it, and `child` itself
 /// should it have left the group. One already gone is killed.

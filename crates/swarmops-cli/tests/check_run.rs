@@ -117,6 +117,16 @@ fn pid_in(dir: &Path, file: &str) -> Pid {
     }
 }
 
+/// Whether process `pid` is gone, waiting up to 10 s for it: one killed is a zombie until its
+/// new parent reaps it.
+fn process_gone(pid: Pid) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rustix::process::test_kill_process(pid).is_ok() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    rustix::process::test_kill_process(pid).is_err()
+}
+
 /// Whether process group `group` is gone, waiting up to 10 s for it.
 fn group_gone(group: Pid) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -177,6 +187,21 @@ fn a_timed_out_check_s_group_is_gone() {
     assert!(slow.get("exit_code").is_none(), "{slow}");
     assert!(group_gone(pid_in(&tree.dir(), "group")));
     assert!(rustix::process::test_kill_process(pid_in(&tree.dir(), "sleeper")).is_err());
+}
+
+/// A check that passes leaves nothing of its process group behind: a sleeper it sent to the
+/// background, its output sent away so that the runner has nothing to wait for, is gone once
+/// `check run` answers.
+#[test]
+fn a_passed_check_s_group_is_gone() {
+    let tree = Tree::new(
+        "[check.leaves]\nargv = [\"sh\", \"-c\", \"echo $$ > group.tmp && mv group.tmp group; \
+         sleep 300 >/dev/null 2>&1 </dev/null & echo $! > sleeper; exit 0\"]\n",
+    );
+    let run = tree.run(&[], &[]).ok();
+    assert_eq!(check(&run, "leaves")["outcome"], "passed");
+    assert!(group_gone(pid_in(&tree.dir(), "group")));
+    assert!(process_gone(pid_in(&tree.dir(), "sleeper")));
 }
 
 /// A check that prints its environment shows only the pinned names, and of the caller's

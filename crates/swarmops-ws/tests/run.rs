@@ -68,6 +68,16 @@ fn pid_in(dir: &Utf8Path, file: &str) -> rustix::process::Pid {
     }
 }
 
+/// Whether process `pid` is gone, waiting up to 10 s for it: one killed is a zombie until its
+/// new parent reaps it.
+fn process_gone(pid: rustix::process::Pid) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rustix::process::test_kill_process(pid).is_ok() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    rustix::process::test_kill_process(pid).is_err()
+}
+
 /// Waits up to 10 s for `group` to be gone, then says whether it is.
 fn group_gone(group: rustix::process::Pid) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -178,6 +188,24 @@ fn a_run_past_its_timeout_is_killed_with_its_children() {
     }
     assert!(rustix::process::test_kill_process_group(group).is_err());
     assert!(rustix::process::test_kill_process(sleeper).is_err());
+}
+
+/// A command that ends on its own, having sent a sleeper to the background with its output
+/// elsewhere, has its group killed all the same: nothing of it outlives the run, whose exit code
+/// is the command's.
+#[test]
+fn a_command_s_group_is_killed_when_it_exits() {
+    let (_tmp, dir) = workdir();
+    let script =
+        "echo $$ > group; sleep 600 >/dev/null 2>&1 </dev/null & echo $! > sleeper; exit 0";
+    let (ran, _, _) = kept(&sh(script), &dir, &Spec::new(Duration::from_secs(60)));
+    assert_eq!(
+        (ran.exit_code, ran.timed_out, ran.stopped),
+        (Some(0), false, false),
+        "{ran:?}"
+    );
+    assert!(group_gone(pid_in(&dir, "group")));
+    assert!(process_gone(pid_in(&dir, "sleeper")));
 }
 
 /// A command's output: the last 8 KiB of each stream are kept, the log holds both streams

@@ -173,7 +173,9 @@ nothing runs then, so a gate that would run nothing fails. A file that does not 
 `E_CHECK_FILE`, as `check list` gives it.
 
 Each check runs its `argv` with no shell and no stdin, in its `dir` below the root, in a process
-group of its own, for at most its `timeout_s`; past it, the whole group is killed. A check that
+group of its own, for at most its `timeout_s`; past it, the whole group is killed. However the
+check ends, its group is killed once its output ends, or a second after it exits if a process it
+left still holds the output: nothing it left running in its group outlives it. A check that
 fails does not stop the run: every selected check runs. Outcomes:
 
 | Outcome | When |
