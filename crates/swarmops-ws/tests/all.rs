@@ -9,6 +9,8 @@ mod hold;
 mod hook;
 mod land;
 mod materialize;
+#[cfg(target_os = "linux")]
+mod queue;
 mod rebase;
 mod registry;
 mod run;

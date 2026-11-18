@@ -12,8 +12,9 @@
 
 use std::time::Duration;
 
+use camino::Utf8Path;
 use serde_json::{Map, Value};
-use swarmops_api::{ErrorCode, OpError, StoreOps};
+use swarmops_api::{ErrorCode, OpError, StoreOps, VerdictState};
 
 use crate::bootstrap::{self, REPO_CONFIG};
 use crate::run::{self, Run};
@@ -88,6 +89,46 @@ pub(crate) fn run(
         return Ok(());
     }
     Err(failed(&done, &log, on.changeset))
+}
+
+/// A queue runner's check (the M22 core design §5 step 6): `argv` run in the workspace at
+/// `dir`, named `name`, on candidate tree `tree`, for at most `timeout`; its verdict and the
+/// tail of its output.
+///
+/// ```text
+///  exit 0                         passed
+///  another exit, or no start      failed
+///  killed by the runner's timeout timed_out
+///  killed by another signal       cancelled   (no one is blamed)
+/// ```
+pub(crate) fn verdict(
+    argv: &[String],
+    dir: &Utf8Path,
+    name: &str,
+    tree: &str,
+    timeout: Duration,
+) -> Result<(VerdictState, String), OpError> {
+    // 1. Its environment and its log, as a checked land's first attempt.
+    let env = [(ENV_WS, name), (ENV_TREE, tree), (ENV_ATTEMPT, "1")];
+    let log = dir.join(SWARMWS_DIR).join(CHECKS_DIR).join("1.log");
+
+    // 2. Run; a command that cannot start fails the candidate, a host failure is the caller's.
+    let done = match run::run(argv, dir, &env, timeout, &log) {
+        Ok(done) => done,
+        Err(e) if e.code == ErrorCode::InvalidArg.as_str() => {
+            return Ok((VerdictState::Failed, e.message));
+        }
+        Err(e) => return Err(e),
+    };
+
+    // 3. The verdict: a signal the runner did not send blames no one.
+    let state = match (done.timed_out, done.exit_code) {
+        (true, _) => VerdictState::TimedOut,
+        (false, Some(0)) => VerdictState::Passed,
+        (false, Some(_)) => VerdictState::Failed,
+        (false, None) => VerdictState::Cancelled,
+    };
+    Ok((state, format!("{}{}", done.stdout_tail, done.stderr_tail)))
 }
 
 /// `E_CHECK_FAILED` for the check that did `done`, its log at `log`, on `changeset`.
