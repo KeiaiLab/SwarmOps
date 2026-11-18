@@ -44,6 +44,14 @@ collects the changes on `stable` that no release holds yet, until the next relea
   (`findings_omitted`). Unknown keys and lines that are no finding are counted and the first one
   named. Findings change no outcome. `E_CHECK_FAILED`'s message counts each failed check's
   findings, and its hint names where they are.
+- A check's JUnit and SARIF reports: after the check, each report its `reports` declares is
+  read, if this run wrote it (else `stale`; `missing` when not there), opened below the check's
+  directory without following a link at any component (`not_a_file`), at most 64 MiB, nested at
+  most 64 deep. A JUnit case that failed or ended in an error is a finding (titled by the test,
+  grouped by its class or suite, its failure and the end of its stderr as the message), with the
+  report's `tests`, `failed` and `skipped`; a SARIF 2.1.0 result of kind `fail` is a finding (its
+  level, rule, message, tool, and first location's path and lines), with the report's `results`.
+  A document type, an entity other than XML's five, or another encoding than UTF-8 is refused.
 - The environment a check of `check run` gets: `SWARMOPS_CHECK_NAME`, `SWARMOPS_CHECK_STAGE`,
   `SWARMOPS_CHECK_TREE`, `SWARMOPS_CHECK_ATTEMPT`, `SWARMOPS_CHECK_RUN`, the paths
   `SWARMOPS_CHECK_REPORT` (its report file of findings), `SWARMOPS_CHECK_OUTPUTS`,

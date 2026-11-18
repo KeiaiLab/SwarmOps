@@ -1688,6 +1688,7 @@ dependencies = [
  "camino",
  "libc",
  "quick-xml",
+ "rustix",
  "serde",
  "serde_json",
  "swarmops-api",

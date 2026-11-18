@@ -630,7 +630,7 @@ static CONTRACT: [Limit; 28] = [
 ];
 
 /// The bounds a response keeps without an error: what it leaves out, and how it says so.
-static BOUNDS: [Limit; 22] = [
+static BOUNDS: [Limit; 24] = [
     Limit {
         name: "Lossy commits listed",
         constant: code(
@@ -891,7 +891,24 @@ static BOUNDS: [Limit; 22] = [
         commands: &["check run"],
         errors: &[],
         what: "A check's report file (`SWARMOPS_CHECK_REPORT`): past it, its whole lines up to \
-                   the bound are read, the rest is not, and its report says `cut`.",
+                   the bound are read, the rest is not, and its report says `cut`. A JUnit or \
+                   SARIF report a check declares past it is `refused`, `too_large`, and none of \
+                   it is read.",
+    },
+    Limit {
+        name: "Report nesting",
+        constant: code(
+            "swarmops_ops::check::MAX_REPORT_DEPTH",
+            CHECK,
+            "pub const MAX_REPORT_DEPTH: usize = 64;",
+            || bytes::to_u64(swarmops_ops::check::MAX_REPORT_DEPTH),
+        ),
+        unit: Unit::Count("levels"),
+        commands: &["check run"],
+        errors: &[],
+        what: "How deep a declared report may nest its XML elements (JUnit) or its arrays and \
+                   objects (SARIF): a deeper one is `refused`, `too_deep`, its findings not \
+                   taken. Counted before the SARIF parser's own bound applies.",
     },
     Limit {
         name: "Report file line",
@@ -921,6 +938,20 @@ static BOUNDS: [Limit; 22] = [
         what: "A finding's title, one line: a longer one is cut at a character's end, with `…`.",
     },
     Limit {
+        name: "Finding group",
+        constant: code(
+            "swarmops_ops::check::MAX_FINDING_GROUP_BYTES",
+            CHECK,
+            "pub const MAX_FINDING_GROUP_BYTES: usize = 200;",
+            || bytes::to_u64(swarmops_ops::check::MAX_FINDING_GROUP_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "A finding's group, a JUnit case's class or suite or a SARIF run's tool, one \
+                   line: a longer one is cut at a character's end, with `…`.",
+    },
+    Limit {
         name: "Finding message",
         constant: code(
             "swarmops_ops::check::MAX_FINDING_MESSAGE_BYTES",
@@ -945,7 +976,8 @@ static BOUNDS: [Limit; 22] = [
         commands: &["check run"],
         errors: &[],
         what: "A finding's path, a repository path: a longer one makes its line of the report \
-                   file invalid.",
+                   file invalid; a JUnit or SARIF report's longer one is left out, and its \
+                   finding kept.",
     },
 ];
 
@@ -1163,7 +1195,7 @@ static DEFAULTS: [DefaultRow; 16] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 44] = [
+static INTERNAL: [Limit; 45] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -1702,6 +1734,20 @@ static INTERNAL: [Limit; 44] = [
         Unit::Count("tags"),
         "The most tags one journal frame creates, as many as a `ref txn` moves: a batch of \
              tags is a frame, and a write transaction, for each this many.",
+    ),
+    internal_value(
+        "Report time slack",
+        code(
+            "swarmops_ops::check::REPORT_FRESH_SLACK",
+            "crates/swarmops-ops/src/check/intake.rs",
+            "pub const REPORT_FRESH_SLACK: Duration = Duration::from_secs(1);",
+            || swarmops_ops::check::REPORT_FRESH_SLACK.as_secs(),
+        ),
+        Unit::Seconds,
+        "How much earlier than its check's start a declared report's modification time may be \
+             and the report still be this run's: an older one, or one that did not change \
+             during the check, is `stale` and not read. A file system's clock may be coarser \
+             than the wall clock's.",
     ),
 ];
 

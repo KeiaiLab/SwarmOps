@@ -99,6 +99,57 @@ but every one is counted: in its check's `findings_total`, its report's `finding
 `findings_omitted`. The 10,001st finding of a run is counted and not returned. Each finding's
 `report` is the index of its report in its check's `reports`.
 
+### Reports a check declares
+
+A check may also declare, with its `reports` key in `.swarmops/checks.toml` ([check
+list](../../commands/check-list.md)), the JUnit and SARIF files its tools leave in its tree. After the check
+(for `passed`, `failed` and `timed_out`, as the report file), each is looked for at its `path`
+below the check's `dir`, in declared order, after the report file, and read into findings:
+
+| Format | A finding for | Level | Title | Group | Message | Path and lines |
+| --- | --- | --- | --- | --- | --- | --- |
+| `junit` | each `testcase` with a `failure` or `error` child | `error` | its `name` | its `classname`, else the nearest `testsuite`'s `name` | the first failure's `message` and text, then the end of the case's `system-err`, within 4 KiB | its `file` and `line` attributes, when it has them |
+| `sarif` | each result whose `kind` is `fail` or not given | `error`, `warning`, `note` and `none` as `error`, `warning`, `notice`, `notice`; no level is `warning` | its `ruleId`, else its message's first line | its run's `tool.driver.name` | `message.text`, within 4 KiB | its first location: `artifactLocation.uri` (a relative reference, percent-decoded, or a `file:` URI below the check's directory) and `region`'s `startLine` and `endLine` |
+
+A path is the report's, relative to the check's `dir`, joined to it to make a repository path from
+the tree's root; one that is not a repository path then (absolute, `..`, another directory) is
+left out, and the finding kept. A JUnit report's `reports` entry counts its cases (`tests`),
+those that failed (`failed`, each a finding) and those skipped (`skipped`), as read, never as the
+suites' own attributes say; a SARIF report's counts its `results`, of every kind.
+
+Only a report this run wrote is read. Each declared path is looked at just before the check
+starts, nothing read; after it, a report whose file is the same and unchanged (device, inode,
+size, modification and status change times), or whose modification time is more than a second
+before the check's start (a copy that kept an old time, say), is `stale`, and not read. `check
+run` writes nothing in the tree it checks: a stale report is left where it is.
+
+A report is opened from the check's directory one component at a time, never through a symbolic
+link: a link anywhere below that directory, a directory, a FIFO or anything but a regular file is
+`refused` with `fault: not_a_file`, and what it names is never read. Each report's `state`:
+
+| State | When |
+| --- | --- |
+| `read` | Read: its `findings`, and its counts. |
+| `missing` | Not there after the check. |
+| `stale` | There, but not written by this run. |
+| `refused` | There, and not read as its format: `fault` and a one-line `message` say why. |
+
+| Fault | When |
+| --- | --- |
+| `too_large` | Past 64 MiB: nothing of it is read. |
+| `not_a_file` | A symbolic link at any component, a directory, a FIFO or another kind of entry. |
+| `not_text` | Not UTF-8: a UTF-16 byte order mark, or an XML declaration of another encoding, included. |
+| `syntax` | Not XML or not JSON, cut short, or an entity reference other than XML's five. |
+| `doctype` | An XML document type declaration, which could define entities: refused before anything is read. |
+| `too_deep` | XML elements, or JSON arrays and objects, nested past 64. |
+| `shape` | Well formed, but not the format: an XML root other than `testsuites` or `testsuite`; a SARIF log not of version `2.1.0`, without `runs`, or with a value of the wrong type. |
+| `io` | It could not be read: the host's words in `message`. |
+
+Nothing in a report is run, opened or followed: its paths are strings. Each report is read whole,
+one at a time, at most 64 MiB of it, and of its findings at most as many as the run can still
+return are kept. The JUnit and SARIF mappings may read more of a report in a later release; the
+report file's format is the one this release fixes.
+
 ### Signals
 
 SIGINT, SIGTERM and SIGHUP stop the run: the running check's process group is killed, that check

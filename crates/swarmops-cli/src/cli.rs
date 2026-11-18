@@ -1602,8 +1602,9 @@ pub enum CheckCommand {
     /// LC_ALL, LC_CTYPE, LOGNAME, PATH, TMPDIR, TZ and USER of your environment, and the
     /// variables --pass names; nothing else (the check default keeps your whole environment).
     /// Its output goes to a log with a time on every line, which check log reads. Once it has
-    /// ended, the findings it wrote as JSON lines to SWARMOPS_CHECK_REPORT come with its outcome,
-    /// at most 10,000 a run, the rest counted; they change no outcome.
+    /// ended, the findings it wrote as JSON lines to SWARMOPS_CHECK_REPORT, and those of the JUnit
+    /// and SARIF reports its definition declares that this run wrote, come with its outcome, at
+    /// most 10,000 a run, the rest counted; they change no outcome.
     ///
     /// The workspace form (--ws, --ws-path, else the workspace around the working directory)
     /// needs a clean workspace: no edits, not rebasing, not stale. It reads the check file from

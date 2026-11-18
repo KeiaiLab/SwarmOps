@@ -1,7 +1,7 @@
-//! `check run` and `check log` (M31-1, M31-2, M31-3, M30-6, M31-4) through the binary: outcomes,
-//! a timed-out check's process group, the environment a check gets, sections in its log, signals,
-//! stages, the workspace form, where runs go, a check's findings, and a log read, and followed
-//! while it grows.
+//! `check run` and `check log` (M31-1, M31-2, M31-3, M30-6, M31-4, M31-5) through the binary:
+//! outcomes, a timed-out check's process group, the environment a check gets, sections in its
+//! log, signals, stages, the workspace form, where runs go, a check's findings and the JUnit and
+//! SARIF reports it declares, and a log read, and followed while it grows.
 //!
 //! Every fixture check is a program with its arguments: `sh -c …` where a script is wanted, since
 //! a check may run a shell, but SwarmOps adds none.
@@ -617,6 +617,198 @@ fn the_10001st_finding_is_counted_not_returned() {
     assert!(more.get("findings").is_none(), "{more}");
     assert_eq!(more["findings_total"], 1);
     assert_eq!(run["findings_omitted"], 2);
+}
+
+// The reports a check declares (M31-5).
+
+/// The JUnit report nextest's `ci` profile wrote for three tests of swarmops-api, two of whose
+/// assertions were broken for it.
+const NEXTEST_JUNIT: &str =
+    include_str!("../../swarmops-ops/tests/fixtures/check/nextest-junit.xml");
+
+/// A SARIF log of four failing results and one passing, of the tool `fixture-lint`.
+const SARIF: &str = include_str!("../../swarmops-ops/tests/fixtures/check/sarif.json");
+
+/// A tree whose check `test` declares `out/junit.xml` and runs `test.sh`, which copies the nextest
+/// fixture there when `copies`, and exits 101 as a failed `cargo nextest run` does.
+fn junit_tree(copies: bool) -> Tree {
+    let tree = Tree::new(
+        "[check.test]\nargv = [\"sh\", \"test.sh\"]\n\
+         reports = [{ format = \"junit\", path = \"out/junit.xml\" }]\n",
+    );
+    write(&tree.dir(), "fixture/junit.xml", NEXTEST_JUNIT);
+    let script = if copies {
+        "mkdir -p out && cp fixture/junit.xml out/junit.xml\nexit 101\n"
+    } else {
+        "exit 101\n"
+    };
+    write(&tree.dir(), "test.sh", script);
+    tree
+}
+
+/// This repository's nextest JUnit file with two failed cases gives two findings with their test
+/// names (M31-5's acceptance), end to end: a check that leaves nextest's report where its
+/// definition declares it and fails gets a finding for each failed test, `error`, titled by the
+/// test and grouped by its binary, and the report's counts; the message counts them.
+#[test]
+fn nextest_s_junit_file_gives_a_finding_per_failed_test() {
+    let tree = junit_tree(true);
+    let out = tree.run(&[], &[]);
+    let run = failed_run(&out);
+    let test = check(&run, "test");
+    let findings = test["findings"].as_array().unwrap();
+    let shown: Vec<(&str, &str, &str)> = (findings.iter())
+        .map(|f| {
+            (
+                f["level"].as_str().unwrap(),
+                f["title"].as_str().unwrap(),
+                f["group"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (
+                "error",
+                "schema::check::a_check_log_request_defaults_to_the_newest_run",
+                "swarmops-api::all"
+            ),
+            (
+                "error",
+                "schema::check::a_check_run_request_defaults_to_the_whole_gate",
+                "swarmops-api::all"
+            ),
+        ]
+    );
+    for finding in findings {
+        assert_eq!(finding["report"], 0, "{finding}");
+        assert!(
+            finding["message"]
+                .as_str()
+                .unwrap()
+                .contains("assertion `left == right` failed"),
+            "{finding}"
+        );
+    }
+    assert_eq!(
+        test["reports"],
+        json!([{"format": "junit", "path": "out/junit.xml", "state": "read", "findings": 2,
+                "tests": 3, "failed": 2, "skipped": 0}])
+    );
+    assert_eq!(test["findings_total"], 2);
+    assert_eq!(
+        out.envelope()["error"]["message"],
+        "1 of 1 checks did not pass: test failed (exit 101, 2 findings)"
+    );
+}
+
+/// A report left from before is `stale`: put there before the run and not written by the check,
+/// it gives no finding; with nothing there, it is `missing`. Neither is the run's error.
+#[test]
+fn a_report_left_from_before_is_stale() {
+    let tree = junit_tree(false);
+    let run = failed_run(&tree.run(&[], &[]));
+    let test = check(&run, "test");
+    assert_eq!(
+        test["reports"],
+        json!([{"format": "junit", "path": "out/junit.xml", "state": "missing"}])
+    );
+    assert!(test.get("findings").is_none(), "{test}");
+
+    write(&tree.dir(), "out/junit.xml", NEXTEST_JUNIT);
+    let run = failed_run(&tree.run(&[], &[]));
+    let test = check(&run, "test");
+    assert_eq!(
+        test["reports"],
+        json!([{"format": "junit", "path": "out/junit.xml", "state": "stale"}])
+    );
+    assert!(
+        test.get("findings").is_none() && test.get("findings_total").is_none(),
+        "{test}"
+    );
+}
+
+/// A declared report that is a link to a file outside the directory is refused `not_a_file`, and
+/// nothing of it is read. A SARIF report gives a finding for each failing result, its path
+/// joined to the check's `dir`; both kinds of report in one check keep their order.
+#[test]
+fn a_linked_report_is_refused_and_a_sarif_one_read() {
+    // 1. A link out of the tree.
+    let tree = Tree::new(
+        "[check.lint]\nargv = [\"sh\", \"lint.sh\"]\ndir = \"app\"\n\
+         reports = [{ format = \"junit\", path = \"out/junit.xml\" }, \
+         { format = \"sarif\", path = \"out/lint.sarif\" }]\n",
+    );
+    let outside = tree.tmp().join("outside.xml");
+    fs::write(&outside, NEXTEST_JUNIT).unwrap();
+    write(&tree.dir(), "app/lint.sarif.in", SARIF);
+    let script = format!(
+        "mkdir -p out && ln -s {} out/junit.xml && cp lint.sarif.in out/lint.sarif\n",
+        outside.display()
+    );
+    write(&tree.dir(), "app/lint.sh", &script);
+    let run = tree.run(&[], &[]).ok();
+    let lint = check(&run, "lint");
+    let reports = lint["reports"].as_array().unwrap();
+    assert_eq!(
+        (&reports[0]["state"], &reports[0]["fault"]),
+        (&json!("refused"), &json!("not_a_file"))
+    );
+    assert!(reports[0].get("tests").is_none(), "{lint}");
+
+    // 2. The SARIF report: four findings, their paths below app/, of report 1.
+    assert_eq!(
+        (
+            &reports[1]["state"],
+            &reports[1]["findings"],
+            &reports[1]["results"]
+        ),
+        (&json!("read"), &json!(4), &json!(5))
+    );
+    let findings = lint["findings"].as_array().unwrap();
+    let paths: Vec<Option<&str>> = findings.iter().map(|f| f["path"].as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            Some("app/src/lib.rs"),
+            Some("app/src/my mod.rs"),
+            None,
+            None
+        ]
+    );
+    assert!(findings.iter().all(|f| f["report"] == 1), "{lint}");
+    assert_eq!(findings[0]["group"], "fixture-lint");
+    assert_eq!(lint["outcome"], "passed");
+}
+
+/// The workspace form reads a declared report as the directory form does: a clean workspace
+/// whose committed check file declares the report, its check writing it below an ignored
+/// directory, gets the same findings; `vouched` is false.
+#[test]
+fn the_workspace_form_reads_a_declared_report() {
+    let lab = Lab::new();
+    lab.publish(".gitignore", "out/\n");
+    lab.publish("fixture/junit.xml", NEXTEST_JUNIT);
+    lab.publish(
+        "test.sh",
+        "mkdir -p out && cp fixture/junit.xml out/junit.xml\nexit 101\n",
+    );
+    lab.publish(
+        ".swarmops/checks.toml",
+        "version = 1\n[check.test]\nargv = [\"sh\", \"test.sh\"]\n\
+         reports = [{ format = \"junit\", path = \"out/junit.xml\" }]\n",
+    );
+    lab.workspace("w1");
+    let run = failed_run(&lab.so(&["check", "run", "--ws", "w1"]));
+    assert_eq!(run["vouched"], false);
+    let test = check(&run, "test");
+    assert_eq!(test["findings_total"], 2, "{test}");
+    assert_eq!(test["reports"][0]["state"], "read");
+    assert_eq!(
+        test["findings"][1]["title"],
+        "schema::check::a_check_run_request_defaults_to_the_whole_gate"
+    );
 }
 
 /// Stages (M30-6): a check of two stages runs under each; a check of one runs under that one

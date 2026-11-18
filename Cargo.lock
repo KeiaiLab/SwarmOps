@@ -2255,6 +2255,7 @@ dependencies = [
  "libc",
  "proptest",
  "quick-xml",
+ "rustix",
  "schemars",
  "serde",
  "serde_json",

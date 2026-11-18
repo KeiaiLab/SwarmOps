@@ -312,8 +312,10 @@ A response past these leaves the rest out, and says so in its fields; nothing fa
 | [Findings of a run](#findings-of-a-run) | 10,000 findings | `swarmops_ops::check::MAX_RUN_FINDINGS` | [`check run`](commands/check-run.md) |
 | [Findings' text of a run](#findings-text-of-a-run) | 4,194,304 bytes (4 MiB) | `swarmops_ops::check::MAX_RUN_FINDING_BYTES` | [`check run`](commands/check-run.md) |
 | [Report file](#report-file) | 67,108,864 bytes (64 MiB) | `swarmops_ops::check::MAX_REPORT_BYTES` | [`check run`](commands/check-run.md) |
+| [Report nesting](#report-nesting) | 64 levels | `swarmops_ops::check::MAX_REPORT_DEPTH` | [`check run`](commands/check-run.md) |
 | [Report file line](#report-file-line) | 65,536 bytes (64 KiB) | `swarmops_ops::check::MAX_FINDING_LINE_BYTES` | [`check run`](commands/check-run.md) |
 | [Finding title](#finding-title) | 200 bytes | `swarmops_ops::check::MAX_FINDING_TITLE_BYTES` | [`check run`](commands/check-run.md) |
+| [Finding group](#finding-group) | 200 bytes | `swarmops_ops::check::MAX_FINDING_GROUP_BYTES` | [`check run`](commands/check-run.md) |
 | [Finding message](#finding-message) | 4,096 bytes (4 KiB) | `swarmops_ops::check::MAX_FINDING_MESSAGE_BYTES` | [`check run`](commands/check-run.md) |
 | [Finding path](#finding-path) | 4,096 bytes (4 KiB) | `swarmops_ops::check::MAX_FINDING_PATH_BYTES` | [`check run`](commands/check-run.md) |
 
@@ -455,10 +457,18 @@ The titles, groups, messages and paths of the findings one run returns, together
 
 ### Report file
 
-A check's report file (`SWARMOPS_CHECK_REPORT`): past it, its whole lines up to the bound are read, the rest is not, and its report says `cut`.
+A check's report file (`SWARMOPS_CHECK_REPORT`): past it, its whole lines up to the bound are read, the rest is not, and its report says `cut`. A JUnit or SARIF report a check declares past it is `refused`, `too_large`, and none of it is read.
 
 - Value: 67,108,864 bytes (64 MiB).
 - Constant: `swarmops_ops::check::MAX_REPORT_BYTES`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Report nesting
+
+How deep a declared report may nest its XML elements (JUnit) or its arrays and objects (SARIF): a deeper one is `refused`, `too_deep`, its findings not taken. Counted before the SARIF parser's own bound applies.
+
+- Value: 64 levels.
+- Constant: `swarmops_ops::check::MAX_REPORT_DEPTH`, in `crates/swarmops-ops/src/check.rs`.
 - Commands: [`check run`](commands/check-run.md).
 
 ### Report file line
@@ -477,6 +487,14 @@ A finding's title, one line: a longer one is cut at a character's end, with `…
 - Constant: `swarmops_ops::check::MAX_FINDING_TITLE_BYTES`, in `crates/swarmops-ops/src/check.rs`.
 - Commands: [`check run`](commands/check-run.md).
 
+### Finding group
+
+A finding's group, a JUnit case's class or suite or a SARIF run's tool, one line: a longer one is cut at a character's end, with `…`.
+
+- Value: 200 bytes.
+- Constant: `swarmops_ops::check::MAX_FINDING_GROUP_BYTES`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
 ### Finding message
 
 A finding's message: a longer one is cut at a character's end, with `…`.
@@ -487,7 +505,7 @@ A finding's message: a longer one is cut at a character's end, with `…`.
 
 ### Finding path
 
-A finding's path, a repository path: a longer one makes its line of the report file invalid.
+A finding's path, a repository path: a longer one makes its line of the report file invalid; a JUnit or SARIF report's longer one is left out, and its finding kept.
 
 - Value: 4,096 bytes (4 KiB).
 - Constant: `swarmops_ops::check::MAX_FINDING_PATH_BYTES`, in `crates/swarmops-ops/src/check.rs`.
@@ -596,6 +614,7 @@ Not part of the contract: these tune the implementation, or bound the store's la
 | Wire chunk | 67,108,864 bytes (64 MiB) | `swarmops_api::MAX_CHUNK_BYTES` | The most record bytes one chunk of objects on the native wire holds; one object alone may be longer, up to the store's object bound. A longer chunk is refused before its records are read. |
 | Wire stall | 300 s | `swarmops_api::WIRE_STALL_SECS` | How long a native wire session waits for a byte from its peer: past it, the session ends with `E_REMOTE_UNREACHABLE`, `details.cause` `timeout`, retryable. |
 | Tag batch | 64 tags | `swarmops_repo::TAG_BATCH` | The most tags one journal frame creates, as many as a `ref txn` moves: a batch of tags is a frame, and a write transaction, for each this many. |
+| Report time slack | 1 s | `swarmops_ops::check::REPORT_FRESH_SLACK` | How much earlier than its check's start a declared report's modification time may be and the report still be this run's: an older one, or one that did not change during the check, is `stale` and not read. A file system's clock may be coarser than the wall clock's. |
 
 ## Details
 

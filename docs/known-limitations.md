@@ -1149,6 +1149,14 @@ check file with its stages, `check list` and `check run` are built
   its run's `run.json` alone, of which the newest 20 runs are kept; nothing keeps them beside the
   store, and nothing reads them beside the lines a change touched. *Target: M36, M36-11. Found:
   the M31 plan.*
+- **A report is read only after its check, and not after a stop.** A cancelled check's report
+  file and declared reports are not read, and a declared report whose file system's clock is
+  more than a second behind the wall clock can read as `stale`. *Unscheduled. Found: the M31
+  plan.*
+- **JUnit and SARIF are read in part.** A JUnit case gives a path only from its `file` and `line`
+  attributes, never from its failure's text; of a SARIF result only the first location is read,
+  `uriBaseId` is not resolved, a path outside the check's directory is left out, and a rule's own
+  level is not looked up. *Unscheduled. Found: the M31 plan.*
 - **Two runs of one directory are not kept apart.** `check run --dir` takes no lock on the
   directory: two runs at once run their checks side by side, each with a run directory of its
   own. The workspace form holds the workspace's lock. *Target: M31-8. Found: the M31 plan.*

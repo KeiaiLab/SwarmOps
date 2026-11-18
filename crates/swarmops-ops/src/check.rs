@@ -47,6 +47,7 @@ use swarmops_api::{
 
 pub use self::file::{Check, CheckFile, LEGACY_CHECK, ROOT_DIR, Reason, Refusal, Report};
 pub use self::file::{parse, parse_legacy};
+pub use self::intake::REPORT_FRESH_SLACK;
 use crate::error;
 
 /// The check file, at a tree's root.
