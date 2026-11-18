@@ -74,7 +74,15 @@ to the weakest:
    (`details.reason` `unknown_key`) instead of reading it without the key, so a newer file never
    means less to an older build. A key whose meaning changes makes a new `version`. The
    `definition_digest` that `check list` gives is not part of this surface yet: its recipe is
-   provisional, and a later release may replace it before it is fixed.
+   provisional, and a later release may replace it before it is fixed. A check's `stages` came
+   with M31: an older build refuses a file that names them, as above.
+8. **The environment a check gets.** The variables `check run` sets for each check
+   (`SWARMOPS_CHECK_NAME`, `_STAGE`, `_TREE`, `_ATTEMPT`, `_RUN`, `_REPORT`, `_OUTPUTS`,
+   `_SUMMARY`, `_ARTIFACTS`, `_CHANGED`, and `SWARMOPS_WS` in a workspace), and the rule that a
+   check of `.swarmops/checks.toml` inherits only a fixed list of the caller's variables and those
+   `--pass` names: a name is not removed, and does not change its meaning, within a major version.
+   The line format of a check's log and the layout of a run's directory are not part of this
+   surface yet: they are diagnostics until logs are kept beside the store, and may change.
 
 The contract surfaces (3 to 5) grow without breaking: a new field, a new optional argument, a new
 command, a new error code or a new tool is not a breaking change. Clients must allow for that.

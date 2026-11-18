@@ -103,7 +103,7 @@ pub(crate) const GROUPS: [Group; 8] = [
     },
     Group {
         title: "Checks",
-        commands: &[entry("check", "List the checks a tree describes")],
+        commands: &[entry("check", "List and run the checks a tree describes")],
     },
     Group {
         title: "Read history",
@@ -400,15 +400,22 @@ pub(crate) const FAMILIES: [Family; 8] = [
     },
     Family {
         name: "check",
-        commands: &[entry(
-            "list",
-            "List the checks of a changeset's tree, or of a directory",
-        )],
+        commands: &[
+            entry(
+                "list",
+                "List the checks of a changeset's tree, or of a directory",
+            ),
+            entry(
+                "run",
+                "Run one stage's checks of a clean workspace or a directory",
+            ),
+        ],
         examples: &[
             Step::Shell("mkdir -p .swarmops"),
             Step::Shell("echo 'version = 1' > .swarmops/checks.toml"),
-            Step::Shell("echo 'check.test.argv = [\"make\", \"test\"]' >> .swarmops/checks.toml"),
+            Step::Shell("echo 'check.test.argv = [\"true\"]' >> .swarmops/checks.toml"),
             run(&["--human", "check", "list", "--dir", "."]),
+            run(&["--human", "check", "run", "--dir", "."]),
         ],
         needs: Needs::Nothing,
         guide: "https://swarmops.cc/docs/guides/parallel-agents",

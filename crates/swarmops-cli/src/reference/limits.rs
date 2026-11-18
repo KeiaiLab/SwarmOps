@@ -139,6 +139,15 @@ const API: &str = "crates/swarmops-api/src/ops.rs";
 /// The file that declares the check file's limits (M30).
 const CHECK: &str = "crates/swarmops-ops/src/check.rs";
 
+/// The file that declares the environment a check gets (M31).
+const CHECK_ENV: &str = "crates/swarmops-ops/src/check/env.rs";
+
+/// The file that declares a check's log and its bounds (M31).
+const CHECK_LOG: &str = "crates/swarmops-ops/src/check/log.rs";
+
+/// The file that declares a run of the checks (M31).
+const CHECK_RUN: &str = "crates/swarmops-ops/src/check/run.rs";
+
 /// A paging default of `command`'s `flag`, filling `request`'s `field`.
 const fn paged(
     request: &'static str,
@@ -178,7 +187,7 @@ const fn internal_value(
 // ---- The tables ----
 
 /// The limits a request is refused past, with the error it gets.
-static CONTRACT: [Limit; 24] = [
+static CONTRACT: [Limit; 26] = [
     Limit {
         name: "Request text",
         constant: code(
@@ -481,7 +490,7 @@ static CONTRACT: [Limit; 24] = [
             || swarmops_ops::check::MAX_CHECK_FILE_BYTES,
         ),
         unit: Unit::Bytes,
-        commands: &["check list"],
+        commands: &["check list", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "A tree's `.swarmops/checks.toml`: a longer one is refused by its size, not \
                    read, with `details.reason` `too_large`, `bytes` and `limit`.",
@@ -495,7 +504,7 @@ static CONTRACT: [Limit; 24] = [
             || bytes::to_u64(swarmops_ops::check::MAX_CHECKS),
         ),
         unit: Unit::Count("checks"),
-        commands: &["check list"],
+        commands: &["check list", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "The `[check.<name>]` tables of one check file: one more is refused with \
                    `details.reason` `too_many`, at its line.",
@@ -509,7 +518,7 @@ static CONTRACT: [Limit; 24] = [
             || bytes::to_u64(swarmops_ops::check::MAX_CHECK_NAME_BYTES),
         ),
         unit: Unit::Bytes,
-        commands: &["check list"],
+        commands: &["check list", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "A check's name, of `a-z`, `0-9`, `-` and `_`: a longer one is refused with \
                    `details.reason` `name`.",
@@ -523,7 +532,7 @@ static CONTRACT: [Limit; 24] = [
             || bytes::to_u64(swarmops_ops::check::MAX_ARGV_ITEMS),
         ),
         unit: Unit::Count("strings"),
-        commands: &["check list"],
+        commands: &["check list", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "A check's `argv`, the program and its arguments: more are refused with \
                    `details.reason` `value`.",
@@ -537,7 +546,7 @@ static CONTRACT: [Limit; 24] = [
             || swarmops_ops::check::MAX_ARGV_BYTES,
         ),
         unit: Unit::Bytes,
-        commands: &["check list"],
+        commands: &["check list", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "A check's `argv` strings together: more are refused with `details.reason` \
                    `value`.",
@@ -551,15 +560,43 @@ static CONTRACT: [Limit; 24] = [
             || swarmops_ops::check::MAX_CHECK_TIMEOUT_S,
         ),
         unit: Unit::Seconds,
-        commands: &["check list"],
+        commands: &["check list", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "A check's `timeout_s`, from 1: a longer one, or 0, is refused with \
-                   `details.reason` `value`. Nothing runs a check with it yet.",
+                   `details.reason` `value`. `check run` kills a check's process group past it.",
+    },
+    Limit {
+        name: "Variables passed",
+        constant: code(
+            "swarmops_ops::check::env::MAX_PASS",
+            CHECK_ENV,
+            "pub const MAX_PASS: usize = 64;",
+            || bytes::to_u64(swarmops_ops::check::env::MAX_PASS),
+        ),
+        unit: Unit::Count("names"),
+        commands: &["check run"],
+        errors: &[ErrorCode::InvalidArg],
+        what: "The `--pass` names of one `check run`: more are refused with `details.reason` \
+                   `pass`, before anything runs.",
+    },
+    Limit {
+        name: "Variable name passed",
+        constant: code(
+            "swarmops_ops::check::env::MAX_PASS_NAME_BYTES",
+            CHECK_ENV,
+            "pub const MAX_PASS_NAME_BYTES: usize = 128;",
+            || bytes::to_u64(swarmops_ops::check::env::MAX_PASS_NAME_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[ErrorCode::InvalidArg],
+        what: "A `--pass` name, of `[A-Za-z_][A-Za-z0-9_]*`: a longer one is refused with \
+                   `details.reason` `pass`.",
     },
 ];
 
 /// The bounds a response keeps without an error: what it leaves out, and how it says so.
-static BOUNDS: [Limit; 9] = [
+static BOUNDS: [Limit; 14] = [
     Limit {
         name: "Lossy commits listed",
         constant: code(
@@ -691,6 +728,77 @@ static BOUNDS: [Limit; 9] = [
         errors: &[],
         what: "The most conflicting paths the report of a push to `refs/land/<target>` lists \
                    on git's `remote:` lines; `… and <k> more` counts the rest.",
+    },
+    Limit {
+        name: "Check log",
+        constant: code(
+            "swarmops_ops::check::log::MAX_CHECK_LOG_BYTES",
+            CHECK_LOG,
+            "pub const MAX_CHECK_LOG_BYTES: u64 = 64 << 20;",
+            || swarmops_ops::check::log::MAX_CHECK_LOG_BYTES,
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "A check's log: past it one `run cut` line is written, later output is counted \
+                   in `dropped_bytes` and not written, and the `end` line is still written. The \
+                   outcome stands. Not measured.",
+    },
+    Limit {
+        name: "Check log line",
+        constant: code(
+            "swarmops_ops::check::log::MAX_CHECK_LOG_LINE_BYTES",
+            CHECK_LOG,
+            "pub const MAX_CHECK_LOG_LINE_BYTES: usize = 16 * 1024;",
+            || bytes::to_u64(swarmops_ops::check::log::MAX_CHECK_LOG_LINE_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "One line of a check's output, as its log keeps it: the rest of a longer one is \
+                   left out and counted in `dropped_bytes`.",
+    },
+    Limit {
+        name: "Check sections",
+        constant: code(
+            "swarmops_ops::check::log::MAX_CHECK_SECTIONS",
+            CHECK_LOG,
+            "pub const MAX_CHECK_SECTIONS: usize = 1_000;",
+            || bytes::to_u64(swarmops_ops::check::log::MAX_CHECK_SECTIONS),
+        ),
+        unit: Unit::Count("sections"),
+        commands: &["check run"],
+        errors: &[],
+        what: "The sections one check opens with `swarmops:section` lines: past them a marker \
+                   is an ordinary line of output.",
+    },
+    Limit {
+        name: "Section title",
+        constant: code(
+            "swarmops_ops::check::log::MAX_SECTION_TITLE_BYTES",
+            CHECK_LOG,
+            "pub const MAX_SECTION_TITLE_BYTES: usize = 200;",
+            || bytes::to_u64(swarmops_ops::check::log::MAX_SECTION_TITLE_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "A section's title: a longer one is cut at a character's end, with `…`.",
+    },
+    Limit {
+        name: "Check runs kept",
+        constant: code(
+            "swarmops_ops::check::run::KEPT_CHECK_RUNS",
+            CHECK_RUN,
+            "pub const KEPT_CHECK_RUNS: usize = 20;",
+            || bytes::to_u64(swarmops_ops::check::run::KEPT_CHECK_RUNS),
+        ),
+        unit: Unit::Count("runs"),
+        commands: &["check run"],
+        errors: &[],
+        what: "The runs a directory (by its canonical path) or a workspace keeps, the new one \
+                   among them: when a run starts the older ones are removed, but never one whose \
+                   lock is held.",
     },
 ];
 

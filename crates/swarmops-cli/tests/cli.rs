@@ -36,7 +36,16 @@ use swarmops_testkit::store::layout_of;
 const AGENT: &str = "agent/worker-17";
 
 /// The keys whose numbers are times or durations, replaced by `[<key>]` in snapshots.
-const TIME_KEYS: &[&str] = &["elapsed_ms", "created_at", "secs", "at"];
+const TIME_KEYS: &[&str] = &[
+    "elapsed_ms",
+    "created_at",
+    "secs",
+    "at",
+    "duration_ms",
+    "start_ms",
+    "started_at_ms",
+    "at_ms",
+];
 
 /// The store's access file for `serve`'s refusals: `person/bob` is named and granted nothing.
 const ACCESS: &str = "version = 1\n\n[[grant]]\nwho = [\"person/bob\"]\n";
@@ -473,6 +482,70 @@ fn commit_to_main(s: &mut Session, store: &str, changes: &Value, name: &str) -> 
     let id = reply["result"]["changeset"].as_str().expect("a changeset");
     s.name(id, name);
     id.to_owned()
+}
+
+/// A check file of one passing and one failing check, for `check run`'s golden.
+const CHECK_RUN_FIXTURE: &str = "version = 1\n\n[check.ok]\nargv = [\"true\"]\n\n\
+[check.bad]\nargv = [\"sh\", \"-c\", \"echo boom >&2; exit 3\"]\n";
+
+/// The caller's variables of `check run`'s golden: every one of the fixed list a check gets, so
+/// that `inherited_env` is the same on every host, and the runs below the session's temp dir.
+fn check_run_env(tmp: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("SWARMOPS_CHECK_RUNS_DIR", format!("{tmp}/runs")),
+        ("HOME", format!("{tmp}/home")),
+        ("LANG", "C".to_owned()),
+        ("LC_ALL", "C".to_owned()),
+        ("LC_CTYPE", "C".to_owned()),
+        ("LOGNAME", "agent".to_owned()),
+        ("PATH", "/usr/bin:/bin".to_owned()),
+        ("TMPDIR", tmp.to_owned()),
+        ("TZ", "UTC".to_owned()),
+        ("USER", "agent".to_owned()),
+    ]
+}
+
+/// `check run` (M31-1), its pinned JSON form, in the directory form: a check that fails and one
+/// that passes run in name order, and the run is E_CHECK_FAILED with the whole run in
+/// `details.run`, the failing check's tails beside its exit code; the passing check alone, named,
+/// is a run that passes. Ids, paths and times are named.
+#[test]
+fn check_run_golden() {
+    // 1. The tree, and the caller's environment.
+    let mut s = Session::new();
+    let tmp = s.tmp();
+    let dir = format!("{tmp}/tree");
+    fs::create_dir_all(format!("{dir}/.swarmops")).unwrap();
+    fs::write(format!("{dir}/.swarmops/checks.toml"), CHECK_RUN_FIXTURE).unwrap();
+    let owned = check_run_env(&tmp);
+    let env: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+    // 2. Both checks: one failed.
+    let failed = s.run_env(&env, &["check", "run", "--dir", &dir]);
+    assert_eq!(
+        (failed.exit, failed.code()),
+        (1, "E_CHECK_FAILED"),
+        "{}",
+        failed.json
+    );
+    let run = &failed["error"]["details"]["run"];
+    let run_dir = run["dir"].as_str().unwrap().to_owned();
+    let key = Path::new(&run_dir)
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    s.name(key, "dir_key");
+    s.name_at(&failed, "/error/details/run/run", "run1");
+    assert_eq!(run["failed"], json!(["bad"]));
+
+    // 3. The passing one alone.
+    let passed = s.run_env(&env, &["check", "run", "--dir", &dir, "ok"]);
+    assert_eq!(passed.exit, 0, "{}", passed.json);
+    s.name_at(&passed, "/result/run", "run2");
+    insta::assert_json_snapshot!(s.transcript());
 }
 
 /// `check list` (M30-1, M30-2), its pinned JSON form: the plan's fixture at main lists its

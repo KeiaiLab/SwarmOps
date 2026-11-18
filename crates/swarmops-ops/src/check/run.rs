@@ -138,7 +138,8 @@ pub fn run_dir(
 /// `check_run`: the checks of `req.stage` (those of `req.checks`, if any) of workspace
 /// `req.workspace`, held clean and locked for the run, read from the store at the changeset its
 /// files stand for, run in its directory. Not `vouched`: the files are that changeset's tree.
-/// The store is only read.
+/// The store is only read. It needs no identity: it writes no store, only its run's files in the
+/// workspace.
 pub fn run_ws(
     ctx: &swarmops_ws::Ctx<'_>,
     req: CheckRunReq,

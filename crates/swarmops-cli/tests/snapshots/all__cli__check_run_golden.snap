@@ -1,0 +1,149 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+assertion_line: 548
+expression: s.transcript()
+---
+[
+  {
+    "args": "check run --dir [tmp]/tree",
+    "env": {
+      "SWARMOPS_CHECK_RUNS_DIR": "[tmp]/runs",
+      "HOME": "[tmp]/home",
+      "LANG": "C",
+      "LC_ALL": "C",
+      "LC_CTYPE": "C",
+      "LOGNAME": "agent",
+      "PATH": "/usr/bin:/bin",
+      "TMPDIR": "[tmp]",
+      "TZ": "UTC",
+      "USER": "agent"
+    },
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "check_run",
+      "api": 1,
+      "error": {
+        "code": "E_CHECK_FAILED",
+        "message": "1 of 2 checks did not pass: bad failed (exit 3)",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "run": {
+            "cancelled": false,
+            "checks": [
+              {
+                "definition_digest": "[id1]",
+                "duration_ms": "[duration_ms]",
+                "exit_code": 3,
+                "log": "[tmp]/runs/[dir_key]/[run1]/logs/bad.log",
+                "name": "bad",
+                "outcome": "failed",
+                "stderr_tail": "boom\n",
+                "stdout_tail": "",
+                "timeout_s": 900
+              },
+              {
+                "definition_digest": "[id2]",
+                "duration_ms": "[duration_ms]",
+                "exit_code": 0,
+                "log": "[tmp]/runs/[dir_key]/[run1]/logs/ok.log",
+                "name": "ok",
+                "outcome": "passed",
+                "timeout_s": 900
+              }
+            ],
+            "dir": "[tmp]/runs/[dir_key]/[run1]",
+            "duration_ms": "[duration_ms]",
+            "failed": [
+              "bad"
+            ],
+            "file": ".swarmops/checks.toml",
+            "inherited_all": false,
+            "inherited_env": [
+              "HOME",
+              "LANG",
+              "LC_ALL",
+              "LC_CTYPE",
+              "LOGNAME",
+              "PATH",
+              "TMPDIR",
+              "TZ",
+              "USER"
+            ],
+            "run": "[run1]",
+            "stage": "before-land",
+            "version": 1,
+            "vouched": true
+          }
+        },
+        "hint": "read its log: swarmops check log bad --dir [tmp]/tree --run [run1]"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "check run --dir [tmp]/tree ok",
+    "env": {
+      "SWARMOPS_CHECK_RUNS_DIR": "[tmp]/runs",
+      "HOME": "[tmp]/home",
+      "LANG": "C",
+      "LC_ALL": "C",
+      "LC_CTYPE": "C",
+      "LOGNAME": "agent",
+      "PATH": "/usr/bin:/bin",
+      "TMPDIR": "[tmp]",
+      "TZ": "UTC",
+      "USER": "agent"
+    },
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "check_run",
+      "api": 1,
+      "result": {
+        "vouched": true,
+        "run": "[run2]",
+        "stage": "before-land",
+        "file": ".swarmops/checks.toml",
+        "version": 1,
+        "dir": "[tmp]/runs/[dir_key]/[run2]",
+        "inherited_env": [
+          "HOME",
+          "LANG",
+          "LC_ALL",
+          "LC_CTYPE",
+          "LOGNAME",
+          "PATH",
+          "TMPDIR",
+          "TZ",
+          "USER"
+        ],
+        "inherited_all": false,
+        "cancelled": false,
+        "failed": [],
+        "duration_ms": "[duration_ms]",
+        "checks": [
+          {
+            "name": "ok",
+            "outcome": "passed",
+            "definition_digest": "[id2]",
+            "timeout_s": 900,
+            "duration_ms": "[duration_ms]",
+            "exit_code": 0,
+            "log": "[tmp]/runs/[dir_key]/[run2]/logs/ok.log"
+          }
+        ]
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

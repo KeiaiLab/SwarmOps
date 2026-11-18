@@ -385,7 +385,7 @@ fn create(
 /// Runs a workspace command that names its workspace: `build` makes the request from the
 /// workspace's name, which `at` gives, or else the workspace around the working directory (or
 /// `--ws-path`) does.
-fn on_named<R, T: Serialize>(
+pub(super) fn on_named<R, T: Serialize>(
     ctx: &Ctx<'_>,
     op: &'static str,
     at: WsAt,

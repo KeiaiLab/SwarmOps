@@ -32,6 +32,8 @@ The limits of the SwarmOps contract: what a request may hold, with the error a r
 | [Check argv strings](#check-argv-strings) | 1,024 strings | `swarmops_ops::check::MAX_ARGV_ITEMS` | [`E_CHECK_FILE`](errors.md#e_check_file) |
 | [Check argv size](#check-argv-size) | 65,536 bytes (64 KiB) | `swarmops_ops::check::MAX_ARGV_BYTES` | [`E_CHECK_FILE`](errors.md#e_check_file) |
 | [Check timeout](#check-timeout) | 86,400 s | `swarmops_ops::check::MAX_CHECK_TIMEOUT_S` | [`E_CHECK_FILE`](errors.md#e_check_file) |
+| [Variables passed](#variables-passed) | 64 names | `swarmops_ops::check::env::MAX_PASS` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
+| [Variable name passed](#variable-name-passed) | 128 bytes | `swarmops_ops::check::env::MAX_PASS_NAME_BYTES` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
 
 ### Request text
 
@@ -200,7 +202,7 @@ A tree's `.swarmops/checks.toml`: a longer one is refused by its size, not read,
 
 - Value: 1,048,576 bytes (1 MiB).
 - Constant: `swarmops_ops::check::MAX_CHECK_FILE_BYTES`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md).
+- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Checks of a file
@@ -209,7 +211,7 @@ The `[check.<name>]` tables of one check file: one more is refused with `details
 
 - Value: 1,000 checks.
 - Constant: `swarmops_ops::check::MAX_CHECKS`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md).
+- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Check name
@@ -218,7 +220,7 @@ A check's name, of `a-z`, `0-9`, `-` and `_`: a longer one is refused with `deta
 
 - Value: 64 bytes.
 - Constant: `swarmops_ops::check::MAX_CHECK_NAME_BYTES`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md).
+- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Check argv strings
@@ -227,7 +229,7 @@ A check's `argv`, the program and its arguments: more are refused with `details.
 
 - Value: 1,024 strings.
 - Constant: `swarmops_ops::check::MAX_ARGV_ITEMS`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md).
+- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Check argv size
@@ -236,17 +238,35 @@ A check's `argv` strings together: more are refused with `details.reason` `value
 
 - Value: 65,536 bytes (64 KiB).
 - Constant: `swarmops_ops::check::MAX_ARGV_BYTES`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md).
+- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Check timeout
 
-A check's `timeout_s`, from 1: a longer one, or 0, is refused with `details.reason` `value`. Nothing runs a check with it yet.
+A check's `timeout_s`, from 1: a longer one, or 0, is refused with `details.reason` `value`. `check run` kills a check's process group past it.
 
 - Value: 86,400 s.
 - Constant: `swarmops_ops::check::MAX_CHECK_TIMEOUT_S`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md).
+- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
+
+### Variables passed
+
+The `--pass` names of one `check run`: more are refused with `details.reason` `pass`, before anything runs.
+
+- Value: 64 names.
+- Constant: `swarmops_ops::check::env::MAX_PASS`, in `crates/swarmops-ops/src/check/env.rs`.
+- Commands: [`check run`](commands/check-run.md).
+- Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
+
+### Variable name passed
+
+A `--pass` name, of `[A-Za-z_][A-Za-z0-9_]*`: a longer one is refused with `details.reason` `pass`.
+
+- Value: 128 bytes.
+- Constant: `swarmops_ops::check::env::MAX_PASS_NAME_BYTES`, in `crates/swarmops-ops/src/check/env.rs`.
+- Commands: [`check run`](commands/check-run.md).
+- Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
 
 ## Bounds without an error
 
@@ -263,6 +283,11 @@ A response past these leaves the rest out, and says so in its fields; nothing fa
 | [Land check paths listed](#land-check-paths-listed) | 1,000 paths | `swarmops_repo::land::MAX_CHECK_PATHS` | [`land-check`](commands/land-check.md), [`land`](commands/land.md) |
 | [Verify findings](#verify-findings) | 1,000 problems | `swarmops_api::VERIFY_MAX_FINDINGS` | [`verify`](commands/verify.md) |
 | [Land conflict lines](#land-conflict-lines) | 50 paths | `swarmops_ops::serve::land::MAX_CONFLICT_LINES` | [`serve`](commands/serve.md) |
+| [Check log](#check-log) | 67,108,864 bytes (64 MiB) | `swarmops_ops::check::log::MAX_CHECK_LOG_BYTES` | [`check run`](commands/check-run.md) |
+| [Check log line](#check-log-line) | 16,384 bytes (16 KiB) | `swarmops_ops::check::log::MAX_CHECK_LOG_LINE_BYTES` | [`check run`](commands/check-run.md) |
+| [Check sections](#check-sections) | 1,000 sections | `swarmops_ops::check::log::MAX_CHECK_SECTIONS` | [`check run`](commands/check-run.md) |
+| [Section title](#section-title) | 200 bytes | `swarmops_ops::check::log::MAX_SECTION_TITLE_BYTES` | [`check run`](commands/check-run.md) |
+| [Check runs kept](#check-runs-kept) | 20 runs | `swarmops_ops::check::run::KEPT_CHECK_RUNS` | [`check run`](commands/check-run.md) |
 
 ### Lossy commits listed
 
@@ -335,6 +360,46 @@ The most conflicting paths the report of a push to `refs/land/<target>` lists on
 - Value: 50 paths.
 - Constant: `swarmops_ops::serve::land::MAX_CONFLICT_LINES`, in `crates/swarmops-ops/src/serve/land.rs`.
 - Commands: [`serve`](commands/serve.md).
+
+### Check log
+
+A check's log: past it one `run cut` line is written, later output is counted in `dropped_bytes` and not written, and the `end` line is still written. The outcome stands. Not measured.
+
+- Value: 67,108,864 bytes (64 MiB).
+- Constant: `swarmops_ops::check::log::MAX_CHECK_LOG_BYTES`, in `crates/swarmops-ops/src/check/log.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Check log line
+
+One line of a check's output, as its log keeps it: the rest of a longer one is left out and counted in `dropped_bytes`.
+
+- Value: 16,384 bytes (16 KiB).
+- Constant: `swarmops_ops::check::log::MAX_CHECK_LOG_LINE_BYTES`, in `crates/swarmops-ops/src/check/log.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Check sections
+
+The sections one check opens with `swarmops:section` lines: past them a marker is an ordinary line of output.
+
+- Value: 1,000 sections.
+- Constant: `swarmops_ops::check::log::MAX_CHECK_SECTIONS`, in `crates/swarmops-ops/src/check/log.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Section title
+
+A section's title: a longer one is cut at a character's end, with `…`.
+
+- Value: 200 bytes.
+- Constant: `swarmops_ops::check::log::MAX_SECTION_TITLE_BYTES`, in `crates/swarmops-ops/src/check/log.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Check runs kept
+
+The runs a directory (by its canonical path) or a workspace keeps, the new one among them: when a run starts the older ones are removed, but never one whose lock is held.
+
+- Value: 20 runs.
+- Constant: `swarmops_ops::check::run::KEPT_CHECK_RUNS`, in `crates/swarmops-ops/src/check/run.rs`.
+- Commands: [`check run`](commands/check-run.md).
 
 ## Defaults
 

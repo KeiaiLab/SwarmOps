@@ -632,7 +632,7 @@ pub enum Command {
     /// DIR names another.
     #[command(subcommand)]
     Ws(WsCommand),
-    /// List the checks a tree names in .swarmops/checks.toml; nothing here runs them.
+    /// List the checks a tree names in .swarmops/checks.toml, and run one stage of them.
     #[command(subcommand)]
     Check(CheckCommand),
     /// Name the changeset REV names, and whether REV is a ref's name.
@@ -860,7 +860,7 @@ pub enum Command {
     /// blob_has, verify, the maintenance's gc, repair and upgrade, the git remotes' remote_list,
     /// fetch, push, sync and sync_status, and the workspaces' ws_create, ws_status, ws_diff,
     /// ws_commit, ws_rebase, ws_resolve, ws_land, ws_materialize, ws_discard, ws_snapshot,
-    /// ws_list and ws_info), each
+    /// ws_list, ws_info and check_run), each
     /// taking the operation's request as its arguments and returning the envelope the other
     /// commands print. The store and the identity are the server's, --repo and --as or their
     /// variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
@@ -1589,6 +1589,43 @@ pub enum CheckCommand {
         #[arg(long, value_enum, value_name = "STAGE")]
         stage: Option<StageArg>,
     },
+    /// Run the checks of one stage of a clean workspace, or of a directory with --dir.
+    ///
+    /// Runs the checks of STAGE (default before-land) that .swarmops/checks.toml names, or the
+    /// one check default of .swarmops/workspaces.json's check.argv, or only the NAMEs given (each
+    /// of the stage), one at a time in name order: each with no shell and no stdin, in its own
+    /// process group, under its timeout_s, in its dir. Every selected check runs, whatever an
+    /// earlier one did, and one envelope names each outcome: passed, failed, timed_out,
+    /// not_started, cancelled or not_run. A run where any check did not pass is E_CHECK_FAILED,
+    /// its details.run the whole result. A check gets the SWARMOPS_CHECK_* variables, HOME, LANG,
+    /// LC_ALL, LC_CTYPE, LOGNAME, PATH, TMPDIR, TZ and USER of your environment, and the
+    /// variables --pass names; nothing else (the check default keeps your whole environment).
+    /// Its output goes to a log with a time on every line, which check log reads.
+    ///
+    /// The workspace form (--ws, --ws-path, else the workspace around the working directory)
+    /// needs a clean workspace: no edits, not rebasing, not stale. It reads the check file from
+    /// the store at the changeset the files stand for, holds the workspace's lock while the
+    /// checks run, and never writes the store; its runs are kept in .swarmws/check-runs/. --dir
+    /// DIR runs the checks of the files below DIR as they are, opens no store, and says vouched:
+    /// its runs are kept below SWARMOPS_CHECK_RUNS_DIR, else the state directory's
+    /// swarmops/check-runs; the newest 20 of each are kept. SIGINT, SIGTERM and SIGHUP kill the
+    /// running check's process group and end the run. No identity.
+    Run {
+        #[command(flatten)]
+        at: WsAt,
+        /// Run the checks of the files below DIR on this host, as they are.
+        #[arg(long, value_name = "DIR", conflicts_with_all = ["name", "ws_path"])]
+        dir: Option<Utf8PathBuf>,
+        /// The stage whose checks to run.
+        #[arg(long, value_enum, value_name = "STAGE", default_value_t = StageArg::BeforeLand)]
+        stage: StageArg,
+        /// A variable of your environment the checks also get; repeatable.
+        #[arg(long = "pass", value_name = "NAME")]
+        pass: Vec<String>,
+        /// Only these checks, each of the stage.
+        #[arg(value_name = "NAME")]
+        names: Vec<String>,
+    },
 }
 
 /// `remote`'s operations.
@@ -1975,6 +2012,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ws", "delete"] => "ws_delete",
         ["ws", "hook"] => "ws_hook",
         ["check", "list"] => "check_list",
+        ["check", "run"] => "check_run",
         ["cat"] => "read_file",
         ["ls"] => "read_tree",
         ["show"] => "show",
@@ -2154,10 +2192,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 66);
+        assert_eq!(ops.len(), 67);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 66, "two subcommands name one op");
+        assert_eq!(ops.len(), 67, "two subcommands name one op");
 
         // Automatic update follows every operation but these, and not `serve --prepare`,
         // which a flag names and no subcommand.

@@ -56,6 +56,9 @@ REVIEWED = {
             "text", "MIT", "fast-hex's, which its AVX2 decoder is modified from",
         ),
     },
+    # src/low_level/extract.c is compiled only with the feature extended-siginfo-raw, which
+    # swarmops-cli leaves off, and carries no notice of its own: the crate's license files cover it.
+    ("signal-hook", "0.4.6"): {},
     # src/unicode_tables/ is generated from the Unicode Character Database, whose terms of use
     # LICENSE-UNICODE carries: the tables of the gitignore patterns' regular expressions
     # (globset, through regex-automata), from M5's workspace scan.

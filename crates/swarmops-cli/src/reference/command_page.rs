@@ -124,7 +124,7 @@ const UPDATE_COMMAND: &str = "update";
 const UPDATE_SINCE: &str = "0.12.0";
 
 /// The checks' commands (M30), and the release they first ship in: the one after 0.12.0.
-const CHECK_COMMANDS: [&str; 1] = ["check list"];
+const CHECK_COMMANDS: [&str; 2] = ["check list", "check run"];
 const CHECK_SINCE: &str = "0.13.0";
 
 /// The release the command at `path` first shipped in.
@@ -276,7 +276,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 66] = [
+const META: [Meta; 67] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -448,6 +448,13 @@ const META: [Meta; 66] = [
         false,
         false,
         Returns::Type("CheckListResp"),
+    ),
+    meta(
+        "check run",
+        Group::Checks,
+        true,
+        false,
+        Returns::Type("CheckRunResp"),
     ),
     meta(
         "resolve",
@@ -1489,7 +1496,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 61] = [
+const RETURN_SITES: [(&str, &str, &str); 62] = [
     ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1551,6 +1558,11 @@ const RETURN_SITES: [(&str, &str, &str); 61] = [
     ("ws list", "../swarmops-ws/src/list.rs", "pub fn list("),
     ("ws info", "../swarmops-ws/src/info.rs", "pub fn info("),
     ("check list", "../swarmops-ops/src/check.rs", "pub fn list("),
+    (
+        "check run",
+        "../swarmops-ops/src/check/run.rs",
+        "pub fn run_ws(",
+    ),
     (
         "ws delete",
         "../swarmops-ws/src/delete.rs",
@@ -1651,7 +1663,12 @@ const CACHE_ONLY_SOURCE: &str = "../swarmops-ops/src/local.rs";
 /// exceptions to [`CHANGE_RULE`]: a fetch's import moves no ref and records no agent, a push is
 /// an export, and `remote add|remove` write the remote configuration and the mirror. The
 /// maintenance (M6) is too: `gc`, `repair` and `upgrade` record no journal frame.
-const NO_IDENTITY: [(&str, &str, &str); 7] = [
+const NO_IDENTITY: [(&str, &str, &str); 8] = [
+    (
+        "check run",
+        "../swarmops-ops/src/check/run.rs",
+        "It needs no identity: it writes no store",
+    ),
     (
         "fetch",
         "../swarmops-ops/src/remote.rs",

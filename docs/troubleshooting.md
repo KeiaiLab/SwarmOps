@@ -100,7 +100,7 @@ retry advice; this is that table, all 57 codes, each raised by some command.
 | `E_WS_UNPORTABLE` | 1 | no | The tree holds paths the workspace's volume cannot hold. | [Workspaces](#e_ws_unportable) |
 | `E_WS_OUTSIDE_PREFIXES` | 1 | no | A sparse workspace holds edits outside its prefixes. | [Workspaces](#e_ws_outside_prefixes) |
 | `E_WS_STALE` | 1 | no | A workspace's base is gone from its target's history. | [Workspaces](#e_ws_stale) |
-| `E_CHECK_FAILED` | 1 | no | A workspace's check or bootstrap command failed or timed out. | [Workspaces](#e_check_failed) |
+| `E_CHECK_FAILED` | 1 | no | A workspace's check or bootstrap command failed or timed out, or a check of `check run` did not pass. | [Workspaces](#e_check_failed) |
 | `E_CHECK_FILE` | 1 | no | A check file does not read; `details.line` names where. | [Checks](#e_check_file) |
 | `E_REF_NOT_FOUND` | 6 | no | `ref log` names a ref the journal records no move of, or an OpenCode hook a start the store does not hold. | [Arguments and revisions](#e_ref_not_found) |
 | `E_AUTH` | 5 | no | `swarmops serve` names no caller, or no grant of the store's `access.toml` names it; or GitHub refused a login by the device flow. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees), [A login that fails](#a-login-that-fails) |
@@ -1518,6 +1518,19 @@ The check of `ws land --check` (`details.stage: check`) or a new workspace's boo
 the workspace. After a failed check nothing landed, and the workspace stands on the rebased
 changeset (`details.changeset`), where the failure reproduces: fix, `ws commit`, and land again.
 A check that needs more than 900 s takes `--check-timeout`.
+
+From `check run`, `details.run` is the whole run: `details.run.failed` names the checks that did
+not pass, and each of `details.run.checks` has its `outcome`, its `log` (read it with
+`swarmops check log NAME` and the run's form, `--dir DIR` or `--ws NAME`, and `--run`) and, for a
+check that ran, the tails of its output. A check `timed_out` ran past its `timeout_s`: raise it
+in the check file, or make the check faster. One `not_started` names why: `dir`, a directory the
+tree does not hold here (a sparse workspace may lack it: `ws materialize` it), or `program`, a
+program that is not on the check's `PATH`. A check gets only a fixed list of your environment's
+variables (`HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `LOGNAME`, `PATH`, `TMPDIR`, `TZ`, `USER`): name
+one more it needs with `--pass NAME`. `cancelled` and `not_run` follow a signal that stopped the
+run (`details.run.cancelled`). In a workspace, `check run` first needs it clean: `E_WS_DIRTY`
+names the edits; commit them, or run the checks on the files as they are with
+`check run --dir <the workspace's directory>`, an answer only you vouch for.
 
 ## Checks
 

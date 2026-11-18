@@ -1,6 +1,6 @@
 ---
 source: crates/swarmops-cli/tests/mcp.rs
-assertion_line: 317
+assertion_line: 321
 expression: listed
 ---
 {
@@ -2996,6 +2996,75 @@ expression: listed
       },
       "name": "ws_info",
       "title": "Describe a workspace"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Runs the checks of one stage (before-land by default) of a clean workspace, one at a time in name order, each in its own process group under its timeout, reading .swarmops/checks.toml from the store at the changeset the files stand for: a passing run gives every check's outcome, and a check that did not pass makes it E_CHECK_FAILED with the whole run in details.run. Holds the workspace's lock while it runs; never writes the store.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`check_run` (CLI `check run`): run the checks of one stage of a workspace's tree, one at a\ntime in name order. The workspace must be clean (no edits, not rebasing, not stale); its lock\nis held while the checks run, and the store is never written.",
+        "properties": {
+          "checks": {
+            "description": "The checks to run, each of the stage; empty (the default): every check of the stage. A\nname given twice runs once.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "stage": {
+            "default": "before-land",
+            "description": "The stage whose checks to run; `before-land` when omitted. When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+            "oneOf": [
+              {
+                "const": "before-land",
+                "description": "Before a change lands: the gate. The default.",
+                "type": "string"
+              },
+              {
+                "const": "after-land",
+                "description": "After a change has landed.",
+                "type": "string"
+              },
+              {
+                "const": "scheduled",
+                "description": "On a schedule.",
+                "type": "string"
+              },
+              {
+                "const": "release",
+                "description": "Before a release is cut.",
+                "type": "string"
+              },
+              {
+                "const": "manual",
+                "description": "Only when someone asks for it.",
+                "type": "string"
+              },
+              {
+                "const": "deploy",
+                "description": "Before a deployment.",
+                "type": "string"
+              }
+            ]
+          },
+          "workspace": {
+            "description": "The workspace, by its name in the store's registry.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace"
+        ],
+        "title": "CheckRunReq",
+        "type": "object"
+      },
+      "name": "check_run",
+      "title": "Run a workspace's checks"
     }
   ],
   "ttlMs": 3600000

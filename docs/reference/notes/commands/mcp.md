@@ -45,19 +45,19 @@ are not served. The results of `server/discover` and `tools/list` may be kept fo
 
 ### Tools
 
-`tools/list` gives 47 tools, one per operation, named as the envelope's `op` is: the 35 store
+`tools/list` gives 48 tools, one per operation, named as the envelope's `op` is: the 35 store
 operations `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`,
 `path_history`, `diff`, `merge_base`, `op_log`, `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `ref_txn`, `undo`, `commit`,
 `land`, `revert`, `land_check`, `land_group`, `check_list`, `rebase`, `blob_put`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`,
-`fetch`, `push`, `sync` and `sync_status`, then the 12 workspace operations `ws_create`, `ws_status`, `ws_diff`,
+`fetch`, `push`, `sync` and `sync_status`, then the 13 workspace operations `ws_create`, `ws_status`, `ws_diff`,
 `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize`, `ws_discard`, `ws_snapshot`,
-`ws_list` and `ws_info`. A tool's input schema is its request type's JSON Schema (`swarmops schema <Req>`), with
+`ws_list`, `ws_info` and `check_run`. A tool's input schema is its request type's JSON Schema (`swarmops schema <Req>`), with
 every reference inlined so that it stands alone. Its annotations say what it does to the store:
 
 | Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
 | --- | --- | --- | --- | --- |
 | The 19 store reads, `land_check`, `check_list`, `blob_has`, `verify`, `remote_list` and `sync_status` among them; `ws_status`, `ws_diff`, `ws_list`, `ws_info` | `true` | `false` | `true` | `false` |
-| `commit`, `rebase`, `blob_put`, `ws_commit` | `false` | `false` | `false` | `false` |
+| `commit`, `rebase`, `blob_put`, `ws_commit`, `check_run` | `false` | `false` | `false` | `false` |
 | `ref_set`, `ref_delete`, `ref_txn`, `undo`, `gc`, `repair`, `upgrade` | `false` | `true` | `true` | `false` |
 | `land`, `revert`, `land_group`, `ws_create`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize` | `false` | `false` | `true` | `false` |
 | `ws_discard` | `false` | `true` | `true` | `false` |

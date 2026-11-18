@@ -22,6 +22,33 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Added
 
+- `check run` and the MCP tool `check_run`: the checks of one stage (`--stage`, `before-land` by
+  default) of a clean workspace, or with `check run --dir DIR` of a directory, one at a time in
+  name order, each with no shell and no stdin, in its own process group, under its `timeout_s`;
+  `NAME…` runs only those checks of the stage. Every check runs whatever an earlier one did, and
+  one envelope names each outcome: `passed`, `failed`, `timed_out` (its group killed),
+  `not_started`, `cancelled` or `not_run`. A run where any check did not pass is
+  `E_CHECK_FAILED`, the whole run in `details.run`. The workspace form reads the check file from
+  the store at the changeset the files stand for, holds the workspace's lock while the checks run
+  and never writes the store; the directory form opens no store and says `vouched: true`.
+  SIGINT, SIGTERM and SIGHUP kill the running check's process group and end the run. The MCP tool
+  has the workspace form only. `swarmops mcp` lists 48 tools.
+- The environment a check of `check run` gets: `SWARMOPS_CHECK_NAME`, `SWARMOPS_CHECK_STAGE`,
+  `SWARMOPS_CHECK_TREE`, `SWARMOPS_CHECK_ATTEMPT`, `SWARMOPS_CHECK_RUN`, the paths
+  `SWARMOPS_CHECK_REPORT`, `SWARMOPS_CHECK_OUTPUTS`, `SWARMOPS_CHECK_SUMMARY` and
+  `SWARMOPS_CHECK_ARTIFACTS` (which nothing reads yet), `SWARMOPS_CHECK_CHANGED` (empty until
+  plans exist) and `SWARMOPS_WS` in a workspace; of the caller's variables only `HOME`, `LANG`,
+  `LC_ALL`, `LC_CTYPE`, `LOGNAME`, `PATH`, `TMPDIR`, `TZ` and `USER`, and each `--pass NAME`. The
+  one check `default` of `.swarmops/workspaces.json` keeps the caller's whole environment, as
+  `ws land --check` gives it.
+- A check's log: both streams of its output with a time on every line, the runner's own lines
+  (`start`, `end`, and `section` for each line `swarmops:section <title>` a check writes), within
+  bounds (64 MiB a log, 16 KiB a line, 1,000 sections). A run's directory holds `run.json`, the
+  logs and each check's own directory: in a workspace below `.swarmws/check-runs/`, in the
+  directory form below `SWARMOPS_CHECK_RUNS_DIR`, else the state directory's
+  `swarmops/check-runs`; the newest 20 runs are kept. The format is provisional.
+- Dependencies: `signal-hook` and `signal-hook-registry` (MIT OR Apache-2.0), for `check run`'s
+  signals.
 - `check list` and the MCP tool `check_list`: the checks a tree names, from the store at a
   changeset (`main` by default) or, with `check list --dir DIR`, from a directory of this host,
   which opens no store. Each check comes with its argv, its directory, its timeout, the digest

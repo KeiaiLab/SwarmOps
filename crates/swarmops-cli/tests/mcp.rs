@@ -60,7 +60,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 /// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
 /// are and the response type its envelope's `result` is. A task that adds a tool adds its line
 /// here and in `mcp_parity.rs`' `PARITY` or `PARITY_EXEMPT`, in the same commit.
-pub(crate) const TOOLS: [(&str, &str, &str); 47] = [
+pub(crate) const TOOLS: [(&str, &str, &str); 48] = [
     ("repo_info", "InfoReq", "RepoInfo"),
     ("resolve_rev", "ResolveRevReq", "ResolvedRev"),
     ("read_file", "ReadFileReq", "FileContent"),
@@ -108,6 +108,7 @@ pub(crate) const TOOLS: [(&str, &str, &str); 47] = [
     ("ws_snapshot", "WsSnapshotReq", "WsSnapshotResp"),
     ("ws_list", "WsListReq", "WsList"),
     ("ws_info", "WsInfoReq", "WsInfo"),
+    ("check_run", "CheckRunReq", "CheckRunResp"),
 ];
 
 /// The tools [`mcp_tool_calls_golden`] does not call: the git remotes' (M13), whose operations
@@ -139,6 +140,9 @@ const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 // The tests.
 // ---------------------------------------------------------------------------------------------
 
+/// The tools of the workspace table that are not named `ws_*`: the checks run in a workspace.
+const WS_CHECK_TOOLS: [&str; 1] = ["check_run"];
+
 /// The pages, from the repository's root, that may state how many tools `swarmops mcp` lists.
 const COUNTED: [&str; 4] = ["README.md", "docs", "web/app", "web/components"];
 
@@ -152,7 +156,7 @@ const PRIVATE: &str = "docs/superpowers";
 fn the_docs_count_the_tools() {
     let workspace = TOOLS
         .iter()
-        .filter(|(name, _, _)| name.starts_with("ws_"))
+        .filter(|(name, _, _)| name.starts_with("ws_") || WS_CHECK_TOOLS.contains(name))
         .count();
     let counts = [
         ("tools", TOOLS.len()),
@@ -695,6 +699,9 @@ fn workspace_calls(golden: &mut Golden, tmp: &Path, landed: &str) {
     // 5. What the store lists.
     golden.ok("ws_list", json!({}));
     golden.ok("ws_info", json!({"workspace": "ws1"}));
+
+    // 6. The workspace's checks: its tree names none, so there is nothing to run.
+    golden.err("check_run", json!({"workspace": "ws1"}), "E_INVALID_ARG");
 }
 
 /// `resolve_rev` is listed as a read whose description names the CLI command it stands for,
@@ -2966,7 +2973,10 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
     assert_eq!(fields(schema), fields(original), "{name}");
     assert_no_references(name, schema);
     let (read_only, destructive, idempotent, open_world) = match name {
-        "commit" | "rebase" | "blob_put" | "ws_commit" => (false, false, false, false),
+        // A run of the checks (M31) is a run of its own each time, its logs beside the others.
+        "commit" | "rebase" | "blob_put" | "ws_commit" | "check_run" => {
+            (false, false, false, false)
+        }
         // A land, a revert and a group land, and the workspaces' that find their work done when
         // run again (M5).
         "land" | "revert" | "land_group" | "ws_create" | "ws_rebase" | "ws_resolve" | "ws_land"

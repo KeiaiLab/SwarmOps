@@ -3,7 +3,7 @@
 After this page you can connect any MCP (Model Context Protocol) client to a store: register
 `swarmops mcp`, give each agent process its identity, call every tool and handle what goes wrong.
 
-**You need:** SwarmOps 0.1.0 or newer on Linux, 0.13.0 for all 47 tools (`swarmops --version`);
+**You need:** SwarmOps 0.1.0 or newer on Linux, 0.13.0 for all 48 tools (`swarmops --version`);
 [Concepts](../concepts.md); a store (`swarmops info`); an MCP client on the same host.
 
 `swarmops mcp` serves a store's operations to an agent as an MCP server on stdin and stdout. An
@@ -131,7 +131,7 @@ ids for compare-and-swap, `land` to publish, small pages):
 {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.11.0"},"instructions":"SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. …"}}
 ```
 
-**`tools/list`.** One page of 47 tools. Each entry holds `name`, `title`, `description`,
+**`tools/list`.** One page of 48 tools. Each entry holds `name`, `title`, `description`,
 `inputSchema` and `annotations`; `read_file` alone also carries `_meta`:
 
 ```sh
@@ -185,6 +185,7 @@ sed -n 2p answers.jsonl | jq -c '.result.tools[] | {name, title, annotations} + 
 {"name":"ws_snapshot","title":"Snapshot a workspace's edits","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"ws_list","title":"List workspaces","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"ws_info","title":"Describe a workspace","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"check_run","title":"Run a workspace's checks","annotations":{"destructiveHint":false,"idempotentHint":false,"openWorldHint":false,"readOnlyHint":false}}
 ```
 
 A tool's `inputSchema` is its request type's JSON Schema, as `swarmops schema <Type>` prints it,
@@ -293,7 +294,7 @@ Give every agent process its own instance name, and yourself one of your own, su
 
 ## The tools
 
-47 tools, one per operation (35 store operations and 12 workspace operations), each named as the
+48 tools, one per operation (35 store operations and 13 workspace operations), each named as the
 envelope's `op` is, in `tools/list`'s order. Its arguments are the CLI command's request;
 `swarmops schema <Request>` prints the type.
 
@@ -346,6 +347,7 @@ envelope's `op` is, in `tools/list`'s order. Its arguments are the CLI command's
 | `ws_snapshot` | `swarmops ws snapshot` | `WsSnapshotReq` | adds a changeset, moving no ref |
 | `ws_list` | `swarmops ws list` | `WsListReq` | no |
 | `ws_info` | `swarmops ws info` | `WsInfoReq` | no |
+| `check_run` | `swarmops check run [NAME…]` | `CheckRunReq` | no: it runs the checks, each log in the workspace |
 
 `init`, `whoami`, `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`, `clone`,
 `remote add|remove`, `derive`, `auth login|status|logout|git-credential`, `update`, `mcp` and
