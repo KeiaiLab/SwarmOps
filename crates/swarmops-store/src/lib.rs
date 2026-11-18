@@ -62,9 +62,9 @@ pub use meta::store::Expect;
 pub use meta::views::Step;
 pub use meta::{
     Answer, BadRecord, CasResult, ChangesetMeta, CommitInfo, DerivedSlot, DerivedStore, Frame,
-    FrameUse, IdHits, Index, InsertOutcome, Journal, JournalEntry, Lead, ListedValue, LogCut,
-    LookupHits, MetaLock, MetaRead, MetaStore, MetaWrite, Outcome, Planned, Record, Recovered,
-    RefFile, RefMismatch, RefMoveEntry, RefState, Request, RequestId, Serve, SortedView,
+    FrameUse, IdHits, Index, InsertOutcome, Journal, JournalEntry, LaneLock, Lead, ListedValue,
+    LogCut, LookupHits, MetaLock, MetaRead, MetaStore, MetaWrite, Outcome, Planned, Record,
+    Recovered, RefFile, RefMismatch, RefMoveEntry, RefState, Request, RequestId, Serve, SortedView,
     StoredValue, TailRepair, Turn, Whose,
 };
 pub use meta::{MetaCheck, Rebuilt, Upgraded};

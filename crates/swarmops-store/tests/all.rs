@@ -22,6 +22,7 @@ mod index;
 mod journal;
 mod journal2;
 mod journal3;
+mod lanes;
 mod layout;
 mod lock;
 mod meta;
