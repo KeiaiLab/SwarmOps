@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 198 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 216 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -109,6 +109,22 @@ The 198 request, response and value types of the API, as `swarmops schema` print
 | [`PushReq`](#pushreq) | object | `push`: send a store ref to a remote branch by compare-and-swap, never forcing: the remote moves only from the head the last fetch saw to a descendant of it. |
 | [`PushResp`](#pushresp) | object | `push`: where the remote branch stands. |
 | [`PushStatus`](#pushstatus) | enumeration | What a push did to the remote branch. |
+| [`QueueEnqueueReq`](#queueenqueuereq) | object | `queue_enqueue`: put a change in a target's queue. |
+| [`QueueEnqueueResp`](#queueenqueueresp) | object | `queue_enqueue`: the entry, and whether an earlier enqueue with the same key made it. |
+| [`QueueEntryOut`](#queueentryout) | object | One entry of the queue, as `queue status` lists it. |
+| [`QueueEntryState`](#queueentrystate) | enumeration | Where an entry stands, as the store's queue facts say. |
+| [`QueuePublishReq`](#queuepublishreq) | object | A runner's publish: move the target from the round's head to a checked prefix's changeset and record its entries landed, and record the removals the verdicts decided, all in one frame or nothing. |
+| [`QueuePublishResp`](#queuepublishresp) | object | A runner's publish: whether it was recorded, and where the target stands. |
+| [`QueuePublishStatus`](#queuepublishstatus) | enumeration | What a publish came to. |
+| [`QueueRemovalIn`](#queueremovalin) | object | One entry a publish removes: a prefix's red verdict blamed on it. |
+| [`QueueRoundItem`](#queuerounditem) | object | One link of a round's chain: an open entry and the prefix that ends with it. |
+| [`QueueRoundReq`](#queueroundreq) | object | A runner's round: build the target's open entries into a chain on its head, and record the candidates it will check. |
+| [`QueueRoundResp`](#queueroundresp) | object | A runner's round: the chain on the target's head, in enqueue order. |
+| [`QueueStatusReq`](#queuestatusreq) | object | `queue_status`: the entries of one target, or of every target, or one entry. |
+| [`QueueStatusResp`](#queuestatusresp) | object | `queue_status`: the entries, open ones in enqueue order first. |
+| [`QueueVerdictReq`](#queueverdictreq) | object | A runner's verdict: what checking a candidate tree came to, recorded on the entry that ends the prefix as soon as the check ends. |
+| [`QueueWaitReq`](#queuewaitreq) | object | `queue_wait`: wait for an entry to land. |
+| [`QueueWithdrawReq`](#queuewithdrawreq) | object | `queue_withdraw`: take an open entry out of its queue (reason `withdrawn`). |
 | [`ReadFileReq`](#readfilereq) | object | `read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or a range of its lines. |
 | [`ReadTreeReq`](#readtreereq) | object | `read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a time; with `depth`, the directories below it too. |
 | [`RebaseReq`](#rebasereq) | object | `rebase` (M5): merge a change three-way onto a ref's head and record the result as one changeset whose parent is that head, moving no ref. |
@@ -136,6 +152,7 @@ The 198 request, response and value types of the API, as `swarmops schema` print
 | [`RemoteListReq`](#remotelistreq) | object | `remote list`: the remotes the store records. |
 | [`RemoteRemoveReq`](#remoteremovereq) | object | `remote remove`: forget a remote, and the mirror's refs of it. |
 | [`RemoteRemoveResp`](#remoteremoveresp) | object | `remote remove`: the remote forgotten. |
+| [`RemovalReason`](#removalreason) | enumeration | Why an entry was taken out of the queue without landing. |
 | [`RepairAction`](#repairaction) | object | `repair`: one thing it did, or would do. |
 | [`RepairReq`](#repairreq) | object | `repair`: rebuild what the journal can rebuild (`journal.off`, the index, the ref files), quarantine damaged objects and drop damaged cache entries. |
 | [`RepairResp`](#repairresp) | object | `repair`: what it did, and what a verify after it found. |
@@ -172,6 +189,7 @@ The 198 request, response and value types of the API, as `swarmops schema` print
 | [`UpdatePendingKind`](#updatependingkind) | enumeration | The kind of a note an automatic update left: what became of a newer release. |
 | [`UpgradeReq`](#upgradereq) | object | `upgrade`: move the store to the latest format this build writes. |
 | [`UpgradeResp`](#upgraderesp) | object | `upgrade`: the formats before and after. |
+| [`VerdictState`](#verdictstate) | enumeration | What a check of a candidate tree came to: a verdict. |
 | [`VerifyFinding`](#verifyfinding) | object | One problem `verify` found, as a program reads it: what kind of damage it is, and what it names. |
 | [`VerifyReport`](#verifyreport) | object | `verify`: what the consistency check found. |
 | [`VerifyReq`](#verifyreq) | object | `verify`: check the whole store's consistency. |
@@ -1630,6 +1648,213 @@ Kind: enumeration. `swarmops schema PushStatus` prints its JSON Schema.
 | `"up_to_date"` | The branch named it already: nothing was sent. |
 | `"created"` | The branch did not exist, and the push created it. |
 
+## QueueEnqueueReq
+
+`queue_enqueue`: put a change in a target's queue. The answer comes once the entry is durable. A store before `FORMAT 3` is `E_FORMAT_REQUIRED`; a change the target holds already is `E_NOTHING_TO_LAND`.
+
+Kind: object. `swarmops schema QueueEnqueueReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `base` | [`Rev`](#rev) or `null` | no | Where the change starts: a first-parent ancestor of `head`. When omitted, the merge base of `head` and the target's head. |
+| `head` | [`Rev`](#rev) | yes | The change's head. |
+| `key` | `string` or `null` | no | Makes a retry safe: at most 128 bytes. The same key with the same target, head and base answers the entry it made; with another, `E_INVALID_ARG` (`details.reason` `key_reused`). When omitted, each enqueue makes a new entry. |
+| `target` | `string` | yes | The ref to land on, which must exist. |
+
+## QueueEnqueueResp
+
+`queue_enqueue`: the entry, and whether an earlier enqueue with the same key made it.
+
+Kind: object. `swarmops schema QueueEnqueueResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `entry` | [`QueueEntryOut`](#queueentryout) | yes | The entry. |
+| `replayed` | `boolean` | yes | True when the key named an entry already, and nothing was written. |
+
+## QueueEntryOut
+
+One entry of the queue, as `queue status` lists it.
+
+Kind: object. `swarmops schema QueueEntryOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `base` | `string` | yes | Where the change starts, a full id. |
+| `candidate` | `string` or `null` | no | The candidate changeset of its latest round: the chain up to it on the target's head. |
+| `check` | `string` or `null` | no | The check a verdict or a removal names. |
+| `head` | `string` | yes | The change's head, a full id. |
+| `id` | `string` | yes | The entry's id: 64 hex digits. |
+| `key` | `string` or `null` | no | The key it was enqueued with; omitted when none. |
+| `landed` | `string` or `null` | no | The target's changeset that holds its change, once landed. |
+| `position` | `integer` (uint64) or `null` | no | Its place among the target's open entries, from 1 in enqueue order; omitted once it landed or was removed. |
+| `removal` | [`RemovalReason`](#removalreason) or `null` | no | Why it was removed, once removed. |
+| `report` | `string` or `null` | no | The blob that holds a removal's report: the conflict report, or the check's output. |
+| `state` | [`QueueEntryState`](#queueentrystate) | yes | Where it stands. |
+| `target` | `string` | yes | The ref it lands on. |
+| `tree` | `string` or `null` | no | The root tree of that candidate, or of the prefix a removal names. |
+| `verdict` | [`VerdictState`](#verdictstate) or `null` | no | The verdict recorded for `tree`; omitted while there is none. |
+
+## QueueEntryState
+
+Where an entry stands, as the store's queue facts say.
+
+Kind: enumeration. `swarmops schema QueueEntryState` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"waiting"` | Open, and no check of a candidate on the target's head runs for it. |
+| `"checking"` | Open, and a candidate built on the target's current head is being checked. |
+| `"landed"` | The target moved to a changeset holding its change. |
+| `"removed"` | Taken out of the queue without landing; `removal` says why. |
+
+## QueuePublishReq
+
+A runner's publish: move the target from the round's head to a checked prefix's changeset and record its entries landed, and record the removals the verdicts decided, all in one frame or nothing.
+
+Kind: object. `swarmops schema QueuePublishReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `head` | `string` | yes | The head the chain was built on: the target moves only from it. |
+| `landed` | array of `string` | no | The entries `tip` lands, in enqueue order. |
+| `removed` | array of [`QueueRemovalIn`](#queueremovalin) | no | The entries to remove. |
+| `target` | `string` | yes | The target ref. |
+| `tip` | `string` or `null` | no | The changeset to move the target to, whose root tree has a passed verdict; omitted when the publish only removes. |
+
+## QueuePublishResp
+
+A runner's publish: whether it was recorded, and where the target stands.
+
+Kind: object. `swarmops schema QueuePublishResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `head` | `string` or `null` | no | What the target names now; omitted when it is gone. |
+| `op` | `integer` (uint64) or `null` | no | The operation that recorded the frame: its number in `op_log`; omitted when nothing was recorded. |
+| `status` | [`QueuePublishStatus`](#queuepublishstatus) | yes | What the publish came to. |
+
+## QueuePublishStatus
+
+What a publish came to.
+
+Kind: enumeration. `swarmops schema QueuePublishStatus` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"published"` | The frame is recorded: the target moved, and each entry landed or was removed. |
+| `"moved"` | The target no longer names the round's head, or an entry changed since the round (withdrawn): nothing was recorded, and the next round builds again. |
+
+## QueueRemovalIn
+
+One entry a publish removes: a prefix's red verdict blamed on it.
+
+Kind: object. `swarmops schema QueueRemovalIn` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `check` | `string` or `null` | no | The check whose verdict blames it. |
+| `entry` | `string` | yes | The entry's id. |
+| `reason` | [`RemovalReason`](#removalreason) | yes | Why. |
+| `tree` | `string` or `null` | no | The candidate tree that verdict is of. |
+
+## QueueRoundItem
+
+One link of a round's chain: an open entry and the prefix that ends with it.
+
+Kind: object. `swarmops schema QueueRoundItem` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cancelled` | `integer` (uint32) | no | How many cancelled verdicts the entry has. Default: `0`. |
+| `candidate` | `string` | yes | The changeset of the prefix ending with it, built on the round's head. |
+| `entry` | `string` | yes | The entry's id. |
+| `tree` | `string` | yes | That changeset's root tree. |
+| `verdict` | [`VerdictState`](#verdictstate) or `null` | no | The verdict the store holds for `tree`, from any round; omitted when none. |
+
+## QueueRoundReq
+
+A runner's round: build the target's open entries into a chain on its head, and record the candidates it will check. With `probes` empty it records only the entries the chain removes (a conflict) or lands (a change on the target already), so that the runner can choose its probes from the answer.
+
+Kind: object. `swarmops schema QueueRoundReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `expect_head` | `string` or `null` | no | Build only while the target names this changeset; the answer names the head it found, and nothing is recorded, when it names another. |
+| `probes` | array of `integer` (uint32) | no | The prefixes to record as candidates, each by the 1-based place of its last entry in the chain: the chain's changesets and one candidate fact for each, in one frame. |
+| `target` | `string` | yes | The target ref. |
+
+## QueueRoundResp
+
+A runner's round: the chain on the target's head, in enqueue order.
+
+Kind: object. `swarmops schema QueueRoundResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `head` | `string` or `null` | no | The head the chain is built on; omitted when the target is gone, which removed every open entry. |
+| `items` | array of [`QueueRoundItem`](#queuerounditem) | yes | The chain, one link per open entry it holds. |
+| `landed` | array of `string` | no | The entries this round recorded as landed: the target held their change. |
+| `removed` | array of `string` | no | The entries this round removed: a conflict, or the target gone. |
+| `target` | `string` | yes | The target ref. |
+
+## QueueStatusReq
+
+`queue_status`: the entries of one target, or of every target, or one entry.
+
+Kind: object. `swarmops schema QueueStatusReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `entry` | `string` or `null` | no | Only this entry, by its id. |
+| `target` | `string` or `null` | no | Only this target's entries; every target's when omitted. |
+
+## QueueStatusResp
+
+`queue_status`: the entries, open ones in enqueue order first.
+
+Kind: object. `swarmops schema QueueStatusResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `entries` | array of [`QueueEntryOut`](#queueentryout) | yes | The entries. |
+
+## QueueVerdictReq
+
+A runner's verdict: what checking a candidate tree came to, recorded on the entry that ends the prefix as soon as the check ends.
+
+Kind: object. `swarmops schema QueueVerdictReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `check` | `string` | yes | The check, as its command line. |
+| `entry` | `string` | yes | The entry that ends the prefix. |
+| `output` | `string` | no | The tail of the check's output, which the store keeps as a blob. Default: `""`. |
+| `state` | [`VerdictState`](#verdictstate) | yes | What the check came to. |
+| `target` | `string` | yes | The target ref. |
+| `tree` | `string` | yes | The candidate's root tree. |
+
+## QueueWaitReq
+
+`queue_wait`: wait for an entry to land. The answer is the landed entry; a removed one is an error naming its removal, and one still open at the timeout is `E_QUEUE_WAIT_TIMEOUT`.
+
+Kind: object. `swarmops schema QueueWaitReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `entry` | `string` | yes | The entry's id. |
+| `timeout_s` | `integer` (uint64) or `null` | no | The most seconds to wait; without limit when omitted. |
+
+## QueueWithdrawReq
+
+`queue_withdraw`: take an open entry out of its queue (reason `withdrawn`). One that landed is `E_INVALID_ARG` (`details.reason` `already_landed`), and nothing is written. The answer is the entry.
+
+Kind: object. `swarmops schema QueueWithdrawReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `entry` | `string` | yes | The entry's id. |
+
 ## ReadFileReq
 
 `read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or a range of its lines.
@@ -1975,6 +2200,21 @@ Kind: object. `swarmops schema RemoteRemoveResp` prints its JSON Schema.
 | --- | --- | --- | --- |
 | `name` | `string` | yes | The remote's name. |
 | `removed_refs` | `integer` (uint64) | yes | How many of the mirror's refs of the remote were removed. |
+
+## RemovalReason
+
+Why an entry was taken out of the queue without landing.
+
+Kind: enumeration. `swarmops schema RemovalReason` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"check_failed"` | Its prefix's check failed while the prefix before it passed. |
+| `"conflict"` | Its change conflicts with the chain before it; `report` holds the conflict report. |
+| `"timed_out"` | Its prefix's check ran past its timeout while the prefix before it passed. |
+| `"withdrawn"` | It was withdrawn. |
+| `"target_gone"` | Its target ref was deleted. |
+| `"cancelled"` | Its prefix's check was cancelled from outside three times. |
 
 ## RepairAction
 
@@ -2420,6 +2660,19 @@ Kind: object. `swarmops schema UpgradeResp` prints its JSON Schema.
 | `from` | `integer` (uint32) | yes | The format the store had. |
 | `to` | `integer` (uint32) | yes | The format it has now. |
 | `upgraded` | `boolean` | yes | Whether it changed: `false` for a store of the latest format already. |
+
+## VerdictState
+
+What a check of a candidate tree came to: a verdict.
+
+Kind: enumeration. `swarmops schema VerdictState` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"passed"` | The check exited 0. |
+| `"failed"` | The check exited with another code. |
+| `"timed_out"` | The runner stopped the check at its timeout. |
+| `"cancelled"` | A signal from outside the runner stopped the check: no one is blamed, and the entry waits for another round (the third such verdict removes it). |
 
 ## VerifyFinding
 

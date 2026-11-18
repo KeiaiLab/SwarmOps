@@ -22,6 +22,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Added
 
+- The landing queue's request and response types and its `queue_enqueue`, `queue_status` and
+  `queue_withdraw` store operations, which a store without them answers `E_INVALID_ARG` (the
+  M22 core design §6).
 - The error code `E_QUEUE_WAIT_TIMEOUT` (exit 4, retryable), which `queue wait` raises when
   its timeout passes with the entry still open (the M22 core design §6). Golden envelopes pin
   56 of the 57 error codes: no command raises the new one yet.

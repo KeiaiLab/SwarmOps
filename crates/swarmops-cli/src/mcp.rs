@@ -3061,6 +3061,19 @@ mod tests {
             "RemoteRemoveReq",
         ];
         let no_tool = ["DeriveReq", "BlobGetReq"];
+
+        // The landing queue's runner exchanges its round with the store, not with an agent, so
+        // its three requests have no tool; the queue's own four tools come with its commands
+        // (the M22 core design §6), and until then it has none.
+        let queue = [
+            "QueueRoundReq",
+            "QueueVerdictReq",
+            "QueuePublishReq",
+            "QueueEnqueueReq",
+            "QueueStatusReq",
+            "QueueWithdrawReq",
+            "QueueWaitReq",
+        ];
         let all = swarmops_api::schema_for_all();
         let requests: Vec<&str> = all
             .as_object()
@@ -3072,6 +3085,7 @@ mod tests {
                     && !name.starts_with("Ws")
                     && !client_side.contains(name)
                     && !no_tool.contains(name)
+                    && !queue.contains(name)
             })
             .collect();
         let mut advertised: Vec<&str> = TOOLS.iter().map(|spec| spec.request).collect();
