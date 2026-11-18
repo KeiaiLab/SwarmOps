@@ -64,7 +64,8 @@ and a way back to git so that existing CI and deployments keep running.
 - **Not multi-host yet.** Every agent and command runs on the host that holds the store. Between
   hosts, git carries the history, one writing host at a time; offline-first sync is M11.
 - **Not a review tool yet.** SwarmOps does not hold a landing for a person's approval; review stays
-  in git until M7.
+  in git until M7. Checks and delivery from a store are planned
+  ([roadmap](/docs/roadmap#checks-and-delivery)).
 - **Not on Windows or an Intel Mac.** The releases hold Linux builds and, from 0.12.0 on, a
   macOS build for Apple silicon; Windows is M12.
 - **Not faster than git at raw throughput.** Writers take turns: each commit holds one store-wide
