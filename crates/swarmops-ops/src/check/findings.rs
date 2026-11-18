@@ -33,8 +33,11 @@ const KEYS: [&str; 6] = ["level", "title", "message", "path", "line", "end_line"
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct FileRead {
-    /// The findings, in line order, each of report 0.
+    /// The findings kept, in line order, each of report 0: the first of [`FileRead::found`], as
+    /// many as the reader was asked to keep.
     pub findings: Vec<CheckFindingOut>,
+    /// The findings read, kept or not.
+    pub found: u64,
     /// The lines read: findings, invalid lines and blank lines together.
     pub lines: u64,
     /// The lines of spaces and tabs alone, or none, skipped.
@@ -48,16 +51,15 @@ pub struct FileRead {
 }
 
 /// Reads `bytes` as a report file: at most [`MAX_REPORT_BYTES`] of them, a larger file read to
-/// that bound, its last partial line left out. The fuzz target's entry.
+/// that bound, its last partial line left out; every finding kept. The fuzz target's entry.
 pub fn read_report_file(bytes: &[u8]) -> FileRead {
-    read_bounded(
-        bytes,
-        usize::try_from(MAX_REPORT_BYTES).unwrap_or(usize::MAX),
-    )
+    let limit = usize::try_from(MAX_REPORT_BYTES).unwrap_or(usize::MAX);
+    read_bounded(bytes, limit, usize::MAX)
 }
 
-/// [`read_report_file`] with a bound of `limit` bytes.
-pub fn read_bounded(bytes: &[u8], limit: usize) -> FileRead {
+/// [`read_report_file`] with a bound of `limit` bytes, keeping the first `keep` findings and
+/// counting the rest: a run keeps no more than it can still return.
+pub fn read_bounded(bytes: &[u8], limit: usize, keep: usize) -> FileRead {
     // 1. The whole lines within the bound.
     let mut read = FileRead::default();
     let mut bytes = bytes;
@@ -82,7 +84,12 @@ pub fn read_bounded(bytes: &[u8], limit: usize) -> FileRead {
         read.lines += 1;
         match finding_of(line) {
             Line::Blank => read.blank += 1,
-            Line::Finding(finding) => read.findings.push(*finding),
+            Line::Finding(finding) => {
+                read.found += 1;
+                if read.findings.len() < keep {
+                    read.findings.push(*finding);
+                }
+            }
             Line::Invalid(why) => {
                 read.invalid += 1;
                 if read.first_invalid.is_none() {
@@ -312,6 +319,20 @@ impl Budget {
     /// The findings counted and not returned so far.
     pub fn omitted(&self) -> u64 {
         self.omitted
+    }
+
+    /// How many more findings the run may still return: 0 once a finding was left out. A
+    /// reader keeps no more than this many.
+    pub fn room(&self) -> usize {
+        if self.omitted > 0 {
+            return 0;
+        }
+        self.max_findings.saturating_sub(self.returned)
+    }
+
+    /// Counts `n` findings that were read and not kept, as not returned.
+    pub fn skip(&mut self, n: u64) {
+        self.omitted = self.omitted.saturating_add(n);
     }
 }
 

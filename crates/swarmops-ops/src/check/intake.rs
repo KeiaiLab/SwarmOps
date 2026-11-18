@@ -17,7 +17,7 @@ use swarmops_api::{
     CheckFindingOut, CheckReportFault, CheckReportFormat, CheckReportReadOut, CheckReportState,
 };
 
-use super::findings::{Budget, read_report_file};
+use super::findings::{Budget, read_bounded};
 use super::{MAX_REPORT_BYTES, Opened, open_bounded};
 use crate::error::one_line;
 
@@ -33,16 +33,25 @@ pub(crate) struct Intake {
 }
 
 impl Intake {
-    /// Takes in the findings of report number `index`, each through `budget`.
-    fn add(&mut self, index: usize, findings: Vec<CheckFindingOut>, budget: &mut Budget) {
+    /// Takes in the `found` findings of report number `index`, of which `findings` were kept,
+    /// each through `budget`; those not kept are counted as not returned.
+    fn add(
+        &mut self,
+        index: usize,
+        findings: Vec<CheckFindingOut>,
+        found: u64,
+        budget: &mut Budget,
+    ) {
         let index = u32::try_from(index).unwrap_or(u32::MAX);
+        let kept = u64::try_from(findings.len()).unwrap_or(u64::MAX);
+        self.total += found;
         for mut finding in findings {
-            self.total += 1;
             finding.report = index;
             if budget.take(&finding) {
                 self.findings.push(finding);
             }
         }
+        budget.skip(found.saturating_sub(kept));
     }
 }
 
@@ -73,14 +82,15 @@ pub(crate) fn take_in(report: &Utf8Path, budget: &mut Budget) -> Intake {
             format!("it cannot be read: {e}"),
         )),
         Ok(Opened::File { bytes, .. }) => {
-            let read = read_report_file(&bytes);
+            let limit = usize::try_from(MAX_REPORT_BYTES).unwrap_or(usize::MAX);
+            let read = read_bounded(&bytes, limit, budget.room());
             drop(bytes);
             let mut out = CheckReportReadOut::new(
                 CheckReportFormat::Findings,
                 report.as_str(),
                 CheckReportState::Read,
             );
-            out.findings = Some(u64::try_from(read.findings.len()).unwrap_or(u64::MAX));
+            out.findings = Some(read.found);
             out.invalid_lines = read.invalid;
             out.cut = read.cut;
             out.message = match (read.first_invalid, read.cut) {
@@ -90,7 +100,7 @@ pub(crate) fn take_in(report: &Utf8Path, budget: &mut Budget) -> Intake {
             };
             let index = intake.reports.len();
             intake.reports.push(out);
-            intake.add(index, read.findings, budget);
+            intake.add(index, read.findings, read.found, budget);
         }
     }
     intake

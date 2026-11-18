@@ -166,6 +166,7 @@ fn blank_lines_crlf_and_the_first_invalid_line() {
     assert_eq!(titles, ["a", "b"]);
     assert_eq!((read.lines, read.blank, read.invalid), (7, 3, 2));
     assert_eq!(read.first_invalid.as_deref(), Some("line 4: not JSON"));
+    assert_eq!(read.found, 2);
     assert_eq!(read_report_file(b""), FileRead::default());
     assert_eq!(read_report_file(b"\n").lines, 1);
 }
@@ -242,14 +243,14 @@ fn a_line_past_64_kib_is_invalid() {
 fn a_file_past_its_bound_is_read_to_it() {
     let line = "{\"level\":\"error\",\"title\":\"t\"}\n";
     let text = line.repeat(4);
-    let read = read_bounded(text.as_bytes(), line.len() * 2 + 5);
+    let read = read_bounded(text.as_bytes(), line.len() * 2 + 5, usize::MAX);
     assert!(read.cut);
     assert_eq!((read.findings.len(), read.lines, read.invalid), (2, 2, 0));
-    let read = read_bounded(text.as_bytes(), line.len() * 2);
+    let read = read_bounded(text.as_bytes(), line.len() * 2, usize::MAX);
     assert_eq!((read.findings.len(), read.cut), (2, true));
-    let read = read_bounded(text.as_bytes(), text.len());
+    let read = read_bounded(text.as_bytes(), text.len(), usize::MAX);
     assert_eq!((read.findings.len(), read.cut), (4, false));
-    let read = read_bounded(text.as_bytes(), 5);
+    let read = read_bounded(text.as_bytes(), 5, usize::MAX);
     assert_eq!((read.lines, read.cut), (0, true));
 }
 
@@ -265,6 +266,23 @@ fn the_cuts_keep_their_bound() {
         }
     }
     assert_eq!(message_of(""), None);
+}
+
+/// A reader keeps no more findings than it is asked to, and counts them all; the budget's room
+/// is what the run can still return.
+#[test]
+fn a_reader_keeps_what_the_run_can_return() {
+    let text = "{\"level\":\"error\",\"title\":\"t\"}\n".repeat(5);
+    let read = read_bounded(text.as_bytes(), text.len(), 2);
+    assert_eq!((read.findings.len(), read.found, read.lines), (2, 5, 5));
+    let mut budget = Budget::bounded(3, 1_000);
+    assert_eq!(budget.room(), 3);
+    let finding = CheckFindingOut::new(CheckFindingLevel::Notice, "n");
+    assert!(budget.take(&finding));
+    assert_eq!(budget.room(), 2);
+    budget.skip(4);
+    assert_eq!((budget.room(), budget.omitted()), (0, 4));
+    assert!(!budget.take(&finding));
 }
 
 /// Two checks of 6,000 and 5,000 findings: the first's 6,000 and the second's first 4,000 are

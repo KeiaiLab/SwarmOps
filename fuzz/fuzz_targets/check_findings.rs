@@ -31,7 +31,7 @@ fuzz_target!(|data: &[u8]| {
         )
     } else {
         let limit = usize::from(mode >> 1) * 8;
-        let read = findings::read_bounded(rest, limit);
+        let read = findings::read_bounded(rest, limit, usize::MAX);
         assert_eq!(read.cut, rest.len() > limit);
         let within = if read.cut {
             let head = &rest[..limit];
@@ -42,7 +42,11 @@ fuzz_target!(|data: &[u8]| {
         } else {
             rest
         };
-        (read, findings::read_bounded(rest, limit), within)
+        (
+            read,
+            findings::read_bounded(rest, limit, usize::MAX),
+            within,
+        )
     };
     assert_eq!(read, again);
     holds(&read, within);
@@ -59,6 +63,7 @@ fn holds(read: &FileRead, within: &[u8]) {
     };
     assert_eq!(read.lines, lines as u64);
     let found = read.findings.len() as u64;
+    assert_eq!(found, read.found, "{read:?}");
     assert_eq!(found + read.invalid + read.blank, read.lines, "{read:?}");
     assert_eq!(read.first_invalid.is_some(), read.invalid > 0, "{read:?}");
 
