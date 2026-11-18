@@ -41,7 +41,9 @@
 //! A target's landing queue is its Queue facts: an enqueue idempotent by its key, a fold of the
 //! entries' states, version compare-and-swap writes of withdrawals, removals and verdicts, and a
 //! round that builds the open entries into a chain on the target's head ([`Repo::queue_enqueue`],
-//! [`RepoRead::queue`], [`Repo::queue_round`]; the [`queue`] module).
+//! [`RepoRead::queue`], [`Repo::queue_round`]; the [`queue`] module). A round's green prefix is
+//! published exactly, all or nothing: the target's move and every Landed fact in one frame
+//! ([`Repo::publish_exact`]).
 //!
 //! Values derived from the immutable objects are made when they are asked for, and cached in the
 //! store ([`Repo::derived`]; the [`derive`](mod@derive) module). A path's history chases one of

@@ -96,9 +96,14 @@
 //! The group land ([`Repo::land_group`], the M18 design §6.3) is the dry run's plan written: the
 //! clean changes a chain of `L`s, each on the one before, published in one frame of k inserts and
 //! one move, never made anew under the lock; a target that moved makes it plan again.
+//!
+//! The exact publish ([`Repo::publish_exact`], the M22 core design §5 step 8) is a landing
+//! queue's green prefix, a chain already inserted: the target's move from the chain's head to
+//! its tip, whose tree passed its check, and each entry's Landed fact, one frame or nothing.
 
 mod batch;
 mod detached;
+mod exact;
 mod group;
 mod key;
 mod landing;
@@ -107,6 +112,7 @@ mod publish;
 mod resolve;
 
 pub use detached::{DetachedLand, DetachedOutcome};
+pub use exact::{ExactPublish, ExactPublished};
 pub(crate) use group::link;
 pub use group::{GroupItem, GroupLanded, LandGroup, LandGroupRequest};
 pub use landing::{

@@ -16,6 +16,9 @@ mod land_batch;
 mod land_check;
 mod land_detached;
 mod land_expect;
+// Its stores enable the feature `queue` with the test hooks' `supported_for_tests`.
+#[cfg(feature = "test-hooks")]
+mod land_exact;
 mod land_group;
 mod land_order;
 mod merge;
