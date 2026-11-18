@@ -27,10 +27,11 @@ use crate::format::StoreFormat;
 use crate::fs_ops::{self, FsMethod, StoreFs};
 use crate::layout::Layout;
 
-/// The features this build supports: the fact kinds whose meaning it implements. `tag_object`
-/// alone: the repository holds git's tag objects (the annotated tags design, slice T-3); a store
-/// that lists any other feature is refused as too new.
-pub const SUPPORTED_FEATURES: &[&str] = &["tag_object"];
+/// The features this build supports: the fact kinds whose meaning it implements. `queue`, the
+/// landing queue's entries (the M22 core design §3), and `tag_object`: the repository holds git's
+/// tag objects (the annotated tags design, slice T-3); a store that lists any other feature is
+/// refused as too new.
+pub const SUPPORTED_FEATURES: &[&str] = &["queue", "tag_object"];
 
 /// The most names `meta/features` holds.
 pub const MAX_FEATURES: usize = 32;
@@ -493,8 +494,8 @@ mod tests {
         assert_eq!(offenders, Vec::<String>::new());
         assert_eq!(
             provisional_files().len(),
-            35,
-            "the design §2.8's 37 cells, less tag_object's two"
+            30,
+            "the design §2.8's 37 cells, less tag_object's two and queue's five"
         );
     }
 
