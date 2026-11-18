@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="3" skipped="0" failures="2" errors="0" uuid="21f3ce3d-c6e4-4e78-b1df-ec51e6061344" timestamp="2026-11-18T16:44:36.631+00:00" time="0.026">
+    <testsuite name="swarmops-api::all" tests="3" skipped="0" errors="0" failures="2">
+        <testcase name="schema::check::a_check_log_request_defaults_to_the_newest_run" classname="swarmops-api::all" timestamp="2026-11-18T16:44:36.633+00:00" time="0.013">
+            <failure message="thread &apos;schema::check::a_check_log_request_defaults_to_the_newest_run&apos; (43778192) panicked at crates/swarmops-api/tests/schema.rs:2166:9" type="test failure with exit code 101">thread &apos;schema::check::a_check_log_request_defaults_to_the_newest_run&apos; (43778192) panicked at crates/swarmops-api/tests/schema.rs:2166:9:
+assertion `left == right` failed
+  left: (None, 1000)
+ right: (None, 100)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</failure>
+            <system-out>
+running 1 test
+test schema::check::a_check_log_request_defaults_to_the_newest_run ... FAILED
+
+failures:
+
+failures:
+    schema::check::a_check_log_request_defaults_to_the_newest_run
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 78 filtered out; finished in 0.00s
+
+</system-out>
+            <system-err>
+thread &apos;schema::check::a_check_log_request_defaults_to_the_newest_run&apos; (43778192) panicked at crates/swarmops-api/tests/schema.rs:2166:9:
+assertion `left == right` failed
+  left: (None, 1000)
+ right: (None, 100)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+        </testcase>
+        <testcase name="schema::check::a_check_run_request_defaults_to_the_whole_gate" classname="swarmops-api::all" timestamp="2026-11-18T16:44:36.633+00:00" time="0.014">
+            <failure message="thread &apos;schema::check::a_check_run_request_defaults_to_the_whole_gate&apos; (43778195) panicked at crates/swarmops-api/tests/schema.rs:2247:9" type="test failure with exit code 101">thread &apos;schema::check::a_check_run_request_defaults_to_the_whole_gate&apos; (43778195) panicked at crates/swarmops-api/tests/schema.rs:2247:9:
+assertion `left == right` failed
+  left: (BeforeLand, 0)
+ right: (Manual, 0)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</failure>
+            <system-out>
+running 1 test
+test schema::check::a_check_run_request_defaults_to_the_whole_gate ... FAILED
+
+failures:
+
+failures:
+    schema::check::a_check_run_request_defaults_to_the_whole_gate
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 78 filtered out; finished in 0.00s
+
+</system-out>
+            <system-err>stage: BeforeLand
+
+thread &apos;schema::check::a_check_run_request_defaults_to_the_whole_gate&apos; (43778195) panicked at crates/swarmops-api/tests/schema.rs:2247:9:
+assertion `left == right` failed
+  left: (BeforeLand, 0)
+ right: (Manual, 0)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+        </testcase>
+        <testcase name="schema::check::a_check_list_request_defaults_to_main" classname="swarmops-api::all" timestamp="2026-11-18T16:44:36.633+00:00" time="0.024"/>
+    </testsuite>
+</testsuites>

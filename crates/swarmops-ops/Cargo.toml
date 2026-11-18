@@ -46,6 +46,8 @@ camino.workspace = true
 # (`O_NOFOLLOW`, `O_NONBLOCK`), as the store opens its lock files; already in the tree through
 # swarmops-store.
 libc.workspace = true
+# `check run` (M31-5): a check's JUnit report, read as XML into findings.
+quick-xml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # The store's TOML files, `remotes.toml` and `authors.toml` (M13), the user's login file, and

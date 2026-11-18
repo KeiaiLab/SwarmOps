@@ -19,7 +19,7 @@
 //! `check run` (M31, [`mod@run`]) runs one stage's checks of a directory or of a workspace held
 //! clean, each with the environment of [`mod@env`], its output in a log of [`mod@log`]'s format.
 //! Once a check has ended, what it reported is read as findings (`intake`): its report file
-//! ([`mod@findings`]).
+//! ([`mod@findings`]) and the JUnit reports it declares ([`mod@junit`]).
 
 mod digest;
 pub mod env;
@@ -27,6 +27,7 @@ mod file;
 pub mod findings;
 pub mod follow;
 mod intake;
+pub mod junit;
 pub mod log;
 pub mod run;
 
@@ -88,6 +89,9 @@ pub const MAX_RUN_FINDING_BYTES: u64 = 4 << 20;
 /// The most bytes of a report read: 64 MiB. A check's report file past it is read to it, its last
 /// partial line left out.
 pub const MAX_REPORT_BYTES: u64 = 64 << 20;
+
+/// The most a JUnit or SARIF report may nest its elements, or its arrays and objects.
+pub const MAX_REPORT_DEPTH: usize = 64;
 
 /// The most bytes of a line of a check's report file: 64 KiB. A longer line is invalid.
 pub const MAX_FINDING_LINE_BYTES: usize = 64 * 1024;

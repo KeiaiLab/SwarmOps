@@ -19,8 +19,9 @@ use swarmops_api::{CheckFindingLevel, CheckFindingOut};
 use swarmops_core::RepoPath;
 
 use super::{
-    MAX_FINDING_LINE_BYTES, MAX_FINDING_MESSAGE_BYTES, MAX_FINDING_PATH_BYTES,
-    MAX_FINDING_TITLE_BYTES, MAX_REPORT_BYTES, MAX_RUN_FINDING_BYTES, MAX_RUN_FINDINGS,
+    MAX_FINDING_GROUP_BYTES, MAX_FINDING_LINE_BYTES, MAX_FINDING_MESSAGE_BYTES,
+    MAX_FINDING_PATH_BYTES, MAX_FINDING_TITLE_BYTES, MAX_REPORT_BYTES, MAX_RUN_FINDING_BYTES,
+    MAX_RUN_FINDINGS,
 };
 
 /// The highest line a finding may name: 2^32.
@@ -221,6 +222,16 @@ pub(crate) fn one_line_title(text: &str) -> Option<String> {
     Some(cut_end(text, MAX_FINDING_TITLE_BYTES))
 }
 
+/// `text` as a finding's group: one line, cut to [`MAX_FINDING_GROUP_BYTES`]; none when empty.
+pub(crate) fn group_of(text: &str) -> Option<String> {
+    let text = text.replace(['\r', '\n'], " ");
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(cut_end(text, MAX_FINDING_GROUP_BYTES))
+}
+
 /// `text` as a finding's message: cut to [`MAX_FINDING_MESSAGE_BYTES`], line breaks kept; none
 /// when empty.
 pub(crate) fn message_of(text: &str) -> Option<String> {
@@ -241,6 +252,19 @@ pub(crate) fn cut_end(text: &str, limit: usize) -> String {
         end -= 1;
     }
     format!("{}…", &text[..end])
+}
+
+/// `text`, at most `limit` bytes: when longer, its end, cut at a character's start with `…`
+/// before it, the whole within `limit`.
+pub(crate) fn cut_front(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+    let mut start = text.len() - limit.saturating_sub('…'.len_utf8());
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", &text[start..])
 }
 
 /// The most characters of a key that a line's message repeats.

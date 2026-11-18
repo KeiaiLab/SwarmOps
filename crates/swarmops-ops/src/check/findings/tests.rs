@@ -260,12 +260,19 @@ fn the_cuts_keep_their_bound() {
     assert_eq!(cut_end("abc", 3), "abc");
     assert_eq!(cut_end("abcd", 3), "…");
     assert_eq!(cut_end("abcdef", 5), "ab…");
+    assert_eq!(cut_front("abcdef", 5), "…ef");
+    assert_eq!(cut_front("aé€x", 6), "…x");
+    assert_eq!(cut_front("aé€x", 7), "aé€x");
+    assert_eq!(cut_front("abc", 3), "abc");
     for limit in 3..12 {
         for text in ["aé€xyz€é", "€€€€€"] {
             assert!(cut_end(text, limit).len() <= limit);
+            assert!(cut_front(text, limit).len() <= limit);
         }
     }
     assert_eq!(message_of(""), None);
+    assert_eq!(group_of(" a\nb "), Some("a b".to_owned()));
+    assert_eq!(group_of(""), None);
 }
 
 /// A reader keeps no more findings than it is asked to, and counts them all; the budget's room

@@ -69,7 +69,7 @@ collects the changes on `stable` that no release holds yet, until the next relea
   holds its end, as `derive --follow` prints its envelopes; `--human` prints the lines as the log
   holds them, control characters escaped. The tool has the workspace form only, and no follow.
 - Dependencies: `signal-hook` and `signal-hook-registry` (MIT OR Apache-2.0), for `check run`'s
-  signals.
+  signals; `quick-xml` (MIT), for reading the JUnit reports a check declares.
 - `check list` and the MCP tool `check_list`: the checks a tree names, from the store at a
   changeset (`main` by default) or, with `check list --dir DIR`, from a directory of this host,
   which opens no store. Each check comes with its argv, its directory, its timeout, the digest
