@@ -23,6 +23,9 @@ Record and land changes:
   revert      Take back a changeset or a range by landing its inverse
   blob        Store content as a blob for a commit to name
 
+Checks:
+  check       List the checks a tree describes
+
 Read history:
   log         List history along first parents, newest first
   show        Show one changeset

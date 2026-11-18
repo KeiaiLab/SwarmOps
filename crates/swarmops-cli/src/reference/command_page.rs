@@ -123,6 +123,10 @@ const AUTH_SINCE: &str = "0.12.0";
 const UPDATE_COMMAND: &str = "update";
 const UPDATE_SINCE: &str = "0.12.0";
 
+/// The checks' commands (M30), and the release they first ship in: the one after 0.12.0.
+const CHECK_COMMANDS: [&str; 1] = ["check list"];
+const CHECK_SINCE: &str = "0.13.0";
+
 /// The release the command at `path` first shipped in.
 fn since(path: &str) -> &'static str {
     if path == SERVE_COMMAND {
@@ -148,6 +152,9 @@ fn since(path: &str) -> &'static str {
     }
     if path == UPDATE_COMMAND {
         return UPDATE_SINCE;
+    }
+    if CHECK_COMMANDS.contains(&path) {
+        return CHECK_SINCE;
     }
     SINCE
 }
@@ -185,13 +192,14 @@ pub(super) enum Group {
     Git,
     Remotes,
     Workspaces,
+    Checks,
     Server,
     Auth,
 }
 
 impl Group {
     /// Every group, in the index's order.
-    pub(super) const ALL: [Group; 11] = [
+    pub(super) const ALL: [Group; 12] = [
         Group::Store,
         Group::Write,
         Group::Read,
@@ -201,6 +209,7 @@ impl Group {
         Group::Git,
         Group::Remotes,
         Group::Workspaces,
+        Group::Checks,
         Group::Server,
         Group::Auth,
     ];
@@ -217,6 +226,7 @@ impl Group {
             Group::Git => "git",
             Group::Remotes => "remotes",
             Group::Workspaces => "workspaces",
+            Group::Checks => "checks",
             Group::Server => "server",
             Group::Auth => "auth",
         }
@@ -234,6 +244,7 @@ impl Group {
             Group::Git => "Git",
             Group::Remotes => "Git remotes",
             Group::Workspaces => "Workspaces",
+            Group::Checks => "Checks",
             Group::Server => "Server",
             Group::Auth => "Logins",
         }
@@ -265,7 +276,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 65] = [
+const META: [Meta; 66] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -431,6 +442,13 @@ const META: [Meta; 65] = [
         Returns::Type("WsDeleteResp"),
     ),
     meta("ws hook", Group::Workspaces, true, false, Returns::Protocol),
+    meta(
+        "check list",
+        Group::Checks,
+        false,
+        false,
+        Returns::Type("CheckListResp"),
+    ),
     meta(
         "resolve",
         Group::Read,
@@ -1471,7 +1489,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 60] = [
+const RETURN_SITES: [(&str, &str, &str); 61] = [
     ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1532,6 +1550,7 @@ const RETURN_SITES: [(&str, &str, &str); 60] = [
     ),
     ("ws list", "../swarmops-ws/src/list.rs", "pub fn list("),
     ("ws info", "../swarmops-ws/src/info.rs", "pub fn info("),
+    ("check list", "../swarmops-ops/src/check.rs", "pub fn list("),
     (
         "ws delete",
         "../swarmops-ws/src/delete.rs",

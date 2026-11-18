@@ -22,14 +22,24 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Added
 
+- `check list` and the MCP tool `check_list`: the checks a tree names, from the store at a
+  changeset (`main` by default) or, with `check list --dir DIR`, from a directory of this host,
+  which opens no store. Each check comes with its argv, its directory, its timeout and the digest
+  of its definition, sorted by name; the directory form's answer says `vouched: true`, since only
+  the caller stands behind the files. The digest's recipe is provisional and may change in a later
+  release. Nothing runs the checks yet: `ws land --check` still runs `check.argv` of
+  `.swarmops/workspaces.json`.
+- The check file, `.swarmops/checks.toml`, version 1: `version = 1`, then one `[check.<name>]`
+  table a check, with `argv` (one command, run with no shell), `dir` and `timeout_s`. Any other
+  key is refused at its line, so a build refuses a file whose keys it does not know instead of
+  reading less of it. In a tree without it, `check.argv` of `.swarmops/workspaces.json` reads as
+  the one check `default`.
 - `E_CHECK_FILE` (exit 1, not retryable): a check file that does not read, `.swarmops/checks.toml`
   or, in a tree without one, `.swarmops/workspaces.json`; `details` name the `file`, the `reason`,
-  whether the caller `vouched` for it, and its `line` and `key` when known. No command raises it
-  yet. Golden envelopes now pin 56 of the 57 error codes.
-- API types `CheckListReq`, `CheckListResp` and `CheckOut`, the request and result of a tree's
-  checks: each check's name, argv, directory, timeout and the digest of its definition, sorted by
-  name, and whether the caller vouched for the file. `swarmops schema` prints them (201 types).
-  No command returns them yet.
+  whether the caller `vouched` for it, and its `line` and `key` when known. Golden envelopes now
+  pin 57 of the 57 error codes.
+- API types `CheckListReq`, `CheckListResp` and `CheckOut`, the request and result of
+  `check list`. `swarmops schema` prints them (201 types).
 
 ### Changed
 

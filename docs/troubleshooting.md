@@ -45,8 +45,7 @@ the process aborts, and says why on stderr ([The server exits](#the-server-exits
 ## Every error code
 
 `ErrorCode` in `crates/swarmops-api/src/error.rs` is the one table of codes, exit codes and
-retry advice; this is that table, all 57 codes, each raised by some command but `E_CHECK_FILE`,
-which no command raises yet.
+retry advice; this is that table, all 57 codes, each raised by some command.
 
 | Code | Exit | Retryable | Means | Section |
 | --- | --- | --- | --- | --- |
@@ -1527,8 +1526,13 @@ A tree names its checks in `.swarmops/checks.toml`, or, without that file, `chec
 
 ### `E_CHECK_FILE`
 
-Exit 1, not retryable. The tree's check file does not read, so nothing was listed: the command
-line was right, the file is not. `details.file` names the file, `details.reason` what is wrong,
+Exit 1, not retryable. The tree's check file does not read, so `check list` listed nothing: the
+command line was right, the file is not.
+
+```text
+{"ok":false,"op":"check_list","api":1,"error":{"code":"E_CHECK_FILE","message":".swarmops/checks.toml has an unknown key check.lint.stage (line 11)","retryable":false,"exit":1,"details":{"file":".swarmops/checks.toml","key":"check.lint.stage","line":11,"reason":"unknown_key","vouched":true},"hint":"version 1 of .swarmops/checks.toml takes version and [check.<name>] tables of argv, dir and timeout_s; a newer swarmops may read this key"},"meta":{"elapsed_ms":0,"resolved":{},"auth":"trust"}}
+```
+ `details.file` names the file, `details.reason` what is wrong,
 `details.line` the line (1 is the first) when the fault has one, and `details.key` the key at
 fault as a dotted path, such as `check.lint.stage`. `details.vouched` is `true` when the file was
 read from a directory the caller named, not from the store.
@@ -1546,13 +1550,14 @@ read from a directory the caller named, not from the store.
 | `too_many` | More checks than the file may hold. | Remove checks. |
 
 A key that a later version of SwarmOps adds is `unknown_key` to an older build, which refuses the
-file rather than list it without that key: the hint says so. No command raises this code yet.
+file rather than list it without that key: the hint says so. Without `.swarmops/checks.toml`,
+the file is `.swarmops/workspaces.json`, which `ws land --check` refuses as `E_INVALID_ARG`.
 
 ## Codes a client does not know
 
-Every code but `E_CHECK_FILE` is raised by some command: `E_REF_NOT_FOUND` by `ref log` since M18, and `E_AUTH` and
-`E_POLICY_DENIED` by `swarmops serve` since M14
-([Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees)). A client that meets a code
+Every code is raised by some command: `E_CHECK_FILE` by `check list` since M30,
+`E_REF_NOT_FOUND` by `ref log` since M18, and `E_AUTH` and `E_POLICY_DENIED` by `swarmops serve`
+since M14 ([Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees)). A client that meets a code
 newer than its own table reads `exit` and `retryable` from the error itself.
 
 ## Next

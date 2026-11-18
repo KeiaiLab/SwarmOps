@@ -60,7 +60,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 /// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
 /// are and the response type its envelope's `result` is. A task that adds a tool adds its line
 /// here and in `mcp_parity.rs`' `PARITY` or `PARITY_EXEMPT`, in the same commit.
-pub(crate) const TOOLS: [(&str, &str, &str); 46] = [
+pub(crate) const TOOLS: [(&str, &str, &str); 47] = [
     ("repo_info", "InfoReq", "RepoInfo"),
     ("resolve_rev", "ResolveRevReq", "ResolvedRev"),
     ("read_file", "ReadFileReq", "FileContent"),
@@ -83,6 +83,7 @@ pub(crate) const TOOLS: [(&str, &str, &str); 46] = [
     ("revert", "RevertReq", "RevertResp"),
     ("land_check", "LandCheckReq", "LandCheckResp"),
     ("land_group", "LandGroupReq", "LandGroupResp"),
+    ("check_list", "CheckListReq", "CheckListResp"),
     ("rebase", "RebaseReq", "RebaseResp"),
     ("blob_put", "BlobPutReq", "BlobPutResp"),
     ("blob_has", "BlobHasReq", "BlobHasResp"),
@@ -473,7 +474,10 @@ fn call_the_store_tools(golden: &mut Golden, store: &Store) {
     let grouped = golden.ok("land_group", group);
     let grouped = golden.name_at(&grouped, "/result/head", "grouped");
 
-    // 9. Two release refs made at once, then moved together, and the store verified.
+    // 9. The checks main's tree describes: none, since it holds no check file.
+    golden.ok("check_list", json!({}));
+
+    // 10. Two release refs made at once, then moved together, and the store verified.
     ref_txn_calls(golden, &c1, &grouped);
     golden.ok("verify", json!({}));
 }

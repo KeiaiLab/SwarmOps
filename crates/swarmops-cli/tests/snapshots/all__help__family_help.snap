@@ -78,6 +78,36 @@ Options:
                          terminal)
   -h, --help             Print help
 
+$ so check --help
+List the checks a tree names in .swarmops/checks.toml; nothing here runs them
+
+Usage: so check [OPTIONS] <COMMAND>
+
+Commands:
+  list  List the checks of a changeset's tree, or of a directory
+
+Examples:
+  $ mkdir -p .swarmops
+  $ echo 'version = 1' > .swarmops/checks.toml
+  $ echo 'check.test.argv = ["make", "test"]' >> .swarmops/checks.toml
+  $ so --human check list --dir .
+
+Learn more:
+  A command's help  so check <command> --help
+  Guide             https://swarmops.cc/docs/guides/parallel-agents
+  Reference         https://swarmops.cc/docs/reference/cli
+
+Options:
+      --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
+      --as <AGENT>       The agent to act as, <family>/<instance> (default:
+                         $SWARMOPS_AGENT)
+      --json             Print the JSON envelope: the default, unless
+                         $SWARMOPS_FORMAT is human
+      --human            Print a short text rendering instead of JSON
+      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
+                         terminal)
+  -h, --help             Print help
+
 $ so ref --help
 List refs, or move one by compare-and-swap
 

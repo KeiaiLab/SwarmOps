@@ -65,7 +65,7 @@ pub(crate) struct Group {
 }
 
 /// Every top-level command, in exactly one group, in the order a newcomer needs them.
-pub(crate) const GROUPS: [Group; 7] = [
+pub(crate) const GROUPS: [Group; 8] = [
     Group {
         title: "Start here",
         commands: &[
@@ -100,6 +100,10 @@ pub(crate) const GROUPS: [Group; 7] = [
             ),
             entry("blob", "Store content as a blob for a commit to name"),
         ],
+    },
+    Group {
+        title: "Checks",
+        commands: &[entry("check", "List the checks a tree describes")],
     },
     Group {
         title: "Read history",
@@ -267,7 +271,7 @@ pub(crate) struct Family {
 }
 
 /// Every command family, with a summary of each of its subcommands.
-pub(crate) const FAMILIES: [Family; 7] = [
+pub(crate) const FAMILIES: [Family; 8] = [
     Family {
         name: "ws",
         commands: &[
@@ -393,6 +397,21 @@ pub(crate) const FAMILIES: [Family; 7] = [
         ],
         needs: Needs::Nothing,
         guide: "https://swarmops.cc/docs/guides/github-remote",
+    },
+    Family {
+        name: "check",
+        commands: &[entry(
+            "list",
+            "List the checks of a changeset's tree, or of a directory",
+        )],
+        examples: &[
+            Step::Shell("mkdir -p .swarmops"),
+            Step::Shell("echo 'version = 1' > .swarmops/checks.toml"),
+            Step::Shell("echo 'check.test.argv = [\"make\", \"test\"]' >> .swarmops/checks.toml"),
+            run(&["--human", "check", "list", "--dir", "."]),
+        ],
+        needs: Needs::Nothing,
+        guide: "https://swarmops.cc/docs/guides/parallel-agents",
     },
 ];
 

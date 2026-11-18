@@ -35,12 +35,17 @@
 //! `auth git-credential` reads that file for git, and prints no envelope on stdout, which
 //! carries git's credential protocol: its envelope, when it fails, goes to stderr.
 //!
+//! `check list` (M30) reads a tree's checks from the store at a changeset; with `--dir` it reads
+//! the files below a directory of the caller's host instead, opens no store, and its envelope
+//! has no `meta.repo` (the `check` module).
+//!
 //! `update` uses no store either: it reads and writes what is beside the binaries, in the
 //! directory the running program is installed in (the `update` module), and its envelope has no
 //! `meta.repo`. It runs the host's curl for the latest release, and the installer built into the
 //! program to download, check and unpack one.
 
 mod auth;
+mod check;
 mod device_flow;
 pub(crate) mod prepare;
 mod run;

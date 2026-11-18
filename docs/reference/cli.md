@@ -147,6 +147,14 @@ Work in a directory of your own: a workspace holds a sparse copy of a changeset'
 - [`swarmops ws delete`](commands/ws-delete.md): Remove a workspace's directory, then its entry.
 - [`swarmops ws hook`](commands/ws-hook.md): The agent hosts' hooks: read the hook's JSON on stdin, print what the hook expects.
 
+## Checks
+
+### swarmops check
+
+List the checks a tree names in .swarmops/checks.toml; nothing here runs them.
+
+- [`swarmops check list`](commands/check-list.md): List the checks REV's tree describes, or those of a directory with --dir.
+
 ## Server
 
 - [`swarmops mcp`](commands/mcp.md): Serve the store's operations to an agent as an MCP server on stdin and stdout.

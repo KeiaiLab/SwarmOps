@@ -48,7 +48,7 @@ use swarmops_ops::{LocalOps, Recording, Resolved};
 use swarmops_ws::workspace::Locate;
 
 use super::prepare::{self, After};
-use super::{auth, serve, update, ws};
+use super::{auth, check, serve, update, ws};
 use crate::cli::{
     self, BlobCommand, Command, DiffArgs, DiffFormatArg, GitCommand, Global, OpCommand, RefCommand,
     RemoteCommand, SyncCommand,
@@ -268,7 +268,7 @@ fn dispatch(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         rebase @ Command::Rebase { .. } => run_rebase(ctx, op, rebase),
         revert @ Command::Revert { .. } => run_revert(ctx, op, revert),
         Command::Blob(command) => run_blob(ctx, op, command),
-        Command::Ws(command) => ws::run(ctx, op, command),
+        family @ (Command::Ws(_) | Command::Check(_)) => run_family(ctx, op, family),
         Command::Resolve { rev } => resolve_rev(ctx, op, rev),
         Command::Cat {
             target,
@@ -330,6 +330,16 @@ fn dispatch(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         own @ (Command::Auth(_) | Command::Update { .. }) => run_own(ctx, op, own),
         // The rest: the git remotes' commands (M13).
         remotes => run_remotes(ctx, op, remotes),
+    }
+}
+
+/// Runs a family of commands that has a module of its own, `ws` and `check`, which name
+/// operation `op`.
+fn run_family(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    match command {
+        Command::Ws(command) => ws::run(ctx, op, command),
+        Command::Check(command) => check::run(ctx, op, command),
+        other => unreachable!("run passes ws and check alone, not {other:?}"),
     }
 }
 

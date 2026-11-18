@@ -950,8 +950,8 @@ left).
   `E_NOTHING_TO_LAND`, or `E_CAS_RETRY_EXHAUSTED` with a smaller `--max-attempts`, though the land
   is durable and the workspace stands on it; a cut unchecked land run again with `--check` replays
   the unchecked land; a `ws land -m` cut inside its own commit asks for `ws commit` first; the
-  `timeout_s` of `.swarmops/workspaces.json`'s `check` is not read (the request's, 900 s by
-  default, applies), and a `--check-timeout` too large for the clock aborts the command;
+  `timeout_s` of `.swarmops/workspaces.json`'s `check` is not read by `ws land --check` (the
+  request's, 900 s by default, applies), though `check list` gives it as the check's timeout, and a `--check-timeout` too large for the clock aborts the command;
   `blob get` takes `--max-bytes 0` as one blob, and caps neither the ids nor the bytes it holds.
   A `ws land -m` cut after the store's land and run again after further edits replays the land
   only while the operation that made the workspace's head is among the journal's newest 10,000;
@@ -1121,13 +1121,19 @@ left).
 
 ## Checks and delivery
 
-What SwarmOps does not do for a repository's checks today. Each item is planned, and none of the
-work is built ([roadmap](roadmap.md#checks-and-delivery)).
+What SwarmOps does not do for a repository's checks today. Each item is planned; of the work, only
+the check file and `check list` are built ([roadmap](roadmap.md#checks-and-delivery)).
 
 - **One command per checked land.** `ws land --check` runs one argv: the command after `--`, else
   `check.argv` of `.swarmops/workspaces.json`. A repository that needs several checks, an order
-  between them or a plan of which ones a change needs puts all of that in the one command.
-  *Target: M31. Found: requirement CD-E20.*
+  between them or a plan of which ones a change needs puts all of that in the one command. The
+  checks `.swarmops/checks.toml` names are listed by `check list` and run by nothing yet, and a
+  tree that holds both files gives `check list` the check file's checks and `ws land --check`
+  the other file's command. *Target: M31. Found: requirement CD-E20.*
+- **A check's definition digest can change.** `check list` gives each check the digest of its
+  definition by a provisional recipe, outside the hash contract: a later release may give the
+  same definition another digest, so digests compare only between builds of one release.
+  *Target: M32. Found: the M30 plan.*
 - **A check result is not recorded.** A checked land's result is in the command's envelope and
   nowhere in the store: no record says which tree passed which check, so no gate and no later
   land can read it. *Target: M7, M32. Found: requirement CD-E20.*
@@ -1434,18 +1440,18 @@ These do not change what SwarmOps does, only how well the tests can see it.
   allocations (the decoder's context and window) can fail there, and the zstd crate reports those
   as `ErrorKind::Other`: the read comes back as `E_STORE_CORRUPT`, not as a failed read.
   *Unscheduled. Found: issue #4 item 14.*
-- **Golden envelopes cover 56 of the 57 error codes.** `error_codes_reach_the_cli` pins the envelope
-  of 43, the nine workspace codes (M5), `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` (M15),
-  `E_FORMAT_REQUIRED` (M6), `E_AUTH` and `E_POLICY_DENIED` (M14) and `E_REF_NOT_FOUND` (`ref log`
-  of a name that never moved, M18) among them; `remote_error_codes_golden` the four `E_REMOTE_*`
+- **Golden envelopes cover 57 of the 57 error codes.** `error_codes_reach_the_cli` pins the
+  envelope of 44, the nine workspace codes (M5), `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` (M15),
+  `E_FORMAT_REQUIRED` (M6), `E_AUTH` and `E_POLICY_DENIED` (M14), `E_REF_NOT_FOUND` (`ref log`
+  of a name that never moved, M18) and `E_CHECK_FILE` (`check list --dir` of a file with a key
+  version 1 does not take, M30) among them; `remote_error_codes_golden` the four `E_REMOTE_*`
   codes over smart HTTP and ssh (M13); the FORMAT 2 goldens `E_TAG_IMMUTABLE` and
   `E_MAINTENANCE_BUSY` (M6); `too_new_maps_to_its_code_and_hint` `E_STORE_TOO_NEW` (M20); and goldens
   of their own six the first test cannot raise (M15):
   `E_AMBIGUOUS_ID`, `E_IO_TRANSIENT`, `E_INTERNAL`, `E_CAS_RETRY_EXHAUSTED`, `E_BUSY` in the slow
   `op_log_behind_a_held_lock_is_e_busy`, and `E_UNKNOWN_PARENT` as an error object, since every
-  operation resolves a parent first. `E_CHECK_FILE` (M30) is listed and pinned by none: no
-  command reads a check file until `check list`. What remains: a code a later milestone adds joins
-  the same test, which fails until it is pinned or listed. *Closed for today's codes in M18 (the M18 design
+  operation resolves a parent first. What remains: a code a later milestone adds joins the same
+  test, which fails until it is pinned or listed. *Closed for today's codes in M18 (the M18 design
   §3.2; `E_IO` joined in M1.6, the six `E_GIT_*` codes in M3, `E_WS_OUTSIDE_PREFIXES` and
   `E_WS_STALE` in M15). Found: the 2026-10-16 comparison.*
 - **The git remotes' reference pages have no recorded example.** The pages of `clone`,

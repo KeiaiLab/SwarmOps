@@ -632,6 +632,9 @@ pub enum Command {
     /// DIR names another.
     #[command(subcommand)]
     Ws(WsCommand),
+    /// List the checks a tree names in .swarmops/checks.toml; nothing here runs them.
+    #[command(subcommand)]
+    Check(CheckCommand),
     /// Name the changeset REV names, and whether REV is a ref's name.
     Resolve {
         /// The revision: a ref name, a full changeset id or a unique prefix of 12 or more of its
@@ -853,10 +856,11 @@ pub enum Command {
     ///
     /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log, ancestry,
     /// path_history, diff, merge_base, op_log, ref_list, ref_set, ref_delete, ref_log, ref_txn,
-    /// undo, commit, land, revert, land_check, land_group, rebase, blob_put, blob_has, verify,
-    /// the maintenance's gc, repair and upgrade, the git remotes' remote_list, fetch, push, sync
-    /// and sync_status, and the workspaces' ws_create, ws_status, ws_diff, ws_commit, ws_rebase,
-    /// ws_resolve, ws_land, ws_materialize, ws_discard, ws_snapshot, ws_list and ws_info), each
+    /// undo, commit, land, revert, land_check, land_group, check_list, rebase, blob_put,
+    /// blob_has, verify, the maintenance's gc, repair and upgrade, the git remotes' remote_list,
+    /// fetch, push, sync and sync_status, and the workspaces' ws_create, ws_status, ws_diff,
+    /// ws_commit, ws_rebase, ws_resolve, ws_land, ws_materialize, ws_discard, ws_snapshot,
+    /// ws_list and ws_info), each
     /// taking the operation's request as its arguments and returning the envelope the other
     /// commands print. The store and the identity are the server's, --repo and --as or their
     /// variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
@@ -1526,6 +1530,30 @@ pub enum GitCommand {
     },
 }
 
+/// `check`'s operations (M30).
+#[derive(Subcommand, Debug)]
+pub enum CheckCommand {
+    /// List the checks REV's tree describes, or those of a directory with --dir.
+    ///
+    /// A tree names its checks in .swarmops/checks.toml (version 1): one [check.NAME] table a
+    /// check, each one command (argv) run with no shell, with a directory (dir) and a timeout
+    /// (timeout_s); any other key is refused at its line. This reads .swarmops/checks.toml at REV (default main), resolved once; a tree without it lists
+    /// check.argv of .swarmops/workspaces.json as the one check default, and a tree with neither
+    /// lists no check. Each check comes with its argv, its directory, its timeout and the digest
+    /// of its definition, sorted by name. --dir DIR reads the files below DIR on this host
+    /// instead, and opens no store: the answer says vouched, since only the caller stands behind
+    /// them. A file that does not read is E_CHECK_FILE, naming its line and key. Reads only:
+    /// no identity, no lock.
+    List {
+        /// The changeset whose tree's checks to list.
+        #[arg(value_name = "REV")]
+        rev: Option<String>,
+        /// Read the check file below DIR on this host, not from the store.
+        #[arg(long, value_name = "DIR", conflicts_with = "rev")]
+        dir: Option<Utf8PathBuf>,
+    },
+}
+
 /// `remote`'s operations.
 #[derive(Subcommand, Debug)]
 pub enum RemoteCommand {
@@ -1909,6 +1937,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ws", "info"] => "ws_info",
         ["ws", "delete"] => "ws_delete",
         ["ws", "hook"] => "ws_hook",
+        ["check", "list"] => "check_list",
         ["cat"] => "read_file",
         ["ls"] => "read_tree",
         ["show"] => "show",
@@ -2006,6 +2035,7 @@ pub(crate) fn command() -> clap::Command {
         .mut_subcommand("op", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("remote", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("auth", |cmd| cmd.arg_required_else_help(false))
+        .mut_subcommand("check", |cmd| cmd.arg_required_else_help(false))
 }
 
 /// Of `--json` and `--human`, keeps the one given last: clap's `overrides_with` settles them
@@ -2087,10 +2117,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 65);
+        assert_eq!(ops.len(), 66);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 65, "two subcommands name one op");
+        assert_eq!(ops.len(), 66, "two subcommands name one op");
 
         // Automatic update follows every operation but these, and not `serve --prepare`,
         // which a flag names and no subcommand.
@@ -2118,6 +2148,7 @@ mod tests {
         assert_eq!(op_name(&["op"]), None);
         assert_eq!(op_name(&["remote"]), None);
         assert_eq!(op_name(&["auth"]), None);
+        assert_eq!(op_name(&["check"]), None);
     }
 
     #[test]
@@ -2185,7 +2216,15 @@ mod tests {
             panic!("a usage error");
         };
         assert_eq!(path, Vec::<String>::new());
-        for line in [&[][..], &["ref"], &["blob"], &["git"], &["op"], &["auth"]] {
+        for line in [
+            &[][..],
+            &["ref"],
+            &["blob"],
+            &["git"],
+            &["op"],
+            &["auth"],
+            &["check"],
+        ] {
             let Parsed::Usage { error, .. } = parse(&args(line)) else {
                 panic!("{line:?}: a usage error, not a help screen");
             };
@@ -2442,6 +2481,7 @@ mod tests {
             &["blob"],
             &["git"],
             &["auth"],
+            &["check"],
             &["--repo", "s", "ws", "--as", "agent/a"],
         ] {
             let Parsed::Usage { error, path, .. } = parse(&args(line)) else {

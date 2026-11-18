@@ -67,6 +67,14 @@ to the weakest:
    as a new version, never in place, and every branch exported before a new version meets it as
    divergence, to be exported again once with `--force`: a deployment pipeline sees a rewritten
    history.
+7. **The files SwarmOps reads from a tree.** `.swarmops/workspaces.json` (its `prefixes`,
+   `bootstrap` and `check`) and, since M30, `.swarmops/checks.toml`, version 1. A file a release
+   reads keeps its meaning in every later release. Version 1 of the check file gains keys as
+   checks gain features; a build that does not know a key refuses the file with `E_CHECK_FILE`
+   (`details.reason` `unknown_key`) instead of reading it without the key, so a newer file never
+   means less to an older build. A key whose meaning changes makes a new `version`. The
+   `definition_digest` that `check list` gives is not part of this surface yet: its recipe is
+   provisional, and a later release may replace it before it is fixed.
 
 The contract surfaces (3 to 5) grow without breaking: a new field, a new optional argument, a new
 command, a new error code or a new tool is not a breaking change. Clients must allow for that.

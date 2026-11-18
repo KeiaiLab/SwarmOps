@@ -445,6 +445,121 @@ fn update_golden() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// The plan's fixture check file (M30-1), and the same file with a key version 1 does not take.
+const CHECK_FIXTURE: &str = include_str!("fixtures/check/checks.toml");
+const CHECK_REFUSED: &str = include_str!("fixtures/check/refused.toml");
+
+/// Commits `changes` (a JSON array) to `store` on main's head and moves main there, as a step
+/// the transcript leaves out, so that no other command's page takes it as its example; the
+/// changeset, named `[name]`.
+fn commit_to_main(s: &mut Session, store: &str, changes: &Value, name: &str) -> String {
+    let file = s.file(&format!("{name}.json"), &changes.to_string());
+    let args = [
+        "--repo",
+        store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        name,
+        "--changes",
+        &file,
+        "--advance",
+        "main",
+    ];
+    let output = Session::run_raw(&[], &args, None);
+    assert_eq!(output.exit, 0, "{}", output.stdout);
+    let reply: Value = serde_json::from_str(&output.stdout).expect("an envelope");
+    let id = reply["result"]["changeset"].as_str().expect("a changeset");
+    s.name(id, name);
+    id.to_owned()
+}
+
+/// `check list` (M30-1, M30-2), its pinned JSON form: the plan's fixture at main lists its
+/// three checks sorted by name, each with its line and the digest of its definition, read from
+/// the store (`vouched: false`, the tree named); the same file in a directory lists the same
+/// checks, vouched for by the caller; a tree without a check file lists no check, exit 0; a
+/// tree whose `.swarmops/workspaces.json` alone names `check.argv` lists it as the one check
+/// `default`; and the fixture with `stage` added is E_CHECK_FILE at line 11, exit 1.
+#[test]
+fn check_list_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = Session::run_raw(&[], &["init", &store], None);
+    assert_eq!(init.exit, 0, "{}", init.stdout);
+
+    // 1. The fixture: three checks, sorted, from the store at main.
+    let fixture = json!([{
+        "path": ".swarmops/checks.toml", "op": "put", "content": {"inline": CHECK_FIXTURE}
+    }]);
+    commit_to_main(&mut s, &store, &fixture, "c0");
+    let listed = s.run(&["--repo", &store, "check", "list"]);
+    assert_eq!(listed.exit, 0, "{}", listed.json);
+    s.name_at(&listed, "/result/tree", "tree_c0");
+    for (at, name) in ["docs", "lint", "unit"].iter().enumerate() {
+        let pointer = format!("/result/checks/{at}/definition_digest");
+        s.name_at(&listed, &pointer, &format!("{name}_digest"));
+    }
+    let result = &listed["result"];
+    let names: Vec<&str> = (result["checks"].as_array().unwrap().iter())
+        .map(|check| check["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["docs", "lint", "unit"]);
+    assert_eq!(
+        (&result["file"], &result["version"], &result["vouched"]),
+        (&json!(".swarmops/checks.toml"), &json!(1), &json!(false))
+    );
+
+    // 2. The same file in a directory: the same checks, vouched for, no tree, no store.
+    let dir = format!("{}/tree", s.tmp());
+    fs::create_dir_all(format!("{dir}/.swarmops")).unwrap();
+    fs::write(format!("{dir}/.swarmops/checks.toml"), CHECK_FIXTURE).unwrap();
+    let vouched = s.run(&["check", "list", "--dir", &dir]);
+    assert_eq!(vouched.exit, 0, "{}", vouched.json);
+    assert_eq!(vouched["result"]["checks"], result["checks"]);
+    assert_eq!(vouched["result"]["vouched"], true);
+    assert!(vouched["result"].get("tree").is_none(), "{}", vouched.json);
+    assert!(vouched["meta"].get("repo").is_none(), "{}", vouched.json);
+
+    // 3. No check file: no check, exit 0, and the tree named.
+    let readme = json!([
+        {"path": ".swarmops/checks.toml", "op": "delete"},
+        {"path": "README.md", "op": "put", "content": {"inline": "# acme\n"}},
+    ]);
+    commit_to_main(&mut s, &store, &readme, "c1");
+    let none = s.run(&["--repo", &store, "check", "list"]);
+    assert_eq!(none.exit, 0, "{}", none.json);
+    assert_eq!(none["result"]["checks"], json!([]));
+    assert_eq!(none["result"]["vouched"], false);
+    assert!(none["result"].get("file").is_none(), "{}", none.json);
+    s.name_at(&none, "/result/tree", "tree_c1");
+
+    // 4. workspaces.json alone: its check.argv, the one check default.
+    let legacy = json!([
+        {"path": ".swarmops/workspaces.json", "op": "put",
+         "content": {"inline": "{\"check\": {\"argv\": [\"./check.sh\"]}}\n"}},
+    ]);
+    commit_to_main(&mut s, &store, &legacy, "c2");
+    let default = s.run(&["--repo", &store, "check", "list"]);
+    assert_eq!(default["result"]["checks"][0]["name"], "default");
+    assert_eq!(default["result"]["file"], ".swarmops/workspaces.json");
+    s.name_at(&default, "/result/tree", "tree_c2");
+    s.name_at(
+        &default,
+        "/result/checks/0/definition_digest",
+        "default_digest",
+    );
+
+    // 5. A key version 1 does not take: refused at its line, nothing listed.
+    fs::write(format!("{dir}/.swarmops/checks.toml"), CHECK_REFUSED).unwrap();
+    let refused = s.run(&["check", "list", "--dir", &dir]);
+    assert_eq!((refused.exit, refused.code()), (1, "E_CHECK_FILE"));
+    assert_eq!(refused["error"]["details"]["line"], 11);
+    assert_eq!(refused["error"]["details"]["key"], "check.lint.stage");
+    assert_eq!(refused["error"]["details"]["vouched"], true);
+    insta::assert_json_snapshot!(s.transcript());
+}
+
 /// The harness names a login file where nothing is (the kit's `isolation`), so a run of the
 /// binary finds no login whatever the developer's home directory holds; only a test that names
 /// a file of its own reads one.
@@ -2079,7 +2194,7 @@ fn cat_truncates_to_max_bytes() {
 }
 
 /// The codes of [`NOT_RAISED`] no golden pins: no operation raises them yet.
-const UNPINNED: &[&str] = &["E_CHECK_FILE"];
+const UNPINNED: &[&str] = &[];
 
 /// Codes [`error_codes_reach_the_cli`] does not raise, and why: each names the test whose golden
 /// pins it, but those of [`UNPINNED`].
@@ -2139,10 +2254,6 @@ const NOT_RAISED: &[(&str, &str)] = &[
     (
         "E_STORE_TOO_NEW",
         "needs a store of a later format: too_new_maps_to_its_code_and_hint pins it",
-    ),
-    (
-        "E_CHECK_FILE",
-        "no command reads a check file yet: check list, which comes next, raises it",
     ),
 ];
 
@@ -2393,7 +2504,7 @@ fn init_format_1_and_2_still_create_their_layouts() {
 /// How many error codes there are, and how many goldens pin: the counts the known limitations,
 /// the changelog and the goals state, which [`check_doc_counts`] reads.
 const CODE_COUNT: usize = 57;
-const PINNED_COUNT: usize = 56;
+const PINNED_COUNT: usize = 57;
 
 /// The documents that state [`CODE_COUNT`] and [`PINNED_COUNT`], from the repository's root.
 const KNOWN_LIMITATIONS: &str = "docs/known-limitations.md";
@@ -2590,6 +2701,15 @@ fn check_doc_counts() {
     );
 }
 
+/// `check list --dir` of a directory whose check file has a key version 1 does not take, made
+/// below `s`'s temp dir: `E_CHECK_FILE`.
+fn check_list_refused(s: &Session) -> Vec<String> {
+    let dir = format!("{}/refused-checks", s.tmp());
+    fs::create_dir_all(format!("{dir}/.swarmops")).unwrap();
+    fs::write(format!("{dir}/.swarmops/checks.toml"), CHECK_REFUSED).unwrap();
+    ["check", "list", "--dir", &dir].map(str::to_owned).to_vec()
+}
+
 /// The failing commands of [`error_codes_reach_the_cli`], each with the code it must raise,
 /// against `store`, where main holds `src/lib.rs`, and `c2`, which main does not hold,
 /// adds `src/main.rs`; `op0` is the id of operation 0, the first commit.
@@ -2699,6 +2819,7 @@ fn error_cases(
         ("E_OP_NOT_FOUND", on(&["op", "undo", "99:00000000"])),
         // An undo takes an operation's id, never its bare number.
         ("E_INVALID_ARG", on(&["op", "undo", "0"])),
+        ("E_CHECK_FILE", check_list_refused(s)),
     ]
 }
 

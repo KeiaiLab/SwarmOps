@@ -2603,6 +2603,49 @@ expression: transcript
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
+          "arguments": {},
+          "name": "check_list"
+        }
+      },
+      "response": {
+        "id": 45,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[grouped]\":\"[grouped]\",\"main\":\"[grouped]\"}},\"ok\":true,\"op\":\"check_list\",\"result\":{\"checks\":[],\"tree\":\"[id20]\",\"vouched\":false}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[grouped]": "[grouped]",
+                "main": "[grouped]"
+              }
+            },
+            "ok": true,
+            "op": "check_list",
+            "result": {
+              "checks": [],
+              "tree": "[id20]",
+              "vouched": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 46,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
           "arguments": {
             "moves": [
               {
@@ -2619,7 +2662,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 45,
+        "id": 46,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -2665,7 +2708,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 46,
+        "id": 47,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2686,7 +2729,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 46,
+        "id": 47,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -2734,7 +2777,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 47,
+        "id": 48,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2743,7 +2786,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 47,
+        "id": 48,
         "jsonrpc": "2.0",
         "result": {
           "content": [

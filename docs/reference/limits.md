@@ -26,6 +26,12 @@ The limits of the SwarmOps contract: what a request may hold, with the error a r
 | [Land check changes](#land-check-changes) | 32 changes | `swarmops_repo::land::MAX_GROUP_CHANGES` | [`E_TOO_LARGE`](errors.md#e_too_large) |
 | [Group land changes](#group-land-changes) | 32 changes | `swarmops_repo::land::MAX_GROUP_CHANGES` | [`E_TOO_LARGE`](errors.md#e_too_large) |
 | [Ref transaction moves](#ref-transaction-moves) | 64 moves | `swarmops_api::MAX_REF_TXN_MOVES` | [`E_TOO_LARGE`](errors.md#e_too_large) |
+| [Check file](#check-file) | 1,048,576 bytes (1 MiB) | `swarmops_ops::check::MAX_CHECK_FILE_BYTES` | [`E_CHECK_FILE`](errors.md#e_check_file) |
+| [Checks of a file](#checks-of-a-file) | 1,000 checks | `swarmops_ops::check::MAX_CHECKS` | [`E_CHECK_FILE`](errors.md#e_check_file) |
+| [Check name](#check-name) | 64 bytes | `swarmops_ops::check::MAX_CHECK_NAME_BYTES` | [`E_CHECK_FILE`](errors.md#e_check_file) |
+| [Check argv strings](#check-argv-strings) | 1,024 strings | `swarmops_ops::check::MAX_ARGV_ITEMS` | [`E_CHECK_FILE`](errors.md#e_check_file) |
+| [Check argv size](#check-argv-size) | 65,536 bytes (64 KiB) | `swarmops_ops::check::MAX_ARGV_BYTES` | [`E_CHECK_FILE`](errors.md#e_check_file) |
+| [Check timeout](#check-timeout) | 86,400 s | `swarmops_ops::check::MAX_CHECK_TIMEOUT_S` | [`E_CHECK_FILE`](errors.md#e_check_file) |
 
 ### Request text
 
@@ -187,6 +193,60 @@ The refs one `ref txn` (`moves`) moves as one operation: more are refused before
 - Constant: `swarmops_api::MAX_REF_TXN_MOVES`, in `crates/swarmops-api/src/ops.rs`.
 - Commands: [`ref txn`](commands/ref-txn.md).
 - Error: [`E_TOO_LARGE`](errors.md#e_too_large).
+
+### Check file
+
+A tree's `.swarmops/checks.toml`: a longer one is refused by its size, not read, with `details.reason` `too_large`, `bytes` and `limit`.
+
+- Value: 1,048,576 bytes (1 MiB).
+- Constant: `swarmops_ops::check::MAX_CHECK_FILE_BYTES`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check list`](commands/check-list.md).
+- Error: [`E_CHECK_FILE`](errors.md#e_check_file).
+
+### Checks of a file
+
+The `[check.<name>]` tables of one check file: one more is refused with `details.reason` `too_many`, at its line.
+
+- Value: 1,000 checks.
+- Constant: `swarmops_ops::check::MAX_CHECKS`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check list`](commands/check-list.md).
+- Error: [`E_CHECK_FILE`](errors.md#e_check_file).
+
+### Check name
+
+A check's name, of `a-z`, `0-9`, `-` and `_`: a longer one is refused with `details.reason` `name`.
+
+- Value: 64 bytes.
+- Constant: `swarmops_ops::check::MAX_CHECK_NAME_BYTES`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check list`](commands/check-list.md).
+- Error: [`E_CHECK_FILE`](errors.md#e_check_file).
+
+### Check argv strings
+
+A check's `argv`, the program and its arguments: more are refused with `details.reason` `value`.
+
+- Value: 1,024 strings.
+- Constant: `swarmops_ops::check::MAX_ARGV_ITEMS`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check list`](commands/check-list.md).
+- Error: [`E_CHECK_FILE`](errors.md#e_check_file).
+
+### Check argv size
+
+A check's `argv` strings together: more are refused with `details.reason` `value`.
+
+- Value: 65,536 bytes (64 KiB).
+- Constant: `swarmops_ops::check::MAX_ARGV_BYTES`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check list`](commands/check-list.md).
+- Error: [`E_CHECK_FILE`](errors.md#e_check_file).
+
+### Check timeout
+
+A check's `timeout_s`, from 1: a longer one, or 0, is refused with `details.reason` `value`. Nothing runs a check with it yet.
+
+- Value: 86,400 s.
+- Constant: `swarmops_ops::check::MAX_CHECK_TIMEOUT_S`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check list`](commands/check-list.md).
+- Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ## Bounds without an error
 

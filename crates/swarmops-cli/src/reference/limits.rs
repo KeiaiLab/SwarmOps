@@ -136,6 +136,9 @@ const fn declared(
 /// The file that declares the paging defaults.
 const API: &str = "crates/swarmops-api/src/ops.rs";
 
+/// The file that declares the check file's limits (M30).
+const CHECK: &str = "crates/swarmops-ops/src/check.rs";
+
 /// A paging default of `command`'s `flag`, filling `request`'s `field`.
 const fn paged(
     request: &'static str,
@@ -175,7 +178,7 @@ const fn internal_value(
 // ---- The tables ----
 
 /// The limits a request is refused past, with the error it gets.
-static CONTRACT: [Limit; 18] = [
+static CONTRACT: [Limit; 24] = [
     Limit {
         name: "Request text",
         constant: code(
@@ -468,6 +471,90 @@ static CONTRACT: [Limit; 18] = [
         what: "The refs one `ref txn` (`moves`) moves as one operation: more are refused \
                    before anything is resolved or read, with `details.max_moves`; none is \
                    `E_INVALID_ARG`.",
+    },
+    Limit {
+        name: "Check file",
+        constant: code(
+            "swarmops_ops::check::MAX_CHECK_FILE_BYTES",
+            CHECK,
+            "pub const MAX_CHECK_FILE_BYTES: u64 = 1 << 20;",
+            || swarmops_ops::check::MAX_CHECK_FILE_BYTES,
+        ),
+        unit: Unit::Bytes,
+        commands: &["check list"],
+        errors: &[ErrorCode::CheckFile],
+        what: "A tree's `.swarmops/checks.toml`: a longer one is refused by its size, not \
+                   read, with `details.reason` `too_large`, `bytes` and `limit`.",
+    },
+    Limit {
+        name: "Checks of a file",
+        constant: code(
+            "swarmops_ops::check::MAX_CHECKS",
+            CHECK,
+            "pub const MAX_CHECKS: usize = 1_000;",
+            || bytes::to_u64(swarmops_ops::check::MAX_CHECKS),
+        ),
+        unit: Unit::Count("checks"),
+        commands: &["check list"],
+        errors: &[ErrorCode::CheckFile],
+        what: "The `[check.<name>]` tables of one check file: one more is refused with \
+                   `details.reason` `too_many`, at its line.",
+    },
+    Limit {
+        name: "Check name",
+        constant: code(
+            "swarmops_ops::check::MAX_CHECK_NAME_BYTES",
+            CHECK,
+            "pub const MAX_CHECK_NAME_BYTES: usize = 64;",
+            || bytes::to_u64(swarmops_ops::check::MAX_CHECK_NAME_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check list"],
+        errors: &[ErrorCode::CheckFile],
+        what: "A check's name, of `a-z`, `0-9`, `-` and `_`: a longer one is refused with \
+                   `details.reason` `name`.",
+    },
+    Limit {
+        name: "Check argv strings",
+        constant: code(
+            "swarmops_ops::check::MAX_ARGV_ITEMS",
+            CHECK,
+            "pub const MAX_ARGV_ITEMS: usize = 1_024;",
+            || bytes::to_u64(swarmops_ops::check::MAX_ARGV_ITEMS),
+        ),
+        unit: Unit::Count("strings"),
+        commands: &["check list"],
+        errors: &[ErrorCode::CheckFile],
+        what: "A check's `argv`, the program and its arguments: more are refused with \
+                   `details.reason` `value`.",
+    },
+    Limit {
+        name: "Check argv size",
+        constant: code(
+            "swarmops_ops::check::MAX_ARGV_BYTES",
+            CHECK,
+            "pub const MAX_ARGV_BYTES: u64 = 64 * 1024;",
+            || swarmops_ops::check::MAX_ARGV_BYTES,
+        ),
+        unit: Unit::Bytes,
+        commands: &["check list"],
+        errors: &[ErrorCode::CheckFile],
+        what: "A check's `argv` strings together: more are refused with `details.reason` \
+                   `value`.",
+    },
+    Limit {
+        name: "Check timeout",
+        constant: code(
+            "swarmops_ops::check::MAX_CHECK_TIMEOUT_S",
+            CHECK,
+            "pub const MAX_CHECK_TIMEOUT_S: u64 = 86_400;",
+            || swarmops_ops::check::MAX_CHECK_TIMEOUT_S,
+        ),
+        unit: Unit::Seconds,
+        commands: &["check list"],
+        errors: &[ErrorCode::CheckFile],
+        what: "A check's `timeout_s`, from 1: a longer one, or 0, is refused with \
+                   `details.reason` `value`. Nothing runs a check with it yet.",
     },
 ];
 

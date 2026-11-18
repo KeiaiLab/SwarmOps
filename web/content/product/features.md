@@ -163,8 +163,8 @@ exit 5
 
 ## An MCP server for agents
 
-`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout: 46 tools, one
-per operation (34 store operations and 12 workspace operations), each taking the operation's
+`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout: 47 tools, one
+per operation (35 store operations and 12 workspace operations), each taking the operation's
 request and returning the envelope the CLI prints.
 Register it with Claude Code, one identity per agent process:
 
