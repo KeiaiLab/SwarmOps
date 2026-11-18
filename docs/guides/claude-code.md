@@ -304,8 +304,8 @@ annotations say whether it changes the store and how.
 
 `ws_create`, `ws_status`, `ws_diff`, `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`,
 `ws_materialize`, `ws_discard`, `ws_snapshot`, `ws_list`, `ws_info`, `check_run` and `check_log`
-work on a workspace, a directory on the server's host, named by its name in the store's registry. Each
-mutation's result carries `status_after`, the workspace's status after it.
+work on a workspace, a directory on the server's host, named by its name in the store's registry.
+Each mutation's result carries `status_after`, the workspace's status after it.
 [Workspaces](#workspaces-for-worktree-sessions-and-subagents) below has the flow. `check_run` runs
 the checks of one stage of a clean workspace, one at a time, and answers every check's outcome; a
 check that did not pass makes it `E_CHECK_FAILED`, with the whole run in `details.run`; `check_log`

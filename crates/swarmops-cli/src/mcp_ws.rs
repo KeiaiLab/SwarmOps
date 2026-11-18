@@ -1,8 +1,9 @@
 //! The workspace tools of `swarmops mcp` (M5): fourteen tools, one per workspace operation but
-//! `ws_delete`, which removes a directory tree (an agent ends its own workspace by landing it,
-//! and the hook adapter removes it), and `check_run` and `check_log` (M31), which run the checks
-//! of a stage of a clean workspace and read a check's log of a run. Each names its workspace by `workspace`, a registry name, and runs the
-//! function of its name on the store the server opens for the call.
+//! `ws_delete`, which removes a directory tree (an agent ends its own workspace by landing it, and
+//! the hook adapter removes it), and `check_run` and `check_log` (M31), which run the checks of a
+//! stage of a clean workspace and read a check's log of a run. Each names its workspace by
+//! `workspace`, a registry name, and runs the function of its name on the store the server opens
+//! for the call.
 //!
 //! A child of `mcp`, since the tool table's machinery (`Operate`, `Refuse`, `Named`) is private
 //! there. The tools have a table of their own, [`WS_TOOLS`], with their own annotations, so that

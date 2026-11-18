@@ -1169,8 +1169,8 @@ check file with its stages, `check list` and `check run` are built
   on GitHub (topology 2), a pushed commit is checked again although the same tree already passed,
   because nothing keys a result by tree (issue #43). *Target: M32. Found: requirement CD-E20.*
 - **No runner, schedule or trigger.** SwarmOps starts a check only inside `ws land --check` or
-  `check run`, on the caller's host. Nothing starts one after a land, on a tag, on a schedule or on another host.
-  *Target: M33, M34. Found: requirement CD-E20.*
+  `check run`, on the caller's host. Nothing starts one after a land, on a tag, on a schedule or on
+  another host. *Target: M33, M34. Found: requirement CD-E20.*
 - **No secrets handling.** A check of `ws land --check` gets the environment of the process that
   runs it; one of `check run`, a short fixed list of it and what `--pass` names. SwarmOps neither
   stores a secret for a check, nor scopes one, nor masks one in output.

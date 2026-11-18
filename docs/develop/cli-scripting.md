@@ -93,15 +93,15 @@ Hints and messages name the program `swarmops`, whichever name ran it, with two 
 name it as you invoked it: a usage error's hint, the usage line (`Usage: so …`), and the message
 for a missing subcommand (`'so' requires a subcommand but one was not provided`).
 
-Some runs print something other than one envelope. `derive --follow` prints one envelope a line
-for each run that derived something, `check log --follow` one a line as a check's log grows (the
-last holds `ended: true`, and the command then exits 0), `mcp` speaks MCP on stdout, and `auth git-credential` answers
-git there as a credential helper, with a failure's envelope on stderr. `--help`, `--version` and the `help`
-subcommand print plain text, and so does `swarmops` alone, or a command group alone, when stdout
-is a terminal and neither `--json` nor `SWARMOPS_FORMAT=json` is given
-([Exit codes](#exit-codes)). And a run that meets one of the store's four documented
-aborts prints no envelope at all: the process aborts, saying why on stderr. A script should treat
-stdout that is not one JSON object as a failure of its own.
+Some runs print something other than one envelope. `derive --follow` prints one envelope a line for
+each run that derived something, `check log --follow` one a line as a check's log grows (the last
+holds `ended: true`, and the command then exits 0), `mcp` speaks MCP on stdout, and
+`auth git-credential` answers git there as a credential helper, with a failure's envelope on stderr.
+`--help`, `--version` and the `help` subcommand print plain text, and so does `swarmops` alone, or a
+command group alone, when stdout is a terminal and neither `--json` nor `SWARMOPS_FORMAT=json` is
+given ([Exit codes](#exit-codes)). And a run that meets one of the store's four documented aborts
+prints no envelope at all: the process aborts, saying why on stderr. A script should treat stdout
+that is not one JSON object as a failure of its own.
 
 stderr carries nothing by default, with two exceptions, both for a person at a terminal. The
 first is automatic update: where an install updates itself

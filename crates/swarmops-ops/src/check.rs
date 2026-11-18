@@ -16,8 +16,8 @@
 //! does not read is `E_CHECK_FILE` ([`Refusal::into_error`]). Listing runs no check and writes
 //! nothing.
 //!
-//! `check run` (M31, [`mod@run`]) runs one stage's checks of a directory or of a workspace held clean,
-//! each with the environment of [`mod@env`], its output in a log of [`mod@log`]'s format.
+//! `check run` (M31, [`mod@run`]) runs one stage's checks of a directory or of a workspace held
+//! clean, each with the environment of [`mod@env`], its output in a log of [`mod@log`]'s format.
 
 mod digest;
 pub mod env;

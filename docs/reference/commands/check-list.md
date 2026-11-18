@@ -212,15 +212,16 @@ later release; compare digests made by one release only.
 ### A tree without the file
 
 When the tree holds no `.swarmops/checks.toml`, `check.argv` of `.swarmops/workspaces.json`, if it
-names a command, is the one check `default`: that argv, at the root, with `check.timeout_s` or
-900, the stage `before-land` (the check `ws land --check` runs before a land), and no `line`; `file` says `.swarmops/workspaces.json`. That file is read in the shape and
-the size a workspace reads it in, at most 64 KiB of JSON, so `check list` refuses every file that
-`ws land --check` refuses (as `E_CHECK_FILE`, where the land says `E_INVALID_ARG`). It also holds
-`check.argv` and `check.timeout_s` to version 1's rules, which the land does not: a timeout past
-86,400 s, or an argv whose program is empty, is refused here and accepted by the land. The land
-never reads `check.timeout_s` at all, and takes its own `--check-timeout`; the `timeout_s` listed
-for `default` is the one a later runner will use. A tree with neither file, or with an empty or
-missing `check.argv`, lists no check and exits 0.
+names a command, is the one check `default`: that argv, at the root, with `check.timeout_s` or 900,
+the stage `before-land` (the check `ws land --check` runs before a land), and no `line`; `file` says
+`.swarmops/workspaces.json`. That file is read in the shape and the size a workspace reads it in, at
+most 64 KiB of JSON, so `check list` refuses every file that `ws land --check` refuses (as
+`E_CHECK_FILE`, where the land says `E_INVALID_ARG`). It also holds `check.argv` and
+`check.timeout_s` to version 1's rules, which the land does not: a timeout past 86,400 s, or an argv
+whose program is empty, is refused here and accepted by the land. The land never reads
+`check.timeout_s` at all, and takes its own `--check-timeout`; the `timeout_s` listed for `default`
+is the one a later runner will use. A tree with neither file, or with an empty or missing
+`check.argv`, lists no check and exits 0.
 
 ### One stage
 
