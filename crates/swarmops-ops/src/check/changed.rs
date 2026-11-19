@@ -98,9 +98,10 @@ impl Changed {
 
     /// Reads one changed path: `see` is given it when it is a repository path of at most
     /// [`MAX_PLAN_PATH_BYTES`]; any other is `path_unreadable`. `false` once more than
-    /// [`MAX_PLAN_PATHS`] entries came (`paths_truncated`): nothing more is read.
+    /// [`MAX_PLAN_PATHS`] entries came (`paths_truncated`): nothing more is read. An empty
+    /// path is unreadable: given by itself, it is no blank between two ends of a list.
     pub fn path(&mut self, path: &str, see: &mut dyn FnMut(&str)) -> bool {
-        self.entry(path.as_bytes(), Sep::Nul, see)
+        self.given(path.as_bytes(), Sep::Nul, see)
     }
 
     /// Reads the list `bytes`, its entries ended by `sep`: a last entry without its end is
@@ -188,13 +189,17 @@ impl Changed {
         Ok(changed)
     }
 
-    /// One entry as it came: passed over when empty, counted against the bound, then read as a
-    /// path or found unreadable. `false` once the bound is passed.
+    /// One entry of a list as it came: passed over when empty, else [`Changed::given`].
     fn entry(&mut self, entry: &[u8], sep: Sep, see: &mut dyn FnMut(&str)) -> bool {
         if entry.is_empty() {
             return true;
         }
+        self.given(entry, sep, see)
+    }
 
+    /// One path as it was given: counted against the bound, then read as a path or found
+    /// unreadable (an empty one too: it names nothing). `false` once the bound is passed.
+    fn given(&mut self, entry: &[u8], sep: Sep, see: &mut dyn FnMut(&str)) -> bool {
         // 1. Within the bound, or the plan is cut here.
         if self.entries == MAX_PLAN_PATHS {
             self.widen(CheckPlanWidened::PathsTruncated);

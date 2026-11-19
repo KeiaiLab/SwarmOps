@@ -1584,6 +1584,16 @@ fn an_unreadable_path_given_widens_the_plan() {
         planned(&[], Some((b"a\xffb\0", Sep::Nul))).widened,
         unreadable
     );
+
+    // An empty path given by its own flag names nothing: it is not a change of no path.
+    let empty = planned(&[""], None);
+    assert_eq!(empty.widened, unreadable);
+    assert!(
+        empty
+            .checks
+            .iter()
+            .all(|check| check.verdict == RUN && check.reason == WIDENED)
+    );
 }
 
 /// The directory form has no target to compare with: when the check file, the legacy file or

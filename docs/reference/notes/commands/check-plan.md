@@ -128,7 +128,8 @@ standard input.
   taken; an empty entry is passed over.
 - An entry is a changed path when it is a repository path from the directory's root: UTF-8, not
   absolute, no empty, `.` or `..` part, at most 4,096 bytes. Any other entry is
-  `path_unreadable`.
+  `path_unreadable`. An empty `--changed` is unreadable too: `--changed ""` names no path, and
+  is not a change of no path.
 - In a list of lines, an entry that starts with `"` or holds a control character is unreadable
   too. A tool that writes one name a line quotes such names, and a quoted name read as a path
   would match nothing and plan its check `not_applicable`. Give such lists NUL-ended:

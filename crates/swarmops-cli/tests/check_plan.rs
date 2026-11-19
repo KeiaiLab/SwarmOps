@@ -574,6 +574,10 @@ fn path_unreadable(lab: &Lab, dir: &Path) {
         &plan_dir(lab, dir, &["--changed", "../x"], None).ok(),
         "path_unreadable",
     );
+    assert_widened(
+        &plan_dir(lab, dir, &["--changed", ""], None).ok(),
+        "path_unreadable",
+    );
     let bytes = lab.beside("bytes.txt");
     fs::write(&bytes, b"docs/a\xffb.md\n").unwrap();
     let from = ["--changed-from", bytes.to_str().unwrap()];
