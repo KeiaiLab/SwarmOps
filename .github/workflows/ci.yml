@@ -43,6 +43,8 @@ jobs:
     # The default is 360 minutes: a hung test would spend them all from the plan's budget.
     timeout-minutes: 30
     env:
+      NEXTEST_TEST_THREADS: "12"
+      CARGO_BUILD_JOBS: "12"
       CARGO_TERM_COLOR: always
       # `just check`'s workspace run uses .config/nextest.toml's `ci` profile: no fail-fast, no
       # retries, a hung test killed after 10 minutes, a JUnit report in target/nextest/ci/.
