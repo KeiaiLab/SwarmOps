@@ -281,6 +281,28 @@ fn each_fault_is_refused() {
     }
 }
 
+/// Text outside the root element is refused, before it or after it, as text, as a CDATA section
+/// or as a reference; blank text there reads, and text with no root at all is still no XML.
+#[test]
+fn text_outside_the_root_is_refused() {
+    for xml in [
+        "<testsuite/>x",
+        "x<testsuite/>",
+        "<testsuite/><![CDATA[x]]>",
+        "<testsuite/>&amp;",
+    ] {
+        let (fault, said) = refused(xml.as_bytes());
+        assert_eq!(
+            (fault, said.as_str()),
+            (CheckReportFault::Syntax, "text outside the root element"),
+            "{xml}"
+        );
+    }
+    assert_eq!(read_ok("\n<testsuite/>\n").tests, 0);
+    let (_, said) = refused(b"x");
+    assert_eq!(said, "no root element: not XML");
+}
+
 /// A UTF-8 byte order mark and a declaration of UTF-8, in any case, read.
 #[test]
 fn utf_8_reads_with_its_mark_or_its_name() {

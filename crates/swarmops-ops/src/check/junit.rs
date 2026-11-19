@@ -6,6 +6,7 @@
 //!     <?xml encoding?> other than UTF-8 ─▶ not_text      <!DOCTYPE …> ─▶ doctype, at once
 //!     &name; other than XML's five ─▶ syntax             nesting past 64 ─▶ too_deep
 //!     root other than testsuites or testsuite ─▶ shape   ill-formed, or cut short ─▶ syntax
+//!     text outside the root, unless blank ─▶ syntax
 //!   testcase (any depth): a test; with a failure or error child: failed, one finding
 //!     (title its name; group its classname, else the nearest testsuite's name; message the
 //!     first failure's message and text, then the end of its system-err; path and line from its
@@ -77,11 +78,11 @@ pub fn read_keeping(bytes: &[u8], dir: &str, keep: usize) -> Result<JunitRead, R
             Event::Start(element) => walk.open(&element, false)?,
             Event::Empty(element) => walk.open(&element, true)?,
             Event::End(_) => walk.close(),
-            Event::Text(text) => walk.text(&text.xml10_content()),
-            Event::CData(data) => walk.text(&data.xml10_content()),
+            Event::Text(text) => walk.text(&text.xml10_content())?,
+            Event::CData(data) => walk.text(&data.xml10_content())?,
             Event::GeneralRef(reference) => {
                 let decoded = entity(&reference)?;
-                walk.text(&decoded);
+                walk.text(&decoded)?;
             }
             Event::Comment(_) | Event::PI(_) => {}
             Event::Eof => return walk.end(),
@@ -261,6 +262,8 @@ struct Walk<'d> {
     depth: usize,
     /// Whether the root has been read, and closed.
     root: Option<bool>,
+    /// Whether text that is not blank came before the root.
+    stray: bool,
     /// Each open `testsuite`'s depth and `name`.
     suites: Vec<(usize, Option<String>)>,
     /// The open cases, the innermost last.
@@ -279,6 +282,7 @@ impl<'d> Walk<'d> {
             keep,
             depth: 0,
             root: None,
+            stray: false,
             suites: Vec::new(),
             cases: Vec::new(),
             into: (Sink::Nothing, 0),
@@ -301,6 +305,9 @@ impl<'d> Walk<'d> {
         if self.depth == 1 {
             if self.root.is_some() {
                 return Err((CheckReportFault::Syntax, "a second root element".to_owned()));
+            }
+            if self.stray {
+                return Err(text_outside_root());
             }
             if name != "testsuites" && name != "testsuite" {
                 return Err((
@@ -372,14 +379,22 @@ impl<'d> Walk<'d> {
         }
     }
 
-    /// Text read, to where it goes.
-    fn text(&mut self, text: &str) {
+    /// Text read, to where it goes; outside the root element only blank text is well-formed.
+    fn text(&mut self, text: &str) -> Result<(), Refused> {
+        if self.depth == 0 && !text.trim().is_empty() {
+            // Before any root it may be no XML at all, which `end` says; the root says it else.
+            if self.root.is_none() {
+                self.stray = true;
+                return Ok(());
+            }
+            return Err(text_outside_root());
+        }
         let (into, depth) = self.into;
         if into == Sink::Nothing || depth != self.depth {
-            return;
+            return Ok(());
         }
         let Some(case) = self.cases.last_mut() else {
-            return;
+            return Ok(());
         };
         match into {
             Sink::Failure => {
@@ -399,6 +414,7 @@ impl<'d> Walk<'d> {
             }
             Sink::Nothing => {}
         }
+        Ok(())
     }
 
     /// The innermost element closed.
@@ -457,6 +473,14 @@ impl<'d> Walk<'d> {
             )),
         }
     }
+}
+
+/// The refusal of text that is not blank outside the root element.
+fn text_outside_root() -> Refused {
+    (
+        CheckReportFault::Syntax,
+        "text outside the root element".to_owned(),
+    )
 }
 
 /// The finding of the failed `case` of a check in `dir`.
