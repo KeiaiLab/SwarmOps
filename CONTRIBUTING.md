@@ -153,7 +153,9 @@ NEXTEST_PROFILE=ci so check run --dir . --stage before-land --pass NEXTEST_PROFI
 
 It runs `just check` and `just check-compare`, this repository's two `before-land` checks in
 `.swarmops/checks.toml`, one after the other under their timeouts, each with a log that
-`so check log --dir . <check>` reads, and answers one envelope naming both outcomes. A check gets
+`so check log --dir . <check>` reads, and answers one envelope naming both outcomes; after it,
+`so check log --failed --dir .` prints the logs of what failed, and `so check runs --dir .` what
+ran. A check gets
 only a fixed list of your variables (`HOME`, `PATH`, `TMPDIR`, the locale and a few more) and
 those `--pass` names, each when it is set: without the four after `NEXTEST_PROFILE`, a shared
 target directory or a pinned toolchain is not used, and the build starts cold in `./target`. With

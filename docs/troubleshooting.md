@@ -1522,8 +1522,15 @@ A check that needs more than 900 s takes `--check-timeout`.
 From `check run`, `details.run` is the whole run: `details.run.failed` names the checks that did
 not pass, and each of `details.run.checks` has its `outcome`, its `findings` (read these first:
 each names a level, a title, and where it applies a path, lines and a message), its `log` (read it
-with `swarmops check log NAME` and the run's form, `--dir DIR` or `--ws NAME`, and `--run`) and,
-for a check that ran, the tails of its output. A check's `reports` say what came of each report
+with `swarmops check log NAME` and the run's form, `--dir DIR` or `--ws NAME`, and `--run`; when
+several checks did not pass, `swarmops check log --failed` with the same form and `--run` reads
+the logs of all of them in one answer) and, for a check that ran, the tails of its output.
+`check log --failed` on a run where nothing failed is `E_INVALID_ARG` with
+`details.reason: none_failed`: name the check whose log you want, or, for a run that still runs
+(`details.running`), wait for it to end. `check log --run RUN --run-lines DIR` answers
+`details.reason: run_gone` once the host no longer keeps that run (the newest 20 of a directory
+or workspace are kept): `details.failed` names what failed, and the logs are gone, so run the
+checks again. A check's `reports` say what came of each report
 its findings were read from: `missing`, its tool wrote none (for this repository's gate, run it
 with `NEXTEST_PROFILE=ci` and `--pass NEXTEST_PROFILE`, whose profile writes the JUnit report);
 `stale`, it was there but not written by this run, and was not read; `refused`, with its `fault`

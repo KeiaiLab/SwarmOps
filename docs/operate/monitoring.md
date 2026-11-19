@@ -121,6 +121,32 @@ the trunk, or an export waits for its review) or `E_GIT_WRITE`, how long the rev
 been ahead of the trunk (`git -C "$GIT_SIDE" log --oneline stable..review` lists what waits), and
 the CI runs on the review branch and the deployment runs on the trunk.
 
+### Check runs
+
+Each check that `swarmops check run` reaches appends one run line, a JSON object, to
+`run-lines.jsonl`: in the workspace's `.swarmws/check-runs/`, or beside the kept runs of the
+directory it checked. To gather the lines of several directories, workspaces and accounts in one
+place, set `SWARMOPS_CHECK_RUN_LINES_DIR` to an absolute directory in the environment of whatever
+starts the checks (or pass `--run-lines DIR`): every run then appends there. SwarmOps makes that
+directory, if it is not there, for its owner alone, and never changes one that exists: a
+directory shared between accounts gets its group and mode from you, and the files in it are made
+under each writer's umask. Past 64 MiB the file is renamed to `run-lines.1.jsonl`, replacing the
+one older file, so a directory holds at most 128 MiB of lines.
+
+The lines are diagnostics: unsynced, and nothing decides from them. `swarmops check runs
+--run-lines DIR` reads them back, newest first, a page at a time; this counts the runs and sums
+their checks' seconds over a window of Unix milliseconds, in one page of at most 1,000 lines
+(page on with `--cursor` while the answer gives one):
+
+```sh
+swarmops check runs --run-lines "$DIR" --since "$FROM_MS" --until "$TO_MS" --limit 1000 |
+  jq '.result.runs | {runs: (map(.run) | unique | length), seconds: ((map(.duration_ms) | add // 0) / 1000)}'
+```
+
+No figure for a host's check runs is recorded yet: [the measurements](../perf.md) hold none.
+`peak_rss_kib` is a sample of the check's process group taken once a second on Linux, not the
+kernel's high-water mark ([`check run`](../reference/commands/check-run.md#run-lines)).
+
 ### `op log`
 
 Who moved which ref, for moves no one expected.

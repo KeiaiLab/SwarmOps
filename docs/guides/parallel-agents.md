@@ -448,6 +448,13 @@ A check reports what it found as findings: it writes them as JSON lines to the f
 its outcome, each with its level, title, path and lines and message, at most 10,000 a run. When a
 run fails, an agent reads `details.run.checks[].findings` first, then the check's log.
 
+After a red run of several checks, `so check log --failed --run RUN` gives the logs of all that
+did not pass in one answer, each its last lines, and of one failed check that log alone. Each
+check a run reaches also leaves a run line on the host that ran it, with how long it waited and
+ran and how it ended: `so check runs` lists them, newest first, by check, tree, outcome, run and
+time. They are diagnostics, and nothing decides from them
+([`check runs`](../reference/commands/check-runs.md)).
+
 ### Git at both ends
 
 `so git import` brings a git repository's history into a store, and `so git export` writes the

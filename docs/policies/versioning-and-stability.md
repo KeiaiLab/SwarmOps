@@ -87,6 +87,11 @@ to the weakest:
    meaning, within a major version, and checks are written against it.
    The line format of a check's log and the layout of a run's directory are not part of this
    surface yet: they are diagnostics until logs are kept beside the store, and may change.
+   A run line (`CheckRunLine`, since M31) is diagnostics too, but its keys are held as a
+   response's are: keys are added, and none is removed or changes its meaning within a major
+   version, so that a reader of an older build still reads a newer line. The names of the run
+   lines' files, where they are kept and how they rotate are not a contract: read them through
+   `check runs`.
 
 The contract surfaces (3 to 5) grow without breaking: a new field, a new optional argument, a new
 command, a new error code or a new tool is not a breaking change. Clients must allow for that.

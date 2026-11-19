@@ -303,7 +303,9 @@ E_PATH_NOT_FOUND retryable=false exit=6
 | The findings of a failed `check run` | `jq -r '.error.details.run.checks[] \| .name as $c \| .findings[]? \| "\($c) \(.level) \(.path // "-"):\(.line // "-") \(.title)"'` after `E_CHECK_FAILED` |
 
 A read cut short says so: `cat` gives `truncated` and `next_offset` (read on with `--offset`), and
-`log`, `ls`, `history`, `diff` give a `cursor` while there is more. This loop pages through the
+`log`, `ls`, `history`, `diff` and `check runs` give a `cursor` while there is more. `check runs`
+pages the same way, with `.result.runs[]` for its lines and the same filters on every page: its
+cursor names a place among the lines, not the filters. This loop pages through the
 whole history three entries at a time:
 
 ```sh
