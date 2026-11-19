@@ -760,15 +760,27 @@ const RESUME_HINT: &str =
 /// The operations-spec error for a `git import` of `git_ref` from the repository at `git_path`
 /// that failed with `e`: the table in [`crate::LocalOps`]'s documentation. The source and its
 /// objects are named as the caller gave them and by their git ids; an import that a store
-/// failure, or a failure after a frame's commit point, stopped says how far it got
-/// (`details.imported`, `details.last_commit`). A refusal does not, though frames committed
-/// before it may be recorded: `ImportError::Convert` carries no count.
+/// failure, a failure after a frame's commit point or a refusal after a frame committed stopped
+/// says how far it got (`details.imported`, `details.last_commit`). A refusal before any frame
+/// committed (`ImportError::Convert`) recorded nothing.
 pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) -> OpError {
     let message = e.to_string();
     match e {
         ImportError::Source(e) => source_error(e, message, git_path, git_ref),
-        // A refusal: no `details.imported`, whatever frames it followed.
+        // A refusal before any frame committed: nothing recorded, no count.
         ImportError::Convert(e) => convert_error(e, message, git_path, git_ref),
+        // A refusal after frames that committed: its own code and hint, and how far it got.
+        ImportError::Refused {
+            source,
+            imported,
+            last,
+        } => {
+            let mut refused = convert_error(*source, message, git_path, git_ref);
+            let found = &mut refused.details;
+            found.insert("imported".to_owned(), imported.into());
+            found.insert("last_commit".to_owned(), last.to_string().into());
+            refused
+        }
         ImportError::RefName(name) => ref_name_invalid(name, message),
         ImportError::Diverged {
             target_ref,
@@ -3115,6 +3127,41 @@ mod tests {
             "run it again with --lossy paths to drop or normalize it and mark the changeset \
              (git.lossy)"
         );
+    }
+
+    /// A refusal after frames that committed is the refusal's own error, its hint kept, and says
+    /// how far the run got: `details.imported` and `details.last_commit`, and the count in the
+    /// message.
+    #[test]
+    fn a_refusal_after_a_frame_says_how_far_it_got() {
+        use serde_json::json;
+        use swarmops_git::LossyClass;
+
+        let lossy = ConvertError::Lossy {
+            commit: COMMIT,
+            class: LossyClass::Gitlinks,
+            path: b"lib/sub".to_vec(),
+            detail: "what is wrong".into(),
+        };
+        let refused = ImportError::Refused {
+            source: Box::new(lossy),
+            imported: 64,
+            last: OBJECT,
+        };
+        let want = json!({
+            "commit": COMMIT.to_string(),
+            "class": "gitlinks",
+            "path": "lib/sub",
+            "imported": 64,
+            "last_commit": OBJECT.to_string(),
+        });
+        let error = git_maps(refused, ErrorCode::GitImportLossy, &want);
+        assert!(
+            error.message.contains("64 commits were recorded"),
+            "{error:?}"
+        );
+        let hint = error.hint.unwrap_or_default();
+        assert!(hint.contains("--lossy gitlinks"), "{hint}");
     }
 
     /// A commit without a parent whose `advance` ref exists is not told that the ref moved: the

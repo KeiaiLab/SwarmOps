@@ -1418,7 +1418,7 @@ fn the_final_move_costs_the_same_for_1_and_2000() {
 /// the last. The figures print.
 #[cfg(feature = "test-hooks")]
 #[test]
-#[ignore = "slow, ~45 s (15.3 s and 43.5 s at load 116 and 141, idle not measured): imports 12,000 commits in process"]
+#[ignore = "slow, ~45 s loaded (15.3 s and 43.5 s at load 116 and 141; no idle run yet, owed to a quiet host): imports 12,000 commits in process"]
 fn the_final_move_costs_the_same_for_1_and_12000() {
     let (one_frames, one_writes, one_flushes) = final_move_cost(1);
     let (many_frames, many_writes, many_flushes) = final_move_cost(12_000);
@@ -1743,6 +1743,54 @@ fn a_lossy_base_seeds_no_import() {
         .map(|(oid, _)| *oid)
         .collect();
     assert_eq!(blobs, BTreeSet::from([readme, two]));
+}
+
+/// A commit refused after frames of the run committed says how far the run got: the frames'
+/// commits stay recorded, the refusal counts them and names the last, and the same import run
+/// again once the refusal is dealt with takes only the refused commit.
+#[test]
+fn a_refusal_after_a_frame_says_how_far_it_got() {
+    let mut source = MemSource::default();
+
+    // 1. Two plain commits, then one holding a gitlink, one commit a frame.
+    let one = source.blob(b"one\n");
+    let first_tree = source.tree(&[("100644", b"a.txt", one)]);
+    let first = source.commit(first_tree, &[], "first\n");
+    let two = source.blob(b"two\n");
+    let second_tree = source.tree(&[("100644", b"a.txt", two)]);
+    let second = source.commit(second_tree, &[first], "second\n");
+    let linked_tree = source.tree(&[("100644", b"a.txt", two), ("160000", b"sub", one)]);
+    let linked = source.commit(linked_tree, &[second], "linked\n");
+    let (_dir, _root, repo) = new_repo();
+    let mut req = request(&linked.to_string());
+    req.frame_changesets = 1;
+    req.step_budget = Duration::MAX;
+
+    // 2. Refused, with the two frames before it counted.
+    let error = import(&repo, &source, &req).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            ImportError::Refused { source, imported: 2, last }
+                if *last == second
+                    && matches!(
+                        **source,
+                        ConvertError::Lossy { class: LossyClass::Gitlinks, .. }
+                    )
+        ),
+        "{error:?}"
+    );
+    assert!(
+        error.to_string().contains("2 commits were recorded"),
+        "{error}"
+    );
+    assert_eq!(repo.info().expect("info").changesets, 2);
+
+    // 3. Run again with the class allowed: the walk stops at the second, known; the third is
+    // taken.
+    req.lossy = [LossyClass::Gitlinks].into_iter().collect();
+    let report = import(&repo, &source, &req).expect("import");
+    assert_eq!((report.imported, report.skipped), (1, 1), "{report:?}");
 }
 
 /// Without `gitlinks` allowed, the commit that holds one is refused by name, and nothing of the
@@ -3204,6 +3252,44 @@ mod import_memos {
         assert_eq!(mac_memo(&repo, MAC_MEMOS[1], lossy_root.0, &key), None);
         let odd_blob = swarmops_testkit::repo::blob(b"odd mode\n");
         assert_eq!(mac_memo(&repo, MAC_MEMOS[2], odd_blob.0, &key), None);
+        let wrong = verify_export_oids_with(&repo, Some(&key)).expect("verify");
+        assert_eq!(wrong, [], "every memo checks");
+    }
+
+    /// An import onto an imported head takes the head's root, its trees and its blobs as
+    /// converted (step 4's seed), and renders a tree it makes over them: a new root that holds
+    /// the old root, a kept tree and a kept blob gets its memo, which only the seeded oids of all
+    /// three give.
+    #[test]
+    fn a_tree_over_seeded_objects_gets_its_memo() {
+        let (_dir, _root, repo, _reads) = counted_store();
+        let mut source = MemSource::default();
+        let key = key();
+
+        // 1. The base: `keep.txt` and `sub/`, imported under the key.
+        let keep = source.blob(b"kept\n");
+        let inner = source.blob(b"inner\n");
+        let sub = source.tree(&[("100644", b"s.txt", inner)]);
+        let base_tree = source.tree(&[("100644", b"keep.txt", keep), ("40000", b"sub", sub)]);
+        let base = source.commit(base_tree, &[], "Base\n");
+        import(&repo, &source, &keyed(base, &key)).expect("import the base");
+
+        // 2. A commit on it whose new root holds the old root, `sub/`, `keep.txt` and a new blob.
+        let new = source.blob(b"new\n");
+        let top_tree = source.tree(&[
+            ("100644", b"keep.txt", keep),
+            ("100644", b"new.txt", new),
+            ("40000", b"old", base_tree),
+            ("40000", b"sub", sub),
+        ]);
+        let top = source.commit(top_tree, &[base], "Top\n");
+        let report = import(&repo, &source, &keyed(top, &key)).expect("import the top");
+        assert_eq!((report.imported, report.skipped), (1, 1), "{report:?}");
+
+        // 3. The new root's memo, and every memo the store's own.
+        let root = repo.changeset(report.head).unwrap().unwrap().changeset.root;
+        let memo = mac_memo(&repo, MAC_MEMOS[1], root.0, &key);
+        assert!(memo.is_some(), "the new root's memo");
         let wrong = verify_export_oids_with(&repo, Some(&key)).expect("verify");
         assert_eq!(wrong, [], "every memo checks");
     }

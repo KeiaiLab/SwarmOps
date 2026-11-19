@@ -955,7 +955,8 @@ Kind: object. `swarmops schema ConflictReport` prints its JSON Schema.
 | --- | --- | --- | --- |
 | `auto_merged` | array of `string` | no | The paths both sides changed whose contents merged cleanly into a content neither side had. Omitted when empty. |
 | `base` | `string` | yes | The merge base: the changeset the change starts from. |
-| `files` | array of [`FileConflictOut`](#fileconflictout) | yes | The files that conflict, in path order, while their entries stay within 24 KiB as JSON, texts aside: the first file always, with at least its first hunk, its hunks past the bound as one hunk that spans them, without texts; a later file whole, or else left out with every file after it (`truncated`). The error's message counts every conflicting path. |
+| `files` | array of [`FileConflictOut`](#fileconflictout) | yes | The files that conflict, in path order, while their entries stay within 24 KiB as JSON, texts aside: the first file always, with at least its first hunk, its hunks past the bound as one hunk that spans them, without texts; a later file whole, or else left out with every file after it (`truncated`, `files_left_out`). The error's message counts every conflicting path. |
+| `files_left_out` | `integer` (uint64) | no | How many conflicting files `files` leaves out: every conflicting path the error's message counts, less the files listed. Omitted when 0. |
 | `kinds` | array of [`ConflictKindOut`](#conflictkindout) | yes | The kinds of conflict in `files`, each once. |
 | `ours` | `string` | yes | The change's head. |
 | `stale` | array of `string` | no | The paths whose resolutions did not apply, since the target holds there what their `against` did not: the target changed them after the report the resolutions answered. Read them at `theirs` and resolve them again, against it. Omitted when empty. |

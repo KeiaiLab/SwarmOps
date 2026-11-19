@@ -231,7 +231,7 @@ fn committers(store: &str, dir: &Path, done: &AtomicBool) -> Vec<Committed> {
 /// The import's peak resident memory on 1,000 and on 12,000 commits, each alone, and its longest
 /// hold of the writer lock on 1,000.
 #[test]
-#[ignore = "slow, ~470 s (469.8 s optimized at load 28 to 5, idle not measured): imports 13,000 commits alone, run by `just perf`"]
+#[ignore = "slow, ~470 s loaded (469.8 s optimized at load 28 to 5; no idle run yet, owed to a quiet host): imports 13,000 commits alone, run by `just perf`"]
 fn import_memory() {
     let work = TempDir::new().expect("a temp dir");
 
@@ -269,7 +269,7 @@ fn import_memory() {
 /// The control lane: the same committers for [`ALONE_FOR`] with no import, their wall time from
 /// spawn to exit (their own queue, read beside the import's lane).
 #[test]
-#[ignore = "slow, ~128 s (127.5 s optimized at load 28, idle not measured): 8 committers for 120 s, run by `just perf`"]
+#[ignore = "slow, ~128 s loaded (127.5 s optimized at load 28; no idle run yet, owed to a quiet host): 8 committers for 120 s, run by `just perf`"]
 fn committers_alone() {
     let work = TempDir::new().expect("a temp dir");
     let shared = store(work.path(), "alone");
@@ -300,7 +300,7 @@ fn committers_alone() {
 /// 8 committers and a reader beside the import of 12,000 commits: each commit's wait behind the
 /// import (`behind`) and its wall time, and the import's longest hold of the writer lock.
 #[test]
-#[ignore = "slow, ~990 s (989.9 s optimized at load 65 to 28, idle not measured): imports 12,000 commits with 8 committers beside, run by `just perf`"]
+#[ignore = "slow, ~990 s loaded (989.9 s optimized at load 65 to 28; no idle run yet, owed to a quiet host): imports 12,000 commits with 8 committers beside, run by `just perf`"]
 fn commits_beside_an_import() {
     let work = TempDir::new().expect("a temp dir");
 
