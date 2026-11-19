@@ -519,8 +519,10 @@ struct InFlight {
 }
 
 impl Rendezvous {
-    /// How long a call waits for the others.
-    pub const PATIENCE: Duration = Duration::from_secs(5);
+    /// How long a call waits for the others at most, as long as [`Hold::PATIENCE`]: calls
+    /// made at once meet long before, on a loaded host too, and calls made one after another
+    /// end rather than hang.
+    pub const PATIENCE: Duration = Duration::from_secs(60);
 
     /// From now on, each call waits until `want` are in flight together; 0 waits for none.
     /// Starts the count of the most at once afresh.
@@ -1126,5 +1128,16 @@ mod tests {
             });
             assert_eq!(outcomes[0], outcomes[1], "{method}");
         }
+    }
+    /// A rendezvous only fails a test by `most()`, after its wait: a wait shorter than a
+    /// hold's lets a loaded host fail calls that are made at once.
+    #[test]
+    fn a_rendezvous_waits_as_long_as_a_hold() {
+        assert!(
+            Rendezvous::PATIENCE >= Hold::PATIENCE,
+            "a rendezvous gives up after {:?}, a hold after {:?}",
+            Rendezvous::PATIENCE,
+            Hold::PATIENCE
+        );
     }
 }
