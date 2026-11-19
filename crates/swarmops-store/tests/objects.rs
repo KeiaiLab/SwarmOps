@@ -22,7 +22,7 @@ use proptest::prelude::Rng;
 use proptest::test_runner::{RngAlgorithm, TestRng};
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 #[cfg(feature = "test-hooks")]
-use swarmops_store::{CRASH_AT_ENV, CrashAtFs, FS_CALLS_ENV, FsOps};
+use swarmops_store::{CRASH_AT_ENV, CrashAtFs, FS_CALLS_ENV, FS_TRACE_ENV, FsOps};
 use swarmops_store::{FsMethod, FsObjectStore, Layout, ObjectStore, RealFs, StoreError};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{self, SIGABRT, this_test};
@@ -49,6 +49,11 @@ const APPENDS_FILE: &str = "SWARMOPS_TEST_CRASH_APPENDS_FILE";
 /// spawns: the store root.
 #[cfg(feature = "test-hooks")]
 const COUNT_CHILD_ROOT: &str = "SWARMOPS_TEST_COUNT_CHILD_ROOT";
+
+/// Set only in the children that `fs_trace_hook_lists_what_a_sweep_compares` spawns: the store
+/// root.
+#[cfg(feature = "test-hooks")]
+const TRACE_CHILD_ROOT: &str = "SWARMOPS_TEST_TRACE_CHILD_ROOT";
 #[cfg(feature = "test-hooks")]
 const CRASH_PAYLOAD: &[u8] = b"this put must never become visible";
 
@@ -1223,6 +1228,97 @@ fn fs_calls_hook_reports_how_many_calls_a_process_made() {
             assert!(output.status.success(), "{shown}");
             assert_eq!(fs::read_to_string(&report).unwrap(), calls.to_string());
         }
+    }
+}
+
+/// `SWARMOPS_TEST_FS_TRACE=<file>`: the object store `open_default` gives lists each call of
+/// the process in the file, numbered, its path relative to the store, so that two runs on two
+/// stores write the same lines; with `SWARMOPS_TEST_CRASH_AT=<k>` set too, the run aborted at
+/// call k leaves lines 1 to k of them, which is what a sweep compares
+/// (`swarmops_testkit::cli::sweep::diverged`).
+#[test]
+#[cfg(feature = "test-hooks")]
+fn fs_trace_hook_lists_what_a_sweep_compares() {
+    use swarmops_testkit::cli::sweep::diverged;
+
+    if let Some(root) = std::env::var_os(TRACE_CHILD_ROOT) {
+        let root = Utf8PathBuf::from_path_buf(root.into()).expect("UTF-8 store root");
+        let mut store = FsObjectStore::open_default(Layout::new(root));
+        // One directory fsync at a time, in path order: the k-th call is the same call.
+        store.set_parallelism(1);
+        store.put(ObjectKind::Blob, CRASH_PAYLOAD).unwrap();
+        store.flush().unwrap();
+        return;
+    }
+
+    // The put and flush in a child of its own, on a store of its own, traced to the file
+    // returned; aborted at call `crash_at`, if any.
+    let traced = |crash_at: Option<u64>| {
+        let (root, layout) = new_root();
+        let trace = layout.root().join("trace").into_std_path_buf();
+        let mut child = this_test(&test_name!("fs_trace_hook_lists_what_a_sweep_compares"));
+        child
+            .env(TRACE_CHILD_ROOT, layout.root())
+            .env(FS_TRACE_ENV, &trace)
+            .env_remove(FS_CALLS_ENV)
+            .env_remove(CRASH_AT_ENV);
+        if let Some(k) = crash_at {
+            child.env(CRASH_AT_ENV, k.to_string());
+        }
+        let output = child::run(&mut child);
+        let shown = format!(
+            "{:?}\n--- child stderr ---\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if crash_at.is_some() {
+            assert_eq!(output.status.signal(), Some(SIGABRT), "{shown}");
+        } else {
+            assert!(output.status.success(), "{shown}");
+        }
+        (root, trace)
+    };
+    let lines = |trace: &std::path::Path| -> Vec<String> {
+        let text = fs::read_to_string(trace).unwrap();
+        text.lines().map(str::to_owned).collect()
+    };
+
+    // The trace alone counts the calls: each line is its number, a method, a path in the store.
+    let (_dry_root, dry) = traced(None);
+    let dry_lines = lines(&dry);
+    assert!(
+        dry_lines.len() > 3,
+        "a put makes several calls: {dry_lines:?}"
+    );
+    for (at, line) in dry_lines.iter().enumerate() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let [n, method, path] = fields[..] else {
+            panic!("{line:?} is not `<n> <method> <path>`");
+        };
+        assert_eq!(n, (at + 1).to_string(), "{line:?}");
+        assert!(
+            FsMethod::ALL.iter().any(|known| *known == method),
+            "{line:?}"
+        );
+        assert!(path.starts_with("objects"), "{line:?} is in the store");
+    }
+    let staged = dry_lines
+        .iter()
+        .filter(|line| line.contains(".tmp"))
+        .count();
+    assert_eq!(staged, 0, "no temp file's random name: {dry_lines:?}");
+
+    // A second run, on another store, makes the same calls: the same lines.
+    let (_again_root, again) = traced(None);
+    assert_eq!(lines(&again), dry_lines);
+
+    // A run aborted at call k leaves the dry run's lines 1 to k, the fatal call the last.
+    let calls = u64::try_from(dry_lines.len()).unwrap();
+    for k in [1, 2, calls] {
+        let (_cut_root, cut) = traced(Some(k));
+        let kept = usize::try_from(k).unwrap();
+        assert_eq!(lines(&cut), dry_lines[..kept], "k={k}");
+        assert_eq!(diverged(&dry, &cut, k), None, "k={k}");
     }
 }
 

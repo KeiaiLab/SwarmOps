@@ -21,7 +21,9 @@
 //! A sixth, `SWARMOPS_TEST_LEAD_WAIT=<n>`, has a writer that leads the write queue wait for `n`
 //! other requests before it plans, then plan them (see [`LEAD_WAIT_ENV`]; [`FsOps::lead_wait`]
 //! asks the same of a lead in the test's own process); [`FsOps::crash_point`] is where a
-//! `CrashAtFs` may end a queue step.
+//! `CrashAtFs` may end a queue step. A seventh, `SWARMOPS_TEST_FS_TRACE=<file>`, has a `CrashAtFs`
+//! list each call it counts in `<file>` (see [`FS_TRACE_ENV`]), so that two runs whose calls
+//! differ show where.
 //!
 //! The hooks act only in a build with the `test-hooks` feature (this crate's, which the
 //! `test-hooks` features of `swarmops-repo`, `swarmops-ops`, `swarmops-cli` and
@@ -98,6 +100,29 @@ pub const CRASH_AT_ENV: &str = "SWARMOPS_TEST_CRASH_AT";
 /// the calls of a run it then crashes or fails at each of (see [`HookedFs::from_env`]). A run
 /// that crashes writes nothing.
 pub const FS_CALLS_ENV: &str = "SWARMOPS_TEST_FS_CALLS";
+
+/// Test hook, in a build with the `test-hooks` feature: with `SWARMOPS_TEST_FS_TRACE=<file>`
+/// set, the filesystem a store opens on by default counts its calls (a `CrashAtFs`, made for
+/// the trace alone if no other hook asks for one; see [`HookedFs::from_env`]) and appends a line
+/// to `<file>` for each, before the call runs:
+///
+/// ```text
+/// <n> <method> <store-relative path>
+/// 7 link_noclobber objects/ab/cd…
+/// ```
+///
+/// `<n>` is the call's number, from 1, `<method>` its [`FsMethod`] (`crash_point` for
+/// [`FsOps::crash_point`], whose path is `-`), and the path is a link's and a rename's target, a
+/// temp file's directory, as [`StoreFs`] names them. The path is relative to the store's root,
+/// found from its text: it starts at `meta`, `objects` or `meta.tmp`, or is `FORMAT` or `REPO`,
+/// and is `.` for the root or anything else. A staged file (in `objects/tmp/` or
+/// `derived/tmp/`) is `*`, since its name is random. So the same calls give the same lines in
+/// every run, on any store.
+///
+/// The file is appended to (`O_APPEND`) and never synced: a run aborted at call k
+/// (`SWARMOPS_TEST_CRASH_AT`) leaves lines 1 to k, and a process that opens a second counting
+/// filesystem shows in it as a count that starts again at 1.
+pub const FS_TRACE_ENV: &str = "SWARMOPS_TEST_FS_TRACE";
 
 /// Test hook, in a build with the `test-hooks` feature: with
 /// `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]` set, k positive, the filesystem a store opens
@@ -1078,6 +1103,8 @@ pub struct CrashAtFs<F: FsOps> {
     calls: AtomicU64,
     /// Where to write `calls` when dropped, if anywhere.
     report: Option<PathBuf>,
+    /// Where to list each call before it runs, if anywhere ([`FS_TRACE_ENV`]).
+    trace: Option<File>,
 }
 
 /// The filesystem the test hooks ask a store to open on: see [`HookedFs::from_env`].
@@ -1094,8 +1121,10 @@ impl HookedFs {
     /// 1. a `FailAtFs` when `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]` is set (see
     ///    [`FAIL_AT_ENV`]); a malformed value panics, as a mistake in the test;
     /// 2. a `CrashAtFs` when `SWARMOPS_TEST_CRASH_AT=<k>` is set to a positive k, or
-    ///    `SWARMOPS_TEST_FS_CALLS=<file>` is set: it aborts at call k, and reports its call
-    ///    count to `<file>`. Being outside the `FailAtFs`, it counts the calls that fails too;
+    ///    `SWARMOPS_TEST_FS_CALLS=<file>` or `SWARMOPS_TEST_FS_TRACE=<file>` is set: it aborts
+    ///    at call k, reports its call count to the one `<file>`, and lists its calls in the
+    ///    other ([`FS_TRACE_ENV`]). Being outside the `FailAtFs`, it counts the calls that fails
+    ///    too;
     /// 3. an `OrderCheckFs` when `SWARMOPS_TEST_ORDER_CHECK=1` is set: outermost, so
     ///    that it sees every call, the injected failures included, and judges them as real ones.
     ///
@@ -1121,9 +1150,9 @@ impl HookedFs {
     }
 
     /// Whether one of the hooks counts calls (`SWARMOPS_TEST_CRASH_AT`,
-    /// `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_FAIL_AT`): a store must then make its calls one
-    /// at a time (parallelism 1), so that call k is the same call in every run. The order check
-    /// alone counts nothing, and leaves the parallelism as it is.
+    /// `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_FS_TRACE`, `SWARMOPS_TEST_FAIL_AT`): a store
+    /// must then make its calls one at a time (parallelism 1), so that call k is the same call
+    /// in every run. The order check alone counts nothing, and leaves the parallelism as it is.
     pub fn counts_calls(&self) -> bool {
         self.counts_calls
     }
@@ -1139,11 +1168,13 @@ impl HookedFs {
 fn hooked_fs() -> Option<HookedFs> {
     let crash_at = crash_at_from_env();
     let report = std::env::var_os(FS_CALLS_ENV).filter(|file| !file.is_empty());
+    let trace = std::env::var_os(FS_TRACE_ENV).filter(|file| !file.is_empty());
     let fail_at = std::env::var(FAIL_AT_ENV).ok().and_then(|spec| {
         FailAt::parse(&spec).unwrap_or_else(|e| panic!("{FAIL_AT_ENV}={spec:?}: {e}"))
     });
     let order_check = std::env::var_os(ORDER_CHECK_ENV).is_some_and(|value| value == "1");
-    let counts_calls = crash_at.is_some() || report.is_some() || fail_at.is_some();
+    let counted = crash_at.is_some() || report.is_some() || trace.is_some();
+    let counts_calls = counted || fail_at.is_some();
     if !counts_calls && !order_check {
         return None;
     }
@@ -1151,12 +1182,15 @@ fn hooked_fs() -> Option<HookedFs> {
     if let Some(fail) = fail_at {
         fs = Box::new(FailAtFs::new(fs, fail));
     }
-    if crash_at.is_some() || report.is_some() {
-        let crash = CrashAtFs::new(fs, crash_at.unwrap_or(0));
-        fs = Box::new(match report {
-            Some(file) => crash.reporting_calls_to(file.into()),
-            None => crash,
-        });
+    if counted {
+        let mut crash = CrashAtFs::new(fs, crash_at.unwrap_or(0));
+        if let Some(file) = report {
+            crash = crash.reporting_calls_to(file.into());
+        }
+        if let Some(file) = trace {
+            crash = crash.tracing_calls_to(Path::new(&file));
+        }
+        fs = Box::new(crash);
     }
     if order_check {
         fs = Box::new(crate::OrderCheckFs::new(fs));
@@ -1180,6 +1214,7 @@ impl<F: FsOps> CrashAtFs<F> {
             crash_at: AtomicU64::new(k),
             calls: AtomicU64::new(0),
             report: None,
+            trace: None,
         }
     }
 
@@ -1192,14 +1227,32 @@ impl<F: FsOps> CrashAtFs<F> {
         self
     }
 
+    /// This wrapper, appending a line to `file` for each call it counts, before the call runs:
+    /// the trace of [`FS_TRACE_ENV`]. The file is made if it is missing, and what it holds is
+    /// kept. A failure to open it or to write is not reported: the lines are missing then,
+    /// which the test that asked for them finds out.
+    #[must_use]
+    pub fn tracing_calls_to(mut self, file: &Path) -> Self {
+        self.trace = appended(file).ok();
+        self
+    }
+
     /// How many calls it has seen.
     pub fn calls(&self) -> u64 {
         self.calls.load(Ordering::SeqCst)
     }
 
-    /// Counts one call, and aborts if it is the k-th.
-    fn tick(&self) {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+    /// Counts one call, `method` on `path` (a [`FsOps::crash_point`] has none), lists it in the
+    /// trace, and aborts if it is the k-th: the fatal call is the trace's last line.
+    fn tick(&self, method: &str, path: Option<&Path>) {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(mut trace) = self.trace.as_ref() {
+            let path = path.map_or_else(|| NO_PATH.to_owned(), traced_path);
+
+            // One write of the whole line, so that appends of several threads do not mix.
+            let _ = trace.write_all(format!("{n} {method} {path}\n").as_bytes());
+        }
+
         let before = self
             .crash_at
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -1223,88 +1276,154 @@ impl<F: FsOps> Drop for CrashAtFs<F> {
 #[cfg(feature = "test-hooks")]
 impl<F: FsOps> FsOps for CrashAtFs<F> {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        self.tick();
+        self.tick(FsMethod::CreateDirAll.as_str(), Some(p));
         self.inner.create_dir_all(p)
     }
 
     fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        self.tick();
+        self.tick(FsMethod::WriteDurableTemp.as_str(), Some(dir));
         self.inner.write_durable_temp(dir, bytes)
     }
 
     fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        self.tick();
+        self.tick(FsMethod::LinkNoclobber.as_str(), Some(to));
         self.inner.link_noclobber(from, to)
     }
 
     fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.tick();
+        self.tick(FsMethod::FsyncDir.as_str(), Some(p));
         self.inner.fsync_dir(p)
     }
 
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        self.tick();
+        self.tick(FsMethod::Read.as_str(), Some(p));
         self.inner.read(p)
     }
 
     fn exists(&self, p: &Path) -> io::Result<bool> {
-        self.tick();
+        self.tick(FsMethod::Exists.as_str(), Some(p));
         self.inner.exists(p)
     }
 
     fn remove(&self, p: &Path) -> io::Result<()> {
-        self.tick();
+        self.tick(FsMethod::Remove.as_str(), Some(p));
         self.inner.remove(p)
     }
 
     fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
-        self.tick();
+        self.tick(FsMethod::Remove.as_str(), Some(p));
         self.inner.remove_dir_all(p)
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.tick();
+        self.tick(FsMethod::AppendDurable.as_str(), Some(path));
         self.inner.append_durable(path, bytes)
     }
 
     fn file_len(&self, path: &Path) -> io::Result<u64> {
-        self.tick();
+        self.tick(FsMethod::FileLen.as_str(), Some(path));
         self.inner.file_len(path)
     }
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        self.tick();
+        self.tick(FsMethod::Truncate.as_str(), Some(path));
         self.inner.truncate(path, len)
     }
 
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.tick();
+        self.tick(FsMethod::AtomicReplace.as_str(), Some(path));
         self.inner.atomic_replace(path, bytes)
     }
 
     fn sync_data(&self, path: &Path) -> io::Result<()> {
-        self.tick();
+        self.tick(FsMethod::SyncData.as_str(), Some(path));
         self.inner.sync_data(path)
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.tick();
+        self.tick(FsMethod::Append.as_str(), Some(path));
         self.inner.append(path, bytes)
     }
 
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.tick();
+        self.tick(FsMethod::RenameDurable.as_str(), Some(to));
         self.inner.rename_durable(from, to)
     }
 
     fn crash_point(&self) {
-        self.tick();
+        self.tick(CRASH_POINT, None);
         self.inner.crash_point();
     }
 
     fn lead_wait(&self) -> Option<usize> {
         self.inner.lead_wait()
     }
+}
+
+/// What a trace calls [`FsOps::crash_point`], which is no [`FsMethod`].
+#[cfg(feature = "test-hooks")]
+const CRASH_POINT: &str = "crash_point";
+
+/// The path of a traced call that has none (a [`FsOps::crash_point`]).
+#[cfg(feature = "test-hooks")]
+const NO_PATH: &str = "-";
+
+/// A create's staging directory, under a store's root, beside [`META_DIR`].
+#[cfg(feature = "test-hooks")]
+const META_STAGING: &str = "meta.tmp";
+
+/// The files a store's root holds itself ([`crate::Layout::format_file`],
+/// [`crate::Layout::repo_file`]).
+#[cfg(feature = "test-hooks")]
+const ROOT_FILES: [&str; 2] = ["FORMAT", "REPO"];
+
+/// The directory of derived values in the metadata directory, whose [`OBJECTS_TMP`] stages them
+/// ([`crate::Layout::derived_tmp`]).
+#[cfg(feature = "test-hooks")]
+const DERIVED_DIR: &str = "derived";
+
+/// What a trace names a staged file, whose own name is random.
+#[cfg(feature = "test-hooks")]
+const STAGED_FILE: &str = "*";
+
+/// `path` as a trace names it ([`FS_TRACE_ENV`]): relative to its store's root, which a
+/// `CrashAtFs` is not told, so found from the path's text alone, with no system call.
+///
+/// ```text
+/// /tmp/.tmpQ1/store/objects/ab/cd…          objects/ab/cd…
+/// /tmp/.tmpQ1/store/meta/refs/meta          meta/refs/meta   (the first `meta` is the store's)
+/// /tmp/.tmpQ1/store/FORMAT                  FORMAT
+/// /tmp/.tmpQ1/store/objects/tmp/.tmpZk3     objects/tmp/*
+/// /tmp/.tmpQ1/store                         .
+/// ```
+#[cfg(feature = "test-hooks")]
+fn traced_path(path: &Path) -> String {
+    let parts: Vec<_> = (path.components())
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect();
+
+    // The root's own entries: a directory anywhere in the path, a file at its end only.
+    let last = parts.len().saturating_sub(1);
+    let top = parts.iter().enumerate().position(|(at, part)| {
+        [META_DIR, OBJECTS_DIR, META_STAGING].contains(&part.as_ref())
+            || (at == last && ROOT_FILES.contains(&part.as_ref()))
+    });
+    let Some(top) = top else {
+        return ".".to_owned();
+    };
+    let mut below: Vec<&str> = parts[top..].iter().map(AsRef::as_ref).collect();
+
+    // A staged file's name is never the same twice: `objects/tmp/<name>`,
+    // `meta/derived/tmp/<name>`.
+    if let [dirs @ .., name] = below.as_mut_slice()
+        && matches!(
+            dirs,
+            [OBJECTS_DIR, OBJECTS_TMP] | [_, DERIVED_DIR, OBJECTS_TMP]
+        )
+    {
+        *name = STAGED_FILE;
+    }
+    below.join("/")
 }
 
 /// The k of `SWARMOPS_TEST_CRASH_AT=<k>`; `None` unless set to a positive integer.
@@ -1796,6 +1915,76 @@ mod tests {
             Some(5)
         );
         assert_eq!(fs::read(&file).unwrap(), b"abcdef", "append does not flush");
+    }
+
+    /// A `CrashAtFs` with a trace lists each call it counts, numbered, by method and by path
+    /// relative to the store, before the call runs: the third call here reads the trace itself,
+    /// and finds its own line in it. Three calls, three lines.
+    #[test]
+    fn a_trace_lists_each_counted_call_before_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("store");
+        let trace = dir.path().join("trace");
+        let traced = CrashAtFs::new(RealFs, 0).tracing_calls_to(&trace);
+
+        traced
+            .create_dir_all(&root.join("meta/derived/tmp"))
+            .unwrap();
+        (traced.append(&root.join("meta/derived/tmp/41-0-9f3a"), b"value")).unwrap();
+        let read = traced.read(&trace).unwrap().expect("the trace is there");
+
+        let lines = "1 create_dir_all meta/derived/tmp\n2 append meta/derived/tmp/*\n3 read .\n";
+        assert_eq!(String::from_utf8(read).unwrap(), lines);
+        assert_eq!(traced.calls(), 3);
+
+        // A crash point is counted too, and has no path; a second trace adds to the file.
+        drop(traced);
+        let again = CrashAtFs::new(RealFs, 0).tracing_calls_to(&trace);
+        again.crash_point();
+        assert!(again.exists(&root.join("FORMAT")).is_ok());
+        assert_eq!(
+            fs::read_to_string(&trace).unwrap(),
+            format!("{lines}1 crash_point -\n2 exists FORMAT\n")
+        );
+    }
+
+    /// A trace names a path from the store's root down, whatever lies above it, so that the
+    /// same call is the same line on any store; a staged file by its directory.
+    #[test]
+    fn a_traced_path_is_relative_to_its_store() {
+        let object = "cd".repeat(31);
+        let cases = [
+            ("/tmp/.tmpQ1/store", "."),
+            ("/tmp/.tmpQ1/store/FORMAT", "FORMAT"),
+            ("/tmp/.tmpQ1/store/REPO", "REPO"),
+            ("/tmp/REPO/store/meta/lock", "meta/lock"),
+            ("/tmp/.tmpQ1/store/meta", "meta"),
+            ("/tmp/.tmpQ1/store/meta/journal.log", "meta/journal.log"),
+            (
+                "/tmp/.tmpQ1/store/meta/refs/objects/meta",
+                "meta/refs/objects/meta",
+            ),
+            (
+                "/tmp/.tmpQ1/store/meta.tmp/journal.off",
+                "meta.tmp/journal.off",
+            ),
+            ("/tmp/.tmpQ1/store/objects/tmp", "objects/tmp"),
+            ("/tmp/.tmpQ1/store/objects/tmp/.tmpZk3a9Q", "objects/tmp/*"),
+            (
+                "/tmp/.tmpQ1/store/meta/derived/tmp/41-0-9f3a",
+                "meta/derived/tmp/*",
+            ),
+            ("/tmp/.tmpQ1/store/meta/refs/tmp/x", "meta/refs/tmp/x"),
+            ("store/meta/sorted3/keys.tmp", "meta/sorted3/keys.tmp"),
+        ];
+        for (path, named) in cases {
+            assert_eq!(traced_path(Path::new(path)), named, "{path}");
+        }
+        let path = format!("/tmp/.tmpQ1/store/objects/ab/{object}");
+        assert_eq!(
+            traced_path(Path::new(&path)),
+            format!("objects/ab/{object}")
+        );
     }
 
     /// `StoreFs` forwards each call once, as it is (a counter around the failing filesystem

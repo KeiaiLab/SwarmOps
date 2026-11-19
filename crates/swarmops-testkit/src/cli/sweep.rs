@@ -12,6 +12,10 @@
 //!   checkpoint's batching or to the template fails both sweeps at their dry runs, rather than
 //!   taking those calls out of them unseen.
 //!
+//! - A sweep holds only if call k is the same call in every run. A run with
+//!   `SWARMOPS_TEST_FS_TRACE` set lists its calls, and two lists show where two runs part:
+//!   [`same_count`] for a dry run done twice, [`diverged`] for a dry run and a cut one.
+//!
 //! Each of them runs the [`Program`] its store's commands run.
 
 use std::fs;
@@ -19,7 +23,7 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use swarmops_store::{FS_CALLS_ENV, StoreFormat};
+use swarmops_store::{FS_CALLS_ENV, FS_TRACE_ENV, StoreFormat};
 
 use super::{Program, Run, Store};
 
@@ -73,6 +77,78 @@ pub fn reported_calls(file: &Path) -> u64 {
     text.trim()
         .parse()
         .unwrap_or_else(|e| panic!("{text:?} is not a call count: {e}"))
+}
+
+/// The lines of the trace a run wrote to `file` (`SWARMOPS_TEST_FS_TRACE`), one for each
+/// filesystem call it counted; `None` if there is no such file.
+fn trace_lines(file: &Path) -> Option<Vec<String>> {
+    let text = fs::read_to_string(file).ok()?;
+    Some(text.lines().map(str::to_owned).collect())
+}
+
+/// The first of lines 1 to `upto` that is not the same in `a` and in `b`: its number, then the
+/// line of each, empty where the trace has ended.
+fn first_difference(a: &[String], b: &[String], upto: u64) -> Option<(u64, String, String)> {
+    let line = |trace: &[String], n: u64| {
+        let at = usize::try_from(n - 1).ok()?;
+        trace.get(at).cloned()
+    };
+    (1..=upto).find_map(|n| {
+        let (in_a, in_b) = (line(a, n), line(b, n));
+        (in_a != in_b).then(|| (n, in_a.unwrap_or_default(), in_b.unwrap_or_default()))
+    })
+}
+
+/// Where a run cut at call `k` (crashed or failed there) parted from the dry run before it, by
+/// their traces (`SWARMOPS_TEST_FS_TRACE`, set in both runs): the first of lines 1 to `k` that
+/// differs, as its number, the dry run's line and the cut run's, the latter empty if the cut
+/// run made fewer calls. `None` if the cut run made the dry run's first `k` calls: call `k` was
+/// then the call the sweep meant. A sweep says this where a cut run did not end as it must.
+///
+/// # Panics
+///
+/// If the dry run left no trace: the test did not set the variable.
+pub fn diverged(dry: &Path, cut: &Path, k: u64) -> Option<(u64, String, String)> {
+    let Some(dry_lines) = trace_lines(dry) else {
+        panic!(
+            "{}: the dry run left no trace: set {FS_TRACE_ENV}",
+            dry.display()
+        )
+    };
+    let cut_lines = trace_lines(cut).unwrap_or_default();
+    first_difference(&dry_lines, &cut_lines, k)
+}
+
+/// Checks that a dry run done twice made the same number of filesystem calls, `a` then `b`:
+/// if it did not, call k is not the same call in every run, and a sweep of the calls proves
+/// nothing. `dry_a` and `dry_b` are the traces of the two runs (`SWARMOPS_TEST_FS_TRACE`).
+///
+/// # Panics
+///
+/// If the counts differ, with the first line at which the traces do.
+#[track_caller]
+pub fn same_count(a: u64, b: u64, dry_a: &Path, dry_b: &Path) {
+    if a == b {
+        return;
+    }
+    let lines_a = trace_lines(dry_a).unwrap_or_default();
+    let lines_b = trace_lines(dry_b).unwrap_or_default();
+    let longest = u64::try_from(lines_a.len().max(lines_b.len())).unwrap_or(u64::MAX);
+    let Some((n, in_a, in_b)) = first_difference(&lines_a, &lines_b, longest) else {
+        panic!(
+            "a dry run made {a} filesystem calls, and {b} when done again: call k is not the \
+             same call in every run. The traces do not differ ({} lines each, of {} and {}): \
+             set {FS_TRACE_ENV} in both runs",
+            lines_a.len(),
+            dry_a.display(),
+            dry_b.display()
+        )
+    };
+    panic!(
+        "a dry run made {a} filesystem calls, and {b} when done again: call k is not the same \
+         call in every run. The traces first differ at line {n}:\n  first:  {in_a:?}\n  again:  \
+         {in_b:?}"
+    );
 }
 
 /// The file a run on `store` writes its call count to.
@@ -202,4 +278,155 @@ pub fn init_again<P: Program>(store: &Store<P>, format: StoreFormat, what: &str)
     assert_eq!(fresh, made, "{what}");
     store.assert_clean(what);
     whole
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::{diverged, same_count};
+
+    /// A trace file in `dir` named `name`, holding `lines`.
+    fn trace(dir: &Path, name: &str, lines: &[&str]) -> PathBuf {
+        let file = dir.join(name);
+        fs::write(&file, lines.join("\n") + "\n").unwrap();
+        file
+    }
+
+    const DRY: [&str; 3] = [
+        "1 read meta/journal.ckpt",
+        "2 exists meta/refs/main",
+        "3 append meta/journal.log",
+    ];
+
+    /// Two traces that differ at line 2: `diverged` reports line 2 and both lines once the cut
+    /// reaches it, and nothing for a cut before it.
+    #[test]
+    fn diverged_reports_the_first_differing_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let dry = trace(dir.path(), "dry", &DRY);
+        let cut = trace(dir.path(), "cut", &[DRY[0], "2 file_len meta/journal.log"]);
+        let second = (
+            2,
+            DRY[1].to_owned(),
+            "2 file_len meta/journal.log".to_owned(),
+        );
+        assert_eq!(diverged(&dry, &cut, 1), None);
+        assert_eq!(diverged(&dry, &cut, 2), Some(second.clone()));
+        assert_eq!(diverged(&dry, &cut, 3), Some(second));
+
+        // The same calls up to the cut: nothing, whatever follows.
+        let same = trace(dir.path(), "same", &DRY[..2]);
+        assert_eq!(diverged(&dry, &same, 2), None);
+
+        // A cut run that ended early, or wrote no trace at all, differs where it ends.
+        let ended = (3, DRY[2].to_owned(), String::new());
+        assert_eq!(diverged(&dry, &same, 3), Some(ended));
+        let none = (1, DRY[0].to_owned(), String::new());
+        assert_eq!(diverged(&dry, &dir.path().join("missing"), 3), Some(none));
+    }
+
+    /// A dry run without a trace is a mistake in the test, not "no divergence".
+    #[test]
+    #[should_panic(expected = "the dry run left no trace: set SWARMOPS_TEST_FS_TRACE")]
+    fn diverged_refuses_a_dry_run_without_a_trace() {
+        let dir = tempfile::tempdir().unwrap();
+        let cut = trace(dir.path(), "cut", &DRY);
+        let _ = diverged(&dir.path().join("missing"), &cut, 3);
+    }
+
+    /// Equal counts pass, with no trace read at all.
+    #[test]
+    fn same_count_passes_equal_counts() {
+        same_count(3, 3, Path::new("/no/such/trace"), Path::new("/nor/this"));
+    }
+
+    /// Counts that differ panic with both counts and the first line the traces differ at.
+    #[test]
+    #[should_panic(
+        expected = "a dry run made 3 filesystem calls, and 4 when done again: call k is not the \
+                    same call in every run. The traces first differ at line 2:\n  first:  \
+                    \"2 exists meta/refs/main\"\n  again:  \"2 exists meta/features\""
+    )]
+    fn same_count_panics_with_the_first_differing_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = trace(dir.path(), "first", &DRY);
+        let again = [
+            DRY[0],
+            "2 exists meta/features",
+            "3 exists meta/refs/main",
+            "4 append meta/journal.log",
+        ];
+        let again = trace(dir.path(), "again", &again);
+        same_count(3, 4, &first, &again);
+    }
+
+    /// Counts that differ with nothing traced still panic, and say what to set.
+    #[test]
+    #[should_panic(expected = "The traces do not differ (0 lines each")]
+    fn same_count_panics_without_traces_too() {
+        same_count(3, 4, Path::new("/no/such/trace"), Path::new("/nor/this"));
+    }
+
+    /// The selftest of the sweeps' determinism check: a run with one more branch (a call the
+    /// other run does not make), traced by a real `CrashAtFs`, is the line `diverged` names,
+    /// and the count `same_count` refuses.
+    #[cfg(feature = "test-hooks")]
+    mod traced {
+        use swarmops_store::{CrashAtFs, FsOps, RealFs};
+
+        use super::*;
+
+        /// Whether a run takes the branch that makes one more call.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Branch {
+            Plain,
+            Extra,
+        }
+
+        /// A run of three calls, four with the extra branch, on a store of its own in `dir`,
+        /// traced to the file it returns with its call count.
+        fn run(dir: &Path, name: &str, branch: Branch) -> (u64, PathBuf) {
+            let root = dir.join(name).join("store");
+            let file = dir.join(format!("{name}.trace"));
+            let fs = CrashAtFs::new(RealFs::new(), 0).tracing_calls_to(&file);
+            fs.create_dir_all(&root.join("meta")).unwrap();
+            if branch == Branch::Extra {
+                fs.exists(&root.join("meta/features")).unwrap();
+            }
+            fs.append(&root.join("meta/journal.log"), b"frame").unwrap();
+            fs.sync_data(&root.join("meta/journal.log")).unwrap();
+            (fs.calls(), file)
+        }
+
+        #[test]
+        fn sweep_names_the_extra_branch_of_a_run() {
+            let dir = tempfile::tempdir().unwrap();
+            let (calls, dry) = run(dir.path(), "dry", Branch::Plain);
+            let (again, dry_again) = run(dir.path(), "again", Branch::Plain);
+            let (more, cut) = run(dir.path(), "cut", Branch::Extra);
+
+            // Two plain runs on two stores: the same count, the same lines.
+            assert_eq!((calls, again), (3, 3));
+            same_count(calls, again, &dry, &dry_again);
+            assert_eq!(diverged(&dry, &dry_again, calls), None);
+
+            // The extra branch is line 2.
+            assert_eq!(more, 4);
+            let extra = (
+                2,
+                "2 append meta/journal.log".to_owned(),
+                "2 exists meta/features".to_owned(),
+            );
+            assert_eq!(diverged(&dry, &cut, calls), Some(extra));
+            let refused = std::panic::catch_unwind(|| same_count(calls, more, &dry, &cut));
+            let panic = refused.expect_err("3 calls are not 4");
+            let said = panic.downcast_ref::<String>().expect("a formatted panic");
+            assert!(
+                said.contains("line 2:\n  first:  \"2 append meta/journal.log\""),
+                "{said}"
+            );
+        }
+    }
 }
