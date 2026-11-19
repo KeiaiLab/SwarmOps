@@ -12,7 +12,8 @@
 //!
 //! [`hold_for_run`] is what `check run`'s workspace form starts from: the workspace under its
 //! lock, settled (not rebasing, not stale) and clean, so that its files are the tree of the
-//! changeset they stand for while its checks run.
+//! changeset they stand for while its checks run. [`edits`] is what `check plan`'s starts from:
+//! the same workspace, settled, read without its lock, with the paths of its edits.
 
 use std::time::Duration;
 
@@ -25,7 +26,7 @@ use crate::bootstrap::{self, REPO_CONFIG};
 use crate::lock::WsLock;
 use crate::materialize;
 use crate::run::{self, Run};
-use crate::scan::Want;
+use crate::scan::{self, Keep, Want};
 use crate::state::{SWARMWS_DIR, State};
 use crate::status;
 use crate::workspace::{self, Locate, Workspace};
@@ -59,14 +60,65 @@ pub struct Held {
     _lock: WsLock,
 }
 
-/// The workspace `at` names, held for a run of its checks: its lock taken (`E_WS_LOCKED` after
-/// the wait), not rebasing (`E_UNRESOLVED_CONFLICTS`), its base still on its target's history
-/// (`E_WS_STALE`), its files standing for its head and holding no edit (`E_WS_DIRTY`, naming the
-/// first 20). Then its files are the tree of `changeset`, and stay so while the lock is held: no
-/// `ws` mutation moves them. Nothing is written, to the store or the workspace.
-pub fn hold_for_run(ctx: &Ctx<'_>, at: &Locate) -> Result<Held, OpError> {
-    // 1. Under the lock, settled.
-    let (ws, lock) = workspace::open_locked(ctx, at)?;
+/// What a workspace holds beyond its head, read for a plan of its checks: the ends of its
+/// committed chain and the paths of its edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Edits {
+    /// The workspace's root directory.
+    pub dir: Utf8PathBuf,
+    /// Its name.
+    pub name: String,
+    /// The ref it lands on.
+    pub target: String,
+    /// The target's changeset its chain starts from.
+    pub base: String,
+    /// Its chain's last changeset: what its edits are against.
+    pub head: String,
+    /// The paths of its edits against its head, in path order: at most the limit asked for.
+    pub paths: Vec<String>,
+    /// Whether it holds more edits than `paths` lists.
+    pub truncated: bool,
+    /// Whether a sparse workspace holds entries off its prefixes: edits that are in no list.
+    pub outside: bool,
+}
+
+/// The edits of the workspace `at` names, at most `limit` of their paths: read without its
+/// lock, as `ws status` reads it, and its scan index kept. Refused as [`hold_for_run`] refuses
+/// a workspace, with the same codes, when it is rebasing, stale, or its files stand for
+/// another changeset than its head. Edits are what this is for: they are not refused. Nothing
+/// is written to the store.
+pub fn edits(ctx: &Ctx<'_>, at: &Locate, limit: usize) -> Result<Edits, OpError> {
+    // 1. The workspace, without its lock: a read. Settled, as a run of its checks needs it.
+    let ws = Workspace::open(ctx, at.clone())?;
+    settled(ctx.store, &ws)?;
+
+    // 2. Its edits against its head, the index kept for the next scan; and whether anything
+    //    stands off its prefixes.
+    let mut scanned = scan::scan(ctx, &ws, &Want::default())?;
+    let outside = !std::mem::take(&mut scanned.outside).is_empty();
+    let changes = scanned.keep(&ws.dir, &scan::binding_of(&ws), Keep::IfChanged);
+    let truncated = changes.len() > limit;
+    let paths = (changes.into_iter().take(limit))
+        .map(|change| change.path)
+        .collect();
+    Ok(Edits {
+        dir: ws.dir,
+        name: ws.file.name,
+        target: ws.file.target,
+        base: ws.file.base,
+        head: ws.file.head,
+        paths,
+        truncated,
+        outside,
+    })
+}
+
+/// Refuses workspace `ws` unless it is settled: not rebasing (`E_UNRESOLVED_CONFLICTS`), its
+/// base still on its target's history (`E_WS_STALE`), its files standing for its head
+/// (`E_INVALID_ARG`, `details.reason: materialized`). What a run of its checks and a plan of
+/// them both need first.
+fn settled(store: &dyn StoreOps, ws: &Workspace) -> Result<(), OpError> {
     if let State::Rebasing { .. } = ws.file.state {
         return Err(OpError::new(
             ErrorCode::UnresolvedConflicts,
@@ -74,7 +126,7 @@ pub fn hold_for_run(ctx: &Ctx<'_>, at: &Locate) -> Result<Held, OpError> {
         )
         .with_hint("swarmops ws rebase --continue, or swarmops ws rebase --abort"));
     }
-    status::refuse_stale(ctx.store, &ws.file)?;
+    status::refuse_stale(store, &ws.file)?;
     if ws.file.materialized != ws.file.head {
         let details = Map::from_iter([
             ("reason".to_owned(), Value::from("materialized")),
@@ -95,6 +147,18 @@ pub fn hold_for_run(ctx: &Ctx<'_>, at: &Locate) -> Result<Held, OpError> {
             ws.file.name
         )));
     }
+    Ok(())
+}
+
+/// The workspace `at` names, held for a run of its checks: its lock taken (`E_WS_LOCKED` after
+/// the wait), not rebasing (`E_UNRESOLVED_CONFLICTS`), its base still on its target's history
+/// (`E_WS_STALE`), its files standing for its head and holding no edit (`E_WS_DIRTY`, naming the
+/// first 20). Then its files are the tree of `changeset`, and stay so while the lock is held: no
+/// `ws` mutation moves them. Nothing is written, to the store or the workspace.
+pub fn hold_for_run(ctx: &Ctx<'_>, at: &Locate) -> Result<Held, OpError> {
+    // 1. Under the lock, settled.
+    let (ws, lock) = workspace::open_locked(ctx, at)?;
+    settled(ctx.store, &ws)?;
 
     // 2. Clean: no edit on disk.
     let changes = status::changes_of(ctx, &ws, &Want::default())?;

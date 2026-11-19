@@ -16,8 +16,9 @@
 //! ```
 //!
 //! The subjects: a changeset against its target ([`plan`]: what it changed since their merge
-//! base); a change as `land_check` lands it (`landed`: the item's paths and tree); and the
-//! changed paths the caller gives with the check file of a directory ([`plan_dir`], vouched).
+//! base); a change as `land_check` lands it (`landed`: the item's paths and tree); a workspace
+//! ([`plan_ws`]: its committed chain and its edits); and the changed paths the caller gives
+//! with the check file of a directory ([`plan_dir`], vouched).
 //! Planning reads only: no lock is taken and nothing is written. A plan informs: `check run`
 //! runs every check of its stage, whatever a plan says.
 //!
@@ -38,9 +39,11 @@ use swarmops_api::{
     ResolveRevReq, Rev, ShowReq, StoreOps,
 };
 
+use swarmops_ws::Locate;
+
 use super::changed::{CHECK_FILE_PATHS, Changed, Sep};
 use super::inputs::Inputs;
-use super::{Check, checks_at, checks_in};
+use super::{Check, MAX_PLAN_PATHS, checks_at, checks_in};
 use crate::error;
 
 /// The candidate's checks of one stage, each with its inputs and the first changed path seen
@@ -440,6 +443,98 @@ fn conflicts(item: &LandCheckItemOut, target: &str, onto: &str) -> OpError {
     error.details.insert("report".to_owned(), report);
     error.details.insert("onto".to_owned(), onto.into());
     error
+}
+
+/// `check plan --ws`: the plan of `stage` for the workspace `at` names: the paths of its
+/// committed chain (the diff from its base to its head), then those of its edits against its
+/// head. Read without the workspace's lock, as `ws status` reads it; refused as `check run`
+/// refuses a workspace that is rebasing, stale, or whose files stand for another changeset
+/// than its head. Edits are what this form is for: they are not refused.
+///
+/// ```text
+///   the candidate's checks   the store's, at the head; the workspace's own files (no link
+///                            followed) when an edit names the check file
+///   the target's             at the head of the workspace's target
+///   entries off the prefixes of a sparse workspace: edits in no list ─▶ paths_unknown
+/// ```
+///
+/// A path both committed and edited is read twice: `changed` counts what was read. With an
+/// edit no tree in the store is what was planned, and `tree` is omitted. The store is only
+/// read; the workspace's scan index is kept, as `ws status` keeps it.
+pub fn plan_ws(
+    ctx: &swarmops_ws::Ctx<'_>,
+    at: &Locate,
+    stage: CheckStage,
+    checks: &[String],
+) -> Result<CheckPlanResp, OpError> {
+    let limit = usize::try_from(MAX_PLAN_PATHS).unwrap_or(usize::MAX);
+    plan_ws_within(ctx, at, stage, checks, limit)
+}
+
+/// [`plan_ws`], reading at most `limit` of the workspace's edits: more of them widen the
+/// plan, `paths_truncated`.
+fn plan_ws_within(
+    ctx: &swarmops_ws::Ctx<'_>,
+    at: &Locate,
+    stage: CheckStage,
+    checks: &[String],
+    limit: usize,
+) -> Result<CheckPlanResp, OpError> {
+    // 1. The workspace's chain and its edits, as far as a plan reads them.
+    let edits = swarmops_ws::check::edits(ctx, at, limit)?;
+    let store = ctx.store;
+
+    // 2. The candidate's checks: the head's, unless an edit changed the check file, which is
+    //    then the workspace's own, read as a directory's and not vouched for by a caller.
+    let edited = (edits.paths.iter()).any(|path| CHECK_FILE_PATHS.contains(&path.as_str()));
+    let (file, version, candidate) = if edited {
+        checks_in(&edits.dir).map_err(|mut e| {
+            if let Some(vouched) = e.details.get_mut("vouched") {
+                *vouched = false.into();
+            }
+            e
+        })?
+    } else {
+        checks_at(store, &edits.head)?
+    };
+
+    // 3. The committed chain's paths, then the edits'; what cannot be listed widens the plan.
+    let mut matcher = Matcher::new(stage, &candidate);
+    let mut see = |path: &str| matcher.see(path);
+    let mut changed = Changed::from_store(store, &edits.base, &edits.head, None, &mut see)?;
+    let within = (edits.paths.iter()).all(|path| changed.path(path, &mut see));
+    if edits.truncated && within {
+        changed.widen(CheckPlanWidened::PathsTruncated);
+    }
+    if edits.outside {
+        changed.widen(CheckPlanWidened::PathsUnknown);
+    }
+
+    // 4. The definitions at the head of the workspace's target, and the plan.
+    let onto = store
+        .resolve_rev(ResolveRevReq::new(Rev::from(edits.target.as_str())))?
+        .id;
+    let theirs = target_at(store, &onto)?;
+    let against = theirs.as_deref().map_or(Target::Unread, Target::Checks);
+    let mut resp = CheckPlanResp::new(false, CheckPlanSubject::Workspace, stage);
+    resp.checks = decide(stage, &candidate, against, &matcher, &changed);
+    if edits.paths.is_empty() {
+        let mut show = ShowReq::new(edits.head.as_str());
+        show.max_changes = 1;
+        resp.tree = Some(store.show(show)?.root);
+    }
+    resp.edits = Some(u64::try_from(edits.paths.len()).unwrap_or(u64::MAX));
+    resp.workspace = Some(edits.name);
+    resp.target = Some(edits.target);
+    resp.onto = Some(onto);
+    resp.base = Some(edits.base);
+    resp.file = file.map(str::to_owned);
+    resp.version = version;
+    resp.changed = changed.count();
+    resp.widened = cause_of(&against, &changed);
+    let list_at = edits.head.clone();
+    resp.rev = Some(edits.head);
+    only(resp, checks, &candidate, &list_at)
 }
 
 /// The changed paths the caller of the directory form gives.

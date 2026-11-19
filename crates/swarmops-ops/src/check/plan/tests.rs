@@ -1,15 +1,19 @@
 //! Plans: the rules of `decide` over the fixture's checks, and the forms over a test store and
 //! a directory.
 
+use std::sync::Arc;
+
 use camino::Utf8PathBuf;
 use serde_json::json;
 use swarmops_api::{
     ChangeInput, ChangeOp, CheckDefinitionChange, CheckPlanOut, CheckPlanReason, CheckPlanReq,
     CheckPlanResp, CheckPlanSubject, CheckPlanVerdict, CheckPlanWidened, CheckStage, CommitReq,
-    ContentInput, ErrorCode, Identity, ItemOutcome, LandReq, OpError, ShowReq, StoreOps,
+    ContentInput, ErrorCode, Identity, ItemOutcome, LandReq, OpError, ShowReq, StatusAfter,
+    StoreOps, WsCommitReq, WsCreateReq,
 };
+use swarmops_ws::Locate;
 
-use super::{Given, Matcher, Target, cause_of, decide, plan, plan_dir};
+use super::{Given, Matcher, Target, cause_of, decide, plan, plan_dir, plan_ws};
 use crate::LocalOps;
 use crate::check::changed::{Changed, Sep};
 use crate::check::{Check, parse};
@@ -1237,6 +1241,230 @@ fn only_the_checks_named_are_given() {
     req.stage = CheckStage::Manual;
     req.checks = vec!["slow".to_owned()];
     assert_eq!(plan(&ops, req).unwrap().checks.len(), 1);
+}
+
+// A workspace's edits.
+
+/// What the workspace operations run with on `ops`, whose store is below `dir`.
+fn ws_ctx<'s>(dir: &tempfile::TempDir, ops: &'s LocalOps) -> swarmops_ws::Ctx<'s> {
+    let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+    let who = Identity::parse("agent/test").unwrap();
+    let (fs, host) = (swarmops_ws::RealFs::new(), swarmops_ws::RealHost::default());
+    swarmops_ws::Ctx::new(ops, root, Some(who), Arc::new(fs), Arc::new(host))
+}
+
+/// The workspace `w` made beside the store below `dir`, on `main`, of `prefixes` (none: the
+/// whole tree); its directory.
+fn workspace(dir: &tempfile::TempDir, ops: &LocalOps, prefixes: &[&str]) -> Utf8PathBuf {
+    let at = Utf8PathBuf::from_path_buf(dir.path().join("w")).unwrap();
+    let mut req = WsCreateReq::new("w".to_owned());
+    req.path = Some(at.to_string());
+    req.prefixes = prefixes.iter().map(|p| (*p).to_owned()).collect();
+    req.all = prefixes.is_empty();
+    req.status_after = StatusAfter::None;
+    swarmops_ws::create(&ws_ctx(dir, ops), req).unwrap();
+    at
+}
+
+/// The `before-land` plan of the workspace `w`.
+fn planned_ws(dir: &tempfile::TempDir, ops: &LocalOps) -> Result<CheckPlanResp, OpError> {
+    let at = Locate::Name("w".to_owned());
+    plan_ws(&ws_ctx(dir, ops), &at, CheckStage::BeforeLand, &[])
+}
+
+/// Commits every edit of the workspace `w`; its new head.
+fn ws_commit(dir: &tempfile::TempDir, ops: &LocalOps) -> String {
+    let mut req = WsCommitReq::new("w".to_owned(), "mine".to_owned());
+    req.status_after = StatusAfter::None;
+    swarmops_ws::commit(&ws_ctx(dir, ops), req)
+        .unwrap()
+        .changeset
+}
+
+/// A workspace is planned on its committed chain and its edits together: the chain's paths
+/// from the store, the edits' from its files. With an edit no tree is named; without one the
+/// head's is.
+#[test]
+fn a_workspace_is_planned_on_its_chain_and_its_edits() {
+    let (dir, ops, _who, main) = store();
+    let at = workspace(&dir, &ops, &[]);
+
+    // 1. Clean and on its base: nothing changed.
+    let resp = planned_ws(&dir, &ops).unwrap();
+    assert_eq!(
+        (resp.vouched, resp.subject, resp.stage),
+        (false, CheckPlanSubject::Workspace, CheckStage::BeforeLand)
+    );
+    assert_eq!(
+        (resp.workspace.as_deref(), resp.edits),
+        (Some("w"), Some(0))
+    );
+    assert_eq!(resp.rev.as_deref(), Some(main.as_str()));
+    assert_eq!(
+        (resp.base.as_deref(), resp.onto.as_deref()),
+        (Some(main.as_str()), Some(main.as_str()))
+    );
+    assert_eq!(resp.target.as_deref(), Some("main"));
+    let mut show = ShowReq::new(main.as_str());
+    show.max_changes = 1;
+    assert_eq!(resp.tree, Some(ops.show(show).unwrap().root));
+    assert_eq!((resp.changed, resp.widened), (0, None));
+    assert!(
+        resp.checks
+            .iter()
+            .all(|check| check.verdict == NOT_APPLICABLE)
+    );
+
+    // 2. One commit touching docs: the chain's path, the head's tree.
+    std::fs::write(at.join("docs/guide.md"), "mine\n").unwrap();
+    let head = ws_commit(&dir, &ops);
+    let resp = planned_ws(&dir, &ops).unwrap();
+    assert_eq!(resp.rev.as_deref(), Some(head.as_str()));
+    assert_eq!(resp.base.as_deref(), Some(main.as_str()));
+    assert_eq!((resp.changed, resp.edits), (1, Some(0)));
+    assert!(resp.tree.is_some());
+    assert_eq!(
+        verdicts(&resp.checks),
+        [
+            ("docs", RUN, INPUT_CHANGED),
+            ("site", RUN, INPUT_CHANGED),
+            ("unit", RUN, NO_INPUTS)
+        ]
+    );
+
+    // 3. An uncommitted edit of a web file on top: both are changed paths, and no tree is
+    //    what was planned.
+    std::fs::write(at.join("web/app/page.tsx"), "edited\n").unwrap();
+    let resp = planned_ws(&dir, &ops).unwrap();
+    assert_eq!((resp.changed, resp.edits, &resp.tree), (2, Some(1), &None));
+    assert_eq!(resp.rev.as_deref(), Some(head.as_str()));
+    let site = entry(&resp.checks, "site");
+    assert_eq!(
+        site.path.as_deref(),
+        Some("docs/guide.md"),
+        "the chain's paths are read first"
+    );
+}
+
+/// An edit alone, on no commit, is a changed path: a check whose inputs it is among runs.
+#[test]
+fn an_uncommitted_edit_is_a_changed_path() {
+    let (dir, ops, _who, _main) = store();
+    let at = workspace(&dir, &ops, &[]);
+    std::fs::write(at.join("crates/a/src/lib.rs"), "edited\n").unwrap();
+    let resp = planned_ws(&dir, &ops).unwrap();
+    assert_eq!((resp.changed, resp.edits, &resp.tree), (1, Some(1), &None));
+    assert_eq!(
+        verdicts(&resp.checks),
+        [
+            ("docs", NOT_APPLICABLE, INPUTS_UNCHANGED),
+            ("site", NOT_APPLICABLE, INPUTS_UNCHANGED),
+            ("unit", RUN, NO_INPUTS)
+        ]
+    );
+
+    // A deleted file is an edit too.
+    std::fs::remove_file(at.join("web/app/page.tsx")).unwrap();
+    let resp = planned_ws(&dir, &ops).unwrap();
+    assert_eq!(resp.edits, Some(2));
+    assert_eq!(entry(&resp.checks, "site").reason, INPUT_CHANGED);
+}
+
+/// An uncommitted edit of the check file is read from the workspace's files and compared with
+/// the target's head; one that does not read is the error, not vouched.
+#[test]
+fn an_edited_check_file_is_read_from_the_workspace() {
+    let (dir, ops, _who, _main) = store();
+    let at = workspace(&dir, &ops, &[]);
+    std::fs::write(at.join(".swarmops/checks.toml"), NARROWED).unwrap();
+    std::fs::write(at.join("docs/guide.md"), "edited\n").unwrap();
+    let resp = planned_ws(&dir, &ops).unwrap();
+    assert_eq!((resp.edits, resp.widened), (Some(2), None));
+    let site = entry(&resp.checks, "site");
+    assert_eq!((site.verdict, site.reason), (RUN, DEFINITION_CHANGED));
+    assert_eq!(site.definition, Some(CheckDefinitionChange::Modified));
+    assert_eq!(site.definition_digest, digest_in(NARROWED, "site"));
+
+    std::fs::write(at.join(".swarmops/checks.toml"), "version = 2\n").unwrap();
+    let error = error_of(planned_ws(&dir, &ops));
+    assert_eq!(error.code, "E_CHECK_FILE", "{error:?}");
+    assert_eq!(error.details["vouched"], false);
+
+    // A deleted check file leaves no check of the candidate's: the target's are listed.
+    std::fs::remove_file(at.join(".swarmops/checks.toml")).unwrap();
+    let resp = planned_ws(&dir, &ops).unwrap();
+    assert_eq!(resp.file, None);
+    assert!(
+        resp.checks
+            .iter()
+            .all(|c| c.definition == Some(CheckDefinitionChange::Deleted))
+    );
+    assert_eq!(resp.checks.len(), 3);
+}
+
+/// A sparse workspace that holds an entry off its prefixes has edits in no list: the changed
+/// paths are not known, and every check runs.
+#[test]
+fn an_entry_off_the_prefixes_widens_the_plan() {
+    let (dir, ops, _who, _main) = store();
+    let at = workspace(&dir, &ops, &["docs", ".swarmops"]);
+    std::fs::write(at.join("docs/guide.md"), "edited\n").unwrap();
+    let resp = planned_ws(&dir, &ops).unwrap();
+    assert_eq!((resp.edits, resp.widened), (Some(1), None));
+
+    std::fs::write(at.join("stray.txt"), "off the prefixes\n").unwrap();
+    let resp = planned_ws(&dir, &ops).unwrap();
+    let unknown = Some(CheckPlanWidened::PathsUnknown);
+    assert_eq!(resp.widened, unknown);
+    assert!(
+        resp.checks
+            .iter()
+            .all(|c| c.verdict == RUN && c.widened == unknown)
+    );
+}
+
+/// More edits than a plan reads cut it: every check runs, `paths_truncated`.
+#[test]
+fn more_edits_than_a_plan_reads_widen_it() {
+    let (dir, ops, _who, _main) = store();
+    let at = workspace(&dir, &ops, &[]);
+    std::fs::write(at.join("crates/a/src/lib.rs"), "edited\n").unwrap();
+    std::fs::write(at.join("crates/a/src/more.rs"), "new\n").unwrap();
+    let ctx = ws_ctx(&dir, &ops);
+    let name = Locate::Name("w".to_owned());
+    let stage = CheckStage::BeforeLand;
+    let whole = super::plan_ws_within(&ctx, &name, stage, &[], 2).unwrap();
+    assert_eq!((whole.edits, whole.widened), (Some(2), None));
+    assert_eq!(entry(&whole.checks, "docs").verdict, NOT_APPLICABLE);
+
+    let cut = super::plan_ws_within(&ctx, &name, stage, &[], 1).unwrap();
+    let truncated = Some(CheckPlanWidened::PathsTruncated);
+    assert_eq!((cut.edits, cut.widened), (Some(1), truncated));
+    assert!(
+        cut.checks
+            .iter()
+            .all(|c| c.verdict == RUN && c.widened == truncated)
+    );
+}
+
+/// The workspace form's refusals: a workspace that is not there, and the checks named.
+#[test]
+fn the_workspace_form_s_errors_are_no_plan() {
+    let (dir, ops, _who, _main) = store();
+    let error = error_of(planned_ws(&dir, &ops));
+    assert_eq!(error.code, "E_WS_NOT_FOUND", "{error:?}");
+    workspace(&dir, &ops, &[]);
+    let at = Locate::Name("w".to_owned());
+    let slow = ["slow".to_owned()];
+    let error = error_of(plan_ws(
+        &ws_ctx(&dir, &ops),
+        &at,
+        CheckStage::BeforeLand,
+        &slow,
+    ));
+    assert_eq!(error.details["reason"], "stage");
+    let manual = plan_ws(&ws_ctx(&dir, &ops), &at, CheckStage::Manual, &slow).unwrap();
+    assert_eq!(manual.checks.len(), 1);
 }
 
 // The directory form.

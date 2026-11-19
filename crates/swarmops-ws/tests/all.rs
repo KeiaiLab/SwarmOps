@@ -3,6 +3,7 @@
 //! target from `tests/` (`autotests = false` in `Cargo.toml`): a new test file is a `mod` line
 //! here. `sweeps` drives the test hooks, so it is here only with the feature.
 
+mod check_edits;
 mod check_hold;
 mod commit;
 mod fixture;
