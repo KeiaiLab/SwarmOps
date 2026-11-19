@@ -1034,6 +1034,14 @@ fn a_land_check_item_is_planned() {
     // `--base` is a land's: clap refuses it without `--landed`.
     let off = plan(&lab, &[&conflicting, "--base", &main]);
     assert_eq!(off.exit, 2, "{off}");
+
+    // The other subjects land nothing: `--base` is refused there too, not dropped.
+    let dir = tree(&lab, TARGET);
+    let off = plan_dir(&lab, &dir, &["--base", &main], None);
+    assert_eq!(off.exit, 2, "{off}");
+    lab.workspace("w1");
+    let off = plan(&lab, &["--ws", "w1", "--base", &main]);
+    assert_eq!(off.exit, 2, "{off}");
 }
 
 /// Item 11 (B4-K15). A plan is of one stage: a check of two stages is in both plans, a

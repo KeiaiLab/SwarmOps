@@ -1903,7 +1903,12 @@ pub struct PlanArgs {
     #[arg(long, requires = "rev", conflicts_with_all = ["name", "ws_path", "dir"])]
     pub landed: bool,
     /// With --landed: where the change starts.
-    #[arg(long, value_name = "REV", requires = "landed")]
+    #[arg(
+        long,
+        value_name = "REV",
+        requires = "landed",
+        conflicts_with_all = ["name", "ws_path", "dir"]
+    )]
     pub base: Option<String>,
     /// A changed path, from the directory's root; repeatable.
     #[arg(
