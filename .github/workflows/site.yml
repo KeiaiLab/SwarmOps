@@ -26,7 +26,7 @@
 # the GitHub record of each Pages deploy), `actions/checkout` keeps no credentials, no
 # `pull_request_target`; ci.yml's zizmor job audits this file too.
 #
-# Where jobs run: as in ci.yml, on the maintainers' own host, through the self-hosted runners
+# Where jobs run: on the maintainers' own host, through the self-hosted runners
 # labelled `swarmops-local`; a pull request from a fork is built and checked on ubuntu-24.04.
 name: Site
 

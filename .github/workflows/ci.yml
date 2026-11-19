@@ -1,12 +1,13 @@
 # The gate: `just check`, the same recipe every session runs. `tests-pass` is the one check to
 # require: it fails unless every other job here succeeded.
 #
-# Where jobs run: on the maintainers' own host, through self-hosted runners labelled
-# `swarmops-local`, for every push and for pull requests from branches of this repository; a
-# persistent target directory per runner (the runner's CARGO_TARGET_DIR) makes each build
-# incremental, so no build cache travels through GitHub. A pull request from a fork runs on
-# ubuntu-24.04 instead: a public repository's self-hosted runner must never run a stranger's code,
-# and GitHub also holds those runs for a maintainer's approval.
+# Where jobs run, for every push and for pull requests from branches of this repository: `just
+# check` in a sandbox on the maintainers' cluster, through self-hosted runners labelled
+# `swarmops-sandbox`, and the other jobs on the maintainers' own host, through self-hosted runners
+# labelled `swarmops-local`; a persistent target directory per runner (the runner's
+# CARGO_TARGET_DIR) makes each build incremental, so no build cache travels through GitHub. A
+# pull request from a fork runs on ubuntu-24.04 instead: a public repository's self-hosted runner
+# must never run a stranger's code, and GitHub also holds those runs for a maintainer's approval.
 #
 # Hardening: every action is pinned to a full commit SHA (its version in the trailing comment;
 # Dependabot updates both), the token has no permissions unless a job asks for one,
@@ -36,7 +37,7 @@ defaults:
 jobs:
   check:
     name: just check
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "swarmops-local"]') || 'ubuntu-24.04' }} # zizmor: ignore[self-hosted-runner]
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "swarmops-sandbox"]') || 'ubuntu-24.04' }} # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
     # The default is 360 minutes: a hung test would spend them all from the plan's budget.
