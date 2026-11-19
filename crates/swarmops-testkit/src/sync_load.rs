@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use crate::cli::{Program, Store};
 use crate::landing::{CliLander, LandRecord, Workload, change_for, open_loop_lands, slot};
+use crate::stop::StopOnDrop;
 
 /// The stretch at each end of a run that [`lag_ratio`] compares: a minute.
 pub const RATIO_WINDOW: Duration = Duration::from_secs(60);
@@ -134,6 +135,7 @@ impl SyncLane {
             });
 
             // 2. The go; the sampler runs on this thread until the landers end.
+            let stopper = StopOnDrop::new(stop);
             start.wait();
             let go = Instant::now();
             let mut samples = Vec::new();
@@ -152,7 +154,7 @@ impl SyncLane {
             };
             let lands = landers.into_iter().map(join).collect();
             let wall = go.elapsed();
-            stop.store(true, Ordering::Relaxed);
+            drop(stopper);
             let syncs = syncer
                 .join()
                 .unwrap_or_else(|e| std::panic::resume_unwind(e));

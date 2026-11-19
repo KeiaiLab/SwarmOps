@@ -6,6 +6,16 @@
 # binary (`tests/all.rs`), so the group takes the tests by name: those of the `contention`
 # modules.
 
+# The default profile's bound, which `just perf` and a local `just check-slow` run under (no
+# `NEXTEST_PROFILE`): a test still running after 2 hours is killed and reported as timed out. No
+# bound at all let a perf case whose import failed run for 13 h and 5 h. The longest case,
+# `serve_perf::clone_against_git`, took 1,650 s optimized on this host (docs/perf.md, "v0.7.0"),
+# the ci-perf profile's 55 minutes is twice that, and the import cases' own deadline is 3,600 s,
+# so 2 hours holds a loaded run and only a hang reaches it. The ci, ci-slow and ci-perf profiles
+# set their own, shorter bounds, which this does not change.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 120 }
+
 [test-groups]
 contention = { max-threads = 1 }
 

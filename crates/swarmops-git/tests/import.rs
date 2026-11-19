@@ -26,6 +26,7 @@ use swarmops_store::{
 use swarmops_testkit::fs::{FailingFs, NoSyncFs};
 use swarmops_testkit::git::{self, GitFixture, Manifest};
 use swarmops_testkit::repo::{commit, new_repo, new_repo_as, put};
+use swarmops_testkit::stop::StopOnDrop;
 
 use crate::support::MemSource;
 use swarmops_testkit::store::layout_of;
@@ -1468,8 +1469,9 @@ fn readers_see_the_old_head_until_the_move() {
             }
         });
         started.wait();
+        let stop = StopOnDrop::new(&done);
         let report = import(&repo, &source, &req).unwrap();
-        done.store(true, Ordering::SeqCst);
+        drop(stop);
         (report, reader.join().expect("the reader ran"))
     });
 

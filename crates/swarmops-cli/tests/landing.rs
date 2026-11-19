@@ -379,7 +379,7 @@ mod perf {
     use std::fs;
     use std::path::Path;
     use std::sync::Barrier;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -395,6 +395,7 @@ mod perf {
     use swarmops_testkit::pool::{
         Arrival, InFlight, Tally, Wave, children_of, mem_available_mib, tally, waves,
     };
+    use swarmops_testkit::stop::StopOnDrop;
 
     use super::{change, commit_base};
     use crate::support::{Store, Swarmops, agent};
@@ -963,7 +964,9 @@ mod perf {
                 })
                 .collect();
 
-            // 2. The go, then every record once all have ended.
+            // 2. The go, then every record once all have ended. A failure in between still
+            //    stops the sampler, which the scope joins.
+            let stopper = StopOnDrop::new(stop);
             start.wait();
             let go = Instant::now();
             let join = |t: thread::ScopedJoinHandle<'_, Vec<LandRecord>>| {
@@ -972,7 +975,7 @@ mod perf {
             let lands = agents.into_iter().map(join).collect();
             let moves = shifters.into_iter().map(join).collect();
             let wall = go.elapsed();
-            stop.store(true, Ordering::Relaxed);
+            drop(stopper);
             let lock = sampler.map(|t| t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)));
             (lands, moves, wall, lock)
         });

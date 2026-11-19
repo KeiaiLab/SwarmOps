@@ -23,6 +23,7 @@ mod perf {
 
     use serde_json::Value;
     use swarmops_testkit::measure::percentile;
+    use swarmops_testkit::stop::StopOnDrop;
 
     use crate::support::queue::{TARGET, checked, listed};
     use crate::support::{Run, Store, agent};
@@ -89,6 +90,7 @@ mod perf {
         let began = Instant::now();
         let (lanes, holds) = thread::scope(|scope| {
             let sampler = scope.spawn(|| sample(&store, &stop));
+            let stopper = StopOnDrop::new(&stop);
             let racers: Vec<_> = (heads.iter().enumerate())
                 .map(|(i, head)| {
                     let (store, start) = (&store, &start);
@@ -101,7 +103,7 @@ mod perf {
             let lanes: Vec<Lane> = (racers.into_iter())
                 .map(|racer| racer.join().expect("a process's thread"))
                 .collect();
-            stop.store(true, Ordering::Relaxed);
+            drop(stopper);
             (lanes, sampler.join().expect("the sampler"))
         });
         let wall = began.elapsed();
