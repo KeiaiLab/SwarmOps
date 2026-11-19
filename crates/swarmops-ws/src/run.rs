@@ -15,10 +15,14 @@
 //!
 //! [`run`] is what `ws land --check` and the bootstrap use: the caller's environment plus a few
 //! variables, the output as it came into a raw log. [`run_with`] hands the caller the output
-//! ([`Output`]), the environment ([`Env`]) and a flag that stops the command (`check run`).
+//! ([`Output`]), the environment ([`Env`]) and a flag that stops the command (`check run`), and
+//! measures the command's memory when asked ([`Measure`]): the wait's looks sample its group, the
+//! first 100 ms after its start and then one a second, on no thread of their own.
 //!
 //! On Windows only the child is killed: a grandchild holding the output open is left, and the
 //! runner stops reading after [`DRAIN`] (a known limitation).
+
+mod rss;
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -53,6 +57,13 @@ pub const DRAIN: Duration = Duration::from_secs(5);
 /// The size of one read from a stream.
 const CHUNK: usize = 64 * 1024;
 
+/// How long after a measured command's start its memory is first sampled: a command over before
+/// then has no sample.
+const MEM_SAMPLE_FIRST: Duration = Duration::from_millis(100);
+
+/// How long after one sample of a measured command's memory the next is taken.
+const MEM_SAMPLE_EVERY: Duration = Duration::from_secs(1);
+
 /// What a command did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -69,6 +80,9 @@ pub struct Run {
     pub stdout_tail: String,
     /// The last [`TAIL_BYTES`] of its stderr, as text.
     pub stderr_tail: String,
+    /// The most resident memory its process group held at one sample, in KiB, when the run was
+    /// measured ([`Measure::GroupRss`]) on Linux and a sample saw the group; none otherwise.
+    pub peak_rss_kib: Option<u64>,
 }
 
 /// Which stream a chunk of output came from.
@@ -128,7 +142,20 @@ pub enum Env<'e> {
     Only(&'e [(String, OsString)]),
 }
 
-/// How a command runs: its environment, its timeout, and the flag that stops it.
+/// What the runner measures of a running command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Measure {
+    /// Nothing: the default.
+    #[default]
+    None,
+    /// The resident memory of the command's process group, sampled about once a second, on Linux:
+    /// the largest sample is [`Run::peak_rss_kib`]. A spike between two samples is not seen.
+    GroupRss,
+}
+
+/// How a command runs: its environment, its timeout, the flag that stops it, and what is
+/// measured of it.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Spec<'a> {
@@ -139,15 +166,18 @@ pub struct Spec<'a> {
     /// Set (by anyone, at any time): the command's group is killed and the run says
     /// [`Run::stopped`].
     pub stop: Option<&'a AtomicBool>,
+    /// What is measured while it runs.
+    pub measure: Measure,
 }
 
 impl<'a> Spec<'a> {
-    /// A run of at most `timeout`, in the caller's environment, with no stop flag.
+    /// A run of at most `timeout`, in the caller's environment, with no stop flag, not measured.
     pub fn new(timeout: Duration) -> Spec<'a> {
         Spec {
             env: Env::Inherit(&[]),
             timeout,
             stop: None,
+            measure: Measure::None,
         }
     }
 }
@@ -260,10 +290,12 @@ fn started_with(
     let stderr = read_out(child.stderr.take(), Stream::Stderr, &shared, &done);
     drop(done);
 
-    // 4. The exit, or the timeout or the stop and the group killed; not reaped yet.
-    let deadline = Instant::now() + spec.timeout;
-    let end =
-        wait(&mut child, deadline, spec.stop).map_err(|e| host_failed("waiting for", shown, &e))?;
+    // 4. The exit, or the timeout or the stop and the group killed; not reaped yet. Its memory
+    //    is sampled at the wait's looks, when asked.
+    let start = Instant::now();
+    let mut meter = Meter::new(spec.measure, child.id(), start);
+    let end = wait(&mut child, start + spec.timeout, spec.stop, &mut meter)
+        .map_err(|e| host_failed("waiting for", shown, &e))?;
 
     // 5. The output to its end within the grace (cut short by the stop flag); then the group
     //    killed, whatever is left in it, the readers given the drain if they had not finished,
@@ -293,6 +325,7 @@ fn started_with(
         stopped: end == End::Stopped,
         stdout_tail: text(&stdout),
         stderr_tail: text(&stderr),
+        peak_rss_kib: meter.peak,
     })
 }
 
@@ -318,9 +351,49 @@ struct Shared {
 /// A stream's last [`TAIL_BYTES`], as its reader keeps them.
 type Tail = Arc<Mutex<Vec<u8>>>;
 
+/// The memory of a running command, sampled at the wait's looks.
+struct Meter {
+    /// The command's process group, when it is measured; none otherwise.
+    group: Option<u32>,
+    /// When the next sample is due.
+    next: Instant,
+    /// The largest sample so far.
+    peak: Option<u64>,
+}
+
+impl Meter {
+    /// The meter of the command of process group `group`, started at `start`, measured as
+    /// `measure` says.
+    fn new(measure: Measure, group: u32, start: Instant) -> Meter {
+        Meter {
+            group: (measure == Measure::GroupRss).then_some(group),
+            next: start + MEM_SAMPLE_FIRST,
+            peak: None,
+        }
+    }
+
+    /// One look at `now`: a sample when one is due, kept if it is the largest.
+    fn look(&mut self, now: Instant) {
+        let Some(group) = self.group else {
+            return;
+        };
+        if now < self.next {
+            return;
+        }
+        self.next = now + MEM_SAMPLE_EVERY;
+        self.peak = self.peak.max(rss::sample(group));
+    }
+}
+
 /// Waits for `child` until `deadline` or until `stop` is set, looking ever less often; past
-/// it, or once stopped, kills its group. The child is not reaped: the caller does that.
-fn wait(child: &mut Child, deadline: Instant, stop: Option<&AtomicBool>) -> io::Result<End> {
+/// it, or once stopped, kills its group. Each look while it runs is `meter`'s too. The child is
+/// not reaped: the caller does that.
+fn wait(
+    child: &mut Child,
+    deadline: Instant,
+    stop: Option<&AtomicBool>,
+    meter: &mut Meter,
+) -> io::Result<End> {
     let mut pause = POLL_FIRST;
     loop {
         // 1. Ended on its own.
@@ -336,7 +409,8 @@ fn wait(child: &mut Child, deadline: Instant, stop: Option<&AtomicBool>) -> io::
             return Ok(if stopped { End::Stopped } else { End::TimedOut });
         }
 
-        // 3. Another look later.
+        // 3. Its memory, when a sample is due; another look later.
+        meter.look(now);
         thread::sleep(pause.min(deadline - now));
         pause = (pause * 2).min(POLL_MAX);
     }

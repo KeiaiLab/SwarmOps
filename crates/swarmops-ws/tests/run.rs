@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use swarmops_ws::run::{Env, Output, Run, Spec, Stream, TAIL_BYTES, run, run_with};
+use swarmops_ws::run::{Env, Measure, Output, Run, Spec, Stream, TAIL_BYTES, run, run_with};
 
 /// `sh -c <script>`, as an argv.
 fn sh(script: &str) -> Vec<String> {
@@ -257,4 +257,30 @@ fn a_run_keeps_the_last_8_kib_of_each_stream_and_the_log() {
     assert!(refused.message.contains("swarmops-no-such-command"));
     let empty = run(&[], &dir, &[], Duration::from_secs(5), &log).unwrap_err();
     assert_eq!(empty.code, "E_INVALID_ARG");
+}
+
+/// A command measured has its group's peak resident memory, on Linux; one not measured, and one
+/// that ends before the first sample, has none.
+#[test]
+fn a_measured_command_has_its_group_s_peak_memory() {
+    // 1. Measured, and lasting past the first sample.
+    let (_tmp, dir) = workdir();
+    let mut measured = Spec::new(Duration::from_secs(60));
+    measured.measure = Measure::GroupRss;
+    let (ran, _, _) = kept(&sh("sleep 0.5"), &dir, &measured);
+    assert_eq!(ran.exit_code, Some(0), "{ran:?}");
+    if cfg!(target_os = "linux") {
+        assert!(ran.peak_rss_kib.is_some_and(|kib| kib > 0), "{ran:?}");
+    } else {
+        assert_eq!(ran.peak_rss_kib, None, "{ran:?}");
+    }
+
+    // 2. Not measured: none, the default.
+    let plain = Spec::new(Duration::from_secs(60));
+    let (ran, _, _) = kept(&sh("sleep 0.5"), &dir, &plain);
+    assert_eq!(ran.peak_rss_kib, None, "{ran:?}");
+
+    // 3. Over before the first sample: none.
+    let (ran, _, _) = kept(&sh("true"), &dir, &measured);
+    assert_eq!(ran.peak_rss_kib, None, "{ran:?}");
 }
