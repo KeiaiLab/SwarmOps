@@ -3903,6 +3903,383 @@ expression: s.redact(&all)
       "title": "CheckRunResp",
       "type": "object"
     },
+    "CheckRunsReq": {
+      "$defs": {
+        "CheckOutcome": {
+          "description": "How a check of a run ended. Only `passed` passes.",
+          "oneOf": [
+            {
+              "const": "passed",
+              "description": "It exited 0.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "It exited with another code, or a signal it was not sent by the runner ended it.",
+              "type": "string"
+            },
+            {
+              "const": "timed_out",
+              "description": "It ran past its timeout, and its process group was killed.",
+              "type": "string"
+            },
+            {
+              "const": "not_started",
+              "description": "Its directory is missing, or its program did not start.",
+              "type": "string"
+            },
+            {
+              "const": "cancelled",
+              "description": "It was running when a signal stopped the run, and its process group was killed.",
+              "type": "string"
+            },
+            {
+              "const": "not_run",
+              "description": "The run was stopped before it started: no process, no log.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`check_runs` (CLI `check runs`): the run lines of a workspace's checks, newest first, those\nthat match every filter given, a page at a time. Reads only: no lock, no identity, nothing\nwritten. Diagnostics: nothing decides from a run line.",
+      "properties": {
+        "checks": {
+          "description": "Only the lines of these checks; every check when empty (the default).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cursor": {
+          "description": "The cursor a page gave, to read the page after it, with the same filters: pass it back\nas it was returned.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 100,
+          "description": "The most lines of a page: 1 to 1,000; 100 when omitted.",
+          "format": "uint",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "outcomes": {
+          "description": "Only the lines that ended as one of these: `passed`, `failed`, `timed_out`, `cancelled`\nor `not_started` (`not_run` leaves no line, and is refused); every outcome when empty.",
+          "items": {
+            "$ref": "#/$defs/CheckOutcome"
+          },
+          "type": "array"
+        },
+        "run": {
+          "description": "Only the lines of this run, by its id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "since": {
+          "description": "Only the lines of checks that started at or after this time, in Unix milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tree": {
+          "description": "Only the lines whose tree starts with these 12 to 64 lowercase hex digits. A line with\nno tree (a run of the directory form) never matches.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "until": {
+          "description": "Only the lines of checks that started before this time, in Unix milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "workspace": {
+          "description": "The workspace, by its name in the store's registry.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "title": "CheckRunsReq",
+      "type": "object"
+    },
+    "CheckRunsResp": {
+      "$defs": {
+        "CheckOutcome": {
+          "description": "How a check of a run ended. Only `passed` passes.",
+          "oneOf": [
+            {
+              "const": "passed",
+              "description": "It exited 0.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "It exited with another code, or a signal it was not sent by the runner ended it.",
+              "type": "string"
+            },
+            {
+              "const": "timed_out",
+              "description": "It ran past its timeout, and its process group was killed.",
+              "type": "string"
+            },
+            {
+              "const": "not_started",
+              "description": "Its directory is missing, or its program did not start.",
+              "type": "string"
+            },
+            {
+              "const": "cancelled",
+              "description": "It was running when a signal stopped the run, and its process group was killed.",
+              "type": "string"
+            },
+            {
+              "const": "not_run",
+              "description": "The run was stopped before it started: no process, no log.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckRunLine": {
+          "description": "One run line: one check of one run of `check run`, as the host that ran it appends it to its\nrun lines file (`run-lines.jsonl`), one JSON object a line. Diagnostics: the file is not\nsynced and nothing decides from it. Later releases add keys; none is removed or changes its\nmeaning.",
+          "properties": {
+            "at": {
+              "description": "When the check started (for `not_started`: when it was tried), in Unix milliseconds on\nthe host that ran it.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "attempt": {
+              "description": "Which attempt of the check in its run this is, from 1.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "check": {
+              "description": "The check's name.",
+              "type": "string"
+            },
+            "definition_digest": {
+              "description": "The digest of the check's definition, as `check list` gives it (provisional).",
+              "type": "string"
+            },
+            "duration_ms": {
+              "description": "The check's milliseconds, from its start to the end of its output; 0 for `not_started`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "exit_code": {
+              "description": "Its exit code, when it exited.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "findings": {
+              "description": "The findings read from its reports. Omitted when 0.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "labels": {
+              "description": "The runner labels the check requires. Omitted when it requires none.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "outcome": {
+              "$ref": "#/$defs/CheckOutcome",
+              "description": "How it ended; never `not_run`, which leaves no line."
+            },
+            "peak_rss_kib": {
+              "description": "The most resident memory the check's process group held at once, in KiB, as the runner\nsampled it: the sum over the group's processes, about once a second, on Linux. A spike\nbetween two samples is not seen. Omitted on other hosts, and for a check no sample saw.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "run": {
+              "description": "The run's id: a UUID v7.",
+              "type": "string"
+            },
+            "run_dir": {
+              "description": "The run's directory on the host it ran on, absolute: where its record and logs are while\nthe host keeps the run. Omitted when longer than 1,024 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stage": {
+              "$ref": "#/$defs/CheckStage",
+              "description": "The stage run."
+            },
+            "tree": {
+              "description": "The root tree the check ran on: 64 hex digits. Omitted in the directory form, which knows\nno tree.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "vouched": {
+              "description": "Whether only the caller stands behind the files the check ran on: `true` in the directory\nform.",
+              "type": "boolean"
+            },
+            "wait_ms": {
+              "description": "The milliseconds from the run's start to the check's start: in a run of one check at a\ntime, the time the checks before it took.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "workspace": {
+              "description": "The workspace's name. Omitted in the directory form.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "at",
+            "run",
+            "check",
+            "attempt",
+            "stage",
+            "vouched",
+            "definition_digest",
+            "wait_ms",
+            "duration_ms",
+            "outcome"
+          ],
+          "type": "object"
+        },
+        "CheckRunsSource": {
+          "description": "What a page of `check_runs` was read from.",
+          "oneOf": [
+            {
+              "const": "run_lines",
+              "description": "The run lines' files of a host: diagnostics that `check run` appended there.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckStage": {
+          "description": "When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+          "oneOf": [
+            {
+              "const": "before-land",
+              "description": "Before a change lands: the gate. The default.",
+              "type": "string"
+            },
+            {
+              "const": "after-land",
+              "description": "After a change has landed.",
+              "type": "string"
+            },
+            {
+              "const": "scheduled",
+              "description": "On a schedule.",
+              "type": "string"
+            },
+            {
+              "const": "release",
+              "description": "Before a release is cut.",
+              "type": "string"
+            },
+            {
+              "const": "manual",
+              "description": "Only when someone asks for it.",
+              "type": "string"
+            },
+            {
+              "const": "deploy",
+              "description": "Before a deployment.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`check_runs`: one page of run lines, newest first. Diagnostics: the lines are what the hosts\nthat ran the checks appended, unsynced, and nothing decides from them.",
+      "properties": {
+        "cursor": {
+          "description": "The cursor of the next page; omitted when no more lines match.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dir": {
+          "description": "The directory the lines were read from, on this host, absolute.",
+          "type": "string"
+        },
+        "runs": {
+          "description": "The page: the lines that match, newest first, by the time each check started.",
+          "items": {
+            "$ref": "#/$defs/CheckRunLine"
+          },
+          "type": "array"
+        },
+        "scanned": {
+          "description": "The lines read from the files, matching or not.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped": {
+          "description": "The lines among them that did not read as a run line, each passed over. Omitted when 0.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/$defs/CheckRunsSource",
+          "description": "What the lines were read from."
+        },
+        "vouched": {
+          "description": "Whether only the caller stands behind where the lines were read from: `true` for a\ndirectory's lines (`check runs --dir`) and for a directory the caller named; `false`\nfor a workspace's own state.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "vouched",
+        "source",
+        "dir",
+        "runs",
+        "scanned"
+      ],
+      "title": "CheckRunsResp",
+      "type": "object"
+    },
+    "CheckRunsSource": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a page of `check_runs` was read from.",
+      "oneOf": [
+        {
+          "const": "run_lines",
+          "description": "The run lines' files of a host: diagnostics that `check run` appended there.",
+          "type": "string"
+        }
+      ],
+      "title": "CheckRunsSource"
+    },
     "CheckSectionOut": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "A section a check opened with a marker line: from its marker to the next one, or to the end\nof the check's output.",

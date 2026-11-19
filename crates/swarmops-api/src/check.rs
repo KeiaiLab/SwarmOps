@@ -36,6 +36,14 @@
 //!                      labels?, peak_rss_kib?, run_dir?}      one JSON object a line
 //! ```
 //!
+//! `check runs` reads those lines, newest first, filtered, a page at a time:
+//!
+//! ```text
+//!   CheckRunsReq {workspace, checks, tree?, outcomes, run?, since?, until?, limit, cursor?}
+//!   CheckRunsResp {vouched, source: run_lines, dir, runs: [CheckRunLine newest first],
+//!                  cursor?, scanned, skipped?}
+//! ```
+//!
 //! No request carries a path of the caller's host: a directory the caller names is read and
 //! run by the CLI alone, and its answer is the same type with `vouched` set. A result names the
 //! host's paths of its run directory and logs: a run happens on one host, and its logs stay
@@ -851,6 +859,116 @@ impl CheckRunLine {
     }
 }
 
+/// `check_runs` (CLI `check runs`): the run lines of a workspace's checks, newest first, those
+/// that match every filter given, a page at a time. Reads only: no lock, no identity, nothing
+/// written. Diagnostics: nothing decides from a run line.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckRunsReq {
+    /// The workspace, by its name in the store's registry.
+    pub workspace: String,
+    /// Only the lines of these checks; every check when empty (the default).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<String>,
+    /// Only the lines whose tree starts with these 12 to 64 lowercase hex digits. A line with
+    /// no tree (a run of the directory form) never matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
+    /// Only the lines that ended as one of these: `passed`, `failed`, `timed_out`, `cancelled`
+    /// or `not_started` (`not_run` leaves no line, and is refused); every outcome when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outcomes: Vec<CheckOutcome>,
+    /// Only the lines of this run, by its id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// Only the lines of checks that started at or after this time, in Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+    /// Only the lines of checks that started before this time, in Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<u64>,
+    /// The most lines of a page: 1 to 1,000; 100 when omitted.
+    #[serde(default = "default_runs_limit")]
+    #[schemars(range(min = 1, max = MAX_CHECK_RUNS_LIMIT))]
+    pub limit: usize,
+    /// The cursor a page gave, to read the page after it, with the same filters: pass it back
+    /// as it was returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+impl CheckRunsReq {
+    /// The newest run lines of `workspace`: no filter, the first page of 100.
+    pub fn new(workspace: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            checks: Vec::new(),
+            tree: None,
+            outcomes: Vec::new(),
+            run: None,
+            since: None,
+            until: None,
+            limit: DEFAULT_CHECK_RUNS_LIMIT,
+            cursor: None,
+        }
+    }
+}
+
+/// The default [`CheckRunsReq::limit`]: 100 lines.
+pub const DEFAULT_CHECK_RUNS_LIMIT: usize = 100;
+
+/// The most lines [`CheckRunsReq::limit`] may ask for.
+pub const MAX_CHECK_RUNS_LIMIT: usize = 1_000;
+
+/// `check_runs`: one page of run lines, newest first. Diagnostics: the lines are what the hosts
+/// that ran the checks appended, unsynced, and nothing decides from them.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckRunsResp {
+    /// Whether only the caller stands behind where the lines were read from: `true` for a
+    /// directory's lines (`check runs --dir`) and for a directory the caller named; `false`
+    /// for a workspace's own state.
+    pub vouched: bool,
+    /// What the lines were read from.
+    pub source: CheckRunsSource,
+    /// The directory the lines were read from, on this host, absolute.
+    pub dir: String,
+    /// The page: the lines that match, newest first, by the time each check started.
+    pub runs: Vec<CheckRunLine>,
+    /// The cursor of the next page; omitted when no more lines match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// The lines read from the files, matching or not.
+    pub scanned: u64,
+    /// The lines among them that did not read as a run line, each passed over. Omitted when 0.
+    #[serde(default, skip_serializing_if = "crate::ops::is_zero")]
+    pub skipped: u64,
+}
+
+impl CheckRunsResp {
+    /// An empty page of the run lines in `dir`, vouched for by the caller or not.
+    pub fn new(vouched: bool, dir: impl Into<String>) -> Self {
+        Self {
+            vouched,
+            source: CheckRunsSource::RunLines,
+            dir: dir.into(),
+            runs: Vec::new(),
+            cursor: None,
+            scanned: 0,
+            skipped: 0,
+        }
+    }
+}
+
+/// What a page of `check_runs` was read from.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckRunsSource {
+    /// The run lines' files of a host: diagnostics that `check run` appended there.
+    RunLines,
+}
+
 /// `check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. Reads
 /// only: no lock, nothing written.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
@@ -990,6 +1108,10 @@ pub enum CheckLogEnd {
     End,
     /// The run's lock was let go with no `end` line: the runner died.
     RunnerGone,
+}
+
+fn default_runs_limit() -> usize {
+    DEFAULT_CHECK_RUNS_LIMIT
 }
 
 fn default_log_tail() -> usize {

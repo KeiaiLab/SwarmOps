@@ -26,6 +26,7 @@ const REQUESTS: &[&str] = &[
     "CheckListReq",
     "CheckLogReq",
     "CheckRunReq",
+    "CheckRunsReq",
     "CloneReq",
     "CommitReq",
     "DeriveReq",
@@ -121,6 +122,7 @@ const RESPONSES: &[&str] = &[
     "CheckRunLine",
     "CheckRunOut",
     "CheckRunResp",
+    "CheckRunsResp",
     "CheckSectionOut",
     "CloneResp",
     "CommitResp",
@@ -228,6 +230,7 @@ const SCALARS: &[&str] = &[
     "CheckReportFault",
     "CheckReportFormat",
     "CheckReportState",
+    "CheckRunsSource",
     "CheckStage",
     "ConflictKindOut",
     "ContentEncoding",
@@ -2184,9 +2187,99 @@ mod check {
         CheckFindingLevel, CheckFindingOut, CheckListReq, CheckListResp, CheckLogEnd,
         CheckLogLineOut, CheckLogReq, CheckLogResp, CheckLogStream, CheckNotStarted, CheckOut,
         CheckOutcome, CheckReportFault, CheckReportFormat, CheckReportOut, CheckReportReadOut,
-        CheckReportState, CheckRunOut, CheckRunReq, CheckRunResp, CheckSectionOut, CheckStage, Rev,
-        schema_for_all,
+        CheckReportState, CheckRunLine, CheckRunOut, CheckRunReq, CheckRunResp, CheckRunsReq,
+        CheckRunsResp, CheckRunsSource, CheckSectionOut, CheckStage, DEFAULT_CHECK_RUNS_LIMIT,
+        MAX_CHECK_RUNS_LIMIT, Rev, schema_for_all,
     };
+
+    /// A request for the run lines names a workspace; no filter, the first page of 100 when it
+    /// names nothing else, and its limit is 1 to 1,000 in the schema.
+    #[test]
+    fn a_check_runs_request_defaults_to_the_newest_page() {
+        let read: CheckRunsReq = serde_json::from_value(json!({"workspace": "w"})).unwrap();
+        assert_eq!(read, CheckRunsReq::new("w"));
+        assert_eq!((read.limit, DEFAULT_CHECK_RUNS_LIMIT), (100, 100));
+        assert_eq!(
+            serde_json::to_string(&read).unwrap(),
+            r#"{"workspace":"w","limit":100}"#
+        );
+        let mut filtered = CheckRunsReq::new("w");
+        filtered.checks = vec!["unit".to_owned()];
+        filtered.tree = Some("abcdef012345".to_owned());
+        filtered.outcomes = vec![CheckOutcome::Failed, CheckOutcome::TimedOut];
+        filtered.run = Some("0193".to_owned());
+        filtered.since = Some(1);
+        filtered.until = Some(2);
+        filtered.limit = 5;
+        filtered.cursor = Some("r1.x".to_owned());
+        let text = serde_json::to_string(&filtered).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"workspace":"w","checks":["unit"],"tree":"abcdef012345","#,
+                r#""outcomes":["failed","timed_out"],"run":"0193","since":1,"until":2,"#,
+                r#""limit":5,"cursor":"r1.x"}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(
+            serde_json::from_str::<CheckRunsReq>(&text).unwrap(),
+            filtered
+        );
+        let schema = &schema_for_all()["CheckRunsReq"];
+        assert_eq!(schema["required"], json!(["workspace"]));
+        let limit = &schema["properties"]["limit"];
+        assert_eq!(
+            (&limit["minimum"], &limit["maximum"]),
+            (&json!(1), &json!(1_000))
+        );
+        assert_eq!(MAX_CHECK_RUNS_LIMIT, 1_000);
+        assert_ignores_unknown_fields::<CheckRunsReq>("CheckRunsReq", json!({"workspace": "w"}));
+    }
+
+    /// A page of run lines in the documented order: where it was read from, its lines, and the
+    /// cursor and the skipped count only when there is one.
+    #[test]
+    fn a_check_runs_page_omits_what_it_lacks() {
+        let empty = CheckRunsResp::new(false, "/w/.swarmws/check-runs");
+        assert_eq!(
+            serde_json::to_string(&empty).unwrap(),
+            [
+                r#"{"vouched":false,"source":"run_lines","dir":"/w/.swarmws/check-runs","#,
+                r#""runs":[],"scanned":0}"#,
+            ]
+            .concat()
+        );
+        let mut page = CheckRunsResp::new(true, "/lines");
+        page.runs = vec![CheckRunLine::new(
+            1,
+            "0193",
+            "unit",
+            CheckStage::BeforeLand,
+            CheckOutcome::Passed,
+        )];
+        page.cursor = Some("r1.1.0193.1.unit".to_owned());
+        page.scanned = 3;
+        page.skipped = 2;
+        let text = serde_json::to_string(&page).unwrap();
+        assert!(
+            text.ends_with(r#""cursor":"r1.1.0193.1.unit","scanned":3,"skipped":2}"#),
+            "{text}"
+        );
+        assert_eq!(serde_json::from_str::<CheckRunsResp>(&text).unwrap(), page);
+        assert_eq!(
+            serde_json::to_value(CheckRunsSource::RunLines).unwrap(),
+            json!("run_lines")
+        );
+        assert_eq!(
+            schema_for_all()["CheckRunsResp"]["required"],
+            json!(["vouched", "source", "dir", "runs", "scanned"])
+        );
+        assert_ignores_unknown_fields::<CheckRunsResp>(
+            "CheckRunsResp",
+            json!({"vouched": true, "source": "run_lines", "dir": "/l", "runs": [], "scanned": 0}),
+        );
+    }
 
     /// A log's request names the workspace and the check; the newest run and 1,000 lines when
     /// it names neither.

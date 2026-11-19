@@ -61,6 +61,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - API type `CheckRunLine`, the run line a check of a run leaves: when it started, its run, name,
   attempt, stage, tree, definition digest, wait, duration, outcome, exit code, findings, labels,
   sampled peak memory and run directory. `swarmops schema CheckRunLine` prints it (239 types).
+- API types `CheckRunsReq`, `CheckRunsResp` and `CheckRunsSource`: a page of run lines, newest
+  first, filtered by check, tree, outcome, run and time, with a cursor, and what it was read
+  from (`run_lines`). `swarmops schema` prints them (242 types).
 
 ### Changed
 

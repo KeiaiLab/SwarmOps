@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 239 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 242 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -51,6 +51,9 @@ The 239 request, response and value types of the API, as `swarmops schema` print
 | [`CheckRunOut`](#checkrunout) | object | One check of a run: how it ended, and where its log is. |
 | [`CheckRunReq`](#checkrunreq) | object | `check_run` (CLI `check run`): run the checks of one stage of a workspace's tree, one at a time in name order. |
 | [`CheckRunResp`](#checkrunresp) | object | `check_run`: every selected check's outcome, in the order they ran. |
+| [`CheckRunsReq`](#checkrunsreq) | object | `check_runs` (CLI `check runs`): the run lines of a workspace's checks, newest first, those that match every filter given, a page at a time. |
+| [`CheckRunsResp`](#checkrunsresp) | object | `check_runs`: one page of run lines, newest first. |
+| [`CheckRunsSource`](#checkrunssource) | enumeration | What a page of `check_runs` was read from. |
 | [`CheckSectionOut`](#checksectionout) | object | A section a check opened with a marker line: from its marker to the next one, or to the end of the check's output. |
 | [`CheckStage`](#checkstage) | enumeration | When a check's answer is wanted. |
 | [`CloneReq`](#clonereq) | object | `clone`: a new store in a directory of the caller's host, holding a git remote's history, with the remote recorded and its followed branch imported into `main`. |
@@ -866,6 +869,50 @@ Kind: object. `swarmops schema CheckRunResp` prints its JSON Schema.
 | `version` | `integer` (uint32) or `null` | no | The check file's `version`, 1. Omitted unless `file` is `.swarmops/checks.toml`. |
 | `vouched` | `boolean` | yes | Whether only the caller stands behind the files the checks ran on: `true` in the directory form (`check run --dir`), which no gate accepts; `false` in a workspace, whose files were checked against `tree` first. |
 | `workspace` | `string` or `null` | no | The workspace's name. Omitted in the directory form. |
+
+## CheckRunsReq
+
+`check_runs` (CLI `check runs`): the run lines of a workspace's checks, newest first, those that match every filter given, a page at a time. Reads only: no lock, no identity, nothing written. Diagnostics: nothing decides from a run line.
+
+Kind: object. `swarmops schema CheckRunsReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `checks` | array of `string` | no | Only the lines of these checks; every check when empty (the default). |
+| `cursor` | `string` or `null` | no | The cursor a page gave, to read the page after it, with the same filters: pass it back as it was returned. |
+| `limit` | `integer` (uint) | no | The most lines of a page: 1 to 1,000; 100 when omitted. Default: `100`. At least 1. At most 1000. |
+| `outcomes` | array of [`CheckOutcome`](#checkoutcome) | no | Only the lines that ended as one of these: `passed`, `failed`, `timed_out`, `cancelled` or `not_started` (`not_run` leaves no line, and is refused); every outcome when empty. |
+| `run` | `string` or `null` | no | Only the lines of this run, by its id. |
+| `since` | `integer` (uint64) or `null` | no | Only the lines of checks that started at or after this time, in Unix milliseconds. |
+| `tree` | `string` or `null` | no | Only the lines whose tree starts with these 12 to 64 lowercase hex digits. A line with no tree (a run of the directory form) never matches. |
+| `until` | `integer` (uint64) or `null` | no | Only the lines of checks that started before this time, in Unix milliseconds. |
+| `workspace` | `string` | yes | The workspace, by its name in the store's registry. |
+
+## CheckRunsResp
+
+`check_runs`: one page of run lines, newest first. Diagnostics: the lines are what the hosts that ran the checks appended, unsynced, and nothing decides from them.
+
+Kind: object. `swarmops schema CheckRunsResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cursor` | `string` or `null` | no | The cursor of the next page; omitted when no more lines match. |
+| `dir` | `string` | yes | The directory the lines were read from, on this host, absolute. |
+| `runs` | array of [`CheckRunLine`](#checkrunline) | yes | The page: the lines that match, newest first, by the time each check started. |
+| `scanned` | `integer` (uint64) | yes | The lines read from the files, matching or not. |
+| `skipped` | `integer` (uint64) | no | The lines among them that did not read as a run line, each passed over. Omitted when 0. |
+| `source` | [`CheckRunsSource`](#checkrunssource) | yes | What the lines were read from. |
+| `vouched` | `boolean` | yes | Whether only the caller stands behind where the lines were read from: `true` for a directory's lines (`check runs --dir`) and for a directory the caller named; `false` for a workspace's own state. |
+
+## CheckRunsSource
+
+What a page of `check_runs` was read from.
+
+Kind: enumeration. `swarmops schema CheckRunsSource` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"run_lines"` | The run lines' files of a host: diagnostics that `check run` appended there. |
 
 ## CheckSectionOut
 

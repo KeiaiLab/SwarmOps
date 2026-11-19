@@ -35,7 +35,7 @@ use swarmops_api::{
     CheckFindingLevel, CheckFindingOut, CheckListReq, CheckListResp, CheckLogLineOut, CheckLogReq,
     CheckLogResp, CheckLogStream, CheckOut, CheckOutcome, CheckReportFormat, CheckReportOut,
     CheckReportReadOut, CheckReportState, CheckRunLine, CheckRunOut, CheckRunReq, CheckRunResp,
-    CheckSectionOut, CheckStage,
+    CheckRunsReq, CheckRunsResp, CheckSectionOut, CheckStage,
 };
 use swarmops_api::{SnapshotWrite, WsSnapshotReq, WsSnapshotResp};
 use swarmops_api::{UpdateOut, UpdatePending, UpdatePendingKind};
@@ -73,6 +73,7 @@ fn every_request_new_fills_the_serde_defaults() {
     reads_back(&BlobPutReq::new(ContentInput::Inline("x".to_owned())));
     reads_back(&ChangeInput::new("x", ChangeOp::Put));
     reads_back(&CheckRunReq::new("x"));
+    reads_back(&CheckRunsReq::new("x"));
     reads_back(&CheckLogReq::new("x", "x"));
     reads_back(&CloneReq::new("x", "x"));
     reads_back(&CommitReq::new(Vec::new(), "x"));
@@ -167,6 +168,7 @@ fn every_response_new_fills_the_serde_defaults() {
     reads_back(&CheckListResp::new(true, Vec::new()));
     reads_back(&CheckRunResp::new(true, "x", CheckStage::Manual, "x", "x"));
     reads_back(&CheckLogResp::new(true, "x", "x"));
+    reads_back(&CheckRunsResp::new(true, "x"));
     reads_back(&RemoteRemoveResp::new("x", 7));
     reads_back(&SyncResp::new(
         "x",
