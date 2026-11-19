@@ -39,7 +39,8 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   grouped by its class or suite, its failure and the end of its stderr as the message), with the
   report's `tests`, `failed` and `skipped`; a SARIF 2.1.0 result of kind `fail` is a finding (its
   level, rule, message, tool, and first location's path and lines), with the report's `results`.
-  A document type, an entity other than XML's five, or another encoding than UTF-8 is refused.
+  A document type, an entity other than XML's five, text outside the root element, or another
+  encoding than UTF-8 is refused.
 - The check file's `reports` key: the JUnit and SARIF files a check leaves in its tree, 1 to 16
   tables of `format`, `junit` or `sarif`, and `path`, a repository path relative to the check's
   `dir`, none twice. They are part of the definition's digest, which is unchanged for a check
