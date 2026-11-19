@@ -73,9 +73,14 @@ to the weakest:
    checks gain features; a build that does not know a key refuses the file with `E_CHECK_FILE`
    (`details.reason` `unknown_key`) instead of reading it without the key, so a newer file never
    means less to an older build. A key whose meaning changes makes a new `version`. The
-   `definition_digest` that `check list` gives is not part of this surface yet: its recipe is
-   provisional, and a later release may replace it before it is fixed. A check's `stages` came
-   with M31: an older build refuses a file that names them, as above.
+   `definition_digest` that `check list` and `check plan` give is not part of this surface yet:
+   its recipe is provisional, and a later release may replace it before it is fixed. It covers a
+   check's `inputs` since they exist. A check's `stages` came with M31 and its `inputs` after
+   0.13.0: an older build refuses a file that names them, as above.
+   A plan's words are closed sets that grow: later releases add verdicts (`run` and
+   `not_applicable` today), reasons, widening causes and kinds of definition change, and none is
+   removed or changes its meaning within a major version. A reader that meets a verdict it does
+   not know takes it as `run`, never as a check it may skip.
 8. **The environment a check gets.** The variables `check run` sets for each check
    (`SWARMOPS_CHECK_NAME`, `_STAGE`, `_TREE`, `_ATTEMPT`, `_RUN`, `_REPORT`, `_OUTPUTS`,
    `_SUMMARY`, `_ARTIFACTS`, `_CHANGED`, and `SWARMOPS_WS` in a workspace), and the rule that a

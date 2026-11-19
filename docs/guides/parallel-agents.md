@@ -433,6 +433,15 @@ no shell, with the directory it runs in, a timeout and the stages its answer is 
 `so check list --dir .` from a checkout, each with the digest of its definition; a key the file's
 version does not take is refused at its line.
 
+A check may declare the paths it depends on, as patterns from the tree's root (`inputs`); one
+that declares none takes the whole tree. Before a land, `so check plan my-change` says which
+checks of a stage the change needs against `main`, and why: each check `run` or `not_applicable`
+with one reason, such as the changed path among its inputs. In a workspace,
+`so check plan --ws NAME` plans the commits and the edits on disk together, without the
+workspace's lock. A plan fails closed: what it cannot read or compare runs, and a change that
+narrows a check's own inputs runs that check. It informs, and starts nothing: `check run` runs
+every check of its stage ([`check plan`](../reference/commands/check-plan.md)).
+
 `so check run` runs one stage's checks of a clean workspace, on the tree its files stand for, or
 with `--dir .` those of a checkout as they are: one at a time, each in its own process group under
 its timeout, with one envelope naming every check's outcome and `E_CHECK_FAILED` when one did not

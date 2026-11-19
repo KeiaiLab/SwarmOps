@@ -155,7 +155,9 @@ It runs `just check` and `just check-compare`, this repository's two `before-lan
 `.swarmops/checks.toml`, one after the other under their timeouts, each with a log that
 `so check log --dir . <check>` reads, and answers one envelope naming both outcomes; after it,
 `so check log --failed --dir .` prints the logs of what failed, and `so check runs --dir .` what
-ran. A check gets
+ran. `so check plan --dir . --stage manual --changed-from <list> --nul` says which of the site and
+server checks a change needs, from a list of its changed paths such as `git diff --name-only -z`
+writes. A check gets
 only a fixed list of your variables (`HOME`, `PATH`, `TMPDIR`, the locale and a few more) and
 those `--pass` names, each when it is set: without the four after `NEXTEST_PROFILE`, a shared
 target directory or a pinned toolchain is not used, and the build starts cold in `./target`. With

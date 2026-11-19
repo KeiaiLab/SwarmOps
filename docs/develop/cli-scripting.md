@@ -301,6 +301,9 @@ E_PATH_NOT_FOUND retryable=false exit=6
 | Branch on the failure | `jq -r '.error.code // empty'` on the envelope, after a non-zero exit |
 | The checks of a `check run` that did not pass | `jq -r '.error.details.run.failed[]'` after `E_CHECK_FAILED`; each check's `outcome`, `log` and tails are in `.error.details.run.checks` |
 | The findings of a failed `check run` | `jq -r '.error.details.run.checks[] \| .name as $c \| .findings[]? \| "\($c) \(.level) \(.path // "-"):\(.line // "-") \(.title)"'` after `E_CHECK_FAILED` |
+| Whether a change needs one check | `swarmops check plan REV --check NAME \| jq -r '.result.checks[0].verdict'`: `run` or `not_applicable`; treat any other word, and a failed command, as `run` |
+| Why each check of a plan runs | `swarmops check plan REV \| jq -r '.result.checks[] \| "\(.name) \(.verdict) \(.reason) \(.path // .widened // .definition // "-")"'` |
+| Plan a git checkout's change | `git diff --name-only -z BASE HEAD > changed.nul`, then `swarmops check plan --dir . --changed-from changed.nul --nul`: NUL-ended names read as they are, where a list of lines cannot hold a name git would quote |
 
 A read cut short says so: `cat` gives `truncated` and `next_offset` (read on with `--offset`), and
 `log`, `ls`, `history`, `diff` and `check runs` give a `cursor` while there is more. `check runs`

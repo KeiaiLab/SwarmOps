@@ -1580,6 +1580,23 @@ A key that a later version of SwarmOps adds is `unknown_key` to an older build, 
 file rather than list it without that key: the hint says so. Without `.swarmops/checks.toml`,
 the file is `.swarmops/workspaces.json`, which `ws land --check` refuses as `E_INVALID_ARG`.
 
+### A plan says `run` for a check I did not touch
+
+`check plan` gives each check one reason, and four of the five say `run`. Read `reason` first,
+then the field that goes with it:
+
+| `reason` | Why the check runs | Look at |
+| --- | --- | --- |
+| `definition_changed` | Its definition is not the one the check file at the target's head has under its name. | `definition`: `modified` (the change, or the target since the base, changed its argv, directory, timeout, reports or inputs), `renamed` (`was` is the old name), `added`, or `deleted` (the candidate no longer has it). `check list REV` and `check list TARGET` show both definitions. |
+| `widened` | The whole plan is widened: the changed paths or the target's definitions are not known in full, so every check runs. | `widened`: `paths_unknown` (no shared history with the target, entries off a sparse workspace's prefixes, or `--dir` with no `--changed`), `paths_truncated` (past 100,000 paths, a 16 MiB list, or a land's 1,000), `path_unreadable` (a path given that is no repository path, or a quoted name in a list of lines: give the list NUL-ended with `--nul`), `check_file_changed` (the check file among `--dir`'s paths, or merged by a land), `target_unread` (the target's check file does not read: `check list TARGET`). |
+| `input_changed` | A changed path is among its inputs. | `path`, the first such path read, and `pattern`, the first of its patterns that matches it. |
+| `no_inputs` | It declares no `inputs`, so it takes the whole tree, and a path changed. | Its definition: give it `inputs` to narrow it. |
+
+`not_applicable` has one reason, `inputs_unchanged`: every changed path was read, none is among
+the check's inputs, and its definition is the target's head's. A plan never says it for a check
+whose inputs the change narrowed: that is a changed definition. An error is never a shorter
+plan: it is an envelope with no `result`.
+
 ## Codes a client does not know
 
 Every code is raised by some command: `E_CHECK_FILE` by `check list` since M30,
