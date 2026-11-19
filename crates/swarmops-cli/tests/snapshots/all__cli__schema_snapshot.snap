@@ -1751,41 +1751,7 @@ expression: s.redact(&all)
       "title": "CheckLogLineOut",
       "type": "object"
     },
-    "CheckLogReq": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. Reads\nonly: no lock, nothing written.",
-      "properties": {
-        "check": {
-          "description": "The check whose log to read.",
-          "type": "string"
-        },
-        "run": {
-          "description": "The run, by its id; the newest run of the workspace that ran `check` when omitted.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "tail": {
-          "default": 1000,
-          "description": "The most lines to give, the last ones: 1 to 100,000; 1,000 when omitted.",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "workspace": {
-          "description": "The workspace, by its name in the store's registry.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "workspace",
-        "check"
-      ],
-      "title": "CheckLogReq",
-      "type": "object"
-    },
-    "CheckLogResp": {
+    "CheckLogMoreOut": {
       "$defs": {
         "CheckLogEnd": {
           "description": "How a check's log ended.",
@@ -1898,7 +1864,7 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`check_log`: lines of a check's log, and whether it has ended. `check log --follow` prints one\nof these first, then one for each batch of lines the check writes, the last with `ended`.",
+      "description": "The log of one more failed check, in an answer of the failed checks' logs: what `check_log`\nanswers for that check alone, key for key.",
       "properties": {
         "check": {
           "description": "The check's name.",
@@ -1942,11 +1908,360 @@ expression: s.redact(&all)
           "type": "array"
         },
         "log": {
+          "description": "The log's path on the host it ran on. Omitted for a check the run never started, which\nhas none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The check's outcome, when `ended_by` is `end`."
+        },
+        "run": {
+          "description": "The run's id.",
+          "type": "string"
+        },
+        "total_lines": {
+          "description": "The log's lines so far.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vouched": {
+          "description": "As the run's: `true` for a run of the directory form.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "vouched",
+        "run",
+        "check",
+        "ended",
+        "first_line",
+        "total_lines",
+        "lines"
+      ],
+      "title": "CheckLogMoreOut",
+      "type": "object"
+    },
+    "CheckLogReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines; or,\nwith `failed`, the logs of the checks of a run that did not pass. Exactly one of `check` and\n`failed` is given. Reads only: no lock, nothing written.",
+      "properties": {
+        "check": {
+          "description": "The check whose log to read. Omitted with `failed`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failed": {
+          "description": "Read the logs of the checks of the run that did not pass, instead of one check's.",
+          "type": "boolean"
+        },
+        "run": {
+          "description": "The run, by its id; when omitted, the newest run of the workspace that ran `check`, or\nwith `failed` the newest run of the workspace.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tail": {
+          "default": 1000,
+          "description": "The most lines to give of a log, the last ones: 1 to 100,000; 1,000 when omitted. With\n`failed`, of each log.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workspace": {
+          "description": "The workspace, by its name in the store's registry.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "title": "CheckLogReq",
+      "type": "object"
+    },
+    "CheckLogResp": {
+      "$defs": {
+        "CheckLogEnd": {
+          "description": "How a check's log ended.",
+          "oneOf": [
+            {
+              "const": "end",
+              "description": "Its `end` line, or the run's record of a check it never started.",
+              "type": "string"
+            },
+            {
+              "const": "runner_gone",
+              "description": "The run's lock was let go with no `end` line: the runner died.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckLogLineOut": {
+          "description": "One line of a check's log.",
+          "properties": {
+            "at_ms": {
+              "description": "Its time: milliseconds since the check's start. Omitted for a line of `other`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "n": {
+              "description": "Its number in the log, from 1.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stream": {
+              "$ref": "#/$defs/CheckLogStream",
+              "description": "Where it came from."
+            },
+            "text": {
+              "description": "Its text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "n",
+            "stream",
+            "text"
+          ],
+          "type": "object"
+        },
+        "CheckLogMoreOut": {
+          "description": "The log of one more failed check, in an answer of the failed checks' logs: what `check_log`\nanswers for that check alone, key for key.",
+          "properties": {
+            "check": {
+              "description": "The check's name.",
+              "type": "string"
+            },
+            "duration_ms": {
+              "description": "The check's milliseconds, when its log's `end` line gives them.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "ended": {
+              "description": "Whether the log is complete: no line follows.",
+              "type": "boolean"
+            },
+            "ended_by": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CheckLogEnd"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How it ended, when `ended`."
+            },
+            "first_line": {
+              "description": "The number of the first line given, from 1.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "lines": {
+              "description": "The lines given, in order.",
+              "items": {
+                "$ref": "#/$defs/CheckLogLineOut"
+              },
+              "type": "array"
+            },
+            "log": {
+              "description": "The log's path on the host it ran on. Omitted for a check the run never started, which\nhas none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "outcome": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CheckOutcome"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The check's outcome, when `ended_by` is `end`."
+            },
+            "run": {
+              "description": "The run's id.",
+              "type": "string"
+            },
+            "total_lines": {
+              "description": "The log's lines so far.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "vouched": {
+              "description": "As the run's: `true` for a run of the directory form.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "vouched",
+            "run",
+            "check",
+            "ended",
+            "first_line",
+            "total_lines",
+            "lines"
+          ],
+          "type": "object"
+        },
+        "CheckLogStream": {
+          "description": "Where a line of a check's log came from.",
+          "oneOf": [
+            {
+              "const": "out",
+              "description": "The check's stdout.",
+              "type": "string"
+            },
+            {
+              "const": "err",
+              "description": "The check's stderr.",
+              "type": "string"
+            },
+            {
+              "const": "run",
+              "description": "The runner's own line: `start`, `section`, `cut` or `end`, and a JSON object.",
+              "type": "string"
+            },
+            {
+              "const": "other",
+              "description": "A line not in the log's format, as a check writing into its own log could leave.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckOutcome": {
+          "description": "How a check of a run ended. Only `passed` passes.",
+          "oneOf": [
+            {
+              "const": "passed",
+              "description": "It exited 0.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "It exited with another code, or a signal it was not sent by the runner ended it.",
+              "type": "string"
+            },
+            {
+              "const": "timed_out",
+              "description": "It ran past its timeout, and its process group was killed.",
+              "type": "string"
+            },
+            {
+              "const": "not_started",
+              "description": "Its directory is missing, or its program did not start.",
+              "type": "string"
+            },
+            {
+              "const": "cancelled",
+              "description": "It was running when a signal stopped the run, and its process group was killed.",
+              "type": "string"
+            },
+            {
+              "const": "not_run",
+              "description": "The run was stopped before it started: no process, no log.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`check_log`: lines of a check's log, and whether it has ended. `check log --follow` prints one\nof these first, then one for each batch of lines the check writes, the last with `ended`.",
+      "properties": {
+        "check": {
+          "description": "The check's name.",
+          "type": "string"
+        },
+        "duration_ms": {
+          "description": "The check's milliseconds, when its log's `end` line gives them.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ended": {
+          "description": "Whether the log is complete: no line follows.",
+          "type": "boolean"
+        },
+        "ended_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckLogEnd"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How it ended, when `ended`."
+        },
+        "failed": {
+          "description": "With `failed`: every check of the run that did not pass, in run order; `check` is the\nfirst of them. Omitted for one check's log.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "first_line": {
+          "description": "The number of the first line given, from 1.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lines": {
+          "description": "The lines given, in order.",
+          "items": {
+            "$ref": "#/$defs/CheckLogLineOut"
+          },
+          "type": "array"
+        },
+        "log": {
           "description": "The log's path on the host it ran on. Omitted for a check the run never started\n(`not_run`), which has none.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "logs_omitted": {
+          "description": "With `failed`: the failed checks whose logs this answer leaves out, past 20 logs or\n100,000 lines; `failed` names them. Omitted when 0.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "more": {
+          "description": "With `failed`: the logs of the failed checks after the first, in run order. Omitted when\nthere is no other.",
+          "items": {
+            "$ref": "#/$defs/CheckLogMoreOut"
+          },
+          "type": "array"
         },
         "outcome": {
           "anyOf": [

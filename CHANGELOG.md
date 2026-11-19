@@ -72,11 +72,17 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - API types `CheckRunsReq`, `CheckRunsResp` and `CheckRunsSource`: a page of run lines, newest
   first, filtered by check, tree, outcome, run and time, with a cursor, and what it was read
   from (`run_lines`). `swarmops schema` prints them (242 types).
+- API type `CheckLogMoreOut`, the log of one more failed check in an answer of the failed checks'
+  logs: one check's log, key for key. `swarmops schema` prints it (243 types).
 
 ### Changed
 
 - `E_CHECK_FAILED`'s `details.run`, the whole result of a run of `check run`, holds each check's
   findings.
+- `CheckLogReq.check` is optional, and the request takes `failed`: exactly one of a check's
+  name and `failed: true` is given, else `E_INVALID_ARG` with `details.reason: check`. A request
+  of `{workspace, check}` reads as before. `CheckLogResp` gains `failed`, `more` and
+  `logs_omitted`, each omitted from one check's log, which is written as before.
 - `SWARMOPS_CHECK_REPORT` is read: it is the check's report file of findings.
 - The MCP tool `check_list`'s description says that a check's declared JUnit and SARIF reports
   are listed.

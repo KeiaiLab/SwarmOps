@@ -114,6 +114,7 @@ const RESPONSES: &[&str] = &[
     "ChangesetSummary",
     "CheckListResp",
     "CheckLogLineOut",
+    "CheckLogMoreOut",
     "CheckLogResp",
     "CheckOut",
     "CheckFindingOut",
@@ -2189,7 +2190,7 @@ mod check {
         CheckOutcome, CheckReportFault, CheckReportFormat, CheckReportOut, CheckReportReadOut,
         CheckReportState, CheckRunLine, CheckRunOut, CheckRunReq, CheckRunResp, CheckRunsReq,
         CheckRunsResp, CheckRunsSource, CheckSectionOut, CheckStage, DEFAULT_CHECK_RUNS_LIMIT,
-        MAX_CHECK_RUNS_LIMIT, Rev, schema_for_all,
+        MAX_CHECK_RUNS_LIMIT, MAX_FAILED_LOGS, Rev, schema_for_all,
     };
 
     /// A request for the run lines names a workspace; no filter, the first page of 100 when it
@@ -2295,11 +2296,81 @@ mod check {
         );
         assert_eq!(
             schema_for_all()["CheckLogReq"]["required"],
-            json!(["workspace", "check"])
+            json!(["workspace"])
         );
         assert_ignores_unknown_fields::<CheckLogReq>(
             "CheckLogReq",
             json!({"workspace": "w", "check": "unit"}),
+        );
+    }
+
+    /// A log's request for the failed checks names no check: `{workspace, failed: true}` reads
+    /// and writes back, and a request of a check writes no `failed`.
+    #[test]
+    fn a_check_log_request_asks_for_a_check_or_for_the_failed_ones() {
+        let read: CheckLogReq =
+            serde_json::from_value(json!({"workspace": "w", "failed": true})).unwrap();
+        assert_eq!(read, CheckLogReq::failed("w"));
+        assert_eq!(
+            (read.check.as_deref(), read.failed, read.tail),
+            (None, true, 1_000)
+        );
+        assert_eq!(
+            serde_json::to_string(&read).unwrap(),
+            r#"{"workspace":"w","failed":true,"tail":1000}"#
+        );
+        let of_check = CheckLogReq::new("w", "unit");
+        assert_eq!(
+            (of_check.check.as_deref(), of_check.failed),
+            (Some("unit"), false)
+        );
+        let neither: CheckLogReq = serde_json::from_value(json!({"workspace": "w"})).unwrap();
+        assert_eq!(
+            (neither.check, neither.failed),
+            (None, false),
+            "the operation refuses it"
+        );
+        assert_eq!(MAX_FAILED_LOGS, 20);
+    }
+
+    /// The failed checks' logs in one answer: the first failed check's log at the top, then
+    /// `failed`, every check that did not pass, `more`, the logs after the first, and
+    /// `logs_omitted`; an answer of one check's log writes none of the three.
+    #[test]
+    fn a_check_log_result_carries_the_failed_checks_logs() {
+        let plain = CheckLogResp::new(true, "0193", "bad");
+        let text = serde_json::to_string(&plain).unwrap();
+        assert!(!text.contains("failed") && !text.contains("more"), "{text}");
+        let mut first = plain.clone();
+        first.failed = vec!["bad".to_owned(), "worse".to_owned(), "worst".to_owned()];
+        first.more = vec![CheckLogResp::new(true, "0193", "worse").into()];
+        first.logs_omitted = 1;
+        let text = serde_json::to_string(&first).unwrap();
+        assert!(
+            text.ends_with(
+                &[
+                    r#""lines":[],"failed":["bad","worse","worst"],"more":[{"vouched":true,"#,
+                    r#""run":"0193","check":"worse","ended":false,"first_line":1,"#,
+                    r#""total_lines":0,"lines":[]}],"logs_omitted":1}"#,
+                ]
+                .concat()
+            ),
+            "{text}"
+        );
+        assert_eq!(serde_json::from_str::<CheckLogResp>(&text).unwrap(), first);
+
+        // One more log has one check's log's keys, required and not, and none of the three.
+        let all = schema_for_all();
+        let (whole, more) = (&all["CheckLogResp"], &all["CheckLogMoreOut"]);
+        let mut keys: Vec<&String> = whole["properties"].as_object().unwrap().keys().collect();
+        keys.retain(|key| !["failed", "more", "logs_omitted"].contains(&key.as_str()));
+        let of_more: Vec<&String> = more["properties"].as_object().unwrap().keys().collect();
+        assert_eq!(of_more, keys);
+        assert_eq!(more["required"], whole["required"]);
+        let one = serde_json::to_value(&first.more[0]).unwrap();
+        assert_eq!(
+            one,
+            serde_json::to_value(CheckLogResp::new(true, "0193", "worse")).unwrap()
         );
     }
 

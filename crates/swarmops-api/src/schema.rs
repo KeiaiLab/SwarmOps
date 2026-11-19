@@ -377,6 +377,7 @@ fn check_schemas() -> serde_json::Value {
         CheckLogReq,
         CheckLogResp,
         CheckLogLineOut,
+        CheckLogMoreOut,
         CheckLogStream,
         CheckLogEnd,
     ]

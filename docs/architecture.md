@@ -980,7 +980,7 @@ envelope a line as a check's log grows, the last the one that holds its end):
 A failure's `code` is one of 57 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 3 conflict, 4 retryable, 5 identity or policy, 6 not
 found) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 242 types, and its snapshot test is where contract
+`swarmops schema` prints the JSON Schema of 243 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what

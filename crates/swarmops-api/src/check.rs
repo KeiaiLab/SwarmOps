@@ -24,7 +24,17 @@
 //! ```
 //!
 //! `check log` reads one check's log of a run ([`CheckLogResp`]): its lines, each with its time
-//! and stream, and whether it has ended.
+//! and stream, and whether it has ended. Asked for the failed checks ([`CheckLogReq::failed`]),
+//! it answers the first one's log the same way, with the names of all of them and the logs of
+//! the others beside it:
+//!
+//! ```text
+//!   CheckLogReq {workspace, check | failed: true, run?, tail}
+//!   CheckLogResp {vouched, run, check, log?, ended, …, lines,
+//!                 failed?: [every check that did not pass, in run order],
+//!                 more?: [CheckLogMoreOut, the log of each failed check after the first],
+//!                 logs_omitted?}
+//! ```
 //!
 //! Each check a run reaches leaves one run line ([`CheckRunLine`]) in a diagnostics file on the
 //! host that ran it: which check, of which run and tree, how long it waited and ran, and how it
@@ -969,19 +979,26 @@ pub enum CheckRunsSource {
     RunLines,
 }
 
-/// `check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. Reads
-/// only: no lock, nothing written.
+/// `check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines; or,
+/// with `failed`, the logs of the checks of a run that did not pass. Exactly one of `check` and
+/// `failed` is given. Reads only: no lock, nothing written.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CheckLogReq {
     /// The workspace, by its name in the store's registry.
     pub workspace: String,
-    /// The check whose log to read.
-    pub check: String,
-    /// The run, by its id; the newest run of the workspace that ran `check` when omitted.
+    /// The check whose log to read. Omitted with `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
+    /// Read the logs of the checks of the run that did not pass, instead of one check's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
+    /// The run, by its id; when omitted, the newest run of the workspace that ran `check`, or
+    /// with `failed` the newest run of the workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
-    /// The most lines to give, the last ones: 1 to 100,000; 1,000 when omitted.
+    /// The most lines to give of a log, the last ones: 1 to 100,000; 1,000 when omitted. With
+    /// `failed`, of each log.
     #[serde(default = "default_log_tail")]
     pub tail: usize,
 }
@@ -991,7 +1008,20 @@ impl CheckLogReq {
     pub fn new(workspace: impl Into<String>, check: impl Into<String>) -> Self {
         Self {
             workspace: workspace.into(),
-            check: check.into(),
+            check: Some(check.into()),
+            failed: false,
+            run: None,
+            tail: DEFAULT_CHECK_LOG_TAIL,
+        }
+    }
+
+    /// The last lines of the log of each check that did not pass in the newest run of
+    /// `workspace`.
+    pub fn failed(workspace: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            check: None,
+            failed: true,
             run: None,
             tail: DEFAULT_CHECK_LOG_TAIL,
         }
@@ -1001,8 +1031,12 @@ impl CheckLogReq {
 /// The default [`CheckLogReq::tail`]: 1,000 lines.
 pub const DEFAULT_CHECK_LOG_TAIL: usize = 1_000;
 
-/// The most lines [`CheckLogReq::tail`] may ask for.
+/// The most lines [`CheckLogReq::tail`] may ask for, and the most lines the failed checks' logs
+/// of one answer hold together.
 pub const MAX_CHECK_LOG_TAIL: usize = 100_000;
+
+/// The most logs one answer of the failed checks' logs holds: the rest are named and counted.
+pub const MAX_FAILED_LOGS: usize = 20;
 
 /// `check_log`: lines of a check's log, and whether it has ended. `check log --follow` prints one
 /// of these first, then one for each batch of lines the check writes, the last with `ended`.
@@ -1036,6 +1070,18 @@ pub struct CheckLogResp {
     pub total_lines: u64,
     /// The lines given, in order.
     pub lines: Vec<CheckLogLineOut>,
+    /// With `failed`: every check of the run that did not pass, in run order; `check` is the
+    /// first of them. Omitted for one check's log.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<String>,
+    /// With `failed`: the logs of the failed checks after the first, in run order. Omitted when
+    /// there is no other.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub more: Vec<CheckLogMoreOut>,
+    /// With `failed`: the failed checks whose logs this answer leaves out, past 20 logs or
+    /// 100,000 lines; `failed` names them. Omitted when 0.
+    #[serde(default, skip_serializing_if = "crate::ops::is_zero")]
+    pub logs_omitted: u64,
 }
 
 impl CheckLogResp {
@@ -1053,6 +1099,63 @@ impl CheckLogResp {
             first_line: 1,
             total_lines: 0,
             lines: Vec::new(),
+            failed: Vec::new(),
+            more: Vec::new(),
+            logs_omitted: 0,
+        }
+    }
+}
+
+/// The log of one more failed check, in an answer of the failed checks' logs: what `check_log`
+/// answers for that check alone, key for key.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckLogMoreOut {
+    /// As the run's: `true` for a run of the directory form.
+    pub vouched: bool,
+    /// The run's id.
+    pub run: String,
+    /// The check's name.
+    pub check: String,
+    /// The log's path on the host it ran on. Omitted for a check the run never started, which
+    /// has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<String>,
+    /// Whether the log is complete: no line follows.
+    pub ended: bool,
+    /// How it ended, when `ended`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_by: Option<CheckLogEnd>,
+    /// The check's outcome, when `ended_by` is `end`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<CheckOutcome>,
+    /// The check's milliseconds, when its log's `end` line gives them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// The number of the first line given, from 1.
+    pub first_line: u64,
+    /// The log's lines so far.
+    pub total_lines: u64,
+    /// The lines given, in order.
+    pub lines: Vec<CheckLogLineOut>,
+}
+
+impl From<CheckLogResp> for CheckLogMoreOut {
+    /// `log`, one check's log, as one more of an answer: its own keys, and none of `failed`,
+    /// `more` and `logs_omitted`.
+    fn from(log: CheckLogResp) -> Self {
+        Self {
+            vouched: log.vouched,
+            run: log.run,
+            check: log.check,
+            log: log.log,
+            ended: log.ended,
+            ended_by: log.ended_by,
+            outcome: log.outcome,
+            duration_ms: log.duration_ms,
+            first_line: log.first_line,
+            total_lines: log.total_lines,
+            lines: log.lines,
         }
     }
 }

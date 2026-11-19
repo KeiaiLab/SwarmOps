@@ -74,7 +74,17 @@ fn every_request_new_fills_the_serde_defaults() {
     reads_back(&ChangeInput::new("x", ChangeOp::Put));
     reads_back(&CheckRunReq::new("x"));
     reads_back(&CheckRunsReq::new("x"));
-    reads_back(&CheckLogReq::new("x", "x"));
+    // `check_log` asks for a check's log or for the failed checks' logs, and the type requires
+    // neither: each constructor sets one of them over the defaults, which the empty request has.
+    let (of_check, of_failed) = (CheckLogReq::new("x", "x"), CheckLogReq::failed("x"));
+    assert_eq!(
+        (of_check.check.as_deref(), of_check.failed),
+        (Some("x"), false)
+    );
+    assert_eq!((of_failed.check.as_deref(), of_failed.failed), (None, true));
+    let mut neither = of_failed;
+    neither.failed = false;
+    reads_back(&neither);
     reads_back(&CloneReq::new("x", "x"));
     reads_back(&CommitReq::new(Vec::new(), "x"));
     reads_back(&DiffReq::new("main", "main"));

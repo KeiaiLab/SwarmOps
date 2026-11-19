@@ -252,9 +252,12 @@ once, and no directory form.
 | `duration_ms` | `integer or null` | no | The check's milliseconds, when its log's `end` line gives them. |
 | `ended` | `boolean` | yes | Whether the log is complete: no line follows. |
 | `ended_by` | `CheckLogEnd or null` | no | How it ended, when `ended`. |
+| `failed` | `array of string` | no | With `failed`: every check of the run that did not pass, in run order; `check` is the first of them. Omitted for one check's log. |
 | `first_line` | `integer` | yes | The number of the first line given, from 1. |
 | `lines` | `array of CheckLogLineOut` | yes | The lines given, in order. |
 | `log` | `string or null` | no | The log's path on the host it ran on. Omitted for a check the run never started (`not_run`), which has none. |
+| `logs_omitted` | `integer` | no | With `failed`: the failed checks whose logs this answer leaves out, past 20 logs or 100,000 lines; `failed` names them. Omitted when 0. |
+| `more` | `array of CheckLogMoreOut` | no | With `failed`: the logs of the failed checks after the first, in run order. Omitted when there is no other. |
 | `outcome` | `CheckOutcome or null` | no | The check's outcome, when `ended_by` is `end`. |
 | `run` | `string` | yes | The run's id. |
 | `total_lines` | `integer` | yes | The log's lines so far. |

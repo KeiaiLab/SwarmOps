@@ -87,6 +87,7 @@ swarmops schema NoSuchType
         "CheckListResp",
         "CheckLogEnd",
         "CheckLogLineOut",
+        "CheckLogMoreOut",
         "CheckLogReq",
         "CheckLogResp",
         "CheckLogStream",

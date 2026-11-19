@@ -91,10 +91,19 @@ pub fn log_ws(ctx: &swarmops_ws::Ctx<'_>, req: CheckLogReq) -> Result<CheckLogRe
     let CheckLogReq {
         workspace,
         check,
+        failed,
         run,
         tail,
         ..
     } = req;
+
+    // Exactly one of a check and the failed ones; the failed ones' logs are not read yet.
+    let (Some(check), false) = (check, failed) else {
+        let what = "give exactly one of check and failed: a check's log, or the logs of the \
+                    checks that did not pass"
+            .to_owned();
+        return Err(invalid(what, "check"));
+    };
     let registry = Registry::open(&ctx.store_root, ctx.fs.clone());
     let at = format!("--ws {workspace}");
     let found = workspace::find(&Locate::Name(workspace), Some(&registry), ctx.fs.as_ref())?;

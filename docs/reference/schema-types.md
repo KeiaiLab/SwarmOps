@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 242 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 243 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -36,7 +36,8 @@ The 242 request, response and value types of the API, as `swarmops schema` print
 | [`CheckListResp`](#checklistresp) | object | `check_list`: the checks a tree describes, sorted by name. |
 | [`CheckLogEnd`](#checklogend) | enumeration | How a check's log ended. |
 | [`CheckLogLineOut`](#checkloglineout) | object | One line of a check's log. |
-| [`CheckLogReq`](#checklogreq) | object | `check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. |
+| [`CheckLogMoreOut`](#checklogmoreout) | object | The log of one more failed check, in an answer of the failed checks' logs: what `check_log` answers for that check alone, key for key. |
+| [`CheckLogReq`](#checklogreq) | object | `check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines; or, with `failed`, the logs of the checks of a run that did not pass. |
 | [`CheckLogResp`](#checklogresp) | object | `check_log`: lines of a check's log, and whether it has ended. |
 | [`CheckLogStream`](#checklogstream) | enumeration | Where a line of a check's log came from. |
 | [`CheckNotStarted`](#checknotstarted) | enumeration | Why a check did not start. |
@@ -617,17 +618,38 @@ Kind: object. `swarmops schema CheckLogLineOut` prints its JSON Schema.
 | `stream` | [`CheckLogStream`](#checklogstream) | yes | Where it came from. |
 | `text` | `string` | yes | Its text. |
 
+## CheckLogMoreOut
+
+The log of one more failed check, in an answer of the failed checks' logs: what `check_log` answers for that check alone, key for key.
+
+Kind: object. `swarmops schema CheckLogMoreOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `check` | `string` | yes | The check's name. |
+| `duration_ms` | `integer` (uint64) or `null` | no | The check's milliseconds, when its log's `end` line gives them. |
+| `ended` | `boolean` | yes | Whether the log is complete: no line follows. |
+| `ended_by` | [`CheckLogEnd`](#checklogend) or `null` | no | How it ended, when `ended`. |
+| `first_line` | `integer` (uint64) | yes | The number of the first line given, from 1. |
+| `lines` | array of [`CheckLogLineOut`](#checkloglineout) | yes | The lines given, in order. |
+| `log` | `string` or `null` | no | The log's path on the host it ran on. Omitted for a check the run never started, which has none. |
+| `outcome` | [`CheckOutcome`](#checkoutcome) or `null` | no | The check's outcome, when `ended_by` is `end`. |
+| `run` | `string` | yes | The run's id. |
+| `total_lines` | `integer` (uint64) | yes | The log's lines so far. |
+| `vouched` | `boolean` | yes | As the run's: `true` for a run of the directory form. |
+
 ## CheckLogReq
 
-`check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. Reads only: no lock, nothing written.
+`check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines; or, with `failed`, the logs of the checks of a run that did not pass. Exactly one of `check` and `failed` is given. Reads only: no lock, nothing written.
 
 Kind: object. `swarmops schema CheckLogReq` prints its JSON Schema.
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
-| `check` | `string` | yes | The check whose log to read. |
-| `run` | `string` or `null` | no | The run, by its id; the newest run of the workspace that ran `check` when omitted. |
-| `tail` | `integer` (uint) | no | The most lines to give, the last ones: 1 to 100,000; 1,000 when omitted. Default: `1000`. |
+| `check` | `string` or `null` | no | The check whose log to read. Omitted with `failed`. |
+| `failed` | `boolean` | no | Read the logs of the checks of the run that did not pass, instead of one check's. |
+| `run` | `string` or `null` | no | The run, by its id; when omitted, the newest run of the workspace that ran `check`, or with `failed` the newest run of the workspace. |
+| `tail` | `integer` (uint) | no | The most lines to give of a log, the last ones: 1 to 100,000; 1,000 when omitted. With `failed`, of each log. Default: `1000`. |
 | `workspace` | `string` | yes | The workspace, by its name in the store's registry. |
 
 ## CheckLogResp
@@ -642,9 +664,12 @@ Kind: object. `swarmops schema CheckLogResp` prints its JSON Schema.
 | `duration_ms` | `integer` (uint64) or `null` | no | The check's milliseconds, when its log's `end` line gives them. |
 | `ended` | `boolean` | yes | Whether the log is complete: no line follows. |
 | `ended_by` | [`CheckLogEnd`](#checklogend) or `null` | no | How it ended, when `ended`. |
+| `failed` | array of `string` | no | With `failed`: every check of the run that did not pass, in run order; `check` is the first of them. Omitted for one check's log. |
 | `first_line` | `integer` (uint64) | yes | The number of the first line given, from 1. |
 | `lines` | array of [`CheckLogLineOut`](#checkloglineout) | yes | The lines given, in order. |
 | `log` | `string` or `null` | no | The log's path on the host it ran on. Omitted for a check the run never started (`not_run`), which has none. |
+| `logs_omitted` | `integer` (uint64) | no | With `failed`: the failed checks whose logs this answer leaves out, past 20 logs or 100,000 lines; `failed` names them. Omitted when 0. |
+| `more` | array of [`CheckLogMoreOut`](#checklogmoreout) | no | With `failed`: the logs of the failed checks after the first, in run order. Omitted when there is no other. |
 | `outcome` | [`CheckOutcome`](#checkoutcome) or `null` | no | The check's outcome, when `ended_by` is `end`. |
 | `run` | `string` | yes | The run's id. |
 | `total_lines` | `integer` (uint64) | yes | The log's lines so far. |

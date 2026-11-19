@@ -489,8 +489,9 @@ mod tests {
             | WsTool::Resolve
             | WsTool::Land
             | WsTool::CheckRun
-            | WsTool::CheckLog
             | WsTool::CheckRuns => r#"the store has no workspace named "probe""#,
+            // The probe's sample names neither a check nor `failed`.
+            WsTool::CheckLog => "give exactly one of check and failed",
             // `from` is checked before anything is made: the probe's sample is not a path.
             WsTool::Create => "is relative: give an absolute one",
             WsTool::Materialize => "ws materialize needs at least one path",
