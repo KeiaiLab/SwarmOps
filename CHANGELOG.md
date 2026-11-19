@@ -54,6 +54,8 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - `E_CHECK_FAILED`'s `details.run`, the whole result of a run of `check run`, holds each check's
   findings.
 - `SWARMOPS_CHECK_REPORT` is read: it is the check's report file of findings.
+- The MCP tool `check_list`'s description says that a check's declared JUnit and SARIF reports
+  are listed.
 
 ## [0.13.0] - 2026-11-18
 

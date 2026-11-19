@@ -2,7 +2,7 @@
 
 # check_list
 
-Lists the checks the tree of rev, main by default, describes in .swarmops/checks.toml (version 1), or else check.argv of .swarmops/workspaces.json as the one check default: each with its argv, its directory, its timeout and the digest of its definition, sorted by name, with the tree they were read from. Reads only. A tree with neither file lists none; a file that does not read is E\_CHECK\_FILE with its line and key. Nothing runs a check.
+Lists the checks the tree of rev, main by default, describes in .swarmops/checks.toml (version 1), or else check.argv of .swarmops/workspaces.json as the one check default: each with its argv, its directory, its timeout, the JUnit and SARIF reports it declares and the digest of its definition, sorted by name, with the tree they were read from. Reads only. A tree with neither file lists none; a file that does not read is E\_CHECK\_FILE with its line and key. Nothing runs a check.
 
 ```yaml
 title: "check_list"

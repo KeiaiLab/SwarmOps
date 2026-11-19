@@ -204,7 +204,8 @@ annotations say whether it changes the store and how.
 - **`check_list`**
 
   The checks a changeset's tree names in `.swarmops/checks.toml`, sorted by name: each with its
-  argv, its directory, its timeout and the digest of its definition. Nothing runs them.
+  argv, its directory, its timeout, the JUnit and SARIF reports it declares and the digest of
+  its definition. Nothing runs them.
 
 - **`blob_has`**
 
