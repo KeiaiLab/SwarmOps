@@ -34,6 +34,7 @@ use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::{NoSyncFs, RecordingFs};
 use swarmops_testkit::measure::{mix, percentile};
+use swarmops_testkit::stop::StopOnDrop;
 use swarmops_testkit::store::new_root as bare_root;
 use swarmops_testkit::store::{append_bytes, file_len, real_fs, set_len};
 #[cfg(feature = "test-hooks")]
@@ -1523,20 +1524,21 @@ fn readers_opening_during_compactions_see_whole_views() {
     let mut index = Index::open(&layout, Arc::new(NoSyncFs)).unwrap();
     append_all(&mut index, &metas[..4]);
     index.compact().unwrap();
-    let writing = AtomicBool::new(true);
+    let done = AtomicBool::new(false);
     thread::scope(|scope| {
         scope.spawn(|| {
+            // Set when the writer ends, by a panic as well: the readers end with it.
+            let _stop = StopOnDrop::new(&done);
             for chunk in metas[4..].chunks(4) {
                 append_all(&mut index, chunk);
                 index.compact().unwrap();
             }
-            writing.store(false, Ordering::SeqCst);
         });
         for reader in 0..to_u64(readers) {
-            let (layout, metas, writing) = (&layout, &metas, &writing);
+            let (layout, metas, done) = (&layout, &metas, &done);
             scope.spawn(move || {
                 let mut opens = 0_u64;
-                while writing.load(Ordering::SeqCst) {
+                while !done.load(Ordering::SeqCst) {
                     let index = Index::open(layout, Arc::new(NoSyncFs)).unwrap();
                     let rec = mix((reader << 32) | opens) % index.len();
                     let meta = &metas[usize::try_from(rec).unwrap()];

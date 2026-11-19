@@ -7,11 +7,12 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
+use swarmops_testkit::stop::StopOnDrop;
 use swarmops_ws::run::{Env, Measure, Output, Run, Spec, Stream, TAIL_BYTES, run, run_with};
 
 /// `sh -c <script>`, as an argv.
@@ -116,10 +117,13 @@ fn the_stop_flag_kills_the_group() {
     let setter = {
         let (stop, dir) = (Arc::clone(&stop), dir.clone());
         std::thread::spawn(move || {
+            // Set when the wait ends, by its panic as well: the run below ends with it.
+            let _stop = StopOnDrop::new(&stop);
+            let deadline = Instant::now() + Duration::from_secs(60);
             while !dir.join("group").exists() {
+                assert!(Instant::now() < deadline, "the shell wrote no group");
                 std::thread::sleep(Duration::from_millis(10));
             }
-            stop.store(true, Ordering::SeqCst);
         })
     };
     let mut spec = Spec::new(Duration::from_secs(600));

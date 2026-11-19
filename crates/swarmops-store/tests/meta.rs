@@ -30,6 +30,7 @@ use swarmops_testkit::child::test_args;
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, this_test};
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::{Call, Failing, NoSyncFs, RecordingFs, Watch, Watched, When, copy_dir};
+use swarmops_testkit::stop::StopOnDrop;
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::store::sweep::{
     SWEEP_PLAN, SWEEP_ROOT, Said, Template, assert_recovers, calls_of, changeset, copy_of,
@@ -4538,15 +4539,6 @@ fn crash_mid_materialization_is_replayed() {
     assert_eq!(ref_file(&root, "main"), Some(ref_content(2, 2)));
 }
 
-/// Sets its flag when dropped, also while a panic unwinds.
-struct SetOnDrop<'a>(&'a AtomicBool);
-
-impl Drop for SetOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
 #[test]
 fn snapshots_stay_consistent_while_a_writer_commits() {
     // Each commit inserts changeset n and moves main to it, so main at version n must name
@@ -4577,7 +4569,7 @@ fn snapshots_stay_consistent_while_a_writer_commits() {
         {
             // Stops the readers however the writes end: a panic here must not leave them
             // spinning, or the scope would never join them.
-            let _stop = SetOnDrop(&done);
+            let _stop = StopOnDrop::new(&done);
             for n in 1..=MOVES {
                 let expected = if n == 1 { None } else { Some(id(n - 1)) };
                 let mut write = store.write().unwrap();
@@ -5461,7 +5453,7 @@ fn snapshots_stay_consistent_across_a_compaction() {
             .collect();
         {
             // Stops the readers however the writes end.
-            let _stop = SetOnDrop(&done);
+            let _stop = StopOnDrop::new(&done);
             for n in 1..=MOVES {
                 if n == COMPACTS {
                     let deadline = Instant::now() + Duration::from_secs(60);

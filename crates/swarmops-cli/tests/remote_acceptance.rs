@@ -1233,6 +1233,18 @@ fn holding_fetch(held: &Path, release: &Path) -> String {
     )
 }
 
+/// Lets the held fetch go when dropped, by a panic as well: a scope that joins the sync holding
+/// it ends, and the test reports its failure.
+#[cfg(unix)]
+struct ReleaseOnDrop<'a>(&'a Path);
+
+#[cfg(unix)]
+impl Drop for ReleaseOnDrop<'_> {
+    fn drop(&mut self) {
+        let _ = fs::write(self.0, "");
+    }
+}
+
 /// Two syncs at once: the second meets the first's mirror lock and fails at once with `E_BUSY`
 /// `git_mirror`, retryable; the first completes.
 #[cfg(unix)]
@@ -1247,11 +1259,17 @@ fn two_syncs_one_busy() {
         let git = stand_in(&remote, dir.path(), &holding_fetch(&held, &release));
 
         std::thread::scope(|scope| {
+            use std::time::{Duration, Instant};
+
             // 1. The first sync, held in its fetch.
             let first =
                 scope.spawn(|| run_with(&remote, &store, &["sync", ORIGIN], &[(GIT_VAR, &git)]));
+            let release = ReleaseOnDrop(&release);
+            let deadline = Instant::now() + Duration::from_secs(60);
             while !held.exists() {
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                assert!(!first.is_finished(), "{transport:?}: no fetch was held");
+                assert!(Instant::now() < deadline, "{transport:?}: no fetch in 60 s");
+                std::thread::sleep(Duration::from_millis(20));
             }
 
             // 2. The second: busy at once.
@@ -1261,7 +1279,7 @@ fn two_syncs_one_busy() {
             assert_eq!(error["retryable"], true, "{second}");
 
             // 3. The first completes.
-            fs::write(&release, "").expect("release the fetch");
+            drop(release);
             let first = first.join().expect("the first sync");
             assert_eq!(first.ok()["status"], "pushed", "{transport:?}: {first}");
         });
