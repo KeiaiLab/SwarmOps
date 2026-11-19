@@ -401,6 +401,12 @@ with `--pass`), and writes a log with a time on every line, which `so check log`
 `.swarmops/workspaces.json` ([`check run`](../reference/commands/check-run.md),
 [`check log`](../reference/commands/check-log.md)).
 
+A check reports what it found as findings: it writes them as JSON lines to the file
+`SWARMOPS_CHECK_REPORT` names, or its definition declares the JUnit or SARIF file its tools write
+(`reports`). After it ends, `check run` reads those its run wrote and returns their findings with
+its outcome, each with its level, title, path and lines and message, at most 10,000 a run. When a
+run fails, an agent reads `details.run.checks[].findings` first, then the check's log.
+
 ### Git at both ends
 
 `so git import` brings a git repository's history into a store, and `so git export` writes the

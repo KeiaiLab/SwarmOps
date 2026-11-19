@@ -20,6 +20,41 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Added
+
+- A check's findings: a check writes them to its report file, at `SWARMOPS_CHECK_REPORT`, one
+  JSON object a line with `level` (`error`, `warning`, `notice`), `title`, and optionally
+  `message`, `path` (a repository path), `line` and `end_line`. Once the check has ended (and
+  not after a stop cancelled it), `check run` reads the file and returns its findings with the
+  check's outcome (`findings`, `findings_total`, and the file as it was read in `reports`: `read`
+  with its count, invalid lines and whether it was cut past 64 MiB, or `refused` with its
+  fault), at most 10,000 findings and 4 MiB of their text a run, the rest counted
+  (`findings_omitted`). Unknown keys and lines that are no finding are counted and the first one
+  named. Findings change no outcome. `E_CHECK_FAILED`'s message counts each failed check's
+  findings, and its hint names where they are.
+- A check's JUnit and SARIF reports: after the check, each report its `reports` declares is
+  read, if this run wrote it (else `stale`; `missing` when not there), opened below the check's
+  directory without following a link at any component (`not_a_file`), at most 64 MiB, nested at
+  most 64 deep. A JUnit case that failed or ended in an error is a finding (titled by the test,
+  grouped by its class or suite, its failure and the end of its stderr as the message), with the
+  report's `tests`, `failed` and `skipped`; a SARIF 2.1.0 result of kind `fail` is a finding (its
+  level, rule, message, tool, and first location's path and lines), with the report's `results`.
+  A document type, an entity other than XML's five, or another encoding than UTF-8 is refused.
+- The check file's `reports` key: the JUnit and SARIF files a check leaves in its tree, 1 to 16
+  tables of `format`, `junit` or `sarif`, and `path`, a repository path relative to the check's
+  `dir`, none twice. They are part of the definition's digest, which is unchanged for a check
+  that declares none; `check list` gives them.
+- Dependency: `quick-xml` (MIT), for reading the JUnit reports a check declares.
+- API types `CheckFindingOut`, `CheckFindingLevel`, `CheckReportReadOut`, `CheckReportFormat`,
+  `CheckReportState` and `CheckReportFault`, a check's findings and the reports they came from;
+  `CheckReportOut`, a report a check declares. `swarmops schema` prints them (238 types).
+
+### Changed
+
+- `E_CHECK_FAILED`'s `details.run`, the whole result of a run of `check run`, holds each check's
+  findings.
+- `SWARMOPS_CHECK_REPORT` is read: it is the check's report file of findings.
+
 ## [0.13.0] - 2026-11-18
 
 A landing queue on a local store: `queue enqueue`, `status`, `withdraw`, `wait` and `run` check

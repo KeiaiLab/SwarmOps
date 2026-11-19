@@ -316,8 +316,8 @@ error_codes! {
     /// A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create`
     /// (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its
     /// output, `log`, `changeset`; nothing was landed), or one or more of `check run`'s
-    /// (`details.run`: the run's whole result, every check's outcome, or `cancelled` after a
-    /// signal).
+    /// (`details.run`: the run's whole result, every check's outcome and each check's findings,
+    /// or `cancelled` after a signal).
     CheckFailed => "E_CHECK_FAILED", EXIT_ERROR, false;
     // FORMAT 3 (M20): a store this build cannot read.
     /// The store is of a later format than this build reads, or lists a feature it lacks

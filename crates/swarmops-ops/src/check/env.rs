@@ -34,8 +34,12 @@ pub const ENV_ATTEMPT: &str = "SWARMOPS_CHECK_ATTEMPT";
 /// The run's id.
 pub const ENV_RUN: &str = "SWARMOPS_CHECK_RUN";
 
-/// The path of the check's findings file, not made: what M31-4 reads.
+/// The path of the check's report file, not made: JSON lines of findings, read once the check
+/// has ended (M31-4, [`super::findings`]).
 pub const ENV_REPORT: &str = "SWARMOPS_CHECK_REPORT";
+
+/// The report file's name, in the check's own directory of its run.
+pub const REPORT_FILE: &str = "report.jsonl";
 
 /// The path of the check's outputs file, not made: M31-6's.
 pub const ENV_OUTPUTS: &str = "SWARMOPS_CHECK_OUTPUTS";
@@ -92,7 +96,7 @@ impl Pinned {
             (ENV_TREE, tree.unwrap_or_default().to_owned()),
             (ENV_ATTEMPT, "1".to_owned()),
             (ENV_RUN, run.to_owned()),
-            (ENV_REPORT, own.join("report.jsonl").into_string()),
+            (ENV_REPORT, own.join(REPORT_FILE).into_string()),
             (ENV_OUTPUTS, own.join("outputs").into_string()),
             (ENV_SUMMARY, own.join("summary.md").into_string()),
             (ENV_ARTIFACTS, format!("{}/", own.join("artifacts"))),

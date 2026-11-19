@@ -486,7 +486,16 @@ fn commit_to_main(s: &mut Session, store: &str, changes: &Value, name: &str) -> 
 
 /// A check file of one passing and one failing check, for `check run`'s golden.
 const CHECK_RUN_FIXTURE: &str = "version = 1\n\n[check.ok]\nargv = [\"true\"]\n\n\
-[check.bad]\nargv = [\"sh\", \"-c\", \"echo boom >&2; exit 3\"]\n";
+[check.bad]\nargv = [\"sh\", \"-c\", \"echo boom >&2; exit 3\"]\n\n\
+[check.found]\nargv = [\"sh\", \"found.sh\"]\n";
+
+/// The script of the check `found` of [`CHECK_RUN_FIXTURE`]: two findings, an error with a path
+/// and lines and a notice with neither, and exit 0.
+const CHECK_RUN_FOUND: &str = r#"cat > "$SWARMOPS_CHECK_REPORT" <<'EOF'
+{"level":"error","title":"unused import","path":"src/lib.rs","line":3,"end_line":4,"message":"remove it"}
+{"level":"notice","title":"no tests changed"}
+EOF
+"#;
 
 /// The caller's variables of `check run`'s golden: every one of the fixed list a check gets, so
 /// that `inherited_env` is the same on every host, and the runs below the session's temp dir.
@@ -505,10 +514,11 @@ fn check_run_env(tmp: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// `check run` (M31-1), its pinned JSON form, in the directory form: a check that fails and one
-/// that passes run in name order, and the run is E_CHECK_FAILED with the whole run in
-/// `details.run`, the failing check's tails beside its exit code; the passing check alone, named,
-/// is a run that passes. Ids, paths and times are named.
+/// `check run` (M31-1), its pinned JSON form, in the directory form: a check that fails and two
+/// that pass run in name order, and the run is E_CHECK_FAILED with the whole run in
+/// `details.run`, the failing check's tails beside its exit code; the passing checks alone,
+/// named, are a run that passes, one of them with its findings and its report file (M31-4). Ids,
+/// paths and times are named.
 #[test]
 fn check_run_golden() {
     // 1. The tree, and the caller's environment.
@@ -517,10 +527,11 @@ fn check_run_golden() {
     let dir = format!("{tmp}/tree");
     fs::create_dir_all(format!("{dir}/.swarmops")).unwrap();
     fs::write(format!("{dir}/.swarmops/checks.toml"), CHECK_RUN_FIXTURE).unwrap();
+    fs::write(format!("{dir}/found.sh"), CHECK_RUN_FOUND).unwrap();
     let owned = check_run_env(&tmp);
     let env: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
-    // 2. Both checks: one failed.
+    // 2. The three checks: one failed.
     let failed = s.run_env(&env, &["check", "run", "--dir", &dir]);
     assert_eq!(
         (failed.exit, failed.code()),
@@ -541,8 +552,8 @@ fn check_run_golden() {
     s.name_at(&failed, "/error/details/run/run", "run1");
     assert_eq!(run["failed"], json!(["bad"]));
 
-    // 3. The passing one alone.
-    let passed = s.run_env(&env, &["check", "run", "--dir", &dir, "ok"]);
+    // 3. The passing ones alone, one with findings.
+    let passed = s.run_env(&env, &["check", "run", "--dir", &dir, "found", "ok"]);
     assert_eq!(passed.exit, 0, "{}", passed.json);
     s.name_at(&passed, "/result/run", "run2");
     insta::assert_json_snapshot!(s.transcript());

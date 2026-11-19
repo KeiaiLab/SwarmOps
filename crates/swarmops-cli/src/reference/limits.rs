@@ -193,7 +193,7 @@ const fn internal_value(
 // ---- The tables ----
 
 /// The limits a request is refused past, with the error it gets.
-static CONTRACT: [Limit; 27] = [
+static CONTRACT: [Limit; 28] = [
     Limit {
         name: "Request text",
         constant: code(
@@ -574,6 +574,20 @@ static CONTRACT: [Limit; 27] = [
                    `details.reason` `value`. `check run` kills a check's process group past it.",
     },
     Limit {
+        name: "Check reports",
+        constant: code(
+            "swarmops_ops::check::MAX_CHECK_REPORTS",
+            CHECK,
+            "pub const MAX_CHECK_REPORTS: usize = 16;",
+            || bytes::to_u64(swarmops_ops::check::MAX_CHECK_REPORTS),
+        ),
+        unit: Unit::Count("reports"),
+        commands: &["check list", "check run"],
+        errors: &[ErrorCode::CheckFile],
+        what: "The reports one check's `reports` declares, from 1: more are refused with \
+                   `details.reason` `value` at the line of the first past it.",
+    },
+    Limit {
         name: "Variables passed",
         constant: code(
             "swarmops_ops::check::env::MAX_PASS",
@@ -618,7 +632,7 @@ static CONTRACT: [Limit; 27] = [
 ];
 
 /// The bounds a response keeps without an error: what it leaves out, and how it says so.
-static BOUNDS: [Limit; 15] = [
+static BOUNDS: [Limit; 24] = [
     Limit {
         name: "Lossy commits listed",
         constant: code(
@@ -836,6 +850,137 @@ static BOUNDS: [Limit; 15] = [
         what: "The most lines one envelope of `check log --follow` gives after its first: \
                    the rest come in the next ones.",
     },
+    Limit {
+        name: "Findings of a run",
+        constant: code(
+            "swarmops_ops::check::MAX_RUN_FINDINGS",
+            CHECK,
+            "pub const MAX_RUN_FINDINGS: usize = 10_000;",
+            || bytes::to_u64(swarmops_ops::check::MAX_RUN_FINDINGS),
+        ),
+        unit: Unit::Count("findings"),
+        commands: &["check run"],
+        errors: &[],
+        what: "The findings one run returns, its checks' together in run order: from the one \
+                   that would pass it on, every finding is counted in its check's \
+                   `findings_total` and in the run's `findings_omitted`, and none is returned. \
+                   Not measured.",
+    },
+    Limit {
+        name: "Findings' text of a run",
+        constant: code(
+            "swarmops_ops::check::MAX_RUN_FINDING_BYTES",
+            CHECK,
+            "pub const MAX_RUN_FINDING_BYTES: u64 = 4 << 20;",
+            || swarmops_ops::check::MAX_RUN_FINDING_BYTES,
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "The titles, groups, messages and paths of the findings one run returns, \
+                   together: from the finding that would pass it on, every finding is counted \
+                   and none is returned, as past the count of findings. Not measured.",
+    },
+    Limit {
+        name: "Report file",
+        constant: code(
+            "swarmops_ops::check::MAX_REPORT_BYTES",
+            CHECK,
+            "pub const MAX_REPORT_BYTES: u64 = 64 << 20;",
+            || swarmops_ops::check::MAX_REPORT_BYTES,
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "A check's report file (`SWARMOPS_CHECK_REPORT`): past it, its whole lines up to \
+                   the bound are read, the rest is not, and its report says `cut`. A JUnit or \
+                   SARIF report a check declares past it is `refused`, `too_large`, and none of \
+                   it is read.",
+    },
+    Limit {
+        name: "Report nesting",
+        constant: code(
+            "swarmops_ops::check::MAX_REPORT_DEPTH",
+            CHECK,
+            "pub const MAX_REPORT_DEPTH: usize = 64;",
+            || bytes::to_u64(swarmops_ops::check::MAX_REPORT_DEPTH),
+        ),
+        unit: Unit::Count("levels"),
+        commands: &["check run"],
+        errors: &[],
+        what: "How deep a declared report may nest its XML elements (JUnit) or its arrays and \
+                   objects (SARIF): a deeper one is `refused`, `too_deep`, its findings not \
+                   taken. Counted before the SARIF parser's own bound applies.",
+    },
+    Limit {
+        name: "Report file line",
+        constant: code(
+            "swarmops_ops::check::MAX_FINDING_LINE_BYTES",
+            CHECK,
+            "pub const MAX_FINDING_LINE_BYTES: usize = 64 * 1024;",
+            || bytes::to_u64(swarmops_ops::check::MAX_FINDING_LINE_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "One line of a check's report file: a longer one is invalid, counted in its \
+                   report's `invalid_lines`, and the next line is read.",
+    },
+    Limit {
+        name: "Finding title",
+        constant: code(
+            "swarmops_ops::check::MAX_FINDING_TITLE_BYTES",
+            CHECK,
+            "pub const MAX_FINDING_TITLE_BYTES: usize = 200;",
+            || bytes::to_u64(swarmops_ops::check::MAX_FINDING_TITLE_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "A finding's title, one line: a longer one is cut at a character's end, with `…`.",
+    },
+    Limit {
+        name: "Finding group",
+        constant: code(
+            "swarmops_ops::check::MAX_FINDING_GROUP_BYTES",
+            CHECK,
+            "pub const MAX_FINDING_GROUP_BYTES: usize = 200;",
+            || bytes::to_u64(swarmops_ops::check::MAX_FINDING_GROUP_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "A finding's group, a JUnit case's class or suite or a SARIF run's tool, one \
+                   line: a longer one is cut at a character's end, with `…`.",
+    },
+    Limit {
+        name: "Finding message",
+        constant: code(
+            "swarmops_ops::check::MAX_FINDING_MESSAGE_BYTES",
+            CHECK,
+            "pub const MAX_FINDING_MESSAGE_BYTES: usize = 4 * 1024;",
+            || bytes::to_u64(swarmops_ops::check::MAX_FINDING_MESSAGE_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "A finding's message: a longer one is cut at a character's end, with `…`.",
+    },
+    Limit {
+        name: "Finding path",
+        constant: code(
+            "swarmops_ops::check::MAX_FINDING_PATH_BYTES",
+            CHECK,
+            "pub const MAX_FINDING_PATH_BYTES: usize = 4 * 1024;",
+            || bytes::to_u64(swarmops_ops::check::MAX_FINDING_PATH_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "A finding's path, a repository path: a longer one makes its line of the report \
+                   file invalid; a JUnit or SARIF report's longer one is left out, and its \
+                   finding kept.",
+    },
 ];
 
 /// The paging defaults a request takes when it does not say.
@@ -1052,7 +1197,7 @@ static DEFAULTS: [DefaultRow; 16] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 44] = [
+static INTERNAL: [Limit; 45] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -1591,6 +1736,20 @@ static INTERNAL: [Limit; 44] = [
         Unit::Count("tags"),
         "The most tags one journal frame creates, as many as a `ref txn` moves: a batch of \
              tags is a frame, and a write transaction, for each this many.",
+    ),
+    internal_value(
+        "Report time slack",
+        code(
+            "swarmops_ops::check::REPORT_FRESH_SLACK",
+            "crates/swarmops-ops/src/check/intake.rs",
+            "pub const REPORT_FRESH_SLACK: Duration = Duration::from_secs(1);",
+            || swarmops_ops::check::REPORT_FRESH_SLACK.as_secs(),
+        ),
+        Unit::Seconds,
+        "How much earlier than its check's start a declared report's modification time may be \
+             and the report still be this run's: an older one, or one that did not change \
+             during the check, is `stale` and not read. A file system's clock may be coarser \
+             than the wall clock's.",
     ),
 ];
 

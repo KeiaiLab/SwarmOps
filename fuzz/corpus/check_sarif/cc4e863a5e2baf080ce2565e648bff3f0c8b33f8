@@ -1,0 +1,52 @@
+{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "results": [
+        {
+          "ruleId": "unused-import",
+          "level": "error",
+          "message": { "text": "the import of `fs` is never used\nremove it" },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": { "uri": "src/lib.rs", "uriBaseId": "SRCROOT" },
+                "region": { "startLine": 3, "startColumn": 5, "endLine": 3 }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "long-function",
+          "level": "warning",
+          "message": { "text": "this function has 120 lines" },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": { "uri": "src/my%20mod.rs" },
+                "region": { "startLine": 10, "endLine": 129 }
+              }
+            }
+          ]
+        },
+        {
+          "level": "note",
+          "message": { "text": "consider a doc comment\non this item" },
+          "locations": [
+            { "physicalLocation": { "artifactLocation": { "uri": "../outside.rs" } } }
+          ]
+        },
+        {
+          "ruleId": "checked",
+          "kind": "pass",
+          "message": { "text": "nothing to report" }
+        },
+        {
+          "ruleId": "no-level",
+          "message": { "text": "a result with no level" }
+        }
+      ],
+      "tool": { "driver": { "name": "fixture-lint", "version": "1.0.0" } }
+    }
+  ]
+}

@@ -10,7 +10,10 @@
 //!   select the stage's (or the named) ─▶ the run's directory, its lock, run.json (running),
 //!                                        runs past the 20 kept removed
 //!   each check, by name: its dir ─▶ its environment (check::env) ─▶ the process runner,
-//!                        the output into its LineLog ─▶ its outcome
+//!                        the output into its LineLog ─▶ its outcome ─▶ its group gone, its
+//!                        report file and the reports it declares read (check::intake):
+//!                        findings, within the run's bound; a declared report is looked at
+//!                        before the check starts, so that one left from before is not read
 //!   run.json (ended), the lock let go ─▶ all passed: the result; else E_CHECK_FAILED{run}
 //! ```
 //!
@@ -40,7 +43,9 @@ use swarmops_api::{
 use swarmops_ws::run::{self, Env, Output, Spec, Stream};
 use swarmops_ws::workspace::Locate;
 
-use super::env::{self, Pinned};
+use super::env::{self, Pinned, REPORT_FILE};
+use super::findings::Budget;
+use super::intake;
 use super::log::{End, LineLog, Start, dir_key};
 use super::{LEGACY_FILE, list, list_dir};
 use crate::error;
@@ -332,11 +337,15 @@ fn run_checks(
     // 3. Each check in turn, until the run is stopped. It was stopped only if that cancelled a
     //    check or left one not run: a stop once the last check has exited changes nothing.
     let started = Instant::now();
+    let mut budget = Budget::new();
     for (at, check) in selected.iter().enumerate() {
         if opts.stopped() {
             break;
         }
-        let out = run_one(subject, &id, &dir, check, &inherited, legacy, opts);
+        let cwd = cwd_of(subject, check);
+        let before = intake::Before::look(&cwd, &check.reports);
+        let mut out = run_one(subject, &id, &dir, check, &inherited, legacy, opts);
+        take_findings(&mut out, &dir, check, (&cwd, &before), &mut budget);
         let cancelled = out.outcome == CheckOutcome::Cancelled;
         resp.checks[at] = out;
         if cancelled {
@@ -346,6 +355,7 @@ fn run_checks(
     resp.cancelled = (resp.checks.iter())
         .any(|c| matches!(c.outcome, CheckOutcome::Cancelled | CheckOutcome::NotRun));
     resp.duration_ms = millis(started.elapsed());
+    resp.findings_omitted = budget.omitted();
     resp.failed = (resp.checks.iter())
         .filter(|c| c.outcome != CheckOutcome::Passed)
         .map(|c| c.name.clone())
@@ -405,11 +415,7 @@ fn run_one(
     );
 
     // 2. Its directory, which must be one.
-    let cwd = if check.dir == super::ROOT_DIR {
-        subject.root.clone()
-    } else {
-        subject.root.join(&check.dir)
-    };
+    let cwd = cwd_of(subject, check);
     if !std::fs::metadata(&cwd).is_ok_and(|meta| meta.is_dir()) {
         out.not_started = Some(CheckNotStarted::Dir);
         out.message = Some(format!(
@@ -481,6 +487,43 @@ fn run_one(
         out.stderr_tail = Some(ran.stderr_tail);
     }
     out
+}
+
+/// The directory `check` runs in: its `dir` below `subject`'s root.
+fn cwd_of(subject: &Subject, check: &CheckOut) -> Utf8PathBuf {
+    if check.dir == super::ROOT_DIR {
+        subject.root.clone()
+    } else {
+        subject.root.join(&check.dir)
+    }
+}
+
+/// Takes in the findings of `out`, the result of `check` of the run in `dir` that has ended and
+/// whose process group is gone, through the run's `budget`: its report file, then the reports it
+/// declares below the directory it ran in, as they were `before` it started. For `passed`,
+/// `failed` and `timed_out`; not for a check a stop cut short, whose reports are partial, nor
+/// one that never ran.
+fn take_findings(
+    out: &mut CheckRunOut,
+    dir: &Utf8Path,
+    check: &CheckOut,
+    (cwd, before): (&Utf8Path, &intake::Before),
+    budget: &mut Budget,
+) {
+    let ended = [
+        CheckOutcome::Passed,
+        CheckOutcome::Failed,
+        CheckOutcome::TimedOut,
+    ];
+    if !ended.contains(&out.outcome) {
+        return;
+    }
+    let report = dir.join("checks").join(&out.name).join(REPORT_FILE);
+    let mut taken = intake::take_in(&report, budget);
+    intake::take_declared(&mut taken, cwd, &check.dir, &check.reports, before, budget);
+    out.findings = taken.findings;
+    out.findings_total = taken.total;
+    out.reports = taken.reports;
 }
 
 /// The log at `path` of `check` of run `id` on `subject`, its `start` line written, and the
@@ -618,13 +661,20 @@ fn failed(resp: &CheckRunResp, at: &str) -> OpError {
         )
     };
 
-    // 2. The details: the run; the hint: the first log to read.
+    // 2. The details: the run; the hint: the first check's findings, if it has any, and its
+    //    log.
     let mut error = error::error(ErrorCode::CheckFailed, error::one_line(message));
     let run = serde_json::to_value(resp).unwrap_or(Value::Null);
     error.details.insert("run".to_owned(), run);
-    let first = not_passed.iter().find(|c| c.log.is_some());
+    let first = (resp.checks.iter().enumerate())
+        .find(|(_, c)| c.outcome != CheckOutcome::Passed && c.log.is_some());
     match first {
-        Some(check) => error.with_hint(format!(
+        Some((i, check)) if !check.findings.is_empty() => error.with_hint(format!(
+            "read its findings in details.run.checks[{i}].findings, then its log: swarmops \
+             check log {} {at} --run {}",
+            check.name, resp.run
+        )),
+        Some((_, check)) => error.with_hint(format!(
             "read its log: swarmops check log {} {at} --run {}",
             check.name, resp.run
         )),
@@ -632,16 +682,25 @@ fn failed(resp: &CheckRunResp, at: &str) -> OpError {
     }
 }
 
-/// Why `check` did not pass, in a few words.
+/// Why `check` did not pass, in a few words, with the count of its findings when it has any.
 fn why(check: &CheckRunOut) -> String {
     let name = &check.name;
+    let found = match check.findings_total {
+        0 => String::new(),
+        1 => ", 1 finding".to_owned(),
+        n => format!(", {n} findings"),
+    };
     match (check.outcome, check.exit_code, check.signal) {
         (CheckOutcome::Failed, _, _) if let Some(message) = &check.message => {
-            format!("{name} failed ({message})")
+            format!("{name} failed ({message}{found})")
         }
-        (CheckOutcome::Failed, Some(code), _) => format!("{name} failed (exit {code})"),
-        (CheckOutcome::Failed, _, Some(signal)) => format!("{name} failed (signal {signal})"),
-        (CheckOutcome::TimedOut, _, _) => format!("{name} timed out ({} s)", check.timeout_s),
+        (CheckOutcome::Failed, Some(code), _) => format!("{name} failed (exit {code}{found})"),
+        (CheckOutcome::Failed, _, Some(signal)) => {
+            format!("{name} failed (signal {signal}{found})")
+        }
+        (CheckOutcome::TimedOut, _, _) => {
+            format!("{name} timed out ({} s{found})", check.timeout_s)
+        }
         (CheckOutcome::NotStarted, _, _) => format!("{name} did not start"),
         (outcome, _, _) => format!("{name} {}", outcome.as_str().replace('_', " ")),
     }

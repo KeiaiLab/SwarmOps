@@ -6,17 +6,21 @@
 //!   CheckListReq {rev, stage?} ──▶ the tree rev names ──▶ .swarmops/checks.toml (version 1)
 //!                                                         or workspaces.json's check.argv
 //!   CheckListResp {vouched, tree, file, version, stage, checks: [CheckOut sorted by name]}
+//!   CheckOut {name, argv, dir, timeout_s, definition_digest, stages, reports, line}
 //! ```
 //!
 //! `check run` runs one stage's checks, one at a time, and answers one [`CheckRunResp`]: an
-//! outcome per check ([`CheckRunOut`]), each check's log and, for a check that did not pass, the
+//! outcome per check ([`CheckRunOut`]), each check's log, its findings ([`CheckFindingOut`]) and
+//! the reports they came from ([`CheckReportReadOut`]), and, for a check that did not pass, the
 //! tails of its output.
 //!
 //! ```text
 //!   CheckRunReq {workspace, stage, checks} ──▶ the workspace held clean and locked
 //!   CheckRunResp {vouched, run, stage, workspace?, changeset?, tree?, file, version, dir,
-//!                 inherited_env, inherited_all, cancelled, failed, duration_ms,
-//!                 checks: [CheckRunOut {name, outcome, …} in run order]}
+//!                 inherited_env, inherited_all, cancelled, failed, findings_omitted?,
+//!                 duration_ms,
+//!                 checks: [CheckRunOut {name, outcome, …, findings, findings_total, reports, …}
+//!                          in run order]}
 //! ```
 //!
 //! `check log` reads one check's log of a run ([`CheckLogResp`]): its lines, each with its time
@@ -122,8 +126,8 @@ pub struct CheckOut {
     /// `.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does
     /// not read it, and takes its own `--check-timeout`.
     pub timeout_s: u64,
-    /// The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not
-    /// its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.
+    /// The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled
+    /// in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.
     /// Provisional: the recipe may change in a later release, so compare digests of one release
     /// only.
     pub definition_digest: String,
@@ -133,6 +137,10 @@ pub struct CheckOut {
     /// `.swarmops/workspaces.json`.
     #[serde(default = "default_stages")]
     pub stages: Vec<CheckStage>,
+    /// The JUnit and SARIF reports it leaves in its tree, which `check run` reads into findings
+    /// once it has ended, in the order the file declares them. Omitted when it declares none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reports: Vec<CheckReportOut>,
     /// The line of `.swarmops/checks.toml` that starts its table. Omitted for the check
     /// `default` read from `.swarmops/workspaces.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,7 +148,7 @@ pub struct CheckOut {
 }
 
 impl CheckOut {
-    /// Takes the required fields; `stages` is `before-land` alone, `line` none.
+    /// Takes the required fields; `stages` is `before-land` alone, no report, `line` none.
     pub fn new(
         name: impl Into<String>,
         argv: Vec<String>,
@@ -155,7 +163,28 @@ impl CheckOut {
             timeout_s,
             definition_digest: definition_digest.into(),
             stages: default_stages(),
+            reports: Vec::new(),
             line: None,
+        }
+    }
+}
+
+/// A report a check declares: a file in its tree, of a format `check run` reads into findings.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckReportOut {
+    /// Its format: `junit` or `sarif`.
+    pub format: CheckReportFormat,
+    /// Where the check leaves it: a repository path relative to the check's `dir`.
+    pub path: String,
+}
+
+impl CheckReportOut {
+    /// The report of `format` at `path`.
+    pub fn new(format: CheckReportFormat, path: impl Into<String>) -> Self {
+        Self {
+            format,
+            path: path.into(),
         }
     }
 }
@@ -298,6 +327,11 @@ pub struct CheckRunResp {
     pub cancelled: bool,
     /// The checks that did not pass, in run order; empty when every one passed.
     pub failed: Vec<String>,
+    /// The findings of the run that were counted and not returned: past the run's bound of
+    /// 10,000 findings and 4 MiB of their text, every later finding is counted in its check's
+    /// `findings_total` and here, and none is returned. Omitted when 0.
+    #[serde(default, skip_serializing_if = "crate::ops::is_zero")]
+    pub findings_omitted: u64,
     /// The run's milliseconds, from its first check's start to its last's end.
     pub duration_ms: u64,
     /// One per selected check, in the order they ran (by name).
@@ -328,6 +362,7 @@ impl CheckRunResp {
             inherited_all: false,
             cancelled: false,
             failed: Vec::new(),
+            findings_omitted: 0,
             duration_ms: 0,
             checks: Vec::new(),
         }
@@ -371,6 +406,19 @@ pub struct CheckRunOut {
     /// The bytes of its output its log left out, past the log's bounds. Omitted when none.
     #[serde(default, skip_serializing_if = "crate::ops::is_zero")]
     pub dropped_bytes: u64,
+    /// Its findings that the run returns, in order: those of its report file, in line order,
+    /// then those of each report it declares, in declared order. Findings change no outcome.
+    /// Omitted when none is returned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<CheckFindingOut>,
+    /// Every finding read from its reports, returned or not: more than `findings` holds once
+    /// the run's bound is reached. Omitted when 0.
+    #[serde(default, skip_serializing_if = "crate::ops::is_zero")]
+    pub findings_total: u64,
+    /// The reports its findings were read from, as this run read them: its report file first,
+    /// when it wrote one. Omitted when there is none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reports: Vec<CheckReportReadOut>,
     /// The last 8 KiB of its stdout, for a check that ran and did not pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdout_tail: Option<String>,
@@ -401,6 +449,9 @@ impl CheckRunOut {
             log: None,
             sections: Vec::new(),
             dropped_bytes: 0,
+            findings: Vec::new(),
+            findings_total: 0,
+            reports: Vec::new(),
             stdout_tail: None,
             stderr_tail: None,
         }
@@ -476,6 +527,229 @@ impl CheckSectionOut {
             duration_ms,
         }
     }
+}
+
+/// One finding of a check: something it reports at a level, about a path and lines of the tree
+/// or about the tree as a whole. Read from the report file the check writes
+/// (`SWARMOPS_CHECK_REPORT`, JSON lines), after the check has ended.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckFindingOut {
+    /// How much it matters.
+    pub level: CheckFindingLevel,
+    /// What it is, in one line: at most 200 bytes, cut with `…`.
+    pub title: String,
+    /// What the report groups it under, when the report gives one. Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// The file it is about: a repository path from the tree's root. Omitted when the finding
+    /// names no file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Its first line in `path`, from 1. Omitted when it names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+    /// Its last line in `path`, at or after `line`. Omitted when it names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u64>,
+    /// What to know about it, its line breaks kept: at most 4 KiB, cut with `…`. Omitted when
+    /// empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// The report it came from: its index, from 0, in its check's `reports`.
+    pub report: u32,
+}
+
+impl CheckFindingOut {
+    /// A finding of `level`, `title`, from report 0; no group, path, lines or message.
+    pub fn new(level: CheckFindingLevel, title: impl Into<String>) -> Self {
+        Self {
+            level,
+            title: title.into(),
+            group: None,
+            path: None,
+            line: None,
+            end_line: None,
+            message: None,
+            report: 0,
+        }
+    }
+}
+
+/// How much a finding matters. Findings change no check's outcome.
+#[derive(
+    Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckFindingLevel {
+    /// Something wrong.
+    Error,
+    /// Something likely wrong, or to look at.
+    Warning,
+    /// Something to know.
+    Notice,
+}
+
+impl CheckFindingLevel {
+    /// Every level, from the most to the least.
+    pub const ALL: [CheckFindingLevel; 3] = [
+        CheckFindingLevel::Error,
+        CheckFindingLevel::Warning,
+        CheckFindingLevel::Notice,
+    ];
+
+    /// Its word, as a report file and the wire write it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckFindingLevel::Error => "error",
+            CheckFindingLevel::Warning => "warning",
+            CheckFindingLevel::Notice => "notice",
+        }
+    }
+
+    /// The level named `name`, if it is one.
+    pub fn parse(name: &str) -> Option<CheckFindingLevel> {
+        CheckFindingLevel::ALL
+            .into_iter()
+            .find(|level| level.as_str() == name)
+    }
+}
+
+/// A report a check's findings were read from, as one run read it, after the check ended.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckReportReadOut {
+    /// Its format.
+    pub format: CheckReportFormat,
+    /// Where it was: the report file's absolute path on the host the check ran on; a declared
+    /// report's path as its check declares it, relative to the check's `dir`.
+    pub path: String,
+    /// What came of it.
+    pub state: CheckReportState,
+    /// Why it was not read, for `refused`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<CheckReportFault>,
+    /// One line: for `refused`, why, in the host's words where they apply; for the report
+    /// file, its first invalid line and why, or that it was cut. Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// The findings it gave, returned or not, for `read`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<u64>,
+    /// The report file's lines that are no finding, each skipped. Omitted when 0.
+    #[serde(default, skip_serializing_if = "crate::ops::is_zero")]
+    pub invalid_lines: u64,
+    /// Whether the report file was past 64 MiB: its lines up to the bound were read, the rest
+    /// not. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cut: bool,
+    /// A JUnit report's test cases, for `read`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests: Option<u64>,
+    /// Those of them that failed or ended in an error, each a finding, for a JUnit report
+    /// `read`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<u64>,
+    /// Those of them skipped, for a JUnit report `read`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<u64>,
+    /// A SARIF report's results, every kind, for `read`; those of kind `fail` are its findings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<u64>,
+}
+
+impl CheckReportReadOut {
+    /// The report of `format` at `path`, ended in `state`; nothing else known yet.
+    pub fn new(
+        format: CheckReportFormat,
+        path: impl Into<String>,
+        state: CheckReportState,
+    ) -> Self {
+        Self {
+            format,
+            path: path.into(),
+            state,
+            fault: None,
+            message: None,
+            findings: None,
+            invalid_lines: 0,
+            cut: false,
+            tests: None,
+            failed: None,
+            skipped: None,
+            results: None,
+        }
+    }
+}
+
+/// The format of a report a check's findings come from.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckReportFormat {
+    /// The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`. Never
+    /// declared.
+    Findings,
+    /// A JUnit XML report of test cases: each case that failed or ended in an error is a
+    /// finding.
+    Junit,
+    /// A SARIF 2.1.0 log of results: each result of kind `fail` is a finding.
+    Sarif,
+}
+
+impl CheckReportFormat {
+    /// The formats a check may declare, in the order a message lists them.
+    pub const DECLARED: [CheckReportFormat; 2] =
+        [CheckReportFormat::Junit, CheckReportFormat::Sarif];
+
+    /// Its word on the wire and in the check file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckReportFormat::Findings => "findings",
+            CheckReportFormat::Junit => "junit",
+            CheckReportFormat::Sarif => "sarif",
+        }
+    }
+}
+
+/// What came of a report after its check.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckReportState {
+    /// Read: its findings are the check's.
+    Read,
+    /// Not there after the check.
+    Missing,
+    /// There, but not written by this run of the check: left from before, and not read.
+    Stale,
+    /// There, and not read as its format: `fault` says why.
+    Refused,
+}
+
+/// Why a report was not read. A report that is not read is a state of that report, never an
+/// error of the run.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckReportFault {
+    /// Past its size bound.
+    TooLarge,
+    /// A symbolic link, a directory, a FIFO or another kind of entry; nothing behind it read.
+    NotAFile,
+    /// Not UTF-8.
+    NotText,
+    /// Not of its format's syntax.
+    Syntax,
+    /// A document type declaration, which is refused before anything is read.
+    Doctype,
+    /// Nested past its depth bound.
+    TooDeep,
+    /// Well formed, but not of its format's shape.
+    Shape,
+    /// It could not be read: the host's words are in `message`.
+    Io,
 }
 
 /// `check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. Reads

@@ -24,9 +24,11 @@ pub mod wire;
 
 pub use auth::{AuthEntry, AuthLogin, AuthLogout, AuthStatus};
 pub use check::{
-    CheckListReq, CheckListResp, CheckLogEnd, CheckLogLineOut, CheckLogReq, CheckLogResp,
-    CheckLogStream, CheckNotStarted, CheckOut, CheckOutcome, CheckRunOut, CheckRunReq,
-    CheckRunResp, CheckSectionOut, CheckStage, DEFAULT_CHECK_LOG_TAIL, MAX_CHECK_LOG_TAIL,
+    CheckFindingLevel, CheckFindingOut, CheckListReq, CheckListResp, CheckLogEnd, CheckLogLineOut,
+    CheckLogReq, CheckLogResp, CheckLogStream, CheckNotStarted, CheckOut, CheckOutcome,
+    CheckReportFault, CheckReportFormat, CheckReportOut, CheckReportReadOut, CheckReportState,
+    CheckRunOut, CheckRunReq, CheckRunResp, CheckSectionOut, CheckStage, DEFAULT_CHECK_LOG_TAIL,
+    MAX_CHECK_LOG_TAIL,
 };
 pub use envelope::{API_VERSION, Envelope, LogCutOut, Meta, RecoveredOut};
 pub use error::{ErrorCode, OpError};

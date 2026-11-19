@@ -1520,9 +1520,16 @@ changeset (`details.changeset`), where the failure reproduces: fix, `ws commit`,
 A check that needs more than 900 s takes `--check-timeout`.
 
 From `check run`, `details.run` is the whole run: `details.run.failed` names the checks that did
-not pass, and each of `details.run.checks` has its `outcome`, its `log` (read it with
-`swarmops check log NAME` and the run's form, `--dir DIR` or `--ws NAME`, and `--run`) and, for a
-check that ran, the tails of its output. A check `timed_out` ran past its `timeout_s`: raise it
+not pass, and each of `details.run.checks` has its `outcome`, its `findings` (read these first:
+each names a level, a title, and where it applies a path, lines and a message), its `log` (read it
+with `swarmops check log NAME` and the run's form, `--dir DIR` or `--ws NAME`, and `--run`) and,
+for a check that ran, the tails of its output. A check's `reports` say what came of each report
+its findings were read from: `missing`, its tool wrote none (for this repository's gate, run it
+with `NEXTEST_PROFILE=ci` and `--pass NEXTEST_PROFILE`, whose profile writes the JUnit report);
+`stale`, it was there but not written by this run, and was not read; `refused`, with its `fault`
+and `message` (a symbolic link, past 64 MiB, not of its format). `details.run.findings_omitted`
+counts the findings past the run's bound of 10,000, which are counted in each check's
+`findings_total` but not returned. A check `timed_out` ran past its `timeout_s`: raise it
 in the check file, or make the check faster. One `not_started` names why: `dir`, a directory the
 tree does not hold here (a sparse workspace may lack it: `ws materialize` it), or `program`, a
 program that is not on the check's `PATH`. A check gets only a fixed list of your environment's

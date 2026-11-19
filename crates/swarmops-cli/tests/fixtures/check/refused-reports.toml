@@ -1,0 +1,9 @@
+# A version 1 check file whose one check declares a report of a format no build reads.
+version = 1
+
+[check.unit]
+argv = ["cargo", "test", "--locked"]
+reports = [
+  { format = "junit", path = "out/junit.xml" },
+  { format = "xunit", path = "out/xunit.xml" },
+]

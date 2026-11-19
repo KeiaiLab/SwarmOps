@@ -25,7 +25,7 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_CHECK_FAILED",
-        "message": "1 of 2 checks did not pass: bad failed (exit 3)",
+        "message": "1 of 3 checks did not pass: bad failed (exit 3)",
         "retryable": false,
         "exit": 1,
         "details": {
@@ -45,6 +45,40 @@ expression: s.transcript()
               },
               {
                 "definition_digest": "[id2]",
+                "duration_ms": "[duration_ms]",
+                "exit_code": 0,
+                "findings": [
+                  {
+                    "end_line": 4,
+                    "level": "error",
+                    "line": 3,
+                    "message": "remove it",
+                    "path": "src/lib.rs",
+                    "report": 0,
+                    "title": "unused import"
+                  },
+                  {
+                    "level": "notice",
+                    "report": 0,
+                    "title": "no tests changed"
+                  }
+                ],
+                "findings_total": 2,
+                "log": "[tmp]/runs/[dir_key]/[run1]/logs/found.log",
+                "name": "found",
+                "outcome": "passed",
+                "reports": [
+                  {
+                    "findings": 2,
+                    "format": "findings",
+                    "path": "[tmp]/runs/[dir_key]/[run1]/checks/found/report.jsonl",
+                    "state": "read"
+                  }
+                ],
+                "timeout_s": 900
+              },
+              {
+                "definition_digest": "[id3]",
                 "duration_ms": "[duration_ms]",
                 "exit_code": 0,
                 "log": "[tmp]/runs/[dir_key]/[run1]/logs/ok.log",
@@ -87,7 +121,7 @@ expression: s.transcript()
     }
   },
   {
-    "args": "check run --dir [tmp]/tree ok",
+    "args": "check run --dir [tmp]/tree found ok",
     "env": {
       "SWARMOPS_CHECK_RUNS_DIR": "[tmp]/runs",
       "HOME": "[tmp]/home",
@@ -129,9 +163,43 @@ expression: s.transcript()
         "duration_ms": "[duration_ms]",
         "checks": [
           {
-            "name": "ok",
+            "name": "found",
             "outcome": "passed",
             "definition_digest": "[id2]",
+            "timeout_s": 900,
+            "duration_ms": "[duration_ms]",
+            "exit_code": 0,
+            "log": "[tmp]/runs/[dir_key]/[run2]/logs/found.log",
+            "findings": [
+              {
+                "level": "error",
+                "title": "unused import",
+                "path": "src/lib.rs",
+                "line": 3,
+                "end_line": 4,
+                "message": "remove it",
+                "report": 0
+              },
+              {
+                "level": "notice",
+                "title": "no tests changed",
+                "report": 0
+              }
+            ],
+            "findings_total": 2,
+            "reports": [
+              {
+                "format": "findings",
+                "path": "[tmp]/runs/[dir_key]/[run2]/checks/found/report.jsonl",
+                "state": "read",
+                "findings": 2
+              }
+            ]
+          },
+          {
+            "name": "ok",
+            "outcome": "passed",
+            "definition_digest": "[id3]",
             "timeout_s": 900,
             "duration_ms": "[duration_ms]",
             "exit_code": 0,

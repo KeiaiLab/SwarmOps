@@ -115,6 +115,9 @@ const RESPONSES: &[&str] = &[
     "CheckLogLineOut",
     "CheckLogResp",
     "CheckOut",
+    "CheckFindingOut",
+    "CheckReportOut",
+    "CheckReportReadOut",
     "CheckRunOut",
     "CheckRunResp",
     "CheckSectionOut",
@@ -218,8 +221,12 @@ const SCALARS: &[&str] = &[
     "ChangeOp",
     "CheckLogEnd",
     "CheckLogStream",
+    "CheckFindingLevel",
     "CheckNotStarted",
     "CheckOutcome",
+    "CheckReportFault",
+    "CheckReportFormat",
+    "CheckReportState",
     "CheckStage",
     "ConflictKindOut",
     "ContentEncoding",
@@ -2173,9 +2180,11 @@ mod update {
 mod check {
     use serde_json::json;
     use swarmops_api::{
-        CheckListReq, CheckListResp, CheckLogEnd, CheckLogLineOut, CheckLogReq, CheckLogResp,
-        CheckLogStream, CheckNotStarted, CheckOut, CheckOutcome, CheckRunOut, CheckRunReq,
-        CheckRunResp, CheckSectionOut, CheckStage, Rev, schema_for_all,
+        CheckFindingLevel, CheckFindingOut, CheckListReq, CheckListResp, CheckLogEnd,
+        CheckLogLineOut, CheckLogReq, CheckLogResp, CheckLogStream, CheckNotStarted, CheckOut,
+        CheckOutcome, CheckReportFault, CheckReportFormat, CheckReportOut, CheckReportReadOut,
+        CheckReportState, CheckRunOut, CheckRunReq, CheckRunResp, CheckSectionOut, CheckStage, Rev,
+        schema_for_all,
     };
 
     /// A log's request names the workspace and the check; the newest run and 1,000 lines when
@@ -2339,6 +2348,178 @@ mod check {
         );
     }
 
+    /// A check's findings and reports in the documented order, after `dropped_bytes` and before
+    /// the tails; the run's count left out after `failed`; each omitted when empty or 0.
+    #[test]
+    fn a_check_run_result_carries_findings_in_order() {
+        let mut first = CheckFindingOut::new(CheckFindingLevel::Warning, "unused");
+        first.group = Some("lint".to_owned());
+        first.path = Some("src/lib.rs".to_owned());
+        first.line = Some(3);
+        first.end_line = Some(4);
+        first.message = Some("remove it".to_owned());
+        let bare = CheckFindingOut::new(CheckFindingLevel::Notice, "slow");
+        let mut report = CheckReportReadOut::new(
+            CheckReportFormat::Findings,
+            "/r/checks/a/report.jsonl",
+            CheckReportState::Read,
+        );
+        report.findings = Some(3);
+        report.message = Some("line 2: not JSON".to_owned());
+        report.invalid_lines = 1;
+        let mut failed = CheckRunOut::new("a", CheckOutcome::Failed, "ab", 60);
+        failed.exit_code = Some(1);
+        failed.dropped_bytes = 2;
+        failed.findings = vec![first, bare];
+        failed.findings_total = 3;
+        failed.reports = vec![report];
+        failed.stderr_tail = Some(String::new());
+        let mut run = CheckRunResp::new(true, "0193", CheckStage::BeforeLand, ".f", "/r");
+        run.failed = vec!["a".to_owned()];
+        run.findings_omitted = 1;
+        run.checks = vec![failed];
+        let text = serde_json::to_string(&run).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"vouched":true,"run":"0193","stage":"before-land","file":".f","dir":"/r","#,
+                r#""inherited_env":[],"inherited_all":false,"cancelled":false,"failed":["a"],"#,
+                r#""findings_omitted":1,"duration_ms":0,"checks":["#,
+                r#"{"name":"a","outcome":"failed","definition_digest":"ab","timeout_s":60,"#,
+                r#""duration_ms":0,"exit_code":1,"dropped_bytes":2,"findings":["#,
+                r#"{"level":"warning","title":"unused","group":"lint","path":"src/lib.rs","#,
+                r#""line":3,"end_line":4,"message":"remove it","report":0},"#,
+                r#"{"level":"notice","title":"slow","report":0}],"findings_total":3,"#,
+                r#""reports":[{"format":"findings","path":"/r/checks/a/report.jsonl","#,
+                r#""state":"read","message":"line 2: not JSON","findings":3,"#,
+                r#""invalid_lines":1}],"stderr_tail":""}]}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(serde_json::from_str::<CheckRunResp>(&text).unwrap(), run);
+
+        // A refused report names its fault; a cut one says so.
+        let mut refused = CheckReportReadOut::new(
+            CheckReportFormat::Findings,
+            "/r/report.jsonl",
+            CheckReportState::Refused,
+        );
+        refused.fault = Some(CheckReportFault::NotAFile);
+        refused.message = Some("a symbolic link".to_owned());
+        assert_eq!(
+            serde_json::to_string(&refused).unwrap(),
+            r#"{"format":"findings","path":"/r/report.jsonl","state":"refused","fault":"not_a_file","message":"a symbolic link"}"#
+        );
+        let mut cut =
+            CheckReportReadOut::new(CheckReportFormat::Findings, "/r", CheckReportState::Read);
+        cut.findings = Some(0);
+        cut.cut = true;
+        assert!(
+            serde_json::to_string(&cut)
+                .unwrap()
+                .ends_with(r#""findings":0,"cut":true}"#)
+        );
+    }
+
+    /// What a finding and a report require, and the words of their levels, formats, states and
+    /// faults.
+    #[test]
+    fn a_finding_s_schema_names_its_levels_and_a_report_s_its_faults() {
+        let all = schema_for_all();
+        assert_eq!(
+            all["CheckFindingOut"]["required"],
+            json!(["level", "title", "report"])
+        );
+        assert_eq!(
+            all["CheckReportReadOut"]["required"],
+            json!(["format", "path", "state"])
+        );
+        let words = |name: &str| -> Vec<String> {
+            let schema = &all[name];
+            let alternatives: Vec<&str> = (schema["oneOf"].as_array())
+                .map(|alts| {
+                    alts.iter()
+                        .filter_map(|alt| alt["const"].as_str())
+                        .collect()
+                })
+                .or_else(|| {
+                    (schema["enum"].as_array())
+                        .map(|alts| alts.iter().filter_map(|alt| alt.as_str()).collect())
+                })
+                .unwrap_or_default();
+            alternatives.into_iter().map(str::to_owned).collect()
+        };
+        assert_eq!(words("CheckFindingLevel"), ["error", "warning", "notice"]);
+        assert_eq!(words("CheckReportFormat"), ["findings", "junit", "sarif"]);
+        assert_eq!(
+            words("CheckReportState"),
+            ["read", "missing", "stale", "refused"]
+        );
+        assert_eq!(
+            words("CheckReportFault"),
+            [
+                "too_large",
+                "not_a_file",
+                "not_text",
+                "syntax",
+                "doctype",
+                "too_deep",
+                "shape",
+                "io"
+            ]
+        );
+        for level in CheckFindingLevel::ALL {
+            assert_eq!(serde_json::to_value(level).unwrap(), json!(level.as_str()));
+            assert_eq!(CheckFindingLevel::parse(level.as_str()), Some(level));
+        }
+        assert_eq!(CheckFindingLevel::parse("info"), None);
+        for format in [
+            CheckReportFormat::Findings,
+            CheckReportFormat::Junit,
+            CheckReportFormat::Sarif,
+        ] {
+            assert_eq!(
+                serde_json::to_value(format).unwrap(),
+                json!(format.as_str())
+            );
+        }
+        assert_eq!(
+            CheckReportFormat::DECLARED,
+            [CheckReportFormat::Junit, CheckReportFormat::Sarif]
+        );
+
+        // A JUnit report's counts and a SARIF report's, after `cut`.
+        let mut junit = CheckReportReadOut::new(
+            CheckReportFormat::Junit,
+            "target/junit.xml",
+            CheckReportState::Read,
+        );
+        junit.findings = Some(2);
+        junit.tests = Some(5);
+        junit.failed = Some(2);
+        junit.skipped = Some(1);
+        assert_eq!(
+            serde_json::to_string(&junit).unwrap(),
+            r#"{"format":"junit","path":"target/junit.xml","state":"read","findings":2,"tests":5,"failed":2,"skipped":1}"#
+        );
+        let mut sarif =
+            CheckReportReadOut::new(CheckReportFormat::Sarif, "a.sarif", CheckReportState::Read);
+        sarif.findings = Some(1);
+        sarif.results = Some(3);
+        assert_eq!(
+            serde_json::to_string(&sarif).unwrap(),
+            r#"{"format":"sarif","path":"a.sarif","state":"read","findings":1,"results":3}"#
+        );
+        assert_ignores_unknown_fields::<CheckFindingOut>(
+            "CheckFindingOut",
+            json!({"level": "error", "title": "t", "report": 0}),
+        );
+        assert_ignores_unknown_fields::<CheckReportReadOut>(
+            "CheckReportReadOut",
+            json!({"format": "findings", "path": "/r", "state": "missing"}),
+        );
+    }
+
     /// What a run's result requires, and the outcomes' words.
     #[test]
     fn a_check_run_result_s_schema_names_its_outcomes() {
@@ -2480,6 +2661,10 @@ mod check {
         );
         check.line = Some(4);
         check.stages = vec![CheckStage::BeforeLand, CheckStage::Manual];
+        check.reports = vec![
+            CheckReportOut::new(CheckReportFormat::Junit, "out/junit.xml"),
+            CheckReportOut::new(CheckReportFormat::Sarif, "out/a.sarif"),
+        ];
         let mut stored = CheckListResp::new(false, vec![check]);
         stored.tree = Some("7f".to_owned());
         stored.file = Some(".swarmops/checks.toml".to_owned());
@@ -2492,7 +2677,8 @@ mod check {
                 r#"{"vouched":false,"tree":"7f","file":".swarmops/checks.toml","version":1,"#,
                 r#""stage":"manual","checks":[{"name":"default","argv":["make"],"dir":".","#,
                 r#""timeout_s":900,"definition_digest":"ab","stages":["before-land","manual"],"#,
-                r#""line":4}]}"#,
+                r#""reports":[{"format":"junit","path":"out/junit.xml"},"#,
+                r#"{"format":"sarif","path":"out/a.sarif"}],"line":4}]}"#,
             ]
             .concat()
         );
@@ -2519,11 +2705,17 @@ mod check {
             json!({"name": "a", "argv": ["a"], "dir": ".", "timeout_s": 1,
                    "definition_digest": "ab"}),
         );
+        assert_eq!(all["CheckReportOut"]["required"], json!(["format", "path"]));
+        assert_ignores_unknown_fields::<CheckReportOut>(
+            "CheckReportOut",
+            json!({"format": "junit", "path": "a.xml"}),
+        );
 
         // An answer of a build before stages reads as before-land.
         let older: CheckOut = serde_json::from_value(json!({"name": "a", "argv": ["a"],
             "dir": ".", "timeout_s": 1, "definition_digest": "ab"}))
         .unwrap();
         assert_eq!(older.stages, [CheckStage::BeforeLand]);
+        assert_eq!(older.reports, []);
     }
 }

@@ -6,8 +6,8 @@ use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use serde_json::{Value, json};
 use swarmops_api::{
-    ChangeInput, ChangeOp, CheckListReq, CheckStage, CommitReq, ContentInput, ErrorCode, Identity,
-    ModeInput, OpError, StoreOps,
+    ChangeInput, ChangeOp, CheckListReq, CheckReportFormat, CheckStage, CommitReq, ContentInput,
+    ErrorCode, Identity, ModeInput, OpError, StoreOps,
 };
 
 use super::*;
@@ -22,6 +22,11 @@ const REFUSED: &str = include_str!("../../../swarmops-cli/tests/fixtures/check/r
 /// A check file whose one check names a stage no build knows, `nightly`, on line 8.
 const REFUSED_STAGE: &str =
     include_str!("../../../swarmops-cli/tests/fixtures/check/refused-stage.toml");
+
+/// A check file whose one check declares a report of a format no build reads, `xunit`, on
+/// line 8.
+const REFUSED_REPORTS: &str =
+    include_str!("../../../swarmops-cli/tests/fixtures/check/refused-reports.toml");
 
 /// The checks of `text`, or the test fails.
 #[track_caller]
@@ -65,6 +70,7 @@ fn check(name: &str, argv: &[&str], dir: &str, timeout_s: u64) -> Check {
         dir: dir.to_owned(),
         timeout_s,
         stages: vec![CheckStage::BeforeLand],
+        reports: Vec::new(),
         line: None,
     }
 }
@@ -88,8 +94,8 @@ fn the_fixture_reads_sorted_with_its_lines() {
     assert_eq!(
         shown,
         [
-            ("docs", ".", 900, Some(12)),
-            ("lint", "crates/app", 600, Some(7)),
+            ("docs", ".", 900, Some(13)),
+            ("lint", "crates/app", 600, Some(8)),
             ("unit", ".", 900, Some(4)),
         ]
     );
@@ -787,6 +793,229 @@ fn a_definition_digest_hashes_the_documented_bytes() {
     );
 }
 
+// Reports (M31-5).
+
+/// The reports of the check `a` whose table holds `body` after its argv.
+fn reports(body: &str) -> Vec<Report> {
+    checks(&one("a", &format!("argv = [\"x\"]\n{body}")))[0]
+        .reports
+        .clone()
+}
+
+/// `reports` reads in both table forms, in declared order, both formats; `check list` gives them
+/// in that order, and a check without them gives none.
+#[test]
+fn reports_read_in_their_declared_order() {
+    let inline = reports(
+        "reports = [{ format = \"sarif\", path = \"out/a.sarif\" }, \
+         { path = \"out/junit.xml\", format = \"junit\" }]",
+    );
+    let expected = [
+        Report::new(CheckReportFormat::Sarif, "out/a.sarif"),
+        Report::new(CheckReportFormat::Junit, "out/junit.xml"),
+    ];
+    assert_eq!(inline, expected);
+    let tables = checks(
+        "version = 1\n[check.a]\nargv = [\"x\"]\n\
+         [[check.a.reports]]\nformat = \"sarif\"\npath = \"out/a.sarif\"\n\
+         [[check.a.reports]]\nformat = \"junit\"\npath = \"out/junit.xml\"\n",
+    );
+    assert_eq!(tables[0].reports, expected);
+    let out = tables[0].out();
+    let listed: Vec<(CheckReportFormat, &str)> = (out.reports.iter())
+        .map(|report| (report.format, report.path.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (CheckReportFormat::Sarif, "out/a.sarif"),
+            (CheckReportFormat::Junit, "out/junit.xml"),
+        ]
+    );
+    assert_eq!(reports(""), []);
+    let read = parse(FIXTURE.as_bytes()).unwrap();
+    assert_eq!(
+        read.checks[2].reports,
+        [Report::new(
+            CheckReportFormat::Junit,
+            "target/nextest/default/junit.xml"
+        )]
+    );
+}
+
+/// Each refusal of `reports`, with its reason, key and line.
+#[test]
+fn reports_refuse_each_fault_at_its_line() {
+    let at = |body: &str| one("a", &format!("argv = [\"x\"]\n{body}"));
+    let cases: &[(&str, Reason, u64, &str)] = &[
+        ("reports = \"junit\"", Reason::Value, 4, "check.a.reports"),
+        ("reports = []", Reason::Value, 4, "check.a.reports"),
+        (
+            "reports = [\n  \"out/junit.xml\",\n]",
+            Reason::Value,
+            5,
+            "check.a.reports",
+        ),
+        (
+            "reports = [\n  { format = \"xunit\", path = \"a.xml\" },\n]",
+            Reason::Value,
+            5,
+            "check.a.reports.format",
+        ),
+        (
+            "reports = [{ format = 1, path = \"a.xml\" }]",
+            Reason::Value,
+            4,
+            "check.a.reports.format",
+        ),
+        (
+            "reports = [{ format = \"findings\", path = \"a.xml\" }]",
+            Reason::Value,
+            4,
+            "check.a.reports.format",
+        ),
+        (
+            "reports = [{ format = \"junit\", path = \"/etc/a.xml\" }]",
+            Reason::Value,
+            4,
+            "check.a.reports.path",
+        ),
+        (
+            "reports = [{ format = \"junit\", path = \"../a.xml\" }]",
+            Reason::Value,
+            4,
+            "check.a.reports.path",
+        ),
+        (
+            "reports = [{ format = \"junit\", path = \".\" }]",
+            Reason::Value,
+            4,
+            "check.a.reports.path",
+        ),
+        (
+            "reports = [{ format = \"junit\", path = 7 }]",
+            Reason::Value,
+            4,
+            "check.a.reports.path",
+        ),
+        (
+            "reports = [\n  { format = \"junit\", path = \"a.xml\" },\n  \
+             { format = \"sarif\", path = \"a.xml\" },\n]",
+            Reason::Value,
+            6,
+            "check.a.reports.path",
+        ),
+        (
+            "reports = [\n  { path = \"a.xml\" },\n]",
+            Reason::Value,
+            5,
+            "check.a.reports.format",
+        ),
+        (
+            "reports = [\n  { format = \"junit\" },\n]",
+            Reason::Value,
+            5,
+            "check.a.reports.path",
+        ),
+        (
+            "reports = [\n  { format = \"junit\", path = \"a.xml\",\n    kind = \"x\" },\n]",
+            Reason::UnknownKey,
+            6,
+            "check.a.reports.kind",
+        ),
+    ];
+    for (body, reason, line, key) in cases {
+        refuses(&at(body), *reason, Some(*line), Some(key));
+    }
+
+    // The fixture: an unknown format at its line, the two formats named, the hint naming
+    // `reports`.
+    refuses(
+        REFUSED_REPORTS,
+        Reason::Value,
+        Some(8),
+        Some("check.unit.reports.format"),
+    );
+    let error = refused(REFUSED_REPORTS.as_bytes()).into_error(true);
+    assert_eq!(
+        error.message,
+        ".swarmops/checks.toml has check.unit.reports.format \"xunit\", not a report format: \
+         junit or sarif (line 8)"
+    );
+    assert!(error.hint.unwrap().contains("reports"));
+    let unknown = refused(at("reports = [{ format = \"junit\", path = \"a\", x = 1 }]").as_bytes());
+    assert!(unknown.into_error(true).hint.unwrap().contains("reports"));
+}
+
+/// Up to 16 reports are taken; the 17th is refused at its line.
+#[test]
+fn at_most_16_reports() {
+    let items = |n: usize| -> String {
+        let lines: Vec<String> = (0..n)
+            .map(|i| format!("  {{ format = \"junit\", path = \"r{i}.xml\" }},"))
+            .collect();
+        format!("reports = [\n{}\n]", lines.join("\n"))
+    };
+    assert_eq!(reports(&items(16)).len(), 16);
+    refuses(
+        &one("a", &format!("argv = [\"x\"]\n{}", items(17))),
+        Reason::Value,
+        Some(21),
+        Some("check.a.reports"),
+    );
+}
+
+/// The digest: unchanged by no `reports`; changed by a report, its format, its path, and their
+/// order; the bytes of tag 4 as the digest module documents them.
+#[test]
+fn reports_are_part_of_the_definition_digest() {
+    // 1. Every other change shows in the digest.
+    let with = |reports: &[(CheckReportFormat, &str)]| {
+        let mut check = check("a", &["make"], ".", 900);
+        check.reports = (reports.iter())
+            .map(|(format, path)| Report::new(*format, *path))
+            .collect();
+        check.definition_digest()
+    };
+    let junit = (CheckReportFormat::Junit, "out/j.xml");
+    let sarif = (CheckReportFormat::Sarif, "out/s.sarif");
+    let digests = [
+        with(&[]),
+        with(&[junit]),
+        with(&[(CheckReportFormat::Sarif, "out/j.xml")]),
+        with(&[(CheckReportFormat::Junit, "out/k.xml")]),
+        with(&[junit, sarif]),
+        with(&[sarif, junit]),
+    ];
+    let unique: std::collections::BTreeSet<&String> = digests.iter().collect();
+    assert_eq!(unique.len(), digests.len(), "{digests:#?}");
+    assert_eq!(
+        digests[0],
+        "25fb129d52047b2d4fdc6f5c464153fd633dd6a40d8abee361f8a845211f3019"
+    );
+
+    // 2. The documented bytes.
+    let le = |n: u64| n.to_le_bytes().to_vec();
+    let mut bytes = b"swarmops:check-definition:v0\0".to_vec();
+    let argv = [le(1), le(4), b"make".to_vec()].concat();
+    bytes.extend([vec![1], le(20), argv].concat());
+    let value = [
+        le(2),
+        vec![1],
+        le(9),
+        b"out/j.xml".to_vec(),
+        vec![2],
+        le(11),
+        b"out/s.sarif".to_vec(),
+    ]
+    .concat();
+    bytes.extend([vec![4], le(u64::try_from(value.len()).unwrap()), value].concat());
+    assert_eq!(
+        with(&[junit, sarif]),
+        blake3::hash(&bytes).to_hex().to_string()
+    );
+}
+
 // The two forms of `check list`.
 
 /// A store whose main holds `files` (path, content), one of them maybe a link.
@@ -828,7 +1057,7 @@ fn the_store_form_reads_the_tree_s_file() {
     assert_eq!(resp.tree.as_ref().map(String::len), Some(64));
     let names: Vec<&str> = resp.checks.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["docs", "lint", "unit"]);
-    assert_eq!(resp.checks[1].line, Some(7));
+    assert_eq!(resp.checks[1].line, Some(8));
 }
 
 #[test]
@@ -1078,7 +1307,7 @@ proptest! {
             prop_assert_eq!(&check.argv, argv);
             prop_assert_eq!(&check.dir, dir);
             prop_assert_eq!(check.timeout_s, *timeout_s);
-            let fresh = digest::definition(argv, dir, *timeout_s);
+            let fresh = digest::definition(argv, dir, *timeout_s, &[]);
             prop_assert_eq!(check.definition_digest(), fresh);
         }
     }

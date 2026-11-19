@@ -1,0 +1,1 @@
+<testsuite name="s"><testcase name="a" classname="k" file="src/a.rs" line="3"><failure message="m">text</failure><system-err>err</system-err></testcase><testcase name="b"><skipped/></testcase></testsuite>

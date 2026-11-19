@@ -5,9 +5,10 @@
 //! ```text
 //! even ─▶ check::parse(.swarmops/checks.toml)   odd ─▶ check::parse_legacy(workspaces.json)
 //! accepted: names unique, sorted, of the grammar; argv, dir and timeout_s inside their rules;
-//!           stages (M30-6) never empty, known, none twice, in their own order; each digest the
-//!           one its definition gives; written back by this target as TOML, read as the same
-//!           checks
+//!           stages (M30-6) never empty, known, none twice, in their own order; reports (M31-5)
+//!           at most 16, junit or sarif, repository paths, none twice, listed in order; each
+//!           digest the one its definition gives; written back by this target as TOML, read as
+//!           the same checks
 //! refused:  E_CHECK_FILE, a known reason, a line from 1 to the input's lines + 1, a message
 //!           of one line and at most 512 bytes
 //! ```
@@ -16,10 +17,11 @@
 use std::fmt::Write as _;
 
 use libfuzzer_sys::fuzz_target;
-use swarmops_api::CheckStage;
+use swarmops_api::{CheckReportFormat, CheckStage};
 use swarmops_ops::check::{
     self, CHECK_FILE, Check, LEGACY_CHECK, LEGACY_FILE, MAX_ARGV_BYTES, MAX_ARGV_ITEMS,
-    MAX_CHECK_NAME_BYTES, MAX_CHECK_TIMEOUT_S, MAX_CHECKS, ROOT_DIR, Reason, Refusal,
+    MAX_CHECK_NAME_BYTES, MAX_CHECK_REPORTS, MAX_CHECK_TIMEOUT_S, MAX_CHECKS, ROOT_DIR, Reason,
+    Refusal,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -42,6 +44,7 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(default.name, LEGACY_CHECK);
             assert_eq!(default.line, None);
             assert_eq!(default.stages, [CheckStage::BeforeLand]);
+            assert!(default.reports.is_empty(), "{default:?}");
             accepted(std::slice::from_ref(&default));
         }
         Ok(None) => {}
@@ -101,6 +104,30 @@ fn accepted(checks: &[Check]) {
         );
         assert_eq!(check.out().stages, check.stages);
 
+        assert!(check.reports.len() <= MAX_CHECK_REPORTS, "{check:?}");
+        for (at, report) in check.reports.iter().enumerate() {
+            assert!(
+                CheckReportFormat::DECLARED.contains(&report.format),
+                "{check:?}"
+            );
+            assert!(
+                swarmops_core::RepoPath::new(report.path.as_str()).is_ok(),
+                "{check:?}"
+            );
+            assert!(
+                check.reports[..at].iter().all(|r| r.path != report.path),
+                "{check:?}"
+            );
+        }
+        let out = check.out();
+        let listed: Vec<(CheckReportFormat, &str)> = (out.reports.iter())
+            .map(|r| (r.format, r.path.as_str()))
+            .collect();
+        let declared: Vec<(CheckReportFormat, &str)> = (check.reports.iter())
+            .map(|r| (r.format, r.path.as_str()))
+            .collect();
+        assert_eq!(listed, declared);
+
         let same = Check::clone(check);
         assert_eq!(same.definition_digest(), check.definition_digest());
         assert_eq!(check.definition_digest().len(), 64, "{check:?}");
@@ -120,6 +147,15 @@ fn round_trip(checks: &[Check]) {
         let _ = writeln!(text, "timeout_s = {}", check.timeout_s);
         let stages: Vec<String> = check.stages.iter().map(|s| basic(s.as_str())).collect();
         let _ = writeln!(text, "stages = [{}]", stages.join(", "));
+        if !check.reports.is_empty() {
+            let reports: Vec<String> = (check.reports.iter())
+                .map(|r| {
+                    let (format, path) = (basic(r.format.as_str()), basic(&r.path));
+                    format!("{{ format = {format}, path = {path} }}")
+                })
+                .collect();
+            let _ = writeln!(text, "reports = [{}]", reports.join(", "));
+        }
     }
     let again = check::parse(text.as_bytes()).unwrap_or_else(|e| panic!("{text:?}: {e:?}"));
     assert_eq!(again.checks.len(), checks.len(), "{text:?}");
@@ -130,6 +166,7 @@ fn round_trip(checks: &[Check]) {
             "{text:?}"
         );
         assert_eq!(read.stages, check.stages, "{text:?}");
+        assert_eq!(read.reports, check.reports, "{text:?}");
         assert_eq!(read.definition_digest(), check.definition_digest());
     }
 }

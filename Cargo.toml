@@ -66,6 +66,11 @@ uuid = { version = "1.28.0", features = ["v7"] }
 # negative pid through a safe API; and the store's `statfs` of the filesystem a store lives on
 # (swarmops-store, Linux). The version tempfile already brings in; no new package.
 rustix = { version = "1.1.5", default-features = false, features = ["std", "process", "fs"] }
+# The JUnit reports `check run` reads into findings (swarmops-ops only, M31-5): a streaming XML
+# reader that processes no document type and expands no entity but XML's five, under the bounds
+# of `check::junit`; no feature, so no encoding but UTF-8. MIT; its one dependency, memchr, is in
+# the tree already.
+quick-xml = { version = "0.42.0", default-features = false }
 insta = { version = "1.49.0", features = ["json"] }
 assert_cmd = "2.2.2"
 

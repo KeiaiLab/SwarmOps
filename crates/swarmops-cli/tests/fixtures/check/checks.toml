@@ -3,6 +3,7 @@ version = 1
 
 [check.unit]
 argv = ["cargo", "test", "--locked"]
+reports = [{ format = "junit", path = "target/nextest/default/junit.xml" }]
 
 [check.lint]
 argv = ["cargo", "clippy", "--", "-D", "warnings"]

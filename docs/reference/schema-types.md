@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 231 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 238 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -30,6 +30,8 @@ The 231 request, response and value types of the API, as `swarmops schema` print
 | [`ChangeOut`](#changeout) | object | One entry of a changeset's changes. |
 | [`ChangesetDetail`](#changesetdetail) | object | `show`: a changeset's header, changes and metadata. |
 | [`ChangesetSummary`](#changesetsummary) | object | One changeset of a log. |
+| [`CheckFindingLevel`](#checkfindinglevel) | enumeration | How much a finding matters. |
+| [`CheckFindingOut`](#checkfindingout) | object | One finding of a check: something it reports at a level, about a path and lines of the tree or about the tree as a whole. |
 | [`CheckListReq`](#checklistreq) | object | `check_list` (CLI `check list`): the checks the tree of `rev` describes. |
 | [`CheckListResp`](#checklistresp) | object | `check_list`: the checks a tree describes, sorted by name. |
 | [`CheckLogEnd`](#checklogend) | enumeration | How a check's log ended. |
@@ -40,6 +42,11 @@ The 231 request, response and value types of the API, as `swarmops schema` print
 | [`CheckNotStarted`](#checknotstarted) | enumeration | Why a check did not start. |
 | [`CheckOut`](#checkout) | object | One check: a command run with no shell, in a directory of the tree, for at most its time. |
 | [`CheckOutcome`](#checkoutcome) | enumeration | How a check of a run ended. |
+| [`CheckReportFault`](#checkreportfault) | enumeration | Why a report was not read. |
+| [`CheckReportFormat`](#checkreportformat) | enumeration | The format of a report a check's findings come from. |
+| [`CheckReportOut`](#checkreportout) | object | A report a check declares: a file in its tree, of a format `check run` reads into findings. |
+| [`CheckReportReadOut`](#checkreportreadout) | object | A report a check's findings were read from, as one run read it, after the check ended. |
+| [`CheckReportState`](#checkreportstate) | enumeration | What came of a report after its check. |
 | [`CheckRunOut`](#checkrunout) | object | One check of a run: how it ended, and where its log is. |
 | [`CheckRunReq`](#checkrunreq) | object | `check_run` (CLI `check run`): run the checks of one stage of a workspace's tree, one at a time in name order. |
 | [`CheckRunResp`](#checkrunresp) | object | `check_run`: every selected check's outcome, in the order they ran. |
@@ -527,6 +534,35 @@ Kind: object. `swarmops schema ChangesetSummary` prints its JSON Schema.
 | `parents` | array of `string` | yes | The parents' ids, mainline parent first. |
 | `title` | `string` | yes | The message's first line. |
 
+## CheckFindingLevel
+
+How much a finding matters. Findings change no check's outcome.
+
+Kind: enumeration. `swarmops schema CheckFindingLevel` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"error"` | Something wrong. |
+| `"warning"` | Something likely wrong, or to look at. |
+| `"notice"` | Something to know. |
+
+## CheckFindingOut
+
+One finding of a check: something it reports at a level, about a path and lines of the tree or about the tree as a whole. Read from the report file the check writes (`SWARMOPS_CHECK_REPORT`, JSON lines), after the check has ended.
+
+Kind: object. `swarmops schema CheckFindingOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `end_line` | `integer` (uint64) or `null` | no | Its last line in `path`, at or after `line`. Omitted when it names none. |
+| `group` | `string` or `null` | no | What the report groups it under, when the report gives one. Omitted otherwise. |
+| `level` | [`CheckFindingLevel`](#checkfindinglevel) | yes | How much it matters. |
+| `line` | `integer` (uint64) or `null` | no | Its first line in `path`, from 1. Omitted when it names none. |
+| `message` | `string` or `null` | no | What to know about it, its line breaks kept: at most 4 KiB, cut with `…`. Omitted when empty. |
+| `path` | `string` or `null` | no | The file it is about: a repository path from the tree's root. Omitted when the finding names no file. |
+| `report` | `integer` (uint32) | yes | The report it came from: its index, from 0, in its check's `reports`. |
+| `title` | `string` | yes | What it is, in one line: at most 200 bytes, cut with `…`. |
+
 ## CheckListReq
 
 `check_list` (CLI `check list`): the checks the tree of `rev` describes. Reads only: no lock, no identity, nothing written.
@@ -644,10 +680,11 @@ Kind: object. `swarmops schema CheckOut` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `argv` | array of `string` | yes | The program and its arguments, run with no shell: at least the program. |
-| `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, the defaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
+| `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
 | `dir` | `string` | yes | The directory of the tree it runs in, as a repository path; `.` is the root. |
 | `line` | `integer` (uint64) or `null` | no | The line of `.swarmops/checks.toml` that starts its table. Omitted for the check `default` read from `.swarmops/workspaces.json`. |
 | `name` | `string` | yes | Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit. |
+| `reports` | array of [`CheckReportOut`](#checkreportout) | no | The JUnit and SARIF reports it leaves in its tree, which `check run` reads into findings once it has ended, in the order the file declares them. Omitted when it declares none. |
 | `stages` | array of [`CheckStage`](#checkstage) | no | When its answer is wanted: one to six stages, in the stages' own order (`before-land`, `after-land`, `scheduled`, `release`, `manual`, `deploy`), whatever order the file wrote them in; `before-land` by default, and for the check `default` of `.swarmops/workspaces.json`. Default: `["before-land"]`. |
 | `timeout_s` | `integer` (uint64) | yes | The most seconds it may run, its default (900) filled in. For the check `default` of `.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does not read it, and takes its own `--check-timeout`. |
 
@@ -666,6 +703,80 @@ Kind: enumeration. `swarmops schema CheckOutcome` prints its JSON Schema.
 | `"cancelled"` | It was running when a signal stopped the run, and its process group was killed. |
 | `"not_run"` | The run was stopped before it started: no process, no log. |
 
+## CheckReportFault
+
+Why a report was not read. A report that is not read is a state of that report, never an error of the run.
+
+Kind: enumeration. `swarmops schema CheckReportFault` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"too_large"` | Past its size bound. |
+| `"not_a_file"` | A symbolic link, a directory, a FIFO or another kind of entry; nothing behind it read. |
+| `"not_text"` | Not UTF-8. |
+| `"syntax"` | Not of its format's syntax. |
+| `"doctype"` | A document type declaration, which is refused before anything is read. |
+| `"too_deep"` | Nested past its depth bound. |
+| `"shape"` | Well formed, but not of its format's shape. |
+| `"io"` | It could not be read: the host's words are in `message`. |
+
+## CheckReportFormat
+
+The format of a report a check's findings come from.
+
+Kind: enumeration. `swarmops schema CheckReportFormat` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"findings"` | The check's report file: one finding a line, as JSON, at `SWARMOPS_CHECK_REPORT`. Never declared. |
+| `"junit"` | A JUnit XML report of test cases: each case that failed or ended in an error is a finding. |
+| `"sarif"` | A SARIF 2.1.0 log of results: each result of kind `fail` is a finding. |
+
+## CheckReportOut
+
+A report a check declares: a file in its tree, of a format `check run` reads into findings.
+
+Kind: object. `swarmops schema CheckReportOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `format` | [`CheckReportFormat`](#checkreportformat) | yes | Its format: `junit` or `sarif`. |
+| `path` | `string` | yes | Where the check leaves it: a repository path relative to the check's `dir`. |
+
+## CheckReportReadOut
+
+A report a check's findings were read from, as one run read it, after the check ended.
+
+Kind: object. `swarmops schema CheckReportReadOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cut` | `boolean` | no | Whether the report file was past 64 MiB: its lines up to the bound were read, the rest not. Omitted when false. |
+| `failed` | `integer` (uint64) or `null` | no | Those of them that failed or ended in an error, each a finding, for a JUnit report `read`. |
+| `fault` | [`CheckReportFault`](#checkreportfault) or `null` | no | Why it was not read, for `refused`. |
+| `findings` | `integer` (uint64) or `null` | no | The findings it gave, returned or not, for `read`. |
+| `format` | [`CheckReportFormat`](#checkreportformat) | yes | Its format. |
+| `invalid_lines` | `integer` (uint64) | no | The report file's lines that are no finding, each skipped. Omitted when 0. |
+| `message` | `string` or `null` | no | One line: for `refused`, why, in the host's words where they apply; for the report file, its first invalid line and why, or that it was cut. Omitted otherwise. |
+| `path` | `string` | yes | Where it was: the report file's absolute path on the host the check ran on; a declared report's path as its check declares it, relative to the check's `dir`. |
+| `results` | `integer` (uint64) or `null` | no | A SARIF report's results, every kind, for `read`; those of kind `fail` are its findings. |
+| `skipped` | `integer` (uint64) or `null` | no | Those of them skipped, for a JUnit report `read`. |
+| `state` | [`CheckReportState`](#checkreportstate) | yes | What came of it. |
+| `tests` | `integer` (uint64) or `null` | no | A JUnit report's test cases, for `read`. |
+
+## CheckReportState
+
+What came of a report after its check.
+
+Kind: enumeration. `swarmops schema CheckReportState` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"read"` | Read: its findings are the check's. |
+| `"missing"` | Not there after the check. |
+| `"stale"` | There, but not written by this run of the check: left from before, and not read. |
+| `"refused"` | There, and not read as its format: `fault` says why. |
+
 ## CheckRunOut
 
 One check of a run: how it ended, and where its log is.
@@ -678,11 +789,14 @@ Kind: object. `swarmops schema CheckRunOut` prints its JSON Schema.
 | `dropped_bytes` | `integer` (uint64) | no | The bytes of its output its log left out, past the log's bounds. Omitted when none. |
 | `duration_ms` | `integer` (uint64) | yes | Its milliseconds, from its start to the end of its output; 0 for `not_started` and `not_run`. |
 | `exit_code` | `integer` (int32) or `null` | no | Its exit code, when it exited. |
+| `findings` | array of [`CheckFindingOut`](#checkfindingout) | no | Its findings that the run returns, in order: those of its report file, in line order, then those of each report it declares, in declared order. Findings change no outcome. Omitted when none is returned. |
+| `findings_total` | `integer` (uint64) | no | Every finding read from its reports, returned or not: more than `findings` holds once the run's bound is reached. Omitted when 0. |
 | `log` | `string` or `null` | no | Its log's path on the host it ran on, absolute. Omitted for `not_run`, which has none. |
 | `message` | `string` or `null` | no | The host's words for why it did not start, one line, for `not_started`; or, for a check that ran and is `failed` because its log could not be written, why not. |
 | `name` | `string` | yes | Its name. |
 | `not_started` | [`CheckNotStarted`](#checknotstarted) or `null` | no | Why it did not start, for `not_started`. |
 | `outcome` | [`CheckOutcome`](#checkoutcome) | yes | How it ended; only `passed` passes. |
+| `reports` | array of [`CheckReportReadOut`](#checkreportreadout) | no | The reports its findings were read from, as this run read them: its report file first, when it wrote one. Omitted when there is none. |
 | `sections` | array of [`CheckSectionOut`](#checksectionout) | no | The sections it opened with a marker line, in order. Omitted when it opened none. |
 | `signal` | `integer` (int32) or `null` | no | The signal that ended it, for a check `failed` by a signal the runner did not send. |
 | `stderr_tail` | `string` or `null` | no | The last 8 KiB of its stderr, for a check that ran and did not pass. |
@@ -716,6 +830,7 @@ Kind: object. `swarmops schema CheckRunResp` prints its JSON Schema.
 | `duration_ms` | `integer` (uint64) | yes | The run's milliseconds, from its first check's start to its last's end. |
 | `failed` | array of `string` | yes | The checks that did not pass, in run order; empty when every one passed. |
 | `file` | `string` | yes | The file the checks came from: `.swarmops/checks.toml`, or `.swarmops/workspaces.json` for the one check `default`. |
+| `findings_omitted` | `integer` (uint64) | no | The findings of the run that were counted and not returned: past the run's bound of 10,000 findings and 4 MiB of their text, every later finding is counted in its check's `findings_total` and here, and none is returned. Omitted when 0. |
 | `inherited_all` | `boolean` | yes | Whether the checks got the caller's whole environment: only the check `default` of `.swarmops/workspaces.json`, which keeps what `ws land --check` gives it. |
 | `inherited_env` | array of `string` | yes | The names of the caller's variables the checks got besides the pinned ones, sorted; no values. Empty when `inherited_all`. |
 | `run` | `string` | yes | The run's id: a UUID v7, so that runs sort by their start. |
@@ -1096,7 +1211,7 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_WS_UNPORTABLE"` | The tree holds paths the workspace's volume cannot hold: `details.reason` says why (`case_collision`, `windows_name`, `reserved_name`: a path component named `.swarmws` at any depth, in any ASCII case) and `details.paths` names them. Nothing was written, unless a target gained the path between the check and the store's call: `ws delete --rescue`. |
 | `"E_WS_OUTSIDE_PREFIXES"` | A sparse workspace's `ws commit` or `ws land` met edits outside its prefixes (`details.paths`, sorted, the first 20). Nothing changed; the hint names `swarmops ws materialize <path>`, which widens the prefixes. |
 | `"E_WS_STALE"` | `ws status`, `ws diff`, `ws commit`, `ws materialize`, `ws land` (onto any target) or `ws rebase --continue` found the workspace's base gone from its target's history (`details.target`, `base`, `head`; `base_op`, the operation that moved the target to the base; `moved_op`, the latest that moved it to `head`, or null when not found). Nothing changed; the hint names `swarmops ws rebase` (after a continue, `swarmops ws rebase --abort` first). |
-| `"E_CHECK_FAILED"` | A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create` (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`; nothing was landed), or one or more of `check run`'s (`details.run`: the run's whole result, every check's outcome, or `cancelled` after a signal). |
+| `"E_CHECK_FAILED"` | A check failed or ran past its time: `ws land --check`'s or the bootstrap of `ws create` (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`; nothing was landed), or one or more of `check run`'s (`details.run`: the run's whole result, every check's outcome and each check's findings, or `cancelled` after a signal). |
 | `"E_STORE_TOO_NEW"` | The store is of a later format than this build reads, or lists a feature it lacks (`details.format`, and `details.features`, the features it lacks, none for a later format). Nothing was written; a newer swarmops reads the store. |
 | `"E_QUEUE_WAIT_TIMEOUT"` | `queue wait` reached its timeout with the entry still open (`details.entry`, and `details.state`, `waiting` or `checking`). The entry stays queued; waiting again can see it land. |
 | `"E_CHECK_FILE"` | A check file does not read: `.swarmops/checks.toml` (or, in a tree without one, `.swarmops/workspaces.json`) is too large, not text, not a file, not TOML (JSON), not version 1, or holds a key, a name or a value version 1 does not take (`details.file`, `details.reason`, `details.vouched`, and `details.line` and `details.key` when known). Nothing was listed; the hint says what the file takes. |

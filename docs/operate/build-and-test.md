@@ -34,7 +34,11 @@ Commands and outputs here follow the
   [check.test]
   argv = ["./check.sh"]
   stages = ["before-land"]
+  reports = [{ format = "junit", path = "target/junit.xml" }]
   ```
+
+  A check's findings come with its outcome: those it writes to `SWARMOPS_CHECK_REPORT`, and the
+  failed tests and results of the JUnit and SARIF reports it declares in `reports`.
 
 A workspace is a directory holding a changeset's tree, or only the paths under `--prefix`, and
 `.swarmws/`, its private state. The agent edits, builds and tests in it with the project's own

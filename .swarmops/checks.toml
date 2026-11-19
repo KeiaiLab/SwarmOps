@@ -21,6 +21,10 @@ version = 1
 argv = ["just", "check"]
 timeout_s = 1420
 stages = ["before-land"]
+# nextest's `ci` profile writes its JUnit report here (.config/nextest.toml); `just check` copies
+# it here from a CARGO_TARGET_DIR elsewhere when a nextest wrote it there. check run reads it
+# after the check, if this run wrote it: each failed test a finding (M31-5).
+reports = [{ format = "junit", path = "target/nextest/ci/junit.xml" }]
 
 # ci.yml, job `check`, after it: bench/compare still compiles against the store's API.
 [check.check-compare]

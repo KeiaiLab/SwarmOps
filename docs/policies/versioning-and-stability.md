@@ -81,6 +81,10 @@ to the weakest:
    `_SUMMARY`, `_ARTIFACTS`, `_CHANGED`, and `SWARMOPS_WS` in a workspace), and the rule that a
    check of `.swarmops/checks.toml` inherits only a fixed list of the caller's variables and those
    `--pass` names: a name is not removed, and does not change its meaning, within a major version.
+   So is the format of a check's report file at `SWARMOPS_CHECK_REPORT`, since M31: one JSON
+   object a line, its keys (`level`, `title`, `message`, `path`, `line`, `end_line`) and its
+   levels (`error`, `warning`, `notice`); a key or a level is not removed, and does not change its
+   meaning, within a major version, and checks are written against it.
    The line format of a check's log and the layout of a run's directory are not part of this
    surface yet: they are diagnostics until logs are kept beside the store, and may change.
 
