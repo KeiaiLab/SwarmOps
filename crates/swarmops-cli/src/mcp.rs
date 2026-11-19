@@ -3204,6 +3204,8 @@ mod tests {
                     && *name != "CheckRunReq"
                     && *name != "CheckLogReq"
                     && *name != "CheckRunsReq"
+                    // Its tool comes with the command `check plan`.
+                    && *name != "CheckPlanReq"
                     && !client_side.contains(name)
                     && !no_tool.contains(name)
                     && !queue.contains(name)

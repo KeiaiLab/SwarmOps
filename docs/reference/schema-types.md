@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 243 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 251 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -30,6 +30,7 @@ The 243 request, response and value types of the API, as `swarmops schema` print
 | [`ChangeOut`](#changeout) | object | One entry of a changeset's changes. |
 | [`ChangesetDetail`](#changesetdetail) | object | `show`: a changeset's header, changes and metadata. |
 | [`ChangesetSummary`](#changesetsummary) | object | One changeset of a log. |
+| [`CheckDefinitionChange`](#checkdefinitionchange) | enumeration | How a check's definition differs from the one at the target's head. |
 | [`CheckFindingLevel`](#checkfindinglevel) | enumeration | How much a finding matters. |
 | [`CheckFindingOut`](#checkfindingout) | object | One finding of a check: something it reports at a level, about a path and lines of the tree or about the tree as a whole. |
 | [`CheckListReq`](#checklistreq) | object | `check_list` (CLI `check list`): the checks the tree of `rev` describes. |
@@ -43,6 +44,13 @@ The 243 request, response and value types of the API, as `swarmops schema` print
 | [`CheckNotStarted`](#checknotstarted) | enumeration | Why a check did not start. |
 | [`CheckOut`](#checkout) | object | One check: a command run with no shell, in a directory of the tree, for at most its time. |
 | [`CheckOutcome`](#checkoutcome) | enumeration | How a check of a run ended. |
+| [`CheckPlanOut`](#checkplanout) | object | One check of a plan: whether the change needs it, and the one reason why. |
+| [`CheckPlanReason`](#checkplanreason) | enumeration | Why a check has its verdict: the first of these that holds, in this order. |
+| [`CheckPlanReq`](#checkplanreq) | object | `check_plan` (CLI `check plan`): for one stage, which checks a change needs and why. |
+| [`CheckPlanResp`](#checkplanresp) | object | `check_plan`: each check of one stage, `run` or `not_applicable`, with one reason. |
+| [`CheckPlanSubject`](#checkplansubject) | enumeration | What a plan is of. |
+| [`CheckPlanVerdict`](#checkplanverdict) | enumeration | Whether a change needs a check. |
+| [`CheckPlanWidened`](#checkplanwidened) | enumeration | Why a whole plan is widened, so that every check runs. |
 | [`CheckReportFault`](#checkreportfault) | enumeration | Why a report was not read. |
 | [`CheckReportFormat`](#checkreportformat) | enumeration | The format of a report a check's findings come from. |
 | [`CheckReportOut`](#checkreportout) | object | A report a check declares: a file in its tree, of a format `check run` reads into findings. |
@@ -539,6 +547,19 @@ Kind: object. `swarmops schema ChangesetSummary` prints its JSON Schema.
 | `parents` | array of `string` | yes | The parents' ids, mainline parent first. |
 | `title` | `string` | yes | The message's first line. |
 
+## CheckDefinitionChange
+
+How a check's definition differs from the one at the target's head.
+
+Kind: enumeration. `swarmops schema CheckDefinitionChange` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"added"` | The target's head has no check of this name, and none this one is renamed from. |
+| `"renamed"` | The target's head has this definition under one other name, `was`, which the candidate no longer has. |
+| `"modified"` | The target's head has a check of this name with another definition. |
+| `"deleted"` | The candidate has no check of this name: the target's head does. |
+
 ## CheckFindingLevel
 
 How much a finding matters. Findings change no check's outcome.
@@ -732,6 +753,118 @@ Kind: enumeration. `swarmops schema CheckOutcome` prints its JSON Schema.
 | `"not_started"` | Its directory is missing, or its program did not start. |
 | `"cancelled"` | It was running when a signal stopped the run, and its process group was killed. |
 | `"not_run"` | The run was stopped before it started: no process, no log. |
+
+## CheckPlanOut
+
+One check of a plan: whether the change needs it, and the one reason why.
+
+Kind: object. `swarmops schema CheckPlanOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `definition` | [`CheckDefinitionChange`](#checkdefinitionchange) or `null` | no | For `definition_changed`: how the definition differs from the target's head's. |
+| `definition_digest` | `string` | yes | The digest of its definition: the candidate's; for a `deleted` definition, the target's. Provisional, as `check_list`'s. |
+| `name` | `string` | yes | The check's name. |
+| `path` | `string` or `null` | no | For `input_changed`: the first changed path read that its inputs match. |
+| `pattern` | `string` or `null` | no | For `input_changed`: the first of its patterns, in declared order, that matches `path`. |
+| `reason` | [`CheckPlanReason`](#checkplanreason) | yes | Why: one reason, the first that holds. |
+| `verdict` | [`CheckPlanVerdict`](#checkplanverdict) | yes | Whether the change needs it. A reader takes a verdict it does not know as `run`. |
+| `was` | `string` or `null` | no | For a `renamed` definition: the name the target's head has it under. |
+| `widened` | [`CheckPlanWidened`](#checkplanwidened) or `null` | no | For `widened`: the plan's cause. |
+
+## CheckPlanReason
+
+Why a check has its verdict: the first of these that holds, in this order. Later releases add reasons.
+
+Kind: enumeration. `swarmops schema CheckPlanReason` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"definition_changed"` | `run`: its definition is not the one the target's head has under its name. |
+| `"widened"` | `run`: the whole plan is widened, since the changed paths or the target's definitions are not known in full. |
+| `"input_changed"` | `run`: a changed path is among its inputs. |
+| `"no_inputs"` | `run`: it declares no inputs, so it takes the whole tree, and a path changed. |
+| `"inputs_unchanged"` | `not_applicable`: no changed path is among its inputs. |
+
+## CheckPlanReq
+
+`check_plan` (CLI `check plan`): for one stage, which checks a change needs and why. The change is the changeset `rev` against `target`, or, with `landed`, `rev` as `land_check` would land it there. Reads only: no lock, no identity, nothing written. A plan informs: it starts no check and skips none.
+
+Kind: object. `swarmops schema CheckPlanReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `base` | [`Rev`](#rev) or `null` | no | With `landed`: where the change starts, as a land's `base`. `E_INVALID_ARG` with `details.reason: base` without `landed`. |
+| `checks` | array of `string` | no | Only these checks of the plan; empty (the default): every one. A name the plan does not hold is `E_INVALID_ARG`. |
+| `landed` | `boolean` | no | Plan the change as `land_check` lands it on `target`: its changed paths and its tree are the landed changeset's. A change that conflicts is `E_CONFLICT`, with no plan. Default: `false`. |
+| `rev` | [`Rev`](#rev) | yes | The candidate: the changeset whose change to plan. |
+| `stage` | [`CheckStage`](#checkstage) | no | The stage to plan; `before-land` when omitted. A plan is of one stage. Default: `"before-land"`. |
+| `target` | `string` | no | The ref the change would land on; `main` when omitted. The definitions are compared with the check file at its head. Default: `"main"`. |
+
+## CheckPlanResp
+
+`check_plan`: each check of one stage, `run` or `not_applicable`, with one reason. The same subject gives the same answer byte for byte: it holds no time and no path of a host.
+
+Later releases add verdicts, reasons and causes. A reader takes a verdict it does not know as `run`.
+
+Kind: object. `swarmops schema CheckPlanResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `base` | `string` or `null` | no | Where the change starts: the merge base of the candidate and the target, or a workspace's base. Omitted for `landed`, in the directory form, and when the two share no history. |
+| `changed` | `integer` (uint64) | yes | The changed paths read; 0 when they are not known. |
+| `checks` | array of [`CheckPlanOut`](#checkplanout) | yes | The checks of the stage, the candidate's and those only the target's head has, sorted by name, bytewise; empty when neither side defines one. |
+| `edits` | `integer` (uint64) or `null` | no | The workspace's edits against its head, counted. Omitted but for a workspace. |
+| `file` | `string` or `null` | no | The file the candidate's checks came from, as `check_list` gives it. Omitted when the candidate has none. |
+| `onto` | `string` or `null` | no | The target's head, a full id: the definitions were compared with its check file. Omitted in the directory form. |
+| `outcome` | [`ItemOutcome`](#itemoutcome) or `null` | no | For `landed`: what landing the change would come to, `clean`, `replayed` or `nothing_to_land`. |
+| `rev` | `string` or `null` | no | The candidate changeset, a full id: the changeset planned, or a workspace's head. Omitted in the directory form. |
+| `stage` | [`CheckStage`](#checkstage) | yes | The stage planned. |
+| `subject` | [`CheckPlanSubject`](#checkplansubject) | yes | What was planned. |
+| `target` | `string` or `null` | no | The ref the change would land on. Omitted in the directory form. |
+| `tree` | `string` or `null` | no | The candidate's root tree: the changeset's, the landed changeset's for a clean `landed` plan, a workspace's head's when it holds no edit. Omitted when no tree in the store is what was planned. |
+| `version` | `integer` (uint32) or `null` | no | The check file's `version`, 1. Omitted unless `file` is `.swarmops/checks.toml`. |
+| `vouched` | `boolean` | yes | Whether only the caller stands behind the plan: `true` in the directory form (`check plan --dir`), where the caller gives both the check file and the changed paths, and which no gate accepts; `false` when both were read from the store. |
+| `widened` | [`CheckPlanWidened`](#checkplanwidened) or `null` | no | Why every check runs, when the whole plan is widened: the first cause that holds, in the causes' own order. Omitted when the plan is not widened. |
+| `workspace` | `string` or `null` | no | The workspace's name. Omitted but for a workspace. |
+
+## CheckPlanSubject
+
+What a plan is of.
+
+Kind: enumeration. `swarmops schema CheckPlanSubject` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"changeset"` | A changeset against its target: what it changed since their merge base. |
+| `"landed"` | A change as `land_check` lands it on its target. |
+| `"workspace"` | A workspace: its committed chain and its edits. |
+| `"paths"` | The changed paths the caller gave, with the check file of a directory it named. |
+
+## CheckPlanVerdict
+
+Whether a change needs a check. Later releases add verdicts: a reader takes one it does not know as `run`.
+
+Kind: enumeration. `swarmops schema CheckPlanVerdict` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"run"` | The change needs the check. |
+| `"not_applicable"` | No changed path is among the check's inputs, and its definition is the target's head's. |
+
+## CheckPlanWidened
+
+Why a whole plan is widened, so that every check runs. When several hold, the first in this order is the one named. Later releases add causes.
+
+Kind: enumeration. `swarmops schema CheckPlanWidened` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"paths_unknown"` | The changed paths are not known: the candidate and the target share no history, a workspace holds entries off its prefixes, or the directory form was given no path. |
+| `"paths_truncated"` | More paths changed than a plan reads, or than the list given holds. |
+| `"path_unreadable"` | A changed path given is not a repository path. |
+| `"check_file_changed"` | The check file is among the changed paths and cannot be compared: in the directory form, or merged by a land. |
+| `"target_unread"` | The check file at the target's head does not read. |
 
 ## CheckReportFault
 

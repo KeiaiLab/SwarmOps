@@ -24,6 +24,10 @@ pub mod wire;
 
 pub use auth::{AuthEntry, AuthLogin, AuthLogout, AuthStatus};
 pub use check::{
+    CheckDefinitionChange, CheckPlanOut, CheckPlanReason, CheckPlanReq, CheckPlanResp,
+    CheckPlanSubject, CheckPlanVerdict, CheckPlanWidened,
+};
+pub use check::{
     CheckFindingLevel, CheckFindingOut, CheckListReq, CheckListResp, CheckLogEnd, CheckLogLineOut,
     CheckLogMoreOut, CheckLogReq, CheckLogResp, CheckLogStream, CheckNotStarted, CheckOut,
     CheckOutcome, CheckReportFault, CheckReportFormat, CheckReportOut, CheckReportReadOut,

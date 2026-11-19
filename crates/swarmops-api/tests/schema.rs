@@ -25,6 +25,7 @@ const REQUESTS: &[&str] = &[
     "ChangeInput",
     "CheckListReq",
     "CheckLogReq",
+    "CheckPlanReq",
     "CheckRunReq",
     "CheckRunsReq",
     "CloneReq",
@@ -117,6 +118,8 @@ const RESPONSES: &[&str] = &[
     "CheckLogMoreOut",
     "CheckLogResp",
     "CheckOut",
+    "CheckPlanOut",
+    "CheckPlanResp",
     "CheckFindingOut",
     "CheckReportOut",
     "CheckReportReadOut",
@@ -223,11 +226,16 @@ const RESPONSES: &[&str] = &[
 const SCALARS: &[&str] = &[
     "AutoUpdate",
     "ChangeOp",
+    "CheckDefinitionChange",
     "CheckLogEnd",
     "CheckLogStream",
     "CheckFindingLevel",
     "CheckNotStarted",
     "CheckOutcome",
+    "CheckPlanReason",
+    "CheckPlanSubject",
+    "CheckPlanVerdict",
+    "CheckPlanWidened",
     "CheckReportFault",
     "CheckReportFormat",
     "CheckReportState",
@@ -2185,6 +2193,10 @@ mod update {
 mod check {
     use serde_json::json;
     use swarmops_api::{
+        CheckDefinitionChange, CheckPlanOut, CheckPlanReason, CheckPlanReq, CheckPlanResp,
+        CheckPlanSubject, CheckPlanVerdict, CheckPlanWidened, ItemOutcome,
+    };
+    use swarmops_api::{
         CheckFindingLevel, CheckFindingOut, CheckListReq, CheckListResp, CheckLogEnd,
         CheckLogLineOut, CheckLogReq, CheckLogResp, CheckLogStream, CheckNotStarted, CheckOut,
         CheckOutcome, CheckReportFault, CheckReportFormat, CheckReportOut, CheckReportReadOut,
@@ -2192,6 +2204,189 @@ mod check {
         CheckRunsResp, CheckRunsSource, CheckSectionOut, CheckStage, DEFAULT_CHECK_RUNS_LIMIT,
         MAX_CHECK_RUNS_LIMIT, MAX_FAILED_LOGS, Rev, schema_for_all,
     };
+
+    /// A plan's request names a revision; `main` is its target, `before-land` its stage, and it
+    /// plans the changeset, not a land of it, when it names nothing else.
+    #[test]
+    fn a_check_plan_request_defaults_to_a_changeset_against_main() {
+        let read: CheckPlanReq = serde_json::from_value(json!({"rev": "c9f1"})).unwrap();
+        assert_eq!(read, CheckPlanReq::new("c9f1"));
+        assert_eq!(
+            (
+                read.target.as_str(),
+                read.landed,
+                read.base.clone(),
+                read.stage
+            ),
+            ("main", false, None, CheckStage::BeforeLand)
+        );
+        assert_eq!(
+            serde_json::to_string(&read).unwrap(),
+            r#"{"rev":"c9f1","target":"main","landed":false,"stage":"before-land"}"#
+        );
+        let mut landed = CheckPlanReq::new("my-change");
+        landed.target = "release/1".to_owned();
+        landed.landed = true;
+        landed.base = Some(Rev::from("c9f1"));
+        landed.stage = CheckStage::Manual;
+        landed.checks = vec!["site".to_owned()];
+        let text = serde_json::to_string(&landed).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"rev":"my-change","target":"release/1","landed":true,"base":"c9f1","#,
+                r#""stage":"manual","checks":["site"]}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(serde_json::from_str::<CheckPlanReq>(&text).unwrap(), landed);
+        assert_eq!(schema_for_all()["CheckPlanReq"]["required"], json!(["rev"]));
+        assert_ignores_unknown_fields::<CheckPlanReq>("CheckPlanReq", json!({"rev": "main"}));
+        assert!(serde_json::from_value::<CheckPlanReq>(json!({})).is_err());
+    }
+
+    /// A plan with every field set is written in the documented order and reads back equal; the
+    /// directory form's holds what it has alone.
+    #[test]
+    fn a_check_plan_holds_its_fields_in_order_and_omits_what_it_lacks() {
+        // 1. The least: the directory form with no check.
+        let least = CheckPlanResp::new(true, CheckPlanSubject::Paths, CheckStage::BeforeLand);
+        assert_eq!(
+            serde_json::to_string(&least).unwrap(),
+            r#"{"vouched":true,"subject":"paths","stage":"before-land","changed":0,"checks":[]}"#
+        );
+
+        // 2. Every field of the answer and of a check.
+        let mut check = CheckPlanOut::new(
+            "docs",
+            CheckPlanVerdict::Run,
+            CheckPlanReason::DefinitionChanged,
+            "ab",
+        );
+        check.widened = Some(CheckPlanWidened::TargetUnread);
+        check.definition = Some(CheckDefinitionChange::Renamed);
+        check.was = Some("prose".to_owned());
+        check.path = Some("docs/a.md".to_owned());
+        check.pattern = Some("docs/**".to_owned());
+        let mut full = CheckPlanResp::new(false, CheckPlanSubject::Workspace, CheckStage::Manual);
+        full.rev = Some("c1".to_owned());
+        full.tree = Some("7f".to_owned());
+        full.workspace = Some("w".to_owned());
+        full.edits = Some(2);
+        full.target = Some("main".to_owned());
+        full.onto = Some("c2".to_owned());
+        full.base = Some("c0".to_owned());
+        full.outcome = Some(ItemOutcome::Clean);
+        full.file = Some(".swarmops/checks.toml".to_owned());
+        full.version = Some(1);
+        full.changed = 3;
+        full.widened = Some(CheckPlanWidened::PathsTruncated);
+        full.checks = vec![check];
+        let text = serde_json::to_string(&full).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"vouched":false,"subject":"workspace","stage":"manual","rev":"c1","#,
+                r#""tree":"7f","workspace":"w","edits":2,"target":"main","onto":"c2","#,
+                r#""base":"c0","outcome":"clean","file":".swarmops/checks.toml","version":1,"#,
+                r#""changed":3,"widened":"paths_truncated","checks":[{"name":"docs","#,
+                r#""verdict":"run","reason":"definition_changed","widened":"target_unread","#,
+                r#""definition":"renamed","was":"prose","path":"docs/a.md","#,
+                r#""pattern":"docs/**","definition_digest":"ab"}]}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(serde_json::from_str::<CheckPlanResp>(&text).unwrap(), full);
+
+        // 3. What is required, and that a later release's keys are passed over.
+        let all = schema_for_all();
+        assert_eq!(
+            all["CheckPlanResp"]["required"],
+            json!(["vouched", "subject", "stage", "changed", "checks"])
+        );
+        assert_eq!(
+            all["CheckPlanOut"]["required"],
+            json!(["name", "verdict", "reason", "definition_digest"])
+        );
+        assert_ignores_unknown_fields::<CheckPlanResp>(
+            "CheckPlanResp",
+            json!({"vouched": true, "subject": "paths", "stage": "manual", "changed": 0,
+                   "checks": []}),
+        );
+        assert_ignores_unknown_fields::<CheckPlanOut>(
+            "CheckPlanOut",
+            json!({"name": "a", "verdict": "run", "reason": "no_inputs",
+                   "definition_digest": "ab"}),
+        );
+    }
+
+    /// The plan's closed sets, as the wire writes them, in the order the reference lists them;
+    /// the widening causes in the order that picks the first.
+    #[test]
+    fn a_check_plan_s_words_are_closed_sets() {
+        fn words<T: serde::Serialize>(name: &str, values: &[T], expected: &[&str]) {
+            let written: Vec<String> = (values.iter())
+                .map(|value| {
+                    serde_json::to_value(value)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect();
+            assert_eq!(written, expected, "{name}");
+            let all = schema_for_all();
+            let listed: Vec<&str> = (all[name]["oneOf"].as_array().unwrap().iter())
+                .filter_map(|alt| alt["const"].as_str())
+                .collect();
+            assert_eq!(listed, expected, "{name}: the schema");
+        }
+        words(
+            "CheckPlanSubject",
+            &CheckPlanSubject::ALL,
+            &["changeset", "landed", "workspace", "paths"],
+        );
+        words(
+            "CheckPlanVerdict",
+            &CheckPlanVerdict::ALL,
+            &["run", "not_applicable"],
+        );
+        words(
+            "CheckPlanReason",
+            &CheckPlanReason::ALL,
+            &[
+                "definition_changed",
+                "widened",
+                "input_changed",
+                "no_inputs",
+                "inputs_unchanged",
+            ],
+        );
+        words(
+            "CheckPlanWidened",
+            &CheckPlanWidened::ALL,
+            &[
+                "paths_unknown",
+                "paths_truncated",
+                "path_unreadable",
+                "check_file_changed",
+                "target_unread",
+            ],
+        );
+        words(
+            "CheckDefinitionChange",
+            &CheckDefinitionChange::ALL,
+            &["added", "renamed", "modified", "deleted"],
+        );
+        let mut sorted = CheckPlanWidened::ALL;
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            CheckPlanWidened::ALL,
+            "Ord is the order that picks the first cause"
+        );
+        assert!(serde_json::from_str::<CheckPlanVerdict>(r#""reused""#).is_err());
+    }
 
     /// A request for the run lines names a workspace; no filter, the first page of 100 when it
     /// names nothing else, and its limit is 1 to 1,000 in the schema.

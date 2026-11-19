@@ -37,6 +37,9 @@ use swarmops_api::{
     CheckReportReadOut, CheckReportState, CheckRunLine, CheckRunOut, CheckRunReq, CheckRunResp,
     CheckRunsReq, CheckRunsResp, CheckSectionOut, CheckStage,
 };
+use swarmops_api::{
+    CheckPlanOut, CheckPlanReason, CheckPlanReq, CheckPlanResp, CheckPlanSubject, CheckPlanVerdict,
+};
 use swarmops_api::{SnapshotWrite, WsSnapshotReq, WsSnapshotResp};
 use swarmops_api::{UpdateOut, UpdatePending, UpdatePendingKind};
 
@@ -74,6 +77,7 @@ fn every_request_new_fills_the_serde_defaults() {
     reads_back(&ChangeInput::new("x", ChangeOp::Put));
     reads_back(&CheckRunReq::new("x"));
     reads_back(&CheckRunsReq::new("x"));
+    reads_back(&CheckPlanReq::new("x"));
     // `check_log` asks for a check's log or for the failed checks' logs, and the type requires
     // neither: each constructor sets one of them over the defaults, which the empty request has.
     let (of_check, of_failed) = (CheckLogReq::new("x", "x"), CheckLogReq::failed("x"));
@@ -179,6 +183,11 @@ fn every_response_new_fills_the_serde_defaults() {
     reads_back(&CheckRunResp::new(true, "x", CheckStage::Manual, "x", "x"));
     reads_back(&CheckLogResp::new(true, "x", "x"));
     reads_back(&CheckRunsResp::new(true, "x"));
+    reads_back(&CheckPlanResp::new(
+        true,
+        CheckPlanSubject::Paths,
+        CheckStage::Manual,
+    ));
     reads_back(&RemoteRemoveResp::new("x", 7));
     reads_back(&SyncResp::new(
         "x",
@@ -221,6 +230,12 @@ fn every_item_new_fills_the_serde_defaults() {
     reads_back(&ChangeOut::new("x", ChangeOp::Put));
     reads_back(&CheckOut::new("x", Vec::new(), "x", 7, "x"));
     reads_back(&CheckRunOut::new("x", CheckOutcome::NotRun, "x", 7));
+    reads_back(&CheckPlanOut::new(
+        "x",
+        CheckPlanVerdict::NotApplicable,
+        CheckPlanReason::InputsUnchanged,
+        "x",
+    ));
     reads_back(&CheckRunLine::new(
         7,
         "x",

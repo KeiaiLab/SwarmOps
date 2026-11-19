@@ -91,6 +91,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   from (`run_lines`). `swarmops schema` prints them (242 types).
 - API type `CheckLogMoreOut`, the log of one more failed check in an answer of the failed checks'
   logs: one check's log, key for key. `swarmops schema` prints it (243 types).
+- API types `CheckPlanReq`, `CheckPlanResp` and `CheckPlanOut`, a plan of one stage's checks, and
+  its closed sets `CheckPlanSubject`, `CheckPlanVerdict`, `CheckPlanReason`, `CheckPlanWidened`
+  and `CheckDefinitionChange`. `swarmops schema` prints them (251 types).
 - The check file's `inputs` key: the paths a check depends on, 1 to 64 patterns in the grammar of
   the store's `access.toml` (literal segments, `*` for one segment, a last `**` for every depth
   below), at most 1,024 bytes each, none twice, from the tree's root whatever the check's `dir`.

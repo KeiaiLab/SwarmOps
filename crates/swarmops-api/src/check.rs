@@ -54,6 +54,16 @@
 //!                  cursor?, scanned, skipped?}
 //! ```
 //!
+//! `check plan` says, for one stage, which checks a change needs and why ([`CheckPlanResp`]): a
+//! changeset against its target, a change as it would land, a workspace's edits, or the changed
+//! paths the caller gives. A plan informs; it starts and skips nothing.
+//!
+//! ```text
+//!   CheckPlanReq {rev, target, landed, base?, stage, checks}
+//!   CheckPlanResp {vouched, subject, stage, rev?, tree?, …, changed, widened?,
+//!                  checks: [CheckPlanOut {name, verdict, reason, …} sorted by name]}
+//! ```
+//!
 //! No request carries a path of the caller's host: a directory the caller names is read and
 //! run by the CLI alone, and its answer is the same type with `vouched` set. A result names the
 //! host's paths of its run directory and logs: a run happens on one host, and its logs stay
@@ -62,6 +72,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::ops::ItemOutcome;
 use crate::rev::Rev;
 
 /// `check_list` (CLI `check list`): the checks the tree of `rev` describes. Reads only: no lock,
@@ -986,6 +997,323 @@ pub enum CheckRunsSource {
     RunLines,
 }
 
+/// `check_plan` (CLI `check plan`): for one stage, which checks a change needs and why. The
+/// change is the changeset `rev` against `target`, or, with `landed`, `rev` as `land_check`
+/// would land it there. Reads only: no lock, no identity, nothing written. A plan informs: it
+/// starts no check and skips none.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckPlanReq {
+    /// The candidate: the changeset whose change to plan.
+    pub rev: Rev,
+    /// The ref the change would land on; `main` when omitted. The definitions are compared with
+    /// the check file at its head.
+    #[serde(default = "default_plan_target")]
+    pub target: String,
+    /// Plan the change as `land_check` lands it on `target`: its changed paths and its tree are
+    /// the landed changeset's. A change that conflicts is `E_CONFLICT`, with no plan.
+    #[serde(default)]
+    pub landed: bool,
+    /// With `landed`: where the change starts, as a land's `base`. `E_INVALID_ARG` with
+    /// `details.reason: base` without `landed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<Rev>,
+    /// The stage to plan; `before-land` when omitted. A plan is of one stage.
+    #[serde(default)]
+    pub stage: CheckStage,
+    /// Only these checks of the plan; empty (the default): every one. A name the plan does not
+    /// hold is `E_INVALID_ARG`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<String>,
+}
+
+impl CheckPlanReq {
+    /// The `before-land` plan of the changeset `rev` against `main`.
+    pub fn new(rev: impl Into<Rev>) -> Self {
+        Self {
+            rev: rev.into(),
+            target: default_plan_target(),
+            landed: false,
+            base: None,
+            stage: CheckStage::BeforeLand,
+            checks: Vec::new(),
+        }
+    }
+}
+
+/// `check_plan`: each check of one stage, `run` or `not_applicable`, with one reason. The same
+/// subject gives the same answer byte for byte: it holds no time and no path of a host.
+///
+/// Later releases add verdicts, reasons and causes. A reader takes a verdict it does not know
+/// as `run`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckPlanResp {
+    /// Whether only the caller stands behind the plan: `true` in the directory form (`check
+    /// plan --dir`), where the caller gives both the check file and the changed paths, and
+    /// which no gate accepts; `false` when both were read from the store.
+    pub vouched: bool,
+    /// What was planned.
+    pub subject: CheckPlanSubject,
+    /// The stage planned.
+    pub stage: CheckStage,
+    /// The candidate changeset, a full id: the changeset planned, or a workspace's head.
+    /// Omitted in the directory form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    /// The candidate's root tree: the changeset's, the landed changeset's for a clean
+    /// `landed` plan, a workspace's head's when it holds no edit. Omitted when no tree in the
+    /// store is what was planned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
+    /// The workspace's name. Omitted but for a workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// The workspace's edits against its head, counted. Omitted but for a workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edits: Option<u64>,
+    /// The ref the change would land on. Omitted in the directory form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The target's head, a full id: the definitions were compared with its check file.
+    /// Omitted in the directory form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onto: Option<String>,
+    /// Where the change starts: the merge base of the candidate and the target, or a
+    /// workspace's base. Omitted for `landed`, in the directory form, and when the two share no
+    /// history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    /// For `landed`: what landing the change would come to, `clean`, `replayed` or
+    /// `nothing_to_land`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ItemOutcome>,
+    /// The file the candidate's checks came from, as `check_list` gives it. Omitted when the
+    /// candidate has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// The check file's `version`, 1. Omitted unless `file` is `.swarmops/checks.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    /// The changed paths read; 0 when they are not known.
+    pub changed: u64,
+    /// Why every check runs, when the whole plan is widened: the first cause that holds, in
+    /// the causes' own order. Omitted when the plan is not widened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widened: Option<CheckPlanWidened>,
+    /// The checks of the stage, the candidate's and those only the target's head has, sorted
+    /// by name, bytewise; empty when neither side defines one.
+    pub checks: Vec<CheckPlanOut>,
+}
+
+impl CheckPlanResp {
+    /// A plan of `subject` at `stage`, vouched for by the caller or not: no check, no changed
+    /// path, nothing else named.
+    pub fn new(vouched: bool, subject: CheckPlanSubject, stage: CheckStage) -> Self {
+        Self {
+            vouched,
+            subject,
+            stage,
+            rev: None,
+            tree: None,
+            workspace: None,
+            edits: None,
+            target: None,
+            onto: None,
+            base: None,
+            outcome: None,
+            file: None,
+            version: None,
+            changed: 0,
+            widened: None,
+            checks: Vec::new(),
+        }
+    }
+}
+
+/// One check of a plan: whether the change needs it, and the one reason why.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckPlanOut {
+    /// The check's name.
+    pub name: String,
+    /// Whether the change needs it. A reader takes a verdict it does not know as `run`.
+    pub verdict: CheckPlanVerdict,
+    /// Why: one reason, the first that holds.
+    pub reason: CheckPlanReason,
+    /// For `widened`: the plan's cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widened: Option<CheckPlanWidened>,
+    /// For `definition_changed`: how the definition differs from the target's head's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<CheckDefinitionChange>,
+    /// For a `renamed` definition: the name the target's head has it under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<String>,
+    /// For `input_changed`: the first changed path read that its inputs match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// For `input_changed`: the first of its patterns, in declared order, that matches `path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    /// The digest of its definition: the candidate's; for a `deleted` definition, the
+    /// target's. Provisional, as `check_list`'s.
+    pub definition_digest: String,
+}
+
+impl CheckPlanOut {
+    /// The check `name` with its verdict, its reason and its definition's digest; nothing else.
+    pub fn new(
+        name: impl Into<String>,
+        verdict: CheckPlanVerdict,
+        reason: CheckPlanReason,
+        definition_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            verdict,
+            reason,
+            widened: None,
+            definition: None,
+            was: None,
+            path: None,
+            pattern: None,
+            definition_digest: definition_digest.into(),
+        }
+    }
+}
+
+/// What a plan is of.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckPlanSubject {
+    /// A changeset against its target: what it changed since their merge base.
+    Changeset,
+    /// A change as `land_check` lands it on its target.
+    Landed,
+    /// A workspace: its committed chain and its edits.
+    Workspace,
+    /// The changed paths the caller gave, with the check file of a directory it named.
+    Paths,
+}
+
+impl CheckPlanSubject {
+    /// Every subject, in the order the reference lists them.
+    pub const ALL: [CheckPlanSubject; 4] = [
+        CheckPlanSubject::Changeset,
+        CheckPlanSubject::Landed,
+        CheckPlanSubject::Workspace,
+        CheckPlanSubject::Paths,
+    ];
+}
+
+/// Whether a change needs a check. Later releases add verdicts: a reader takes one it does not
+/// know as `run`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckPlanVerdict {
+    /// The change needs the check.
+    Run,
+    /// No changed path is among the check's inputs, and its definition is the target's head's.
+    NotApplicable,
+}
+
+impl CheckPlanVerdict {
+    /// Every verdict, in the order the reference lists them.
+    pub const ALL: [CheckPlanVerdict; 2] = [CheckPlanVerdict::Run, CheckPlanVerdict::NotApplicable];
+}
+
+/// Why a check has its verdict: the first of these that holds, in this order. Later releases
+/// add reasons.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckPlanReason {
+    /// `run`: its definition is not the one the target's head has under its name.
+    DefinitionChanged,
+    /// `run`: the whole plan is widened, since the changed paths or the target's definitions
+    /// are not known in full.
+    Widened,
+    /// `run`: a changed path is among its inputs.
+    InputChanged,
+    /// `run`: it declares no inputs, so it takes the whole tree, and a path changed.
+    NoInputs,
+    /// `not_applicable`: no changed path is among its inputs.
+    InputsUnchanged,
+}
+
+impl CheckPlanReason {
+    /// Every reason, in the order that decides.
+    pub const ALL: [CheckPlanReason; 5] = [
+        CheckPlanReason::DefinitionChanged,
+        CheckPlanReason::Widened,
+        CheckPlanReason::InputChanged,
+        CheckPlanReason::NoInputs,
+        CheckPlanReason::InputsUnchanged,
+    ];
+}
+
+/// Why a whole plan is widened, so that every check runs. When several hold, the first in
+/// this order is the one named. Later releases add causes.
+#[derive(
+    Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckPlanWidened {
+    /// The changed paths are not known: the candidate and the target share no history, a
+    /// workspace holds entries off its prefixes, or the directory form was given no path.
+    PathsUnknown,
+    /// More paths changed than a plan reads, or than the list given holds.
+    PathsTruncated,
+    /// A changed path given is not a repository path.
+    PathUnreadable,
+    /// The check file is among the changed paths and cannot be compared: in the directory
+    /// form, or merged by a land.
+    CheckFileChanged,
+    /// The check file at the target's head does not read.
+    TargetUnread,
+}
+
+impl CheckPlanWidened {
+    /// Every cause, in the order that picks the one named.
+    pub const ALL: [CheckPlanWidened; 5] = [
+        CheckPlanWidened::PathsUnknown,
+        CheckPlanWidened::PathsTruncated,
+        CheckPlanWidened::PathUnreadable,
+        CheckPlanWidened::CheckFileChanged,
+        CheckPlanWidened::TargetUnread,
+    ];
+}
+
+/// How a check's definition differs from the one at the target's head.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckDefinitionChange {
+    /// The target's head has no check of this name, and none this one is renamed from.
+    Added,
+    /// The target's head has this definition under one other name, `was`, which the candidate
+    /// no longer has.
+    Renamed,
+    /// The target's head has a check of this name with another definition.
+    Modified,
+    /// The candidate has no check of this name: the target's head does.
+    Deleted,
+}
+
+impl CheckDefinitionChange {
+    /// Every change, in the order the reference lists them.
+    pub const ALL: [CheckDefinitionChange; 4] = [
+        CheckDefinitionChange::Added,
+        CheckDefinitionChange::Renamed,
+        CheckDefinitionChange::Modified,
+        CheckDefinitionChange::Deleted,
+    ];
+}
+
 /// `check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines; or,
 /// with `failed`, the logs of the checks of a run that did not pass. Exactly one of `check` and
 /// `failed` is given. Reads only: no lock, nothing written.
@@ -1230,6 +1558,10 @@ fn default_log_tail() -> usize {
 
 fn default_rev() -> Rev {
     Rev::from("main")
+}
+
+fn default_plan_target() -> String {
+    "main".to_owned()
 }
 
 fn default_stages() -> Vec<CheckStage> {
