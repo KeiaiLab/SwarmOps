@@ -1696,6 +1696,12 @@ pub enum CheckCommand {
     /// its runs are kept below SWARMOPS_CHECK_RUNS_DIR, else the state directory's
     /// swarmops/check-runs; the newest 20 of each are kept. SIGINT, SIGTERM and SIGHUP kill the
     /// running check's process group and end the run. No identity.
+    ///
+    /// Each check the run reaches appends one run line, a JSON object of diagnostics (its name,
+    /// run, stage, tree, wait, duration, outcome and, on Linux, sampled peak memory), to
+    /// run-lines.jsonl in the directory --run-lines names, else SWARMOPS_CHECK_RUN_LINES_DIR,
+    /// else beside the runs kept; nothing decides from it, and a line that cannot be written is
+    /// a warning on stderr.
     Run {
         #[command(flatten)]
         at: WsAt,
@@ -1708,6 +1714,9 @@ pub enum CheckCommand {
         /// A variable of your environment the checks also get; repeatable.
         #[arg(long = "pass", value_name = "NAME")]
         pass: Vec<String>,
+        /// Append the run lines to run-lines.jsonl in DIR, not beside the runs.
+        #[arg(long = "run-lines", value_name = "DIR")]
+        run_lines: Option<Utf8PathBuf>,
         /// Only these checks, each of the stage.
         #[arg(value_name = "NAME")]
         names: Vec<String>,

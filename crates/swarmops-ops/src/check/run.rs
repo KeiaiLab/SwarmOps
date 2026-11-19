@@ -13,7 +13,8 @@
 //!                        the output into its LineLog ─▶ its outcome ─▶ its group gone, its
 //!                        report file and the reports it declares read (check::intake):
 //!                        findings, within the run's bound; a declared report is looked at
-//!                        before the check starts, so that one left from before is not read
+//!                        before the check starts, so that one left from before is not read;
+//!                        then its run line appended (check::lines), before the next starts
 //!   run.json (ended), the lock let go ─▶ all passed: the result; else E_CHECK_FAILED{run}
 //! ```
 //!
@@ -40,12 +41,13 @@ use swarmops_api::{
     CheckListReq, CheckListResp, CheckNotStarted, CheckOut, CheckOutcome, CheckRunOut, CheckRunReq,
     CheckRunResp, CheckStage, ErrorCode, OpError,
 };
-use swarmops_ws::run::{self, Env, Output, Spec, Stream};
+use swarmops_ws::run::{self, Env, Measure, Output, Spec, Stream};
 use swarmops_ws::workspace::Locate;
 
 use super::env::{self, Pinned, REPORT_FILE};
 use super::findings::Budget;
 use super::intake;
+use super::lines::{self, Sink};
 use super::log::{End, LineLog, Start, dir_key};
 use super::{LEGACY_FILE, list, list_dir};
 use crate::error;
@@ -77,7 +79,7 @@ pub const RUNS_DIR_MODE: u32 = 0o700;
 const DIR_FILE: &str = "dir";
 
 /// What a run takes from its host, which no API type carries: the variables to pass, the stop
-/// flag, the caller's environment, and where a directory's runs go.
+/// flag, the caller's environment, where a directory's runs go, and where the run lines go.
 #[non_exhaustive]
 pub struct RunOpts<'a> {
     /// The names of the caller's variables the checks also get (`--pass`).
@@ -88,17 +90,21 @@ pub struct RunOpts<'a> {
     pub lookup: &'a dyn Fn(&str) -> Option<OsString>,
     /// Where a directory's runs go (the directory form); none when the host gives no place.
     pub runs_root: Option<Utf8PathBuf>,
+    /// The directory the caller named for the run lines ([`lines::named`]); none: beside the
+    /// directory's runs, or in the workspace's.
+    pub lines: Option<Utf8PathBuf>,
 }
 
 impl<'a> RunOpts<'a> {
-    /// A run that passes nothing more, with no stop flag and no runs root, reading the caller's
-    /// environment through `lookup`.
+    /// A run that passes nothing more, with no stop flag, no runs root and no directory named
+    /// for its lines, reading the caller's environment through `lookup`.
     pub fn new(lookup: &'a dyn Fn(&str) -> Option<OsString>) -> RunOpts<'a> {
         RunOpts {
             pass: Vec::new(),
             stop: None,
             lookup,
             runs_root: None,
+            lines: None,
         }
     }
 
@@ -335,17 +341,37 @@ fn run_checks(
     prune(&subject.runs, &id);
 
     // 3. Each check in turn, until the run is stopped. It was stopped only if that cancelled a
-    //    check or left one not run: a stop once the last check has exited changes nothing.
+    //    check or left one not run: a stop once the last check has exited changes nothing. A
+    //    check reached leaves its run line before the next starts: diagnostics, whose failure
+    //    is a warning and changes nothing here.
     let started = Instant::now();
     let mut budget = Budget::new();
+    let mut sink = Sink::resolve(opts.lines.as_deref(), &subject.runs);
+    let of = lines::Of {
+        run: &id,
+        stage: subject.stage,
+        vouched: subject.vouched,
+        tree: subject.tree.as_deref(),
+        workspace: subject.workspace.as_deref(),
+        run_dir: &dir,
+    };
     for (at, check) in selected.iter().enumerate() {
         if opts.stopped() {
             break;
         }
         let cwd = cwd_of(subject, check);
         let before = intake::Before::look(&cwd, &check.reports);
-        let mut out = run_one(subject, &id, &dir, check, &inherited, legacy, opts);
+        let ran = run_one(subject, &id, &dir, check, &inherited, legacy, opts);
+        let mut out = ran.out;
         take_findings(&mut out, &dir, check, (&cwd, &before), &mut budget);
+        let times = lines::Times {
+            at_ms: ran.at_ms,
+            wait_ms: millis(ran.started.saturating_duration_since(started)),
+            peak_rss_kib: ran.peak_rss_kib,
+        };
+        if let Some(warning) = sink.append(&lines::line_of(&of, &out, &times)) {
+            let _ = writeln!(io::stderr(), "warning: run lines: {warning}");
+        }
         let cancelled = out.outcome == CheckOutcome::Cancelled;
         resp.checks[at] = out;
         if cancelled {
@@ -372,8 +398,21 @@ fn run_checks(
     Err(failed(&resp, &subject.hint_at))
 }
 
+/// One check as [`run_one`] ran it: its result, and what its run line holds beside it.
+struct Ran {
+    /// The check's result.
+    out: CheckRunOut,
+    /// When it started, or was tried: Unix milliseconds, its log's `started_at_ms`.
+    at_ms: u64,
+    /// The same moment on the monotonic clock.
+    started: Instant,
+    /// The peak of its group's sampled resident memory, in KiB.
+    peak_rss_kib: Option<u64>,
+}
+
 /// Runs `check` of run `id`, its log and own directory in the run's `dir`, with what it
-/// `inherited` of the caller's environment (or the whole of it, for the `legacy` check).
+/// `inherited` of the caller's environment (or the whole of it, for the `legacy` check), its
+/// group's memory sampled.
 ///
 /// A log that cannot be written is the check's outcome, never the run's error: before the
 /// program starts, `not_started: log`; once it ran, `failed`, its exit code and tails kept, the
@@ -386,8 +425,15 @@ fn run_one(
     inherited: &[(String, OsString)],
     legacy: bool,
     opts: &RunOpts<'_>,
-) -> CheckRunOut {
-    // 1. Its log, started; its own directory and its environment.
+) -> Ran {
+    // 1. Its start, on both clocks; its log, started; its own directory and its environment.
+    let (at_ms, started) = (now_ms(), Instant::now());
+    let ran = |out: CheckRunOut, peak_rss_kib: Option<u64>| Ran {
+        out,
+        at_ms,
+        started,
+        peak_rss_kib,
+    };
     let mut out = CheckRunOut::new(
         &check.name,
         CheckOutcome::NotStarted,
@@ -397,12 +443,12 @@ fn run_one(
     let log_path = dir.join("logs").join(format!("{}.log", check.name));
     out.log = Some(log_path.to_string());
     let own = dir.join("checks").join(&check.name);
-    let log = match start_log(subject, id, check, &log_path, &own) {
+    let log = match start_log(subject, id, check, (&log_path, at_ms), &own) {
         Ok(log) => log,
         Err((path, e)) => {
             out.not_started = Some(CheckNotStarted::Log);
             out.message = Some(unwritten(&path, &e));
-            return out;
+            return ran(out, None);
         }
     };
     let pinned = Pinned::new(
@@ -423,10 +469,10 @@ fn run_one(
             check.dir
         ));
         let _ = log.finish(End::new(CheckOutcome::NotStarted));
-        return out;
+        return ran(out, None);
     }
 
-    // 3. The process runner, its output into the log.
+    // 3. The process runner, its output into the log, its group's memory sampled.
     let only = env::only(inherited, &pinned);
     let pairs = pinned.pairs();
     let mut spec = Spec::new(Duration::from_secs(check.timeout_s));
@@ -436,12 +482,13 @@ fn run_one(
         Env::Only(&only)
     };
     spec.stop = opts.stop;
-    let (ran, log, failed) = Slot::run(&check.argv, &cwd, &spec, log, &log_path);
+    spec.measure = Measure::GroupRss;
+    let (done, log, failed) = Slot::run(&check.argv, &cwd, &spec, log, &log_path);
 
     // 4. Its outcome, and the log's end. The output is the slot's, whose writes never fail:
     //    the runner refuses a program that did not start, or fails waiting for one (`failed`).
-    let ran = match ran {
-        Ok(ran) => ran,
+    let done = match done {
+        Ok(done) => done,
         Err(e) => {
             let program = e.details.contains_key("program");
             let outcome = if program {
@@ -455,21 +502,21 @@ fn run_one(
             if let Some(log) = log {
                 let _ = log.finish(End::new(outcome));
             }
-            return out;
+            return ran(out, None);
         }
     };
-    let outcome = match (ran.stopped, ran.timed_out, ran.exit_code) {
+    let outcome = match (done.stopped, done.timed_out, done.exit_code) {
         (true, _, _) => CheckOutcome::Cancelled,
         (_, true, _) => CheckOutcome::TimedOut,
         (_, _, Some(0)) => CheckOutcome::Passed,
         _ => CheckOutcome::Failed,
     };
     let mut end = End::new(outcome);
-    end.exit_code = ran.exit_code;
-    end.signal = ran.signal;
+    end.exit_code = done.exit_code;
+    end.signal = done.signal;
     out.outcome = outcome;
-    out.exit_code = ran.exit_code;
-    out.signal = ran.signal;
+    out.exit_code = done.exit_code;
+    out.signal = done.signal;
     match finish(log, failed, end) {
         Ok(summary) => {
             out.duration_ms = summary.duration_ms;
@@ -483,10 +530,10 @@ fn run_one(
         }
     }
     if out.outcome != CheckOutcome::Passed {
-        out.stdout_tail = Some(ran.stdout_tail);
-        out.stderr_tail = Some(ran.stderr_tail);
+        out.stdout_tail = Some(done.stdout_tail);
+        out.stderr_tail = Some(done.stderr_tail);
     }
-    out
+    ran(out, done.peak_rss_kib)
 }
 
 /// The directory `check` runs in: its `dir` below `subject`'s root.
@@ -526,14 +573,14 @@ fn take_findings(
     out.reports = taken.reports;
 }
 
-/// The log at `path` of `check` of run `id` on `subject`, its `start` line written, and the
-/// check's own directory `own` with its `artifacts`; else the path that could not be written,
-/// and why.
+/// The log at `path` of `check` of run `id` on `subject`, its `start` line written as of
+/// `at_ms`, and the check's own directory `own` with its `artifacts`; else the path that could
+/// not be written, and why.
 fn start_log(
     subject: &Subject,
     id: &str,
     check: &CheckOut,
-    path: &Utf8Path,
+    (path, at_ms): (&Utf8Path, u64),
     own: &Utf8Path,
 ) -> Result<LineLog<File>, (Utf8PathBuf, io::Error)> {
     let mut start = Start::new(&check.name, id, subject.stage.as_str());
@@ -542,7 +589,7 @@ fn start_log(
     start.dir.clone_from(&check.dir);
     start.timeout_s = check.timeout_s;
     let log = (File::create(path))
-        .and_then(|file| LineLog::start(file, &start, now_ms()))
+        .and_then(|file| LineLog::start(file, &start, at_ms))
         .map_err(|e| (path.to_owned(), e))?;
     let artifacts = own.join("artifacts");
     private_dirs(&artifacts).map_err(|e| (artifacts, e))?;

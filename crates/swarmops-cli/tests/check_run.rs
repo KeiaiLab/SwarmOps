@@ -19,14 +19,14 @@ use crate::ws::{AGENT, Lab, Out, run_in, write};
 
 /// A directory `tree` below a temp dir, holding `.swarmops/checks.toml` with `checks`, and a runs
 /// directory beside it.
-struct Tree {
+pub(crate) struct Tree {
     /// The temp dir.
     tmp: tempfile::TempDir,
 }
 
 impl Tree {
     /// A tree whose check file holds `version = 1` and `checks`.
-    fn new(checks: &str) -> Tree {
+    pub(crate) fn new(checks: &str) -> Tree {
         let tree = Tree {
             tmp: tempfile::tempdir().unwrap(),
         };
@@ -39,22 +39,22 @@ impl Tree {
     }
 
     /// The tree's directory.
-    fn dir(&self) -> PathBuf {
+    pub(crate) fn dir(&self) -> PathBuf {
         self.tmp.path().join("tree")
     }
 
     /// Where its runs go.
-    fn runs(&self) -> PathBuf {
+    pub(crate) fn runs(&self) -> PathBuf {
         self.tmp.path().join("runs")
     }
 
     /// The temp dir.
-    fn tmp(&self) -> &Path {
+    pub(crate) fn tmp(&self) -> &Path {
         self.tmp.path()
     }
 
     /// `check run --dir <tree>` and `args`, its runs below [`Tree::runs`], with `env` set.
-    fn run(&self, args: &[&str], env: &[(&str, &str)]) -> Out {
+    pub(crate) fn run(&self, args: &[&str], env: &[(&str, &str)]) -> Out {
         let runs = self.runs();
         let mut all = vec![("SWARMOPS_CHECK_RUNS_DIR", runs.to_str().unwrap())];
         all.extend_from_slice(env);
@@ -66,13 +66,13 @@ impl Tree {
 }
 
 /// The run an `E_CHECK_FAILED` carries in `details.run`.
-fn failed_run(out: &Out) -> Value {
+pub(crate) fn failed_run(out: &Out) -> Value {
     let mut error = out.err("E_CHECK_FAILED", 1);
     error["details"]["run"].take()
 }
 
 /// Check `name` of `run`.
-fn check<'r>(run: &'r Value, name: &str) -> &'r Value {
+pub(crate) fn check<'r>(run: &'r Value, name: &str) -> &'r Value {
     (run["checks"].as_array().unwrap().iter())
         .find(|c| c["name"] == name)
         .unwrap_or_else(|| panic!("no check {name} in {run}"))
@@ -979,7 +979,7 @@ const ISOLATED: [&str; 8] = [
 /// A store whose main holds a check file of four checks (`env`; `writes`, which writes the store,
 /// and `locked`, which commits in its workspace, both `manual`; `docs`, in `docs/`, `deploy`), and
 /// a workspace `w1` of the whole tree; the workspace's directory.
-fn checked_lab() -> (Lab, PathBuf) {
+pub(crate) fn checked_lab() -> (Lab, PathBuf) {
     let lab = Lab::new();
     let bin = env!("CARGO_BIN_EXE_swarmops");
     let store = lab.path().to_owned();

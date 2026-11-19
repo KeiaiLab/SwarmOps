@@ -437,3 +437,151 @@ fn the_runs_of_a_directory_that_is_gone_go() {
     run(&dir, &runs, &[], &[]).unwrap();
     assert!(!busy_key.exists() && kept_key.exists());
 }
+
+/// The run lines beside the runs of `resp`'s directory, in file order.
+fn run_lines(resp: &CheckRunResp) -> Vec<swarmops_api::CheckRunLine> {
+    let keyed = Utf8Path::new(&resp.dir).parent().unwrap();
+    let text = std::fs::read_to_string(keyed.join(lines::RUN_LINES_FILE)).unwrap();
+    (text.lines())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// A run of three checks leaves three lines beside the directory's runs, in run order: each
+/// with the run's id and directory, its check's outcome and duration, a wait no shorter than
+/// the one before, and a start at or after it.
+#[test]
+fn three_checks_leave_three_lines_in_run_order() {
+    let (_tmp, dir, runs) = tree(
+        "[check.a]\nargv = [\"/bin/sh\", \"-c\", \"sleep 0.05\"]\n\
+         [check.b]\nargv = [\"/bin/sh\", \"-c\", \"exit 3\"]\n\
+         [check.c]\nargv = [\"/usr/bin/true\"]\n",
+    );
+    let resp = run_of(&run(&dir, &runs, &[], &[]).unwrap_err());
+    let lines = run_lines(&resp);
+    let names: Vec<&str> = lines.iter().map(|line| line.check.as_str()).collect();
+    assert_eq!(names, ["a", "b", "c"]);
+    for (line, out) in lines.iter().zip(&resp.checks) {
+        assert_eq!(
+            (line.run.as_str(), line.run_dir.as_deref()),
+            (resp.run.as_str(), Some(resp.dir.as_str()))
+        );
+        assert_eq!(
+            (line.outcome, line.duration_ms, line.exit_code),
+            (out.outcome, out.duration_ms, out.exit_code)
+        );
+        assert_eq!(line.definition_digest, out.definition_digest);
+        assert_eq!((line.attempt, line.stage), (1, CheckStage::BeforeLand));
+        assert!(line.vouched && line.tree.is_none() && line.workspace.is_none());
+        assert!(lines::valid(line), "{line:?}");
+    }
+    assert!(lines[0].wait_ms <= lines[1].wait_ms && lines[1].wait_ms <= lines[2].wait_ms);
+    assert!(lines[1].wait_ms >= 50, "b waited for a: {lines:?}");
+    assert!(lines[0].at <= lines[1].at && lines[1].at <= lines[2].at);
+
+    // The line's start is its log's.
+    let log = std::fs::read_to_string(resp.checks[0].log.as_deref().unwrap()).unwrap();
+    let start = parse(&log)[0].event("start").unwrap();
+    assert_eq!(start["started_at_ms"], lines[0].at, "{log}");
+
+    // A second run adds its lines after them; a directory the caller names gets them instead.
+    let elsewhere = runs.join("elsewhere");
+    let mut opts = RunOpts::new(&caller);
+    opts.runs_root = Some(runs.clone());
+    opts.lines = Some(elsewhere.clone());
+    let again = run_of(&run_dir(&dir, CheckStage::BeforeLand, &[], &opts).unwrap_err());
+    assert_eq!(
+        run_lines(&resp).len(),
+        3,
+        "the directory's own file is as it was"
+    );
+    let text = std::fs::read_to_string(elsewhere.join(lines::RUN_LINES_FILE)).unwrap();
+    assert_eq!(text.lines().count(), 3, "{text}");
+    assert!(text.contains(&again.run), "{text}");
+}
+
+/// A check that a stop cut short leaves a `cancelled` line, and the checks never reached none;
+/// a program that does not start leaves a `not_started` line of no duration.
+#[test]
+fn a_check_not_reached_leaves_no_line() {
+    // 1. `a` is stopped once it runs; `b` is never reached.
+    let (_tmp, dir, runs) = tree(
+        "[check.a]\nargv = [\"/bin/sh\", \"-c\", \"touch started; sleep 60\"]\n\
+         [check.b]\nargv = [\"/usr/bin/true\"]\n",
+    );
+    let stop = AtomicBool::new(false);
+    let mut opts = RunOpts::new(&caller);
+    opts.runs_root = Some(runs.clone());
+    opts.stop = Some(&stop);
+    let started = dir.join("started");
+    let error = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !started.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            stop.store(true, Ordering::SeqCst);
+        });
+        run_dir(&dir, CheckStage::BeforeLand, &[], &opts).unwrap_err()
+    });
+    let resp = run_of(&error);
+    assert_eq!(
+        (resp.checks[0].outcome, resp.checks[1].outcome),
+        (CheckOutcome::Cancelled, CheckOutcome::NotRun)
+    );
+    let lines = run_lines(&resp);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(
+        (lines[0].check.as_str(), lines[0].outcome),
+        ("a", CheckOutcome::Cancelled)
+    );
+
+    // 2. A program that is not there: `not_started`, duration 0, no exit code.
+    let (_tmp, dir, runs) = tree("[check.gone]\nargv = [\"swarmops-no-such-program\"]\n");
+    let resp = run_of(&run(&dir, &runs, &[], &[]).unwrap_err());
+    let lines = run_lines(&resp);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(
+        (lines[0].outcome, lines[0].duration_ms, lines[0].exit_code),
+        (CheckOutcome::NotStarted, 0, None)
+    );
+    assert!(lines[0].at > 0, "when it was tried: {lines:?}");
+
+    // 3. A stop before the first check: no line, no file.
+    let (_tmp, dir, runs) = tree("[check.a]\nargv = [\"/usr/bin/true\"]\n");
+    let stop = AtomicBool::new(true);
+    let mut opts = RunOpts::new(&caller);
+    opts.runs_root = Some(runs);
+    opts.stop = Some(&stop);
+    let resp = run_of(&run_dir(&dir, CheckStage::BeforeLand, &[], &opts).unwrap_err());
+    let keyed = Utf8Path::new(&resp.dir).parent().unwrap();
+    assert!(!keyed.join(lines::RUN_LINES_FILE).exists(), "no line");
+}
+
+/// Lines that cannot be appended change nothing a run answers: its outcomes, its record and its
+/// error are those of a run whose lines were written.
+#[test]
+fn a_failed_append_changes_no_answer() {
+    let (_tmp, dir, runs) = tree(
+        "[check.bad]\nargv = [\"/bin/sh\", \"-c\", \"exit 3\"]\n\
+         [check.ok]\nargv = [\"/usr/bin/true\"]\n",
+    );
+    let file = dir.join("a-file");
+    std::fs::write(&file, "x").unwrap();
+    let mut opts = RunOpts::new(&caller);
+    opts.runs_root = Some(runs.clone());
+    opts.lines = Some(file.clone());
+    let unwritten = run_dir(&dir, CheckStage::BeforeLand, &[], &opts).unwrap_err();
+    let written = run(&dir, &runs, &[], &[]).unwrap_err();
+    assert_eq!(unwritten.message, written.message);
+    assert_eq!(unwritten.hint.is_some(), written.hint.is_some());
+    let (a, b) = (run_of(&unwritten), run_of(&written));
+    let outcomes = |resp: &CheckRunResp| -> Vec<(String, CheckOutcome, Option<i32>)> {
+        (resp.checks.iter())
+            .map(|c| (c.name.clone(), c.outcome, c.exit_code))
+            .collect()
+    };
+    assert_eq!(outcomes(&a), outcomes(&b));
+    assert_eq!((a.failed, a.cancelled), (b.failed, b.cancelled));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "x", "untouched");
+}

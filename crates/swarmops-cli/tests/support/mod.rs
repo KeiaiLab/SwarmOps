@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use swarmops_testkit::cli::{self, Program};
 pub use swarmops_testkit::cli::{
-    RUN_TIMEOUT, Run, agent, isolate, isolation, retry_busy, run_bin, run_bin_within, swarmops_vars,
+    RUN_TIMEOUT, Run, agent, isolate, isolation, removed, retry_busy, run_bin, run_bin_within,
+    swarmops_vars,
 };
 
 /// The binary under test.

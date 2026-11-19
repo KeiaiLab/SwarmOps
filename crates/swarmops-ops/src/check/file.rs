@@ -803,7 +803,7 @@ fn timeout_rule(seconds: u64) -> Result<(), String> {
 
 /// Whether `name` is a check's name: 1 to [`MAX_CHECK_NAME_BYTES`] bytes of `a-z`, `0-9`, `-`
 /// and `_`, the first a letter or digit.
-fn is_check_name(name: &str) -> bool {
+pub(super) fn is_check_name(name: &str) -> bool {
     let allowed = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_';
     let first = name.bytes().next();
     first.is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())

@@ -1160,6 +1160,15 @@ check file with its stages, `check list` and `check run` are built
 - **Two runs of one directory are not kept apart.** `check run --dir` takes no lock on the
   directory: two runs at once run their checks side by side, each with a run directory of its
   own. The workspace form holds the workspace's lock. *Target: M31-8. Found: the M31 plan.*
+- **Run lines are kept on the host that ran the check.** `check run` appends them in the
+  workspace's state, beside a directory's runs (removed with them once that directory is gone),
+  or where the caller says; none is kept beside a store, and `ws land --check` and the queue's
+  runner, which do not go through `check run`, leave none. *Target: M31-10, M33-1, M34. Found:
+  the M31 plan.*
+- **Peak memory is sampled, on Linux only.** A run line's `peak_rss_kib` is the largest sum of
+  the check's process group's resident memory seen once a second: a spike between two samples
+  and a process that left the group are missed, and the key is omitted on other hosts and for a
+  check over within 100 ms. *Target: M31-22, M34. Found: the M31 plan.*
 - **This repository's CI does not start its gate through `check run` yet.** The `check` job of
   `ci.yml` runs `just check` and `just check-compare` itself; it moves to
   `check run --dir . --stage before-land` with a pinned build once a release holds `check run`,

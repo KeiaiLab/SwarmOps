@@ -57,6 +57,10 @@ pub const BOOTSTRAP_SKIP: &str = "skip";
 /// ([`check_runs_root`]).
 pub const CHECK_RUNS_DIR_ENV: &str = swarmops_ops::check::run::CHECK_RUNS_DIR_ENV;
 
+/// The environment variable that names the directory `check run` sends its run lines to
+/// ([`run_lines_dir`]).
+pub const RUN_LINES_DIR_ENV: &str = swarmops_ops::check::lines::RUN_LINES_DIR_ENV;
+
 /// The environment variable that names the directory of the stores' memo keys ([`memo_key`]).
 pub const MEMO_KEY_DIR_ENV: &str = "SWARMOPS_MEMO_KEY_DIR";
 
@@ -162,6 +166,18 @@ pub fn check_runs_root(env: Env<'_>) -> Result<Option<Utf8PathBuf>, OpError> {
     }
     let state = userdir::state_dir(env)?;
     Ok(state.map(|state| state.join("swarmops").join("check-runs")))
+}
+
+/// The directory a caller named for the run lines of `check run`: `flag` (`--run-lines`), made
+/// absolute, else [`RUN_LINES_DIR_ENV`], which must be absolute; `None` when neither is given,
+/// and the lines go beside the runs. `E_INVALID_ARG` (`details.reason` `run_lines_dir`) for a
+/// variable that names no absolute directory.
+pub fn run_lines_dir(
+    flag: Option<&Utf8Path>,
+    env: Env<'_>,
+) -> Result<Option<Utf8PathBuf>, OpError> {
+    let var = env(RUN_LINES_DIR_ENV).filter(|value| !value.is_empty());
+    swarmops_ops::check::lines::named(flag, var.as_deref())
 }
 
 /// The memo key of the store whose id is `repo_id` (operations spec §1, storage spec §5): 32

@@ -1,5 +1,6 @@
-//! The store's line-per-record diagnostics files: `serve`'s (the M17 design §6) and the
-//! operations' (the M21 design §2.2), one copy of their append, rotation and read.
+//! The line-per-record diagnostics files: `serve`'s (the M17 design §6), the operations' (the
+//! M21 design §2.2) and the check runs' run lines (M31-11, `check::lines`), one copy of their
+//! append, rotation and read.
 //!
 //! ```text
 //!   append: one line < 4 KiB, one O_APPEND write, unsynced
@@ -17,7 +18,7 @@ use std::path::Path;
 use serde::Serialize;
 
 /// The longest line appended: one `write` of it is not interleaved with another's.
-const MAX_LINE: usize = 4 << 10;
+pub(crate) const MAX_LINE: usize = 4 << 10;
 
 /// The files of one kind of record, in their directory.
 #[derive(Debug, Clone, Copy)]

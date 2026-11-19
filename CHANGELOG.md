@@ -49,6 +49,15 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - API types `CheckFindingOut`, `CheckFindingLevel`, `CheckReportReadOut`, `CheckReportFormat`,
   `CheckReportState` and `CheckReportFault`, a check's findings and the reports they came from;
   `CheckReportOut`, a report a check declares. `swarmops schema` prints them (238 types).
+- Run lines: each check a run of `check run` reaches (`passed`, `failed`, `timed_out`,
+  `cancelled` or `not_started`; not `not_run`) appends one JSON object of diagnostics to
+  `run-lines.jsonl`, in the workspace's `.swarmws/check-runs/`, beside a directory's kept runs,
+  or in the directory `--run-lines DIR` names, else `SWARMOPS_CHECK_RUN_LINES_DIR` (absolute, or
+  `E_INVALID_ARG` with `details.reason: run_lines_dir`). Past 64 MiB the file is renamed to the
+  one older file, `run-lines.1.jsonl`. Nothing decides from a line: the file is not synced, and a
+  line that cannot be appended is a `warning: run lines:` line on stderr, once a run, that
+  changes no outcome, envelope or exit code. `peak_rss_kib` is the sampled sum of the resident
+  memory of the check's process group, on Linux. The MCP tool `check_run` leaves the same lines.
 - API type `CheckRunLine`, the run line a check of a run leaves: when it started, its run, name,
   attempt, stage, tree, definition digest, wait, duration, outcome, exit code, findings, labels,
   sampled peak memory and run directory. `swarmops schema CheckRunLine` prints it (239 types).

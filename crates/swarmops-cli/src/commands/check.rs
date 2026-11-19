@@ -15,7 +15,8 @@
 //! ```text
 //! so check run [NAME…] --dir DIR ─▶ check::run::run_dir(DIR, stage, names, opts)
 //! so check run [NAME…] [--ws N]  ─▶ ws::on_named ─▶ check::run::run_ws(&WsCtx, req, opts)
-//!                          opts: --pass names, the stop flag, the environment, the runs root
+//!                          opts: --pass names, the stop flag, the environment, the runs root,
+//!                                the directory named for the run lines (context::run_lines_dir)
 //! so check log CHECK --dir DIR | [--ws N] ─▶ the runs found (no store opened)
 //!                                         ─▶ check::follow::Follower: its last lines, and
 //!                                            with --follow one envelope a line as they come
@@ -75,88 +76,109 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Pri
             },
             |ops, req| swarmops_ops::check::list(ops, req),
         ),
-        CheckCommand::Run {
-            at,
-            dir,
-            stage,
-            pass,
-            names,
-        } => {
-            // 1. The flag the signals set, before any check starts.
-            let stop = match stop_on_signals() {
-                Ok(stop) => stop,
-                Err(e) => return ctx.finish(op, ctx.used.meta(), Err::<(), _>(e)),
-            };
-            let stage = stage.stage();
-
-            // 2. A directory: no store.
-            if let Some(dir) = dir {
-                let ran = context::check_runs_root(ctx.env).and_then(|runs_root| {
-                    let mut opts = RunOpts::new(ctx.env);
-                    opts.pass = pass;
-                    opts.stop = Some(&stop);
-                    opts.runs_root = runs_root;
-                    check_run::run_dir(&dir, stage, &names, &opts)
-                });
-                return ctx.finish(op, (None, BTreeMap::new(), None), ran);
-            }
-
-            // 3. A workspace: its store, as the `ws` commands open it.
-            ws::on_named(
-                ctx,
-                op,
-                at,
-                |workspace| {
-                    let mut req = CheckRunReq::new(workspace);
-                    req.stage = stage;
-                    req.checks = names;
-                    req
-                },
-                |wctx, req| {
-                    let mut opts = RunOpts::new(ctx.env);
-                    opts.pass = pass;
-                    opts.stop = Some(&stop);
-                    check_run::run_ws(wctx, req, &opts)
-                },
-            )
-        }
-        CheckCommand::Log {
-            at,
-            dir,
-            check,
-            run,
-            tail,
-            follow,
-            interval_ms,
-        } => {
-            // 1. The runs: of the directory, or of the workspace.
-            let runs = match &dir {
-                Some(dir) => context::check_runs_root(ctx.env)
-                    .and_then(|root| follow::dir_runs(dir, root.as_deref())),
-                None => ws_runs(ctx, &at),
-            };
-
-            // 2. The log's last lines; with --follow, the rest as it comes.
-            let named = named_at(dir.as_deref(), &at);
-            let started = runs.and_then(|runs| {
-                Follower::start(&runs, &named, &check, run.as_deref(), tail, follow)
-            });
-            let (follower, first) = match started {
-                Ok(started) => started,
-                Err(e) => return ctx.finish(op, ctx.used.meta(), Err::<(), _>(e)),
-            };
-            if !follow || first.ended {
-                return log_printed(ctx, op, Ok(first));
-            }
-            follow_log(
-                ctx,
-                op,
-                follower,
-                &first,
-                Duration::from_millis(interval_ms),
-            )
-        }
+        run @ CheckCommand::Run { .. } => run_checks(ctx, op, run),
+        log @ CheckCommand::Log { .. } => read_log(ctx, op, log),
     }
+}
+
+/// `check run`, which names operation `op`: the checks of a directory, with no store, or of a
+/// workspace, through the `ws` commands' store opening.
+fn run_checks(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Printed {
+    let CheckCommand::Run {
+        at,
+        dir,
+        stage,
+        pass,
+        run_lines,
+        names,
+    } = command
+    else {
+        unreachable!("run passes check run its own command alone");
+    };
+
+    // 1. Where the run lines go, if the caller says; then the flag the signals set, before any
+    //    check starts.
+    let lines = context::run_lines_dir(run_lines.as_deref(), ctx.env);
+    let (lines, stop) = match lines.and_then(|lines| Ok((lines, stop_on_signals()?))) {
+        Ok(ready) => ready,
+        Err(e) => return ctx.finish(op, ctx.used.meta(), Err::<(), _>(e)),
+    };
+    let stage = stage.stage();
+
+    // 2. A directory: no store.
+    if let Some(dir) = dir {
+        let ran = context::check_runs_root(ctx.env).and_then(|runs_root| {
+            let mut opts = RunOpts::new(ctx.env);
+            opts.pass = pass;
+            opts.stop = Some(&stop);
+            opts.runs_root = runs_root;
+            opts.lines = lines;
+            check_run::run_dir(&dir, stage, &names, &opts)
+        });
+        return ctx.finish(op, (None, BTreeMap::new(), None), ran);
+    }
+
+    // 3. A workspace: its store, as the `ws` commands open it.
+    ws::on_named(
+        ctx,
+        op,
+        at,
+        |workspace| {
+            let mut req = CheckRunReq::new(workspace);
+            req.stage = stage;
+            req.checks = names;
+            req
+        },
+        |wctx, req| {
+            let mut opts = RunOpts::new(ctx.env);
+            opts.pass = pass;
+            opts.stop = Some(&stop);
+            opts.lines = lines;
+            check_run::run_ws(wctx, req, &opts)
+        },
+    )
+}
+
+/// `check log`, which names operation `op`: a check's log of a run, once or followed.
+fn read_log(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Printed {
+    let CheckCommand::Log {
+        at,
+        dir,
+        check,
+        run,
+        tail,
+        follow,
+        interval_ms,
+    } = command
+    else {
+        unreachable!("run passes check log its own command alone");
+    };
+
+    // 1. The runs: of the directory, or of the workspace.
+    let runs = match &dir {
+        Some(dir) => context::check_runs_root(ctx.env)
+            .and_then(|root| follow::dir_runs(dir, root.as_deref())),
+        None => ws_runs(ctx, &at),
+    };
+
+    // 2. The log's last lines; with --follow, the rest as it comes.
+    let named = named_at(dir.as_deref(), &at);
+    let started =
+        runs.and_then(|runs| Follower::start(&runs, &named, &check, run.as_deref(), tail, follow));
+    let (follower, first) = match started {
+        Ok(started) => started,
+        Err(e) => return ctx.finish(op, ctx.used.meta(), Err::<(), _>(e)),
+    };
+    if !follow || first.ended {
+        return log_printed(ctx, op, Ok(first));
+    }
+    follow_log(
+        ctx,
+        op,
+        follower,
+        &first,
+        Duration::from_millis(interval_ms),
+    )
 }
 
 /// How the command line named the runs' directory or workspace, as `check run` takes it: `--dir

@@ -61,6 +61,12 @@ const CHECK_RUNS_DIR_ENV: &str = "SWARMOPS_CHECK_RUNS_DIR";
 /// kept apart by the key of the directory each checked.
 const SHARED_CHECK_RUNS: &str = "swarmops-test-check-runs";
 
+/// The variable that names the directory `check run` sends its run lines to (`swarmops-ops`'
+/// `check::lines::RUN_LINES_DIR_ENV`, which this crate cannot name): every run of the binary
+/// goes without it ([`removed`]), so that a gate started through `check run` on a host that sets
+/// it never has its tests write the operator's run lines.
+const CHECK_RUN_LINES_DIR_ENV: &str = "SWARMOPS_CHECK_RUN_LINES_DIR";
+
 /// The variable that names the user's login file, which this crate cannot name by its constant:
 /// every run of the binary sets it ([`isolate`]), so that no test reads or writes the
 /// developer's.
@@ -140,12 +146,22 @@ pub fn isolation() -> [(&'static str, OsString); 5] {
     ]
 }
 
-/// Sets [`isolation`] on `command`, a run of the binary. Every place that spawns the binary
-/// calls this, or sets [`isolation`] itself: after it has removed this process's `SWARMOPS_*`
-/// variables ([`swarmops_vars`]), which would unset these again, and before the test's own
-/// variables, which may name a login file, a curl or a memo keys' directory of the test's, or
-/// turn automatic update on.
+/// The variables a run of the binary goes without, whatever set them: the run lines' directory
+/// (`SWARMOPS_CHECK_RUN_LINES_DIR`), so that a run's lines go beside its runs, under the
+/// isolation's runs directory or in its workspace, unless the test names a directory of its own.
+pub fn removed() -> [&'static str; 1] {
+    [CHECK_RUN_LINES_DIR_ENV]
+}
+
+/// Sets [`isolation`] on `command`, a run of the binary, and takes [`removed`] from it. Every
+/// place that spawns the binary calls this, or sets [`isolation`] itself: after it has removed
+/// this process's `SWARMOPS_*` variables ([`swarmops_vars`]), which would unset these again, and
+/// before the test's own variables, which may name a login file, a curl or a memo keys'
+/// directory of the test's, or turn automatic update on.
 pub fn isolate(command: &mut Command) {
+    for name in removed() {
+        command.env_remove(name);
+    }
     command.envs(isolation());
 }
 
@@ -788,9 +804,13 @@ mod tests {
         isolate(&mut command);
 
         let named = isolation();
-        assert_eq!(command.get_envs().count(), named.len());
+        assert_eq!(command.get_envs().count(), named.len() + removed().len());
         for (name, value) in named {
             assert_eq!(set(&command, name), Some(value), "{name}");
         }
+        for name in removed() {
+            assert_eq!(set(&command, name), None, "{name}");
+        }
+        assert_eq!(removed(), ["SWARMOPS_CHECK_RUN_LINES_DIR"]);
     }
 }

@@ -11,6 +11,7 @@ mod support;
 mod auth;
 mod check;
 mod check_run;
+mod check_runs;
 mod cli;
 mod coming_from_git;
 mod contention;
@@ -265,6 +266,27 @@ fn the_isolation_s_runs_directory_is_the_one_the_program_reads() {
         .iter()
         .find(|(name, _)| *name == swarmops_ops::check::run::CHECK_RUNS_DIR_ENV);
     assert!(runs.is_some(), "the isolation names the program's variable");
+}
+
+/// No command the tests start sees the run lines' directory of the host that runs the gate: the
+/// isolation removes the variable the program reads, as the test kit spells it, also from a
+/// command that had it set.
+#[test]
+fn the_isolation_removes_the_run_lines_directory_the_program_reads() {
+    use swarmops_ops::check::lines::RUN_LINES_DIR_ENV;
+
+    assert!(
+        support::removed().contains(&RUN_LINES_DIR_ENV),
+        "by the program's name"
+    );
+    let mut command = std::process::Command::new("true");
+    command.env(RUN_LINES_DIR_ENV, "/host/lines");
+    support::isolate(&mut command);
+    let left = command
+        .get_envs()
+        .find(|(name, _)| *name == std::ffi::OsStr::new(RUN_LINES_DIR_ENV));
+    assert_eq!(left.and_then(|(_, value)| value), None, "removed: {left:?}");
+    assert!(left.is_some(), "removed by name, not only left unset");
 }
 
 /// The isolation turns automatic update off in the words the program reads: the test kit, which

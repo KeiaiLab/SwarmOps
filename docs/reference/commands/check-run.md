@@ -8,6 +8,8 @@ Runs the checks of STAGE (default before-land) that .swarmops/checks.toml names,
 
 The workspace form (--ws, --ws-path, else the workspace around the working directory) needs a clean workspace: no edits, not rebasing, not stale. It reads the check file from the store at the changeset the files stand for, holds the workspace's lock while the checks run, and never writes the store; its runs are kept in .swarmws/check-runs/. --dir DIR runs the checks of the files below DIR as they are, opens no store, and says vouched: its runs are kept below SWARMOPS\_CHECK\_RUNS\_DIR, else the state directory's swarmops/check-runs; the newest 20 of each are kept. SIGINT, SIGTERM and SIGHUP kill the running check's process group and end the run. No identity.
 
+Each check the run reaches appends one run line, a JSON object of diagnostics (its name, run, stage, tree, wait, duration, outcome and, on Linux, sampled peak memory), to run-lines.jsonl in the directory --run-lines names, else SWARMOPS\_CHECK\_RUN\_LINES\_DIR, else beside the runs kept; nothing decides from it, and a line that cannot be written is a warning on stderr.
+
 ```yaml
 title: "swarmops check run"
 description: "Run the checks of one stage of a clean workspace, or of a directory with --dir."
@@ -66,6 +68,12 @@ The stage whose checks to run. Values: `before-land`: Before a change lands: the
 Syntax: `--pass <NAME>...`.
 
 A variable of your environment the checks also get; repeatable.
+
+### `--run-lines`
+
+Syntax: `--run-lines <DIR>`.
+
+Append the run lines to run-lines.jsonl in DIR, not beside the runs.
 
 ### `NAME`
 
@@ -379,6 +387,70 @@ on; only a record that cannot be written makes the run `E_IO`, with the outcomes
 `duration_ms` is the run's, from its first check's start to its last's end, and each check's its
 own; neither is a measured figure of any check.
 
+### Run lines
+
+Each check a run reaches appends one *run line* to a diagnostics file on the host that ran it:
+one JSON object a line, at most 4 KiB, ended by `\n`. A check that ended `passed`, `failed`,
+`timed_out`, `cancelled` or `not_started` leaves one, the check `default` of
+`.swarmops/workspaces.json` as any other; a check the run never reached (`not_run`) leaves none.
+The line is appended once the check's process group is gone and its findings are read, before
+the next check starts, so a runner that dies in a run has left the lines of the checks that
+ended. A run of three checks adds three lines.
+
+| Key | Type | Present | Meaning |
+| --- | --- | --- | --- |
+| `at` | integer | always | When the check started (for `not_started`: when it was tried), in Unix milliseconds on the host that ran it: the `started_at_ms` of its log's `start` line. |
+| `run` | string | always | The run's id. |
+| `check` | string | always | The check's name. |
+| `attempt` | integer | always | `1`, as `SWARMOPS_CHECK_ATTEMPT`. |
+| `stage` | string | always | The stage run. |
+| `tree` | string | in a workspace | The tree's 64 hex digits; the directory form knows no tree. |
+| `vouched` | bool | always | `true` in the directory form. |
+| `workspace` | string | in a workspace | The workspace's name. |
+| `definition_digest` | string | always | As `check list` gives it (provisional). |
+| `wait_ms` | integer | always | The milliseconds from the run's start to the check's start: with one check at a time, the time the checks before it took. |
+| `duration_ms` | integer | always | The check's, as in the result; 0 for `not_started`. |
+| `outcome` | string | always | As in the result; never `not_run`. |
+| `exit_code` | integer | when it exited | |
+| `findings` | integer | when not 0 | The check's `findings_total`. |
+| `labels` | array of strings | when not empty | The runner labels the check requires: none yet. |
+| `peak_rss_kib` | integer | on Linux, when a sample saw the check | See below. |
+| `run_dir` | string | when at most 1,024 bytes | The run's directory, absolute: where its `run.json` and logs are while the host keeps the run. |
+
+`swarmops schema CheckRunLine` prints the type. A later release adds keys; none is removed or
+changes its meaning, and a reader ignores a key it does not know.
+
+**Where they go.** To `run-lines.jsonl` in:
+
+1. the directory `--run-lines DIR` names (relative to the working directory);
+2. else the directory `SWARMOPS_CHECK_RUN_LINES_DIR` names, which must be absolute: another value
+   is `E_INVALID_ARG` with `details.reason: run_lines_dir`, before anything runs;
+3. else the form's own place: the workspace's `.swarmws/check-runs/`, or the directory's key
+   directory below the runs root, beside its kept runs.
+
+A named directory that is not there is made, one level, its owner's alone (mode `0700`); one that
+is there is used as it is and never changed, so that an operator may share it between accounts
+with the mode it chooses. The runs kept (the newest 20) are removed without the lines; the lines
+beside a directory's runs go with them when that directory is gone.
+
+**Rotation.** The append that takes `run-lines.jsonl` past 64 MiB renames it to
+`run-lines.1.jsonl`, replacing the one older file, under `run-lines.lock`; the next line starts a
+new file. At most 128 MiB of lines are kept in a directory.
+
+**Diagnostics.** The file is not synced, and nothing decides from it: no gate, no land, no answer
+of `check run`. A line that cannot be appended (the directory not writable, the disk full,
+something there that is no directory) writes `warning: run lines: …` to stderr, once a run, and
+nothing more is tried in that run: every outcome, the envelope, the exit code and `run.json` are
+what they would have been.
+
+**Peak memory.** `peak_rss_kib` is a sample, on Linux: once 100 ms after the check starts and
+then once a second, the resident memory (`VmRSS`) of every process in the check's process group
+is summed from `/proc`, and the largest sum is kept. It is not the kernel's high-water mark: a
+spike between two samples is missed, pages two of the group's processes share are counted for
+each, and a process that left the check's group is not counted. A check over within 100 ms has
+none, and neither has a check on a host that is not Linux. The cost of a sample, one pass over
+`/proc`, is not measured.
+
 ### The MCP tool
 
 `swarmops mcp` serves the workspace form as the tool `check_run`, whose arguments are
@@ -388,7 +460,9 @@ since the server's environment is not the agent's to hand out; a check gets the 
 server's variables. A call holds the server until the run ends, each check bounded by its
 timeout. SIGINT, SIGTERM or SIGHUP to the server stops the run as it stops `check run`: the call is
 answered, and then the server exits. A check that did not pass makes the call's result an error,
-`E_CHECK_FAILED`, with every outcome in `details.run`.
+`E_CHECK_FAILED`, with every outcome in `details.run`. Its checks leave run lines as the
+command's do: in the directory the server's `SWARMOPS_CHECK_RUN_LINES_DIR` names, else in the
+workspace's `.swarmws/check-runs/`.
 
 ## Return information
 

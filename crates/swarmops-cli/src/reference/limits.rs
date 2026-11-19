@@ -154,6 +154,12 @@ const CHECK_API: &str = "crates/swarmops-api/src/check.rs";
 /// The file that declares the reader of a check's log (M31).
 const CHECK_FOLLOW: &str = "crates/swarmops-ops/src/check/follow.rs";
 
+/// The file that declares the run lines' limits (M31-11).
+const CHECK_LINES: &str = "crates/swarmops-ops/src/check/lines.rs";
+
+/// The file that declares the process runner's values.
+const WS_RUN: &str = "crates/swarmops-ws/src/run.rs";
+
 /// A paging default of `command`'s `flag`, filling `request`'s `field`.
 const fn paged(
     request: &'static str,
@@ -632,7 +638,7 @@ static CONTRACT: [Limit; 28] = [
 ];
 
 /// The bounds a response keeps without an error: what it leaves out, and how it says so.
-static BOUNDS: [Limit; 24] = [
+static BOUNDS: [Limit; 27] = [
     Limit {
         name: "Lossy commits listed",
         constant: code(
@@ -835,6 +841,49 @@ static BOUNDS: [Limit; 24] = [
         what: "The runs a directory (by its canonical path) or a workspace keeps, the new one \
                    among them: when a run starts the older ones are removed, but never one whose \
                    lock is held.",
+    },
+    Limit {
+        name: "Run lines kept",
+        constant: code(
+            "swarmops_ops::check::lines::MAX_RUN_LINES_BYTES",
+            CHECK_LINES,
+            "pub const MAX_RUN_LINES_BYTES: u64 = 64 << 20;",
+            || swarmops_ops::check::lines::MAX_RUN_LINES_BYTES,
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "The run lines' file, `run-lines.jsonl`: the append that takes it past this \
+                   renames it to the one older file, `run-lines.1.jsonl`, replacing that one, \
+                   and the next line starts a new file.",
+    },
+    Limit {
+        name: "Run line",
+        constant: code(
+            "swarmops_ops::check::lines::MAX_RUN_LINE_BYTES",
+            CHECK_LINES,
+            "pub const MAX_RUN_LINE_BYTES: usize = records::MAX_LINE;",
+            || bytes::to_u64(swarmops_ops::check::lines::MAX_RUN_LINE_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "One run line, its line end included: what one append writes whole. A run writes \
+                   none longer; one that would be is not written, with a warning.",
+    },
+    Limit {
+        name: "Run line's run directory",
+        constant: code(
+            "swarmops_ops::check::lines::MAX_RUN_LINE_DIR_BYTES",
+            CHECK_LINES,
+            "pub const MAX_RUN_LINE_DIR_BYTES: usize = 1_024;",
+            || bytes::to_u64(swarmops_ops::check::lines::MAX_RUN_LINE_DIR_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check run"],
+        errors: &[],
+        what: "The run's directory a run line names in `run_dir`: a longer path is left out of \
+                   the line.",
     },
     Limit {
         name: "Followed lines",
@@ -1197,7 +1246,7 @@ static DEFAULTS: [DefaultRow; 16] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 45] = [
+static INTERNAL: [Limit; 47] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -1687,6 +1736,31 @@ static INTERNAL: [Limit; 45] = [
         Unit::Bytes,
         "The longest request or answer line of the native wire: a longer request is refused \
              before a byte is sent, and a longer answer ends the session.",
+    ),
+    internal_value(
+        "Check memory, first sample",
+        declared(
+            "swarmops_ws::run::MEM_SAMPLE_FIRST",
+            WS_RUN,
+            "const MEM_SAMPLE_FIRST: Duration = Duration::from_millis(100);",
+            || 100,
+        ),
+        Unit::Millis,
+        "How long after a check of `check run` starts its process group's resident memory is \
+             first sampled, on Linux: a check over before then has no `peak_rss_kib` in its run \
+             line.",
+    ),
+    internal_value(
+        "Check memory, sample interval",
+        declared(
+            "swarmops_ws::run::MEM_SAMPLE_EVERY",
+            WS_RUN,
+            "const MEM_SAMPLE_EVERY: Duration = Duration::from_secs(1);",
+            || 1,
+        ),
+        Unit::Seconds,
+        "How long after one sample of a running check's memory the next is taken: each is a \
+             pass over `/proc`, and what the group held between two is not seen. Not measured.",
     ),
     internal_value(
         "Wire ids",

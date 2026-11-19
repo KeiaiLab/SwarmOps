@@ -154,7 +154,9 @@ pub(super) static WS_TOOLS: [WsSpec; 14] = [
                       in details.run. Each check's findings, from the JSON lines it writes to \
                       SWARMOPS_CHECK_REPORT and the JUnit and SARIF reports its definition \
                       declares, come with its outcome, at most 10,000 a run, the rest counted. \
-                      Holds the workspace's lock while it runs; never writes the store.",
+                      Holds the workspace's lock while it runs; never writes the store. Each \
+                      check reached leaves one run line of diagnostics in the workspace's state \
+                      (or the directory the server's SWARMOPS_CHECK_RUN_LINES_DIR names).",
     },
     WsSpec {
         tool: WsTool::CheckLog,
@@ -282,11 +284,13 @@ pub(super) fn operate_ws<O: Operate>(tool: WsTool, how: O) -> O::Done {
         WsTool::Info => how.workspace(|store, root, who, _, req| {
             swarmops_ws::info(&ws_ctx(store, root, who), req)
         }),
-        // The server's own environment gives the fixed list; it passes no more. While the run
-        // runs, SIGINT, SIGTERM and SIGHUP stop it instead of ending the server (`Busy`).
+        // The server's own environment gives the fixed list; it passes no more, and it names
+        // where the run lines go, if anything does. While the run runs, SIGINT, SIGTERM and
+        // SIGHUP stop it instead of ending the server (`Busy`).
         WsTool::CheckRun => how.workspace(|store, root, who, _, req| {
             let lookup = |name: &str| std::env::var_os(name);
             let mut opts = RunOpts::new(&lookup);
+            opts.lines = crate::context::run_lines_dir(None, &lookup)?;
             let busy = Busy::start();
             opts.stop = busy.stop();
             swarmops_ops::check::run::run_ws(&ws_ctx(store, root, who), req, &opts)

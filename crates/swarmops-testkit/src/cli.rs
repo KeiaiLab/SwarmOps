@@ -27,6 +27,6 @@ pub mod sweep;
 mod binary;
 
 pub use binary::{
-    BUSY_RETRIES, Program, RUN_TIMEOUT, Racers, Run, Store, agent, isolate, isolation, retry_busy,
-    run, run_bin, run_bin_within, run_within, swarmops, swarmops_vars,
+    BUSY_RETRIES, Program, RUN_TIMEOUT, Racers, Run, Store, agent, isolate, isolation, removed,
+    retry_busy, run, run_bin, run_bin_within, run_within, swarmops, swarmops_vars,
 };

@@ -20,6 +20,11 @@
 //! clean, each with the environment of [`mod@env`], its output in a log of [`mod@log`]'s format.
 //! Once a check has ended, what it reported is read as findings (`intake`): its report file
 //! ([`mod@findings`]) and the JUnit and SARIF reports it declares ([`mod@junit`], [`mod@sarif`]).
+//! Each check reached then leaves one run line of diagnostics ([`mod@lines`]):
+//!
+//! ```text
+//!   check run ─ each check reached ─▶ lines::Sink ─▶ <dir>/run-lines.jsonl (rotating, unsynced)
+//! ```
 
 mod digest;
 pub mod env;
@@ -28,6 +33,7 @@ pub mod findings;
 pub mod follow;
 mod intake;
 pub mod junit;
+pub mod lines;
 pub mod log;
 pub mod run;
 pub mod sarif;

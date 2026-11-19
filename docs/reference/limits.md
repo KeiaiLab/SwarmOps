@@ -308,6 +308,9 @@ A response past these leaves the rest out, and says so in its fields; nothing fa
 | [Check sections](#check-sections) | 1,000 sections | `swarmops_ops::check::log::MAX_CHECK_SECTIONS` | [`check run`](commands/check-run.md) |
 | [Section title](#section-title) | 200 bytes | `swarmops_ops::check::log::MAX_SECTION_TITLE_BYTES` | [`check run`](commands/check-run.md) |
 | [Check runs kept](#check-runs-kept) | 20 runs | `swarmops_ops::check::run::KEPT_CHECK_RUNS` | [`check run`](commands/check-run.md) |
+| [Run lines kept](#run-lines-kept) | 67,108,864 bytes (64 MiB) | `swarmops_ops::check::lines::MAX_RUN_LINES_BYTES` | [`check run`](commands/check-run.md) |
+| [Run line](#run-line) | 4,096 bytes (4 KiB) | `swarmops_ops::check::lines::MAX_RUN_LINE_BYTES` | [`check run`](commands/check-run.md) |
+| [Run line's run directory](#run-lines-run-directory) | 1,024 bytes (1 KiB) | `swarmops_ops::check::lines::MAX_RUN_LINE_DIR_BYTES` | [`check run`](commands/check-run.md) |
 | [Followed lines](#followed-lines) | 1,000 lines | `swarmops_ops::check::follow::MAX_FOLLOW_LINES` | [`check log`](commands/check-log.md) |
 | [Findings of a run](#findings-of-a-run) | 10,000 findings | `swarmops_ops::check::MAX_RUN_FINDINGS` | [`check run`](commands/check-run.md) |
 | [Findings' text of a run](#findings-text-of-a-run) | 4,194,304 bytes (4 MiB) | `swarmops_ops::check::MAX_RUN_FINDING_BYTES` | [`check run`](commands/check-run.md) |
@@ -429,6 +432,30 @@ The runs a directory (by its canonical path) or a workspace keeps, the new one a
 
 - Value: 20 runs.
 - Constant: `swarmops_ops::check::run::KEPT_CHECK_RUNS`, in `crates/swarmops-ops/src/check/run.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Run lines kept
+
+The run lines' file, `run-lines.jsonl`: the append that takes it past this renames it to the one older file, `run-lines.1.jsonl`, replacing that one, and the next line starts a new file.
+
+- Value: 67,108,864 bytes (64 MiB).
+- Constant: `swarmops_ops::check::lines::MAX_RUN_LINES_BYTES`, in `crates/swarmops-ops/src/check/lines.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Run line
+
+One run line, its line end included: what one append writes whole. A run writes none longer; one that would be is not written, with a warning.
+
+- Value: 4,096 bytes (4 KiB).
+- Constant: `swarmops_ops::check::lines::MAX_RUN_LINE_BYTES`, in `crates/swarmops-ops/src/check/lines.rs`.
+- Commands: [`check run`](commands/check-run.md).
+
+### Run line's run directory
+
+The run's directory a run line names in `run_dir`: a longer path is left out of the line.
+
+- Value: 1,024 bytes (1 KiB).
+- Constant: `swarmops_ops::check::lines::MAX_RUN_LINE_DIR_BYTES`, in `crates/swarmops-ops/src/check/lines.rs`.
 - Commands: [`check run`](commands/check-run.md).
 
 ### Followed lines
@@ -610,6 +637,8 @@ Not part of the contract: these tune the implementation, or bound the store's la
 | Queue manifest | 32,507,904 bytes (31,746 KiB) | `swarmops_store::meta::queue::MANIFEST_MAX` | The longest manifest the lock's holder leaves in `meta/queue/` before it claims the other members of its batch: per member at most an answer and 64 bytes. The next holder settles a dead one's batch from it, and reads no more of it. |
 | Wire protocol | 1 version | `swarmops_api::WIRE_PROTOCOL` | The protocol of the native wire between two stores that this build speaks: a request names its protocol, and a peer refuses one it does not take before it reads the request. |
 | Wire line | 1,048,576 bytes (1 MiB) | `swarmops_api::MAX_WIRE_LINE` | The longest request or answer line of the native wire: a longer request is refused before a byte is sent, and a longer answer ends the session. |
+| Check memory, first sample | 100 ms | `swarmops_ws::run::MEM_SAMPLE_FIRST` | How long after a check of `check run` starts its process group's resident memory is first sampled, on Linux: a check over before then has no `peak_rss_kib` in its run line. |
+| Check memory, sample interval | 1 s | `swarmops_ws::run::MEM_SAMPLE_EVERY` | How long after one sample of a running check's memory the next is taken: each is a pass over `/proc`, and what the group held between two is not seen. Not measured. |
 | Wire ids | 10,000 ids | `swarmops_api::MAX_WIRE_IDS` | The most ids one list of a native wire request or result carries; longer lists page. |
 | Wire chunk | 67,108,864 bytes (64 MiB) | `swarmops_api::MAX_CHUNK_BYTES` | The most record bytes one chunk of objects on the native wire holds; one object alone may be longer, up to the store's object bound. A longer chunk is refused before its records are read. |
 | Wire stall | 300 s | `swarmops_api::WIRE_STALL_SECS` | How long a native wire session waits for a byte from its peer: past it, the session ends with `E_REMOTE_UNREACHABLE`, `details.cause` `timeout`, retryable. |
