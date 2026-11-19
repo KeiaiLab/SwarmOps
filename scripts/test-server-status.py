@@ -33,6 +33,10 @@ SO_STATUS = STATUS / "bin" / "so-status"
 SETTINGS = STATUS / "status.conf"
 TIMER = STATUS / "systemd" / "swarmops-status.timer"
 WORKFLOW = ROOT / ".github" / "workflows" / "status.yml"
+HOSTED_SETTINGS = "deploy/swarmops.cc/config/status.conf"
+GATE_CLASS = "# gate: probe"
+PROBE_SECRETS = ("PROBE_SSH_KEY", "PROBE_KNOWN_HOSTS", "PROBE_HTTPS_PASSWORD",
+                 "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID")
 
 PROBE_IDENTITY = "person/probe"
 STORE = "probe"
@@ -216,10 +220,10 @@ def probe_clones_pushes_lands(scratch: Path) -> None:
 
 def probe_period_is_one_minute(scratch: Path) -> None:
     """The probe's period is one minute wherever it is set: the default, the settings file, the
-    unit's timer and the workflow (its schedule divided by its rounds); a planted 5-minute timer
-    is found."""
+    unit's timer and the workflow (each schedule it has, divided by its rounds); a planted
+    5-minute timer and a planted 10-minute schedule are found."""
 
-    def problems(timer_text: str) -> list[str]:
+    def problems(timer_text: str, workflow: str) -> list[str]:
         found = []
         settings = dict(line.split("=", 1) for line in SETTINGS.read_text().splitlines()
                         if line and not line.startswith("#"))
@@ -233,18 +237,89 @@ def probe_period_is_one_minute(scratch: Path) -> None:
         timer.read_string(timer_text)
         if timer.get("Timer", "OnUnitActiveSec", fallback="") != "1min":
             found.append(f"timer: OnUnitActiveSec={timer.get('Timer', 'OnUnitActiveSec')}")
-        workflow = WORKFLOW.read_text()
-        cron = re.search(r'cron: "\*/(\d+) \* \* \* \*"', workflow)
         rounds = re.search(r"so-status loop (\d+)", workflow)
-        if not cron or not rounds or int(cron.group(1)) != int(rounds.group(1)):
-            found.append("status.yml: the schedule is not one round a minute")
+        if not rounds:
+            found.append("status.yml: no rounds")
+        for cron in re.findall(r"^\s*- cron: (.*)$", workflow, re.MULTILINE):
+            every = re.fullmatch(r'"\*/(\d+) \* \* \* \*"', cron)
+            if not every or not rounds or every.group(1) != rounds.group(1):
+                found.append(f"status.yml: the schedule {cron} is not one round a minute")
         return found
 
     text = TIMER.read_text()
-    found = problems(text)
+    workflow = WORKFLOW.read_text()
+    found = problems(text, workflow)
     check(not found, f"{found}")
     planted = text.replace("OnUnitActiveSec=1min", "OnUnitActiveSec=5min")
-    check(planted != text and problems(planted), "a planted 5-minute timer is not found")
+    check(planted != text and problems(planted, workflow),
+          "a planted 5-minute timer is not found")
+    scheduled = workflow + '\n  schedule:\n    - cron: "*/10 * * * *"\n'
+    check(problems(text, scheduled), "a planted 10-minute schedule is not found")
+
+
+def ready_step() -> str:
+    """The script of the workflow's `ready` step, as the runner would run it."""
+    block = re.search(r"^      - id: ready\n(?:.*\n)*?        run: \|\n((?:(?: {10}.*)?\n)+)",
+                      WORKFLOW.read_text(), re.MULTILINE)
+    check(block is not None, "status.yml has no `ready` step with a script")
+    return "".join(line[10:] + "\n" for line in (block.group(1) if block else "").splitlines())
+
+
+def ready(scratch: Path, event: str, settings: bool,
+          secrets: tuple[str, ...]) -> tuple[subprocess.CompletedProcess, str]:
+    """The `ready` step run for `event`, with the hosted settings file or without and with
+    `secrets` set; how it ended and the outputs it wrote."""
+    work = scratch / event
+    (work / "repo").mkdir(parents=True)
+    if settings:
+        (work / "repo" / "status.conf").write_text("period=60\n")
+    outputs = work / "outputs"
+    outputs.write_text("")
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "SETTINGS": "status.conf",
+           "GITHUB_OUTPUT": str(outputs), "GITHUB_EVENT_NAME": event}
+    env.update({name: "set" if name in secrets else "" for name in PROBE_SECRETS})
+    done = run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", ready_step()],
+               cwd=work / "repo", env=env)
+    written = outputs.read_text()
+    shutil.rmtree(work)
+    return done, written
+
+
+def empty_probe_is_not_green(scratch: Path) -> None:
+    """The workflow states its gate class, has no schedule while the repository holds no hosted
+    settings, and a run somebody asked for that can probe nothing fails naming what is missing;
+    with everything there, any run probes."""
+    workflow = WORKFLOW.read_text()
+    check(workflow.splitlines()[0] == GATE_CLASS, f"status.yml does not start with {GATE_CLASS}")
+    triggers = workflow.split("\non:\n", 1)[1].split("\n\n", 1)[0]
+    check("workflow_dispatch:" in triggers and "push:" in triggers, f"triggers: {triggers}")
+    check(f"SETTINGS: {HOSTED_SETTINGS}\n" in workflow, "the workflow reads other settings")
+    if not (ROOT / HOSTED_SETTINGS).is_file():
+        check("schedule:" not in triggers and "cron:" not in workflow,
+              f"a schedule with no {HOSTED_SETTINGS}: every run would probe nothing")
+
+    # Asked for, nothing to probe with: red, every missing name stated.
+    done, outputs = ready(scratch, "workflow_dispatch", False, ())
+    check(done.returncode == 1, f"a dispatch with no settings exited {done.returncode}")
+    for name in ("status.conf", *PROBE_SECRETS):
+        check(name in done.stdout, f"the failure does not name {name}: {done.stdout}")
+    check("::error " in done.stdout and outputs == "ready=false\n", f"{done.stdout} {outputs}")
+
+    # One secret short: still red, and only that name.
+    done, outputs = ready(scratch, "workflow_dispatch", True, PROBE_SECRETS[1:])
+    check(done.returncode == 1 and outputs == "ready=false\n", f"one short: {done} {outputs}")
+    check(PROBE_SECRETS[0] in done.stdout and PROBE_SECRETS[1] not in done.stdout,
+          f"one short names {done.stdout}")
+
+    # A push of the probe's files is no request to probe: a notice, and no later step runs.
+    done, outputs = ready(scratch, "push", False, ())
+    check(done.returncode == 0 and outputs == "ready=false\n", f"push: {done} {outputs}")
+    check("::notice " in done.stdout and PROBE_SECRETS[0] in done.stdout, done.stdout)
+
+    # Everything there: ready, whatever started the run.
+    for event in ("workflow_dispatch", "push"):
+        done, outputs = ready(scratch, event, True, PROBE_SECRETS)
+        check(done.returncode == 0 and outputs == "ready=true\n", f"{event}: {done} {outputs}")
 
 
 def stale_probe_reads_stale(scratch: Path) -> None:
@@ -333,6 +408,7 @@ CASES: tuple[tuple[str, Callable[[Path], None]], ...] = (
     ("status files parse", status_files_parse),
     ("the probe clones, pushes and lands", probe_clones_pushes_lands),
     ("the probe's period is one minute", probe_period_is_one_minute),
+    ("an empty probe is not green", empty_probe_is_not_green),
     ("a stale probe reads stale", stale_probe_reads_stale),
     ("the page shows copies and the backup age", page_shows_copies_and_backup_age),
     ("self-check: a stopped host turns the page red", stopped_host_turns_red),

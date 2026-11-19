@@ -1,3 +1,5 @@
+# gate: probe
+#
 # The hosted copy's status page (status.swarmops.cc): the package's probe, so-status
 # (packaging/server/status/), run with the hosted settings in deploy/swarmops.cc/config/, five
 # rounds a run, one a minute, then the page it makes deployed to Cloudflare Pages, project
@@ -5,8 +7,11 @@
 # page counts across runs; a page no run replaced reads stale by its own time. This workflow
 # runs no other repository script.
 #
-# Until the hosted settings file and every secret below exist (in the environment `hosted`), a
-# run leaves a notice, probes nothing and stays green.
+# Until the hosted settings file and every secret below exist (in the environment `hosted`), no
+# run can probe, so there is no schedule: a run every five minutes would be green having probed
+# nothing. A run started by hand then fails and names what is missing; a push of the probe's
+# files leaves a notice. With the settings in place, the schedule returns as `*/5 * * * *`: with
+# `so-status loop 5` that is one round a minute.
 #
 # Hardening as in ci.yml: actions pinned to a full commit SHA, no token permission a job does
 # not need, `actions/checkout` keeps no credentials. Runs on the maintainers' own host, through
@@ -19,9 +24,6 @@ on:
     paths:
       - "packaging/server/status/**"
       - ".github/workflows/status.yml"
-  schedule:
-    # Every 5 minutes; with `so-status loop 5` that is one round a minute.
-    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions: {}
@@ -54,7 +56,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # 1. No hosted settings or no secrets: a notice, and the job still succeeds.
+      # 1. No hosted settings or no secrets: nothing can be probed. A run started by hand fails
+      #    with the missing names; a push leaves them in a notice.
       - id: ready
         env:
           PROBE_SSH_KEY: ${{ secrets.PROBE_SSH_KEY }}
@@ -72,8 +75,12 @@ jobs:
             echo "ready=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "::notice title=Status not probed::missing: ${missing[*]}; nothing was probed or deployed."
           echo "ready=false" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            echo "::error title=Status not probed::missing: ${missing[*]}; nothing was probed or deployed."
+            exit 1
+          fi
+          echo "::notice title=Status not probed::missing: ${missing[*]}; nothing was probed or deployed."
 
       # 2. The settings: the hosted file, then the credentials and this run's paths.
       - if: steps.ready.outputs.ready == 'true'
