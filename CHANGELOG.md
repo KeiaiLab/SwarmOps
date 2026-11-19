@@ -80,7 +80,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - `check log --run RUN --run-lines DIR` finds a run through its run lines, from any working
   directory: its line's `run_dir` names where the run was kept. `details.reason` is `run` for a
   run the lines do not hold, `run_dir` for a line that names no directory of it, and `run_gone`,
-  with the names of what failed, once the host no longer keeps the run.
+  with the names of what failed, once the host no longer keeps the run. A run's `run.json` is
+  read as its logs are: a link is not followed, a FIFO or a device is `E_IO`, and a file past
+  64 MiB is no run's record.
 - API type `CheckRunLine`, the run line a check of a run leaves: when it started, its run, name,
   attempt, stage, tree, definition digest, wait, duration, outcome, exit code, findings, labels,
   sampled peak memory and run directory. `swarmops schema CheckRunLine` prints it (239 types).

@@ -232,6 +232,51 @@ fn a_log_that_is_not_a_regular_file_is_refused() {
     assert_eq!(fifo.code, "E_IO", "{fifo:?}");
 }
 
+/// A record that is not a regular file, or is longer than a run writes, as a run line may name
+/// a directory holding one: a link (to `/dev/zero`, which would never end) is not followed and
+/// a FIFO does not block the open, each `E_IO`; one past its bound is no record, and is read no
+/// further.
+#[test]
+fn a_record_that_no_run_wrote_is_not_read() {
+    let (_tmp, dir, runs) = tree(&failing(1));
+    let id = ran(&dir, &runs);
+    let record = runs.join(&id).join(RUN_FILE);
+    let kept = std::fs::read(&record).unwrap();
+    let read = || failed_logs(&runs, "--dir .", Some(&id), 5);
+
+    // 1. A link, and a FIFO no one writes.
+    std::fs::remove_file(&record).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", &record).unwrap();
+    let linked = read().unwrap_err();
+    assert_eq!(linked.code, "E_IO", "{linked:?}");
+    std::fs::remove_file(&record).unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(&record)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let fifo = read().unwrap_err();
+    assert_eq!(fifo.code, "E_IO", "{fifo:?}");
+    std::fs::remove_file(&record).unwrap();
+
+    // 2. A record past the bound, blanks after its text: no record; at the bound, read.
+    let padded = |len: u64| {
+        let mut file = std::fs::File::create(&record).unwrap();
+        file.write_all(&kept).unwrap();
+        let blanks = vec![b' '; usize::try_from(len).unwrap() - kept.len()];
+        file.write_all(&blanks).unwrap();
+    };
+    padded(MAX_RUN_RECORD_BYTES + 1);
+    let long = read().unwrap_err();
+    assert_eq!(
+        (long.code.as_str(), &long.details["reason"]),
+        ("E_INVALID_ARG", &"run".into()),
+        "{long:?}"
+    );
+    padded(MAX_RUN_RECORD_BYTES);
+    assert_eq!(read().unwrap().failed, ["c01"]);
+}
+
 /// The run of `dir` with its result, whatever its checks did.
 fn ran_whole(dir: &Utf8Path, runs: &Utf8Path) -> CheckRunResp {
     let mut opts = RunOpts::new(&nothing);

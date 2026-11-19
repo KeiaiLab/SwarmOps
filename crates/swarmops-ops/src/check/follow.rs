@@ -53,6 +53,12 @@ pub const MAX_FOLLOW_LINES: usize = 1_000;
 /// lines. A file longer than that was not written by a run, and its rest is never read.
 pub const READ_LIMIT: u64 = MAX_CHECK_LOG_BYTES + (1 << 20);
 
+/// The most bytes of a run's record read: a longer `run.json` is no record this build reads, and
+/// its rest is never read. The log's bound: some 30 MiB hold a run's 10,000 findings and 4 MiB of
+/// their text at their longest. It is a ceiling on what is read, not the most the limits allow:
+/// 1,000 checks of 1,000 sections each write more, and such a run is read from its logs.
+const MAX_RUN_RECORD_BYTES: u64 = MAX_CHECK_LOG_BYTES;
+
 /// The size of one read of a log.
 const READ_CHUNK: usize = 64 * 1024;
 
@@ -630,9 +636,10 @@ fn found_at(id: &str, dir: &Utf8Path) -> Result<Option<FoundRun>, OpError> {
     }))
 }
 
-/// The log at `path`, opened to read if it is a regular file: none while it is not there. A link
-/// is not followed and a FIFO does not block the open (`O_NOFOLLOW | O_NONBLOCK`); anything but a
-/// regular file is `E_IO`, since a check could put one at its log's path.
+/// The log, or the record, at `path`, opened to read if it is a regular file: none while it is
+/// not there. A link is not followed and a FIFO does not block the open (`O_NOFOLLOW |
+/// O_NONBLOCK`); anything but a regular file is `E_IO`, since a check could put one at its log's
+/// path, and a run line may name a directory holding one as its record.
 fn open_log(path: &Utf8Path) -> Result<Option<File>, OpError> {
     let file = match (OpenOptions::new().read(true))
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -650,11 +657,11 @@ fn open_log(path: &Utf8Path) -> Result<Option<File>, OpError> {
     Ok(Some(file))
 }
 
-/// `E_IO` for a log at `path` that is not a regular file.
+/// `E_IO` for a log or a record at `path` that is not a regular file.
 fn not_a_log(path: &Utf8Path) -> OpError {
     let mut error = error::error(
         ErrorCode::Io,
-        format!("{path} is not a regular file: no run wrote it as a log"),
+        format!("{path} is not a regular file: no run wrote it"),
     );
     error
         .details
@@ -663,14 +670,22 @@ fn not_a_log(path: &Utf8Path) -> OpError {
 }
 
 /// The record of the run in `dir`: its result and whether it ended; none when there is no record
-/// this build reads.
+/// this build reads, one past [`MAX_RUN_RECORD_BYTES`] among them. Opened as a log is: `E_IO`
+/// for anything but a regular file.
 fn read_record(dir: &Utf8Path) -> Result<Option<(CheckRunResp, bool)>, OpError> {
+    // 1. Read within its bound, and a byte, which tells a longer one.
     let path = dir.join(RUN_FILE);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(io_failed(&path, &e)),
+    let Some(file) = open_log(&path)? else {
+        return Ok(None);
     };
+    let mut bytes = Vec::new();
+    let read = (file.take(MAX_RUN_RECORD_BYTES + 1)).read_to_end(&mut bytes);
+    read.map_err(|e| io_failed(&path, &e))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_RUN_RECORD_BYTES {
+        return Ok(None);
+    }
+
+    // 2. Its result and its state.
     let Ok(mut record) = serde_json::from_slice::<Value>(&bytes) else {
         return Ok(None);
     };

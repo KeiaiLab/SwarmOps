@@ -244,7 +244,9 @@ counted in the `end` line's `dropped_bytes`, not written; the outcome stands. A 
 A reader reads a log as a stream, keeping only the lines it gives, and no further than 65 MiB
 from its start, which no run writes past: a longer file, which a check writing to its own log's
 path could leave, counts only the lines within that. A log that is not a regular file (a link,
-which is not followed, a FIFO, a device) is `E_IO`.
+which is not followed, a FIFO, a device) is `E_IO`. A run's `run.json` is read the same way: one
+that is not a regular file is `E_IO`, and one longer than 64 MiB is not read, its run as one that
+is not there.
 
 The format is SwarmOps' own and provisional: it may change before logs are kept beside the store.
 
