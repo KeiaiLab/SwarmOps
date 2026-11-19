@@ -13,6 +13,10 @@
 //!
 //! A pattern names paths as they are, byte for byte, whatever the check's `dir`. A path matches
 //! a check's inputs when any pattern does; its *first match* is the first one in declared order.
+//! [`resolve`] gives the entries of a changeset's tree that a check's inputs match, and
+//! [`resolve_paths`] the same match over a list of paths.
+
+use swarmops_api::{EntryKindOut, OpError, ReadTreeReq, StoreOps};
 
 use super::{MAX_CHECK_INPUTS, MAX_INPUT_PATTERN_BYTES};
 use crate::pattern::{DEEP, Pattern};
@@ -58,6 +62,129 @@ impl Inputs {
     pub fn matches(&self, path: &str) -> bool {
         self.whole_tree() || self.first_match(path).is_some()
     }
+
+    /// Whether a path below the directory `dir` could be among the inputs: a pattern reaches
+    /// below it, or there is none.
+    fn reach_below(&self, dir: &str) -> bool {
+        let segments: Vec<&str> = dir.split('/').collect();
+        self.whole_tree()
+            || (self.patterns.iter()).any(|pattern| pattern.could_match_below(&segments))
+    }
+}
+
+/// The entries of a tree that a check's inputs match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Resolved {
+    /// The paths of the matched entries, from the tree's root, in tree order: directory by
+    /// directory, a directory's entries by name, bytewise.
+    pub entries: Vec<String>,
+    /// Whether more entries match than `entries` holds: the walk stopped at its limit. A caller
+    /// that needs every entry and gets `truncated` must fail closed: take the check's inputs as
+    /// not known, never as the entries listed.
+    pub truncated: bool,
+}
+
+/// The entries of changeset `id`'s tree that `inputs` match, at most `limit` of them, in tree
+/// order. An entry is a file, an executable or a symbolic link; a directory is none, so `docs`
+/// matches a file named `docs` and nothing below a directory of that name. No pattern gives
+/// every entry.
+///
+/// ```text
+///   read_tree(id, dir, depth 1), every page ─▶ each entry, by name:
+///       a file, an executable, a link ─ a pattern matches its path ─▶ listed
+///       a directory ─ a pattern could match below it ─▶ walked next, before its siblings
+///                   └ none could ─▶ never read
+/// ```
+///
+/// Reads the store and writes nothing. A store error is the error; a tree deeper than
+/// [`MAX_TREE_DEPTH`](swarmops_api::MAX_TREE_DEPTH) is the store's own refusal.
+pub fn resolve(
+    store: &dyn StoreOps,
+    id: &str,
+    inputs: &Inputs,
+    limit: usize,
+) -> Result<Resolved, OpError> {
+    let mut walk = Walk {
+        store,
+        id,
+        inputs,
+        limit,
+        found: Resolved {
+            entries: Vec::new(),
+            truncated: false,
+        },
+    };
+    walk.directory(None)?;
+    Ok(walk.found)
+}
+
+/// The paths of `paths` that `inputs` match, in the order given: [`resolve`]'s match over a list
+/// of paths, not a tree.
+pub fn resolve_paths<'p>(inputs: &Inputs, paths: impl Iterator<Item = &'p str>) -> Vec<&'p str> {
+    paths.filter(|path| inputs.matches(path)).collect()
+}
+
+/// The most entries of a directory read at once.
+const TREE_PAGE: usize = 1_000;
+
+/// A walk of one tree for [`resolve`].
+struct Walk<'w> {
+    /// The store read.
+    store: &'w dyn StoreOps,
+    /// The changeset whose tree is walked, a full id.
+    id: &'w str,
+    /// The inputs matched.
+    inputs: &'w Inputs,
+    /// The most entries to list.
+    limit: usize,
+    /// What matched so far.
+    found: Resolved,
+}
+
+impl Walk<'_> {
+    /// Walks the directory at `dir` (none: the root), every page of it, and the directories
+    /// below it that a pattern can reach. `false` once the limit stopped the walk.
+    fn directory(&mut self, dir: Option<&str>) -> Result<bool, OpError> {
+        let mut cursor = None;
+        loop {
+            // 1. One page of the directory's own entries, in the tree's order.
+            let mut req = ReadTreeReq::new(self.id);
+            req.path = dir.map(str::to_owned);
+            req.limit = TREE_PAGE;
+            req.cursor = cursor;
+            let page = self.store.read_tree(req)?;
+
+            // 2. Each entry: a directory walked if a pattern reaches below it, any other
+            //    entry listed if one matches it.
+            for entry in &page.entries {
+                let path = match dir {
+                    Some(dir) => format!("{dir}/{}", entry.name),
+                    None => entry.name.clone(),
+                };
+                if entry.kind == EntryKindOut::Dir {
+                    if self.inputs.reach_below(&path) && !self.directory(Some(&path))? {
+                        return Ok(false);
+                    }
+                    continue;
+                }
+                if !self.inputs.matches(&path) {
+                    continue;
+                }
+                if self.found.entries.len() == self.limit {
+                    self.found.truncated = true;
+                    return Ok(false);
+                }
+                self.found.entries.push(path);
+            }
+
+            // 3. The next page, if any.
+            cursor = page.cursor.filter(|_| page.truncated);
+            if cursor.is_none() {
+                return Ok(true);
+            }
+        }
+    }
 }
 
 /// The pattern `text`, or what is wrong with it: more than [`MAX_INPUT_PATTERN_BYTES`] bytes, a
@@ -94,3 +221,6 @@ fn rule(text: &str) -> Result<Pattern, String> {
     };
     Err(format!("not a pattern: {why}"))
 }
+
+#[cfg(test)]
+mod tests;

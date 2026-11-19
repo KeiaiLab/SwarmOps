@@ -61,10 +61,6 @@ impl Pattern {
     /// Whether a name below the directory `dir` (its segments, from the root) could match: the
     /// pattern's first segments match the directory's, and it has more segments or ends in `**`.
     /// So `web/*/x` could match below `web` and `web/app`, not below `docs` or `web/app/x`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "a check's inputs are its first caller")
-    )]
     pub(crate) fn could_match_below(&self, dir: &[&str]) -> bool {
         // 1. A trailing `**` takes every depth once the segments before it match.
         if let Some((last, head)) = self.segments.split_last()
