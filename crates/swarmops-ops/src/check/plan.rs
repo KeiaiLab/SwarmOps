@@ -16,9 +16,10 @@
 //! ```
 //!
 //! The subjects: a changeset against its target ([`plan`]: what it changed since their merge
-//! base), and the changed paths the caller gives with the check file of a directory
-//! ([`plan_dir`], vouched). Planning reads only: no lock is taken and nothing is written. A plan
-//! informs: `check run` runs every check of its stage, whatever a plan says.
+//! base); a change as `land_check` lands it (`landed`: the item's paths and tree); and the
+//! changed paths the caller gives with the check file of a directory ([`plan_dir`], vouched).
+//! Planning reads only: no lock is taken and nothing is written. A plan informs: `check run`
+//! runs every check of its stage, whatever a plan says.
 //!
 //! A plan fails closed (M30-5). Changed paths that are unknown, cut or unreadable, a target
 //! whose check file does not read, and a check file changed where it cannot be compared widen
@@ -32,11 +33,12 @@ use camino::Utf8Path;
 use serde_json::json;
 use swarmops_api::{
     CheckDefinitionChange, CheckPlanOut, CheckPlanReason, CheckPlanReq, CheckPlanResp,
-    CheckPlanSubject, CheckPlanVerdict, CheckPlanWidened, CheckStage, ErrorCode, MergeBaseReq,
-    OpError, ResolveRevReq, Rev, ShowReq, StoreOps,
+    CheckPlanSubject, CheckPlanVerdict, CheckPlanWidened, CheckStage, ErrorCode, ItemOutcome,
+    LandCheckItemOut, LandCheckReq, LandCheckResp, LandItemIn, MergeBaseReq, OpError, PathChange,
+    ResolveRevReq, Rev, ShowReq, StoreOps,
 };
 
-use super::changed::{Changed, Sep};
+use super::changed::{CHECK_FILE_PATHS, Changed, Sep};
 use super::inputs::Inputs;
 use super::{Check, checks_at, checks_in};
 use crate::error;
@@ -284,21 +286,25 @@ fn by_paths(
 ///
 /// The candidate's check file not reading is `E_CHECK_FILE`: its checks cannot be listed
 /// without it. The target's not reading widens the plan.
+///
+/// With `req.landed`, the change is planned as `land_check` lands it from `req.base`: the
+/// item's paths and tree, not the changeset's own.
 pub fn plan(store: &dyn StoreOps, req: CheckPlanReq) -> Result<CheckPlanResp, OpError> {
+    if req.landed {
+        return plan_landed(store, req);
+    }
     let CheckPlanReq {
         rev,
         target,
-        landed,
         base,
         stage,
         checks,
         ..
     } = req;
-    if landed || base.is_some() {
-        return Err(invalid(
-            "a plan of a change as it would land is not built yet".to_owned(),
-            "landed",
-        ));
+    if base.is_some() {
+        let what = "base says where a land's change starts: it is taken with landed alone";
+        return Err(invalid(what.to_owned(), "base")
+            .with_hint("give --landed with --base, or leave --base out"));
     }
 
     // 1. Both sides, each resolved once; the candidate's checks and its tree.
@@ -344,6 +350,96 @@ pub fn plan(store: &dyn StoreOps, req: CheckPlanReq) -> Result<CheckPlanResp, Op
     resp.changed = changed.count();
     resp.widened = cause_of(&against, &changed);
     only(resp, &checks, &candidate, &id)
+}
+
+/// The plan of `stage` for `rev` as `land_check` lands it on `target` from `base`: the item's
+/// paths are the changed paths and its root the tree. A change with nothing to land, or one
+/// already landed, changes no path. One that conflicts has no landed tree: `E_CONFLICT`, with
+/// the item's report, and no plan.
+///
+/// No changeset names the landed tree, so its check file is read where the item's paths say
+/// it comes from:
+///
+/// ```text
+///   neither check file among the paths    the target's head's files     read at onto
+///   one added, modified or deleted        the change's                  read at rev
+///   one merged, or the paths cut          in no changeset: read at rev, and the plan widened
+/// ```
+fn plan_landed(store: &dyn StoreOps, req: CheckPlanReq) -> Result<CheckPlanResp, OpError> {
+    let CheckPlanReq {
+        rev,
+        target,
+        base,
+        stage,
+        checks,
+        ..
+    } = req;
+
+    // 1. What landing the one change would come to.
+    let mut change = LandItemIn::new(rev);
+    change.base = base;
+    let mut check = LandCheckReq::new(vec![change]);
+    check.target.clone_from(&target);
+    let LandCheckResp { onto, items, .. } = store.land_check(check)?;
+    let Some(item) = items.into_iter().next() else {
+        let what = "land_check answered no item for the one change";
+        return Err(error::error(ErrorCode::Internal, what));
+    };
+    if item.outcome == ItemOutcome::Conflict {
+        return Err(conflicts(&item, &target, &onto));
+    }
+
+    // 2. The item's paths, in path order, and where they say the landed tree's check file is.
+    let mut changed = Changed::none();
+    let mut file_at = onto.as_str();
+    for path in (item.paths.iter()).filter(|path| CHECK_FILE_PATHS.contains(&path.path.as_str())) {
+        file_at = item.head.as_str();
+        if path.change == PathChange::Merged {
+            changed.widen(CheckPlanWidened::CheckFileChanged);
+        }
+    }
+    if item.paths_truncated {
+        file_at = item.head.as_str();
+        changed.widen(CheckPlanWidened::PathsTruncated);
+    }
+    let (file, version, candidate) = checks_at(store, file_at)?;
+    let mut matcher = Matcher::new(stage, &candidate);
+    for path in &item.paths {
+        changed.path(&path.path, &mut |path| matcher.see(path));
+    }
+
+    // 3. The definitions at the target's head, and the plan.
+    let theirs = target_at(store, &onto)?;
+    let against = theirs.as_deref().map_or(Target::Unread, Target::Checks);
+    let mut resp = CheckPlanResp::new(false, CheckPlanSubject::Landed, stage);
+    resp.checks = decide(stage, &candidate, against, &matcher, &changed);
+    resp.rev = Some(item.head.clone());
+    resp.tree = item.root.filter(|_| item.outcome == ItemOutcome::Clean);
+    resp.target = Some(target);
+    resp.onto = Some(onto);
+    resp.outcome = Some(item.outcome);
+    resp.file = file.map(str::to_owned);
+    resp.version = version;
+    resp.changed = changed.count();
+    resp.widened = cause_of(&against, &changed);
+    only(resp, &checks, &candidate, &item.head)
+}
+
+/// `E_CONFLICT` for the change `item`, which conflicts with `target` at its head `onto`: the
+/// item's report in `details.report`, as a land gives it, and `details.onto`.
+fn conflicts(item: &LandCheckItemOut, target: &str, onto: &str) -> OpError {
+    let report = serde_json::to_value(&item.report).unwrap_or_default();
+    let what = format!(
+        "{} conflicts with {target}: there is no landed tree to plan",
+        item.head
+    );
+    let mut error = error::error(ErrorCode::Conflict, what).with_hint(format!(
+        "swarmops land-check {} --target {target} shows the conflict; resolve it, then plan again",
+        item.head
+    ));
+    error.details.insert("report".to_owned(), report);
+    error.details.insert("onto".to_owned(), onto.into());
+    error
 }
 
 /// The changed paths the caller of the directory form gives.

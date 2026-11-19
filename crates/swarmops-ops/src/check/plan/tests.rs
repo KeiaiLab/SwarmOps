@@ -6,7 +6,7 @@ use serde_json::json;
 use swarmops_api::{
     ChangeInput, ChangeOp, CheckDefinitionChange, CheckPlanOut, CheckPlanReason, CheckPlanReq,
     CheckPlanResp, CheckPlanSubject, CheckPlanVerdict, CheckPlanWidened, CheckStage, CommitReq,
-    ContentInput, Identity, OpError, StoreOps,
+    ContentInput, ErrorCode, Identity, ItemOutcome, LandReq, OpError, ShowReq, StoreOps,
 };
 
 use super::{Given, Matcher, Target, cause_of, decide, plan, plan_dir};
@@ -934,6 +934,241 @@ fn a_target_whose_file_does_not_read_widens_the_plan() {
 
     let error = error_of(plan(&ops, CheckPlanReq::new("main")));
     assert_eq!(error.code, "E_CHECK_FILE", "the candidate's: {error:?}");
+}
+
+// A change as `land_check` lands it.
+
+/// `main` moved by `changes`, on its head `parent`: the target's new head.
+fn advance(ops: &LocalOps, who: &Identity, parent: &str, changes: Vec<ChangeInput>) -> String {
+    let mut req = CommitReq::new(changes, "target".to_owned());
+    req.parent = Some(parent.into());
+    req.advance = Some("main".to_owned());
+    ops.commit(who, req).unwrap().changeset
+}
+
+/// The landed plan of `rev` onto `main`.
+fn landed(ops: &LocalOps, rev: &str) -> Result<CheckPlanResp, OpError> {
+    let mut req = CheckPlanReq::new(rev);
+    req.landed = true;
+    plan(ops, req)
+}
+
+/// Lands `rev` on `main` for real, and holds `planned` to what landed: its tree is the landed
+/// changeset's, and each of its checks has the digest the landed tree's check file gives it.
+#[track_caller]
+fn assert_lands_as_planned(ops: &LocalOps, who: &Identity, rev: &str, planned: &CheckPlanResp) {
+    let done = ops.land(who, LandReq::new(rev)).unwrap();
+    let mut show = ShowReq::new(done.landed.as_str());
+    show.max_changes = 1;
+    assert_eq!(planned.tree, Some(ops.show(show).unwrap().root), "the tree");
+    let (_, _, held) = crate::check::checks_at(ops, &done.landed).unwrap();
+    for check in held.iter().filter(|check| check.is_of(planned.stage)) {
+        let digest = check.definition_digest();
+        assert_eq!(
+            entry(&planned.checks, &check.name).definition_digest,
+            digest
+        );
+    }
+}
+
+/// A clean change that leaves the check file alone is planned on the paths `land_check` gives
+/// for it and the tree it would land, with the target's own check file.
+#[test]
+fn a_landed_plan_takes_the_item_s_paths_and_tree() {
+    let (_dir, ops, who, main) = store();
+    let change = commit(&ops, &who, &main, vec![put("docs/guide.md", "edit\n")]);
+    let theirs = vec![
+        put("crates/a/src/lib.rs", "target\n"),
+        put(".swarmops/checks.toml", MODIFIED),
+    ];
+    let onto = advance(&ops, &who, &main, theirs);
+    let resp = landed(&ops, &change).unwrap();
+    assert_eq!(
+        (resp.vouched, resp.subject, resp.outcome),
+        (false, CheckPlanSubject::Landed, Some(ItemOutcome::Clean))
+    );
+    assert_eq!(resp.rev.as_deref(), Some(change.as_str()));
+    assert_eq!(resp.onto.as_deref(), Some(onto.as_str()));
+    assert_eq!((resp.target.as_deref(), &resp.base), (Some("main"), &None));
+    assert_eq!((resp.changed, resp.widened), (1, None));
+    assert_eq!(
+        verdicts(&resp.checks),
+        [
+            ("docs", RUN, INPUT_CHANGED),
+            ("site", RUN, INPUT_CHANGED),
+            ("unit", RUN, NO_INPUTS)
+        ]
+    );
+    assert_eq!(resp.checks[0].path.as_deref(), Some("docs/guide.md"));
+
+    // The target changed `unit` since the base and the change left the file alone: the landed
+    // tree holds the target's file, so no definition differs from the target's head's.
+    let unit = entry(&resp.checks, "unit");
+    assert_eq!(unit.definition_digest, digest_in(MODIFIED, "unit"));
+
+    // The target named is the one the change is landed on: one that is not there is an error.
+    let mut elsewhere = CheckPlanReq::new(change.as_str());
+    elsewhere.landed = true;
+    elsewhere.target = "release/none".to_owned();
+    let error = error_of(plan(&ops, elsewhere));
+    assert_ne!(error.code, "E_CONFLICT", "{error:?}");
+
+    // The landed tree is neither side's: it holds the target's crate file and the change's
+    // docs file. A plan of the changeset names the candidate's own tree instead.
+    let unlanded = plan(&ops, CheckPlanReq::new(change.as_str())).unwrap();
+    assert_ne!(resp.tree, unlanded.tree);
+    assert_lands_as_planned(&ops, &who, &change, &resp);
+}
+
+/// A change that modified the check file, on a target that left it alone: the landed tree
+/// holds the change's file, read at the candidate, and its definitions are compared.
+#[test]
+fn a_landed_plan_reads_a_check_file_the_change_modified() {
+    let (_dir, ops, who, main) = store();
+    let change = commit(
+        &ops,
+        &who,
+        &main,
+        vec![put(".swarmops/checks.toml", MODIFIED)],
+    );
+    advance(
+        &ops,
+        &who,
+        &main,
+        vec![put("crates/a/src/lib.rs", "target\n")],
+    );
+    let resp = landed(&ops, &change).unwrap();
+    assert_eq!(
+        (resp.outcome, resp.widened),
+        (Some(ItemOutcome::Clean), None)
+    );
+    let unit = entry(&resp.checks, "unit");
+    assert_eq!((unit.verdict, unit.reason), (RUN, DEFINITION_CHANGED));
+    assert_eq!(unit.definition, Some(CheckDefinitionChange::Modified));
+    assert_eq!(unit.definition_digest, digest_in(MODIFIED, "unit"));
+    assert_eq!(entry(&resp.checks, "docs").verdict, NOT_APPLICABLE);
+    assert_lands_as_planned(&ops, &who, &change, &resp);
+}
+
+/// A change and a target that both changed the check file, merging cleanly: the merged file
+/// is in no changeset, so it is read at the candidate and the whole plan is widened.
+#[test]
+fn a_landed_plan_widens_when_the_check_file_merged() {
+    let (_dir, ops, who, main) = store();
+    let top = TARGET.replacen("# The check file", "# A check file", 1);
+    assert_ne!(top, TARGET);
+    let change = commit(&ops, &who, &main, vec![put(".swarmops/checks.toml", &top)]);
+    let bottom = format!("{TARGET}\n[check.lint]\nargv = [\"cargo\", \"clippy\"]\n");
+    advance(
+        &ops,
+        &who,
+        &main,
+        vec![put(".swarmops/checks.toml", &bottom)],
+    );
+    let resp = landed(&ops, &change).unwrap();
+    assert_eq!(resp.outcome, Some(ItemOutcome::Clean));
+    let merged = Some(CheckPlanWidened::CheckFileChanged);
+    assert_eq!(resp.widened, merged);
+    for check in &resp.checks {
+        assert_eq!(check.verdict, RUN, "{check:?}");
+    }
+    assert_eq!(entry(&resp.checks, "docs").widened, merged);
+
+    // The target's added check is not in the candidate's file: listed all the same, deleted.
+    let lint = entry(&resp.checks, "lint");
+    assert_eq!(lint.definition, Some(CheckDefinitionChange::Deleted));
+    let done = ops.land(&who, LandReq::new(change.as_str())).unwrap();
+    let mut show = ShowReq::new(done.landed.as_str());
+    show.max_changes = 1;
+    assert_eq!(resp.tree, Some(ops.show(show).unwrap().root));
+}
+
+/// A change the target already holds has nothing to land: no path changes, so no check is
+/// needed, and no tree is named.
+#[test]
+fn a_landed_plan_of_nothing_to_land_needs_no_check() {
+    let (_dir, ops, who, main) = store();
+    let change = commit(&ops, &who, &main, vec![put("docs/guide.md", "edit\n")]);
+    ops.land(&who, LandReq::new(change.as_str())).unwrap();
+    for rev in [change.as_str(), main.as_str(), "main"] {
+        let resp = landed(&ops, rev).unwrap();
+        assert_eq!(resp.outcome, Some(ItemOutcome::NothingToLand), "{rev}");
+        assert_eq!(
+            (resp.changed, resp.widened, &resp.tree),
+            (0, None, &None),
+            "{rev}"
+        );
+        assert_eq!(
+            verdicts(&resp.checks),
+            [
+                ("docs", NOT_APPLICABLE, INPUTS_UNCHANGED),
+                ("site", NOT_APPLICABLE, INPUTS_UNCHANGED),
+                ("unit", NOT_APPLICABLE, INPUTS_UNCHANGED)
+            ],
+            "{rev}"
+        );
+    }
+}
+
+/// A change that conflicts has no landed tree: `E_CONFLICT` with the item's report and the
+/// target's head, and no plan.
+#[test]
+fn a_landed_plan_of_a_conflict_is_an_error() {
+    let (_dir, ops, who, main) = store();
+    let change = commit(&ops, &who, &main, vec![put("docs/guide.md", "ours\n")]);
+    let onto = advance(&ops, &who, &main, vec![put("docs/guide.md", "theirs\n")]);
+    let error = error_of(landed(&ops, &change));
+    assert_eq!(error.code, "E_CONFLICT", "{error:?}");
+    assert_eq!(error.exit, ErrorCode::Conflict.exit(), "{error:?}");
+    assert_eq!(error.details["onto"], onto.as_str());
+    assert_eq!(error.details["report"]["files"][0]["path"], "docs/guide.md");
+    let hint = error.hint.unwrap();
+    assert!(hint.starts_with("swarmops land-check "), "{hint}");
+}
+
+/// A land-check item lists at most 1,000 paths: a change of 1,001 is cut, and the plan widened.
+#[test]
+fn a_landed_plan_of_more_paths_than_an_item_lists_is_widened() {
+    let (_dir, ops, who, main) = store();
+    let many = |n: usize| -> Vec<ChangeInput> {
+        (0..n)
+            .map(|i| put(&format!("data/f{i:04}"), "x\n"))
+            .collect()
+    };
+    let whole = commit(&ops, &who, &main, many(1_000));
+    let resp = landed(&ops, &whole).unwrap();
+    assert_eq!((resp.changed, resp.widened), (1_000, None));
+    assert_eq!(entry(&resp.checks, "docs").verdict, NOT_APPLICABLE);
+
+    let cut = commit(&ops, &who, &main, many(1_001));
+    let resp = landed(&ops, &cut).unwrap();
+    let truncated = Some(CheckPlanWidened::PathsTruncated);
+    assert_eq!((resp.changed, resp.widened), (1_000, truncated));
+    assert!(
+        resp.checks
+            .iter()
+            .all(|c| c.verdict == RUN && c.widened == truncated)
+    );
+}
+
+/// `base` says where a land's change starts, so it is taken with `landed` alone; with it, the
+/// plan is of the change since that base.
+#[test]
+fn a_base_is_taken_with_landed_alone() {
+    let (_dir, ops, who, main) = store();
+    let first = commit(&ops, &who, &main, vec![put("docs/guide.md", "edit\n")]);
+    let second = commit(&ops, &who, &first, vec![put("web/app/page.tsx", "edit\n")]);
+    let mut req = CheckPlanReq::new(second.as_str());
+    req.base = Some(first.as_str().into());
+    let error = error_of(plan(&ops, req.clone()));
+    assert_eq!(error.code, "E_INVALID_ARG", "{error:?}");
+    assert_eq!(error.details["reason"], "base");
+
+    req.landed = true;
+    let resp = plan(&ops, req).unwrap();
+    assert_eq!(resp.changed, 1, "the second commit's path alone");
+    assert_eq!(entry(&resp.checks, "docs").verdict, NOT_APPLICABLE);
+    assert_eq!(entry(&resp.checks, "site").reason, INPUT_CHANGED);
 }
 
 /// An error is no plan: a revision or a target that names nothing, a candidate whose check
