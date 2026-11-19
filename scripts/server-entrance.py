@@ -54,6 +54,7 @@ READY = "/run/entrance-ready"
 READY_WAIT_S = 60
 COMMAND_WAIT_S = 600
 ENTRANCES = ("ssh", "https")
+SO_HTTPS_LOGIN = "ada"
 PLANT_AUTH_OFF = "auth_off"
 HTTPS_PROMPT = "could not read Password"
 HTTPS_REFUSED = "Authentication failed"
@@ -223,6 +224,17 @@ class Site:
         if entrance == "ssh":
             return f"ssh://so-{who}/{store}.git"
         return f"https://{who}@so-host/{store}.git"
+
+    def so_url(self, entrance: str, who: str, store: str) -> str:
+        """The store's address for `so`, which refuses a URL with a user part. Over ssh the
+        alias names `who`; over https the client's stored logins answer the bare host with
+        their first, ada's."""
+        if entrance == "ssh":
+            return self.url(entrance, who, store)
+        check(who == SO_HTTPS_LOGIN, f"so over https logs in as {SO_HTTPS_LOGIN}, not {who}")
+        address = f"https://so-host/{store}.git"
+        check("@" not in address, f"so's https address holds a user part: {address}")
+        return address
 
     def serving(self, argv: list[str], stdin: str = "") -> Ran:
         """`argv` as the serving account."""
@@ -439,7 +451,8 @@ def so_clone_fetch_push_over_serve(site: Site) -> None:
         local = f"local-{entrance}"
 
         # 1. The clone imports main as the seed's history.
-        cloned = site.so_ok(["--as", f"person/ada-{entrance}", "clone", url, "--into", local])
+        so_url = site.so_url(entrance, "ada", store)
+        cloned = site.so_ok(["--as", f"person/ada-{entrance}", "clone", so_url, "--into", local])
         check(cloned["fetch"]["head"]["sha"] == seed, f"{entrance}: clone: {cloned}")
 
         # 2. A native change pushed: the remote serves it.
