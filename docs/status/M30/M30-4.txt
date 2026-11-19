@@ -1,0 +1,2 @@
+check plan marks each check of a stage run or not_applicable with one reason, for a changeset, a workspace, a land-check item or a directory's paths.
+commit c95f82b7749da0161c1684c3c00251341dbedc97

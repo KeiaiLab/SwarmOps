@@ -108,7 +108,7 @@ Native sync is M11, planned.
 | Remotes, remote state and `sync` | 2, 3 | Built for git remotes (M13): `remotes.toml`, the mirror's refs, `so sync` | M13 (done), M11 (store remotes) |
 | Ref names beyond `main` and `release/<name>`, and tags | 1, 3 | Built (M6): free-form branches, `tags/<path>` and `remote/<remote>/<path>` in a `FORMAT 2` store; the git side maps them (M14): `git import`, `git export` and `serve` take branches and lightweight tags | M6 (done), M14 (done) |
 | Access control and identities for remote callers | 1, 3 | Built (M14): the store's `access.toml`, the caller named by the key line or the web server, `E_AUTH` and `E_POLICY_DENIED` | M14 (done), M11 |
-| Checks: a description of what runs for a tree | — | `.swarmops/checks.toml` with stages, `check list`, `check run` with findings and JUnit and SARIF reports, `check log`, run lines and `check runs` (M30-1, M30-2, M30-6, M31-1 to M31-5, M31-11 to M31-13); a checked land runs one command, the `check.argv` of `.swarmops/workspaces.json` | M30, M31 |
+| Checks: a description of what runs for a tree | — | `.swarmops/checks.toml` with stages and declared inputs, `check list`, `check plan`, which says which checks a change needs and fails closed, `check run` with findings and JUnit and SARIF reports, `check log`, run lines and `check runs` (M30-1 to M30-6, M31-1 to M31-5, M31-11 to M31-13); a plan informs and no run or land acts on one; a checked land runs one command, the `check.argv` of `.swarmops/workspaces.json` | M30, M31 |
 | Checks: results on a tree | — | Not built | M7, M32 |
 | Checks: triggers | — | Not built | M33 |
 | Checks: runners | — | Not built | M34 |
@@ -179,8 +179,9 @@ change feed exists. The benchmark gate (condition 3) runs in the weekly Schedule
 [Checks and delivery](#checks-and-delivery) (M30 to M40) is planned; of it, the check file and
 `check list` (M30-1 and M30-2, step 1 of the first steps), a check's stages, `check run`, the
 environment a check gets and its log with `check log` (M30-6 and M31-1 to M31-3, step 2), a
-check's findings with its JUnit and SARIF reports (M31-4 and M31-5, step 3), and the run line each
-check of a run leaves, with `check runs` and `check log --failed` (M31-11 to M31-13, step 4) are
+check's findings with its JUnit and SARIF reports (M31-4 and M31-5, step 3), the run line each
+check of a run leaves, with `check runs` and `check log --failed` (M31-11 to M31-13, step 4), and
+a check's declared inputs with `check plan`, which fails closed (M30-3 to M30-5, step 5) are
 on `stable` and in no release yet, and nothing else is built. Step 2's CI half, the `check` job
 starting the gate with `check run` and a pinned build, waits for the first release that holds
 `check run`. It
@@ -706,7 +707,9 @@ for the maintainers ([Risks and open questions](#risks-and-open-questions-3)).
 
 ### What people and agents type
 
-Planned and provisional: none of these commands exists, and each milestone's plan fixes its names.
+Planned and provisional: of these commands, `check plan` and `check run` exist (`check run` runs
+every check of its stage, and takes no plan yet); the others do not, and each milestone's plan
+fixes its names.
 
 ```sh
 so check plan my-change                        # which checks this change needs, and why
@@ -869,10 +872,10 @@ store and freezes nothing in the hash contract. 17 units.
 | --- | --- | --- | --- |
 | M30-1 | The check file `.swarmops/checks.toml`, `version = 1`: named checks, each one argv with no shell, a directory and a timeout; read from the store at a named changeset, or with `--dir` from a directory, in which case every answer says the caller vouched for the file | M5 | on stable |
 | M30-2 | `check list`: the checks of a changeset's file, or of a directory's, each with the digest of its definition | M30-1 | on stable |
-| M30-3 | Declared inputs: a check's path patterns, in the access file's `*` and `**` grammar, resolve against a tree to the entries they match; no pattern means the whole tree | M30-1 | planned |
-| M30-4 | `check plan`: for a changeset against its target, a workspace's edits, a `land-check` item or, in the directory form, a list of changed paths, each check marked `run` or `not_applicable` with one reason from a closed set; no lock, nothing written | M30-3, M18 | planned |
-| M30-5 | Planning fails closed: unresolvable inputs, an unreadable path, a renamed or deleted definition, or a definition that differs from the one at the target's head widen the check to `run`, with the reason `widened` or `definition_changed`; a check whose definition changed is never `not_applicable` or `reused` for that land; an error never yields an empty plan | M30-4 | planned |
-| M30-6 | Stages: a check names when its answer is needed, `before-land`, `after-land`, `scheduled`, `release`, `manual` or `deploy`; `check plan --stage` | M30-1 | on stable (`check plan --stage` with M30-4) |
+| M30-3 | Declared inputs: a check's path patterns, in the access file's `*` and `**` grammar, resolve against a tree to the entries they match; no pattern means the whole tree | M30-1 | on stable |
+| M30-4 | `check plan`: for a changeset against its target, a workspace's edits, a `land-check` item or, in the directory form, a list of changed paths, each check marked `run` or `not_applicable` with one reason from a closed set; no lock, nothing written | M30-3, M18 | on stable |
+| M30-5 | Planning fails closed: unresolvable inputs, an unreadable path, a renamed or deleted definition, or a definition that differs from the one at the target's head widen the check to `run`, with the reason `widened` or `definition_changed`; a check whose definition changed is never `not_applicable` or `reused` for that land; an error never yields an empty plan | M30-4 | on stable |
+| M30-6 | Stages: a check names when its answer is needed, `before-land`, `after-land`, `scheduled`, `release`, `manual` or `deploy`; `check plan --stage` | M30-1 | on stable |
 | M30-7 | Order between checks: `needs` lists the checks that go first; a failed need skips its dependants unless they say `always`; a cycle is refused at parse | M30-1 | planned |
 | M30-8 | Variants: a check expands over declared value lists into named variants, with exclusions, added combinations, a cap on the count and a stop-at-first-failure switch | M30-1 | planned |
 | M30-9 | Runner requirements: a check names the labels its runner must hold and a size hint; `check plan` reports them | M30-1 | planned |
@@ -1205,7 +1208,13 @@ job still runs `just check` and uploads the same report. Since step 4 a gate sta
 directory `SWARMOPS_CHECK_RUN_LINES_DIR` names, which `check runs` and `check log --failed` read;
 CI's `check` job, which still runs `just check`, leaves none until it makes step 2's switch, and
 the runners then set that variable to a directory of the operator's, outside every checkout. No
-baseline is read from the lines yet: [perf.md](perf.md) holds no figure for them.
+baseline is read from the lines yet: [perf.md](perf.md) holds no figure for them. Since step 5
+its site and server checks declare, as `inputs`, the paths `site.yml`'s `scope` job and
+`server.yml`'s trigger already decide by, and `check plan --dir . --stage manual` over a list of
+changed paths says which of them a change needs; a test holds the lists equal. Neither workflow
+asks it yet: `check plan` is not one of the commands a job may run with the build under test, so
+`freshness.py scope` and `server.yml`'s `paths` keep deciding until a pinned build holds the
+command.
 
 **Two tracks.** Track A, steps 1 to 8, runs inside the jobs GitHub starts, with no store: it uses
 the directory form, writes nothing to any store, needs no new record kind and freezes nothing in

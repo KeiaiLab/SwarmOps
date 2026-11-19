@@ -1,0 +1,2 @@
+A check declares its inputs as path patterns in the access file's grammar; they resolve against a tree, and no pattern means the whole tree.
+commit d8509afc8a627b997f71983873bb4ad625c058cd

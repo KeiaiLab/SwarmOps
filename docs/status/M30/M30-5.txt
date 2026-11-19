@@ -1,0 +1,2 @@
+A plan fails closed: unknown, cut or unreadable paths and a changed, renamed or deleted definition give run, and an error gives no plan.
+commit a6e05a588d5a804b52452d399ecab1bab0f9ef86
