@@ -108,6 +108,14 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - The MCP tool `check_list`'s description says that a check's declared JUnit and SARIF reports
   are listed.
 
+### Fixed
+
+- A native `sync` or `fetch` that lost a race to another host's push no longer ends in
+  `E_REV_NOT_FOUND` (`not_a_ref_head`, exit 6, not retryable). The upstream refuses a `wire_list`
+  for a head that is no ref's head any more, and a ref that moved between the fetch's `wire_refs`
+  and its `wire_list` was that case; the fetch now reads the refs again (up to 8 times, then
+  `E_BUSY`, retryable).
+
 ## [0.13.0] - 2026-11-18
 
 A landing queue on a local store: `queue enqueue`, `status`, `withdraw`, `wait` and `run` check
