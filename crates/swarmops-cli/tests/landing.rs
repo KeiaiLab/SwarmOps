@@ -12,13 +12,13 @@
 use std::collections::BTreeMap;
 use std::sync::Barrier;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
 use swarmops_core::{ChangesetId, ObjectId, ObjectKind, hash_object};
 use swarmops_testkit::landing::{
-    Change, CliLander, LandRecord, REGISTRY, Stats, Workload, base_files, check_invariants,
-    own_line, registry_text, with_line,
+    Change, CliLander, LandRecord, MAX_LATENCY, REGISTRY, Stats, Workload, base_files,
+    check_invariants, own_line, registry_text, with_line,
 };
 
 use crate::support::{Store, agent};
@@ -51,6 +51,26 @@ fn change(lander: usize, land: usize) -> Change {
     }
 }
 
+/// `duration` in microseconds, the unit of [`LandRecord::latency_us`].
+fn micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).expect("microseconds in a u64")
+}
+
+/// `records` with every land's latency zeroed, so that [`check_invariants`] judges the chain
+/// and not the time.
+fn untimed(records: &[Vec<LandRecord>]) -> Vec<Vec<LandRecord>> {
+    (records.iter())
+        .map(|lands| {
+            (lands.iter())
+                .map(|record| LandRecord {
+                    latency_us: 0,
+                    ..record.clone()
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Eight agents land at once on one `main` through the binary, four keyed lands each, each agent
 /// running one process of the binary at a time: every land puts a file of its own, and every other
 /// one also replaces the agent's own line of a file they all share ([`change`]). Up to eight `land`
@@ -61,7 +81,7 @@ fn change(lander: usize, land: usize) -> Change {
 /// verifies clean ([`check_invariants`]); every land has landed; `log` lists each agent's landed
 /// changesets on `main` exactly once; and `main` holds every land's file and, on each agent's line
 /// of the shared file, its last land's text, so that no land's merge dropped another's change. None
-/// of this depends on how the lands interleave.
+/// of this depends on how the lands interleave, or on how long a land took.
 #[test]
 fn eight_processes_land_concurrently_none_lost() {
     let store = Store::init();
@@ -95,7 +115,19 @@ fn eight_processes_land_concurrently_none_lost() {
         wall.as_millis()
     );
     let base_id = ChangesetId::new(ObjectId::from_hex(&base).expect("a changeset id"));
-    if let Err(rule) = check_invariants(Utf8Path::new(store.path()), "main", base_id, &records) {
+    let path = Utf8Path::new(store.path());
+
+    // The latency rule still reads the records: this run's, with one land a second past the
+    // bound, is a slow land.
+    let mut slow = records.clone();
+    slow[0][0].latency_us = micros(MAX_LATENCY + Duration::from_secs(1));
+    let rule = check_invariants(path, "main", base_id, &slow).expect_err("a slow land");
+    assert!(rule.starts_with("slow land: "), "{rule}");
+
+    // The chain's rules without the latency bound: how long a land took is the host's load,
+    // which `landing::perf` judges, never this test. The slow run's records pass once zeroed.
+    let zeroed = untimed(&slow);
+    if let Err(rule) = check_invariants(path, "main", base_id, &zeroed) {
         panic!("{rule}\n{records:#?}");
     }
     for (lander, lands) in records.iter().enumerate() {
