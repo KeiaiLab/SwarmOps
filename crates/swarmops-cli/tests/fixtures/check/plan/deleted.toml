@@ -1,0 +1,14 @@
+# The target's check file without `site`.
+version = 1
+
+[check.docs]
+argv = ["python3", "-I", "scripts/check-docs.py"]
+inputs = ["docs/**", "README.md"]
+
+[check.unit]
+argv = ["cargo", "test", "--locked"]
+
+[check.slow]
+argv = ["cargo", "test", "--locked", "--", "--ignored"]
+stages = ["manual"]
+inputs = ["crates/**"]

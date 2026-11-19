@@ -1,0 +1,23 @@
+# The target's check file with a fifth check, `lint`.
+version = 1
+
+[check.docs]
+argv = ["python3", "-I", "scripts/check-docs.py"]
+inputs = ["docs/**", "README.md"]
+
+[check.site]
+argv = ["just", "site-check"]
+stages = ["before-land", "manual"]
+inputs = ["web/**", "docs/**"]
+
+[check.unit]
+argv = ["cargo", "test", "--locked"]
+
+[check.slow]
+argv = ["cargo", "test", "--locked", "--", "--ignored"]
+stages = ["manual"]
+inputs = ["crates/**"]
+
+[check.lint]
+argv = ["cargo", "clippy", "--", "-D", "warnings"]
+inputs = ["crates/**"]

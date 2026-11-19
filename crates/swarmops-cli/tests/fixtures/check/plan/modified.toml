@@ -1,0 +1,19 @@
+# The target's check file with `unit`'s argv changed.
+version = 1
+
+[check.docs]
+argv = ["python3", "-I", "scripts/check-docs.py"]
+inputs = ["docs/**", "README.md"]
+
+[check.site]
+argv = ["just", "site-check"]
+stages = ["before-land", "manual"]
+inputs = ["web/**", "docs/**"]
+
+[check.unit]
+argv = ["cargo", "test", "--locked", "--workspace"]
+
+[check.slow]
+argv = ["cargo", "test", "--locked", "--", "--ignored"]
+stages = ["manual"]
+inputs = ["crates/**"]

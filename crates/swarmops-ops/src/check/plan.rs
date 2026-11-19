@@ -1,30 +1,39 @@
-//! `check plan` (M30-4): for one stage, which checks a change needs, each `run` or
+//! `check plan` (M30-4, M30-5): for one stage, which checks a change needs, each `run` or
 //! `not_applicable` with one reason.
 //!
 //! ```text
 //!   the candidate's checks ─▶ Matcher: each check's inputs
 //!   the changed paths ─ read one by one (changed::Changed) ─▶ Matcher::see: the first match
 //!                                                              of each check, no path kept
-//!                                   ▼
-//!   decide: per check of the stage, the first rule that holds
-//!     the whole plan is widened (paths unknown, cut, unreadable)   run             widened
-//!     it has inputs, and a changed path matches one                run             input_changed
-//!     it has no inputs, and at least one path changed              run             no_inputs
-//!     otherwise                                                    not_applicable  inputs_unchanged
+//!   the checks at the target's head (Target) ──┐
+//!                                              ▼
+//!   decide: per name of either side, the first rule that holds
+//!     its definition is not the target's head's     run             definition_changed
+//!     the whole plan is widened                     run             widened
+//!     a changed path is among its inputs            run             input_changed
+//!     it has no inputs, and a path changed          run             no_inputs
+//!     otherwise                                     not_applicable  inputs_unchanged
 //! ```
 //!
 //! The subjects: a changeset against its target ([`plan`]: what it changed since their merge
 //! base), and the changed paths the caller gives with the check file of a directory
 //! ([`plan_dir`], vouched). Planning reads only: no lock is taken and nothing is written. A plan
 //! informs: `check run` runs every check of its stage, whatever a plan says.
+//!
+//! A plan fails closed (M30-5). Changed paths that are unknown, cut or unreadable, a target
+//! whose check file does not read, and a check file changed where it cannot be compared widen
+//! the whole plan; a definition added, renamed, deleted or not the target's head's runs. An
+//! error is an error, never a plan with fewer checks: [`decide`] gives one entry for each name
+//! of either side.
 
 use std::collections::BTreeSet;
 
 use camino::Utf8Path;
 use serde_json::json;
 use swarmops_api::{
-    CheckPlanOut, CheckPlanReason, CheckPlanReq, CheckPlanResp, CheckPlanSubject, CheckPlanVerdict,
-    CheckStage, ErrorCode, MergeBaseReq, OpError, ResolveRevReq, Rev, ShowReq, StoreOps,
+    CheckDefinitionChange, CheckPlanOut, CheckPlanReason, CheckPlanReq, CheckPlanResp,
+    CheckPlanSubject, CheckPlanVerdict, CheckPlanWidened, CheckStage, ErrorCode, MergeBaseReq,
+    OpError, ResolveRevReq, Rev, ShowReq, StoreOps,
 };
 
 use super::changed::{Changed, Sep};
@@ -88,27 +97,152 @@ impl Matcher {
     }
 }
 
-/// The plan of `stage`: one entry for each check of `candidate` that is of it, sorted by name,
-/// each by the first rule that holds for what `matcher` saw of the paths `changed` read.
+/// What a plan compares the candidate's definitions with.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum Target<'t> {
+    /// The checks of the check file at the target's head.
+    Checks(&'t [Check]),
+    /// The target's check file does not read: no comparison can be made, and the whole plan
+    /// is widened, `target_unread`.
+    Unread,
+    /// No target is at hand: the directory form, whose caller vouches that the definitions
+    /// are the target's.
+    Unknown,
+}
+
+/// Why the whole plan is widened, if it is: the first cause that holds, in the causes' own
+/// order, among what reading the changed paths came to and a target that does not read.
+pub fn cause_of(target: &Target<'_>, changed: &Changed) -> Option<CheckPlanWidened> {
+    let unread = matches!(target, Target::Unread).then_some(CheckPlanWidened::TargetUnread);
+    match (changed.cause(), unread) {
+        (Some(paths), Some(unread)) => Some(paths.min(unread)),
+        (paths, unread) => paths.or(unread),
+    }
+}
+
+/// The plan of `stage`: exactly one entry for each name that `candidate` or `target` has in
+/// it, sorted by name, each by the first rule that holds:
 ///
-/// `not_applicable` has one way in, the last rule: every changed path was read (no cause
-/// widens the plan), and none is among the check's inputs.
+/// ```text
+///   1  its definition is not the target's head's    run             definition_changed
+///        in both, digests differ                      modified
+///        the candidate's alone, its digest that of    renamed, was
+///          exactly one name the target alone has
+///        the candidate's alone, otherwise             added
+///        the target's alone                           deleted (the target's digest)
+///   2  the whole plan is widened                    run             widened, the cause
+///   3  a changed path is among its inputs           run             input_changed
+///   4  it has no inputs, and a path changed         run             no_inputs
+///   5  otherwise                                    not_applicable  inputs_unchanged
+/// ```
+///
+/// `not_applicable` has one way in, rule 5: every changed path was read, none is among the
+/// check's inputs, and its definition is the target's head's. `stages` is not in a digest:
+/// membership of the planned stage is what is compared, so a check moved out of the stage is
+/// `deleted` for it and one moved in `added`.
 pub fn decide(
     stage: CheckStage,
     candidate: &[Check],
+    target: Target<'_>,
     matcher: &Matcher,
     changed: &Changed,
 ) -> Vec<CheckPlanOut> {
-    let mut checks: Vec<CheckPlanOut> = (candidate.iter())
-        .filter(|check| check.is_of(stage))
-        .map(|check| by_paths(check, matcher, changed))
-        .collect();
-    checks.sort_by(|a, b| a.name.cmp(&b.name));
-    checks
+    // 1. Each side's checks of the stage, with their digests; the plan's cause.
+    let of_stage = |checks: &[Check]| -> Vec<(String, String)> {
+        (checks.iter())
+            .filter(|check| check.is_of(stage))
+            .map(|check| (check.name.clone(), check.definition_digest()))
+            .collect()
+    };
+    let ours = of_stage(candidate);
+    let theirs = match target {
+        Target::Checks(checks) => Some(of_stage(checks)),
+        Target::Unread | Target::Unknown => None,
+    };
+    let cause = cause_of(&target, changed);
+
+    // 2. The candidate's checks: a definition that differs, else by the paths.
+    let mut plan = Vec::with_capacity(ours.len());
+    for check in candidate.iter().filter(|check| check.is_of(stage)) {
+        let differs = (theirs.as_deref()).and_then(|theirs| differs(&check.name, &ours, theirs));
+        plan.push(match differs {
+            Some((definition, was)) => {
+                let mut out = CheckPlanOut::new(
+                    check.name.clone(),
+                    CheckPlanVerdict::Run,
+                    CheckPlanReason::DefinitionChanged,
+                    check.definition_digest(),
+                );
+                out.definition = Some(definition);
+                out.was = was;
+                out
+            }
+            None => by_paths(check, matcher, changed.count(), cause),
+        });
+    }
+
+    // 3. The checks only the target's head has: deleted, listed with the target's digest.
+    for (name, digest) in theirs.iter().flatten() {
+        if ours.iter().any(|(ours, _)| ours == name) {
+            continue;
+        }
+        let mut out = CheckPlanOut::new(
+            name.clone(),
+            CheckPlanVerdict::Run,
+            CheckPlanReason::DefinitionChanged,
+            digest.clone(),
+        );
+        out.definition = Some(CheckDefinitionChange::Deleted);
+        plan.push(out);
+    }
+    plan.sort_by(|a, b| a.name.cmp(&b.name));
+    plan
 }
 
-/// `check` by what changed: widened with the plan, else by its inputs.
-fn by_paths(check: &Check, matcher: &Matcher, changed: &Changed) -> CheckPlanOut {
+/// How the definition of the candidate's check `name` differs from the target's head's, and
+/// for a rename the name it had there; none when the target has it under that name with the
+/// same digest. `ours` and `theirs` are each side's names and digests.
+fn differs(
+    name: &str,
+    ours: &[(String, String)],
+    theirs: &[(String, String)],
+) -> Option<(CheckDefinitionChange, Option<String>)> {
+    let digest_of = |side: &[(String, String)], name: &str| {
+        let found = side.iter().find(|(held, _)| held == name);
+        found.map(|(_, digest)| digest.clone())
+    };
+    let digest = digest_of(ours, name)?;
+
+    // 1. Under the same name: equal, or modified.
+    if let Some(held) = digest_of(theirs, name) {
+        return (held != digest).then_some((CheckDefinitionChange::Modified, None));
+    }
+
+    // 2. Under no name of the target's: renamed when exactly one name that only the target has
+    //    carries this digest and no other name that only the candidate has does; else added.
+    let alone = |side: &[(String, String)], other: &[(String, String)]| -> Vec<String> {
+        (side.iter())
+            .filter(|(_, held)| *held == digest)
+            .filter(|(name, _)| digest_of(other, name).is_none())
+            .map(|(name, _)| name.clone())
+            .collect()
+    };
+    let (new, old) = (alone(ours, theirs), alone(theirs, ours));
+    match (new.as_slice(), old.as_slice()) {
+        ([_], [was]) => Some((CheckDefinitionChange::Renamed, Some(was.clone()))),
+        _ => Some((CheckDefinitionChange::Added, None)),
+    }
+}
+
+/// `check` by what changed: widened with the plan for `cause`, else by its inputs and the
+/// `count` of paths read.
+fn by_paths(
+    check: &Check,
+    matcher: &Matcher,
+    count: u64,
+    cause: Option<CheckPlanWidened>,
+) -> CheckPlanOut {
     let entry = |verdict, reason| {
         CheckPlanOut::new(
             check.name.clone(),
@@ -119,7 +253,7 @@ fn by_paths(check: &Check, matcher: &Matcher, changed: &Changed) -> CheckPlanOut
     };
 
     // 1. The whole plan is widened: every check runs, also one a path already matched.
-    if let Some(cause) = changed.cause() {
+    if let Some(cause) = cause {
         let mut out = entry(CheckPlanVerdict::Run, CheckPlanReason::Widened);
         out.widened = Some(cause);
         return out;
@@ -134,7 +268,7 @@ fn by_paths(check: &Check, matcher: &Matcher, changed: &Changed) -> CheckPlanOut
     }
 
     // 3. No inputs: the whole tree, so any changed path is one of its own.
-    if check.inputs.is_empty() && changed.count() > 0 {
+    if check.inputs.is_empty() && count > 0 {
         return entry(CheckPlanVerdict::Run, CheckPlanReason::NoInputs);
     }
     entry(
@@ -145,7 +279,11 @@ fn by_paths(check: &Check, matcher: &Matcher, changed: &Changed) -> CheckPlanOut
 
 /// `check_plan`: the plan of `req.stage` for the changeset `req.rev` against `req.target`: what
 /// it changed since their merge base, matched against the inputs of the checks its own tree
-/// describes. Both revisions are resolved once. Reads the store; writes nothing.
+/// describes, each definition compared with the check file at the target's head. Both
+/// revisions are resolved once. Reads the store; writes nothing.
+///
+/// The candidate's check file not reading is `E_CHECK_FILE`: its checks cannot be listed
+/// without it. The target's not reading widens the plan.
 pub fn plan(store: &dyn StoreOps, req: CheckPlanReq) -> Result<CheckPlanResp, OpError> {
     let CheckPlanReq {
         rev,
@@ -188,9 +326,14 @@ pub fn plan(store: &dyn StoreOps, req: CheckPlanReq) -> Result<CheckPlanResp, Op
         Err(e) => return Err(e),
     };
 
-    // 3. The plan, and of it the checks asked for.
+    // 3. The definitions at the target's head, to compare with; a file there that does not
+    //    read leaves nothing to compare, and widens the plan.
+    let theirs = target_at(store, &onto)?;
+    let against = theirs.as_deref().map_or(Target::Unread, Target::Checks);
+
+    // 4. The plan, and of it the checks asked for.
     let mut resp = CheckPlanResp::new(false, CheckPlanSubject::Changeset, stage);
-    resp.checks = decide(stage, &candidate, &matcher, &changed);
+    resp.checks = decide(stage, &candidate, against, &matcher, &changed);
     resp.rev = Some(id.clone());
     resp.tree = Some(tree);
     resp.target = Some(target);
@@ -199,7 +342,7 @@ pub fn plan(store: &dyn StoreOps, req: CheckPlanReq) -> Result<CheckPlanResp, Op
     resp.file = file.map(str::to_owned);
     resp.version = version;
     resp.changed = changed.count();
-    resp.widened = changed.cause();
+    resp.widened = cause_of(&against, &changed);
     only(resp, &checks, &candidate, &id)
 }
 
@@ -223,6 +366,10 @@ pub enum Given<'g> {
 /// the files below `dir` describe, as `check list --dir` reads them. The answer is `vouched`:
 /// only the caller stands behind the file and the paths, and no gate accepts it. Opens no
 /// store, and looks up no path below `dir`: a deleted file is a changed path.
+///
+/// No target is at hand, so no check is `definition_changed` here: the caller vouches that
+/// the definitions are the target's, and a check file among the changed paths widens the
+/// whole plan, `check_file_changed`.
 pub fn plan_dir(
     dir: &Utf8Path,
     stage: CheckStage,
@@ -232,9 +379,10 @@ pub fn plan_dir(
     // 1. The directory's checks.
     let (file, version, candidate) = checks_in(dir)?;
 
-    // 2. The paths given, the flags' first; none given at all is not a change of no path.
+    // 2. The paths given, the flags' first; none given at all is not a change of no path. No
+    //    target is at hand to compare a changed check file with: it widens the plan.
     let mut matcher = Matcher::new(stage, &candidate);
-    let changed = match given {
+    let mut changed = match given {
         Given::None => Changed::unknown(),
         Given::Paths { flags, list } => {
             let mut see = |path: &str| matcher.see(path);
@@ -246,10 +394,13 @@ pub fn plan_dir(
             changed
         }
     };
+    if changed.check_file() {
+        changed.widen(CheckPlanWidened::CheckFileChanged);
+    }
 
     // 3. The plan, and of it the checks asked for.
     let mut resp = CheckPlanResp::new(true, CheckPlanSubject::Paths, stage);
-    resp.checks = decide(stage, &candidate, &matcher, &changed);
+    resp.checks = decide(stage, &candidate, Target::Unknown, &matcher, &changed);
     resp.file = file.map(str::to_owned);
     resp.version = version;
     resp.changed = changed.count();
@@ -295,6 +446,16 @@ pub fn only(
             .retain(|check| wanted.contains(check.name.as_str()));
     }
     Ok(resp)
+}
+
+/// The checks of the check file at the target's head `onto`, read as `check list` reads it;
+/// none when that file does not read (`E_CHECK_FILE`). Any other error is the error.
+fn target_at(store: &dyn StoreOps, onto: &str) -> Result<Option<Vec<Check>>, OpError> {
+    match checks_at(store, onto) {
+        Ok((_, _, checks)) => Ok(Some(checks)),
+        Err(e) if e.code == ErrorCode::CheckFile.as_str() => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Whether `e` is `merge_base`'s answer for two revisions whose first-parent chains share no
