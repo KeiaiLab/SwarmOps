@@ -1162,6 +1162,14 @@ fn wait_for(what: &str, done: impl Fn() -> bool) {
     }
 }
 
+/// Waits until no run in the background holds `site`'s lock file, at most [`BACKGROUND_WAIT`]: a
+/// run that has made its request may hold the lock a moment longer, and a claim tried meanwhile
+/// is not made.
+fn wait_for_a_free_lock(site: &Site) {
+    let lock = File::open(site.install.file(LOCK_FILE)).expect("open the lock file");
+    wait_for("the lock", || lock.try_lock().is_ok());
+}
+
 /// `run`'s envelope without the time it took: the rest is the same for the same command.
 fn timeless(run: &Run) -> Value {
     let mut envelope = run.envelope();
@@ -1377,6 +1385,7 @@ fn a_check_that_reaches_no_one_changes_nothing_a_command_prints() {
         assert_eq!(timeless(&run), timeless(&off));
         assert!(site.last_claim() >= started, "claimed before any request");
         wait_for("the request", || site.curl.calls().len() == n + 1);
+        wait_for_a_free_lock(&site);
     }
 
     // 2. A lock file of a time in the future, as a clock set back leaves, is no claim.
@@ -1385,6 +1394,7 @@ fn a_check_that_reaches_no_one_changes_nothing_a_command_prints() {
     assert_eq!(site.run("so", &["whoami"], &AUTOMATIC).exit(), 0);
     assert!(site.last_claim() <= SystemTime::now());
     wait_for("the request", || site.curl.calls().len() == 4);
+    wait_for_a_free_lock(&site);
 
     // 3. The next command claims nothing: the day has just begun.
     let claim = site.last_claim();
