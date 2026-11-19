@@ -233,7 +233,9 @@ Only `passed` passes. Every check passed: the result, exit 0. Otherwise `E_CHECK
 whose message names each check that did not pass and why, with the count of its findings when it
 has any (`check failed (exit 101, 2 findings)`), whose `details.run` is the whole result below,
 and whose hint names, for the first, where its findings are
-(`details.run.checks[<i>].findings`) when it has any, then `check log`. A check that did not pass
+(`details.run.checks[<i>].findings`) when it has any, then `check log`: that check's, or, when two
+or more checks did not pass, `check log --failed --run RUN`, which reads the logs of all of them.
+A check that did not pass
 carries the last 8 KiB of each of its streams (`stdout_tail`, `stderr_tail`); one that passed does
 not.
 

@@ -585,3 +585,65 @@ fn a_failed_append_changes_no_answer() {
     assert_eq!((a.failed, a.cancelled), (b.failed, b.cancelled));
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "x", "untouched");
 }
+
+/// Two checks that did not pass: the hint names `check log --failed` and the run, after the
+/// first one's findings when it has any; one failed check keeps the hint it had.
+#[test]
+fn two_failed_checks_are_hinted_to_their_logs_together() {
+    // 1. Two failures, the first without findings.
+    let (_tmp, dir, runs) = tree(
+        "[check.a]\nargv = [\"/bin/sh\", \"-c\", \"exit 1\"]\n\
+         [check.b]\nargv = [\"/bin/sh\", \"-c\", \"exit 2\"]\n\
+         [check.c]\nargv = [\"/usr/bin/true\"]\n",
+    );
+    let error = run(&dir, &runs, &[], &[]).unwrap_err();
+    let resp = run_of(&error);
+    assert_eq!(
+        error.hint.as_deref(),
+        Some(
+            format!(
+                "read their logs: swarmops check log --failed --dir {dir} --run {}",
+                resp.run
+            )
+            .as_str()
+        )
+    );
+
+    // 2. Two failures, the first with a finding.
+    let (_tmp, dir, runs) = tree(
+        "[check.a]\nargv = [\"/bin/sh\", \"-c\", \"echo '{\\\"level\\\":\\\"error\\\",\\\"title\\\":\\\"t\\\"}' > \\\"$SWARMOPS_CHECK_REPORT\\\"; exit 1\"]\n\
+         [check.b]\nargv = [\"/bin/sh\", \"-c\", \"exit 2\"]\n",
+    );
+    let error = run(&dir, &runs, &[], &[]).unwrap_err();
+    let resp = run_of(&error);
+    assert_eq!(resp.checks[0].findings_total, 1, "{resp:?}");
+    assert_eq!(
+        error.hint.as_deref(),
+        Some(
+            format!(
+                "read its findings in details.run.checks[0].findings, then the logs: swarmops \
+                 check log --failed --dir {dir} --run {}",
+                resp.run
+            )
+            .as_str()
+        )
+    );
+
+    // 3. One failure: the hint names its log, as before.
+    let (_tmp, dir, runs) = tree(
+        "[check.a]\nargv = [\"/usr/bin/true\"]\n\
+         [check.b]\nargv = [\"/bin/sh\", \"-c\", \"exit 2\"]\n",
+    );
+    let error = run(&dir, &runs, &[], &[]).unwrap_err();
+    let resp = run_of(&error);
+    assert_eq!(
+        error.hint.as_deref(),
+        Some(
+            format!(
+                "read its log: swarmops check log b --dir {dir} --run {}",
+                resp.run
+            )
+            .as_str()
+        )
+    );
+}

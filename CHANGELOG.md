@@ -79,6 +79,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 - `E_CHECK_FAILED`'s `details.run`, the whole result of a run of `check run`, holds each check's
   findings.
+- `E_CHECK_FAILED`'s hint names `swarmops check log --failed ... --run RUN` when two or more
+  checks of the run did not pass and have logs; for one failed check it names that check's log,
+  as before.
 - `CheckLogReq.check` is optional, and the request takes `failed`: exactly one of a check's
   name and `failed: true` is given, else `E_INVALID_ARG` with `details.reason: check`. A request
   of `{workspace, check}` reads as before. `CheckLogResp` gains `failed`, `more` and

@@ -11,6 +11,18 @@
 //!          run ended and its record says the check never started (`not_run`)
 //! ```
 //!
+//! `check log --failed` (M31-13) reads the logs of the checks of one run that did not pass, each
+//! as above, in one answer; and a run is found through its run lines when the caller names their
+//! directory:
+//!
+//! ```text
+//!   --failed:    --run, else the newest run ─▶ its record: every check not passed, in run order
+//!                ─▶ the first min(failed, 20, 100,000 / tail) logs: the first at the top, the
+//!                   others in `more`; the rest named in `failed` and counted in `logs_omitted`
+//!   --run-lines: the run's newest line (check::runs) ─▶ its run_dir, whose last component is
+//!                the run's id ─▶ the runs' directory to read the run from
+//! ```
+//!
 //! Reads only: no lock is taken, nothing is written, no store operation is called.
 
 use std::collections::VecDeque;
@@ -22,13 +34,16 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::Value;
 use swarmops_api::{
     CheckLogEnd, CheckLogLineOut, CheckLogReq, CheckLogResp, CheckLogStream, CheckOutcome,
-    CheckRunResp, ErrorCode, MAX_CHECK_LOG_TAIL, OpError,
+    CheckRunResp, CheckRunsReq, ErrorCode, MAX_CHECK_LOG_TAIL, MAX_CHECK_RUNS_LIMIT,
+    MAX_FAILED_LOGS, OpError,
 };
 use swarmops_ws::registry::Registry;
 use swarmops_ws::workspace::{self, Locate};
 
+use super::lines;
 use super::log::{Kind, Line, MAX_CHECK_LOG_BYTES, dir_key, parse_line};
-use super::run::{RUN_FILE, RUN_LOCK, WS_RUNS_DIR, held};
+use super::run::{KEPT_CHECK_RUNS, RUN_FILE, RUN_LOCK, WS_RUNS_DIR, held};
+use super::runs;
 use crate::error;
 
 /// The most lines one look of a follower gives; the rest come with the next looks.
@@ -86,7 +101,13 @@ pub fn dir_runs(dir: &Utf8Path, runs_root: Option<&Utf8Path>) -> Result<Utf8Path
 
 /// `check_log`: the last `req.tail` lines of check `req.check`'s log of a run of workspace
 /// `req.workspace`, found through the registry beside the store; `req.run`, else the newest run
-/// that ran the check. Reads only.
+/// that ran the check. With `req.failed` instead of a check: the logs of the checks of the run
+/// that did not pass ([`failed_logs`]); `req.run`, else the workspace's newest run. Reads only.
+///
+/// # Errors
+///
+/// `E_INVALID_ARG` with `details.reason` `check` for a request of neither a check nor `failed`,
+/// or of both; then as [`Follower::start`] or [`failed_logs`].
 pub fn log_ws(ctx: &swarmops_ws::Ctx<'_>, req: CheckLogReq) -> Result<CheckLogResp, OpError> {
     let CheckLogReq {
         workspace,
@@ -97,19 +118,217 @@ pub fn log_ws(ctx: &swarmops_ws::Ctx<'_>, req: CheckLogReq) -> Result<CheckLogRe
         ..
     } = req;
 
-    // Exactly one of a check and the failed ones; the failed ones' logs are not read yet.
-    let (Some(check), false) = (check, failed) else {
+    // 1. Exactly one of a check and the failed ones.
+    if check.is_some() == failed {
         let what = "give exactly one of check and failed: a check's log, or the logs of the \
                     checks that did not pass"
             .to_owned();
         return Err(invalid(what, "check"));
-    };
+    }
+
+    // 2. The workspace's runs; then the check's log, or the failed ones'.
     let registry = Registry::open(&ctx.store_root, ctx.fs.clone());
     let at = format!("--ws {workspace}");
     let found = workspace::find(&Locate::Name(workspace), Some(&registry), ctx.fs.as_ref())?;
     let runs = found.dir.join(WS_RUNS_DIR);
+    let Some(check) = check else {
+        return failed_logs(&runs, &at, run.as_deref(), tail);
+    };
     let (_, resp) = Follower::start(&runs, &at, &check, run.as_deref(), tail, false)?;
     Ok(resp)
+}
+
+/// `check log --failed`: the logs of the checks that did not pass in a run of the runs in
+/// `runs`, `run` if given, else the newest run there, running or ended. Each log is its last
+/// `tail` lines, as [`Follower::start`] gives that check's: the first failed check's is the
+/// answer, the others' are its `more`, in run order, and `failed` names every one. At most
+/// [`MAX_FAILED_LOGS`] logs and [`MAX_CHECK_LOG_TAIL`] lines are given: the rest are counted in
+/// `logs_omitted`. Of a run that has not ended, the checks never started so far are left out.
+/// `at` is how `check run` names the runs' directory or workspace, for a hint.
+///
+/// # Errors
+///
+/// `E_INVALID_ARG` with `details.reason`: `tail` (not 1 to 100,000); `run` (no such run, or no
+/// run at all); `none_failed` (every check passed, or none has ended), with `details.run` and
+/// `details.running`. `E_IO` for a record or a log that cannot be read.
+pub fn failed_logs(
+    runs: &Utf8Path,
+    at: &str,
+    run: Option<&str>,
+    tail: usize,
+) -> Result<CheckLogResp, OpError> {
+    // 1. The request, and the run: the one named, else the newest.
+    check_tail(tail)?;
+    let found = match run {
+        Some(run) => {
+            let read = (lines::is_run_id(run).then(|| runs.join(run)))
+                .map(|dir| found_at(run, &dir))
+                .transpose()?;
+            read.flatten().ok_or_else(|| {
+                let mut error = invalid(format!("no run {run} here"), "run");
+                error.details.insert("run".to_owned(), run.into());
+                error
+            })?
+        }
+        None => newest_run(runs)?.ok_or_else(|| {
+            let spaced = spaced(at);
+            invalid("no run here yet".to_owned(), "run")
+                .with_hint(format!("start one: swarmops check run{spaced}"))
+        })?,
+    };
+
+    // 2. Its checks that did not pass, in run order; one never started only once the run ended.
+    let failed: Vec<String> = (found.result.checks.iter())
+        .filter(|check| check.outcome != CheckOutcome::Passed)
+        .filter(|check| found.ended || check.outcome != CheckOutcome::NotRun)
+        .map(|check| check.name.clone())
+        .collect();
+    if failed.is_empty() {
+        return Err(none_failed(&found, at));
+    }
+
+    // 3. As many logs as the bounds give, each as `check log` reads it.
+    let within_lines = (MAX_CHECK_LOG_TAIL / tail).max(1);
+    let given = failed.len().min(MAX_FAILED_LOGS).min(within_lines);
+    let mut logs = Vec::with_capacity(given);
+    for name in &failed[..given] {
+        let (_, log) = Follower::start(runs, at, name, Some(&found.id), tail, false)?;
+        logs.push(log);
+    }
+
+    // 4. The first at the top, the others beside it.
+    let mut logs = logs.into_iter();
+    let Some(mut first) = logs.next() else {
+        return Err(none_failed(&found, at));
+    };
+    first.more = logs.map(Into::into).collect();
+    first.logs_omitted = u64::try_from(failed.len() - given).unwrap_or(u64::MAX);
+    first.failed = failed;
+    Ok(first)
+}
+
+/// `E_INVALID_ARG` (`none_failed`) for the run `found`, none of whose checks did not pass: the
+/// run and whether it still runs in the details, and what to read or do instead in the hint.
+fn none_failed(found: &FoundRun, at: &str) -> OpError {
+    let running = held(&found.dir.join(RUN_LOCK));
+    let (id, spaced) = (&found.id, spaced(at));
+    let (what, hint) = if running {
+        (
+            format!("no check of the run {id} has failed so far: it is still running"),
+            format!(
+                "wait for the run to end, or follow one check: swarmops check log NAME{spaced} \
+                 --run {id} --follow"
+            ),
+        )
+    } else {
+        (
+            format!("no check of the run {id} failed"),
+            format!("read one check's log: swarmops check log NAME{spaced} --run {id}"),
+        )
+    };
+    let mut error = invalid(what, "none_failed");
+    error.details.insert("run".to_owned(), id.as_str().into());
+    error.details.insert("running".to_owned(), running.into());
+    error.with_hint(hint)
+}
+
+/// The newest run in `runs` whose record reads, running or ended: the one of the greatest id.
+///
+/// # Errors
+///
+/// `E_IO` for a record that cannot be read.
+pub fn newest_run(runs: &Utf8Path) -> Result<Option<FoundRun>, OpError> {
+    for name in &run_names(runs) {
+        if let Some(found) = found_at(name, &runs.join(name))? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
+/// The runs' directory to read run `run` from, found through the run lines in `lines_dir`: the
+/// parent of the run directory the run's newest line names.
+///
+/// # Errors
+///
+/// `E_INVALID_ARG` with `details.reason`: `run` (not a run's id, or no line of that run there);
+/// `run_dir` (its line names no run directory, or one whose last component is not the run's
+/// id); `run_gone` (the directory is not there any more), with `details.failed`, the checks of
+/// the run that the lines say did not pass. As [`runs::runs_at`] for lines that cannot be read.
+pub fn run_through_lines(lines_dir: &Utf8Path, run: &str) -> Result<Utf8PathBuf, OpError> {
+    // 1. The run's lines, newest first.
+    let unknown = |what: String| {
+        let mut error = invalid(what, "run");
+        error.details.insert("run".to_owned(), run.into());
+        error
+    };
+    if !lines::is_run_id(run) {
+        return Err(unknown(format!("{run:?} is not a run's id")));
+    }
+    let mut req = CheckRunsReq::new(String::new());
+    req.run = Some(run.to_owned());
+    req.limit = MAX_CHECK_RUNS_LIMIT;
+    let page = runs::runs_at(lines_dir, true, &req)?;
+    let Some(newest) = page.runs.first() else {
+        return Err(unknown(format!(
+            "the run lines in {lines_dir} hold no line of the run {run}"
+        )));
+    };
+
+    // 2. Where the newest of them says the run is: a directory named as the run.
+    let dir = (newest.run_dir.as_deref().map(Utf8Path::new))
+        .filter(|dir| dir.is_absolute() && dir.file_name() == Some(run));
+    let Some((dir, parent)) = dir.and_then(|dir| Some((dir, dir.parent()?))) else {
+        return Err(invalid(
+            format!("the run lines of the run {run} name no run directory of it"),
+            "run_dir",
+        )
+        .with_hint("name where the run ran instead: --dir DIR, or --ws NAME"));
+    };
+
+    // 3. Still there: a host keeps the newest runs only.
+    if !dir.is_dir() {
+        let failed: Vec<&str> = (page.runs.iter().rev())
+            .filter(|line| line.outcome != CheckOutcome::Passed)
+            .map(|line| line.check.as_str())
+            .collect();
+        let mut error = invalid(
+            format!("the run {run} is not kept any more: {dir} is gone"),
+            "run_gone",
+        );
+        error.details.insert("run".to_owned(), run.into());
+        error
+            .details
+            .insert("failed".to_owned(), serde_json::json!(failed));
+        return Err(error.with_hint(format!(
+            "a host keeps the newest {KEPT_CHECK_RUNS} runs of a directory or workspace: run \
+             the checks again to read their logs"
+        )));
+    }
+    Ok(parent.to_owned())
+}
+
+/// `at`, how `check run` names where the runs are, after a space; nothing when it names
+/// nothing.
+fn spaced(at: &str) -> String {
+    if at.is_empty() {
+        String::new()
+    } else {
+        format!(" {at}")
+    }
+}
+
+/// `E_INVALID_ARG` (`tail`) unless `tail` is 1 to [`MAX_CHECK_LOG_TAIL`].
+fn check_tail(tail: usize) -> Result<(), OpError> {
+    if (1..=MAX_CHECK_LOG_TAIL).contains(&tail) {
+        return Ok(());
+    }
+    let mut error = invalid(
+        format!("--tail is 1 to {MAX_CHECK_LOG_TAIL}, not {tail}"),
+        "tail",
+    );
+    error.details.insert("tail".to_owned(), tail.into());
+    Err(error)
 }
 
 /// One check's log of a run, read from where the last look stopped.
@@ -174,14 +393,7 @@ impl Follower {
         following: bool,
     ) -> Result<(Follower, CheckLogResp), OpError> {
         // 1. The request, and the run.
-        if !(1..=MAX_CHECK_LOG_TAIL).contains(&tail) {
-            let mut error = invalid(
-                format!("--tail is 1 to {MAX_CHECK_LOG_TAIL}, not {tail}"),
-                "tail",
-            );
-            error.details.insert("tail".to_owned(), tail.into());
-            return Err(error);
-        }
+        check_tail(tail)?;
         let found = find_run(runs, at, check, run, following)?;
         let log = found.dir.join("logs").join(format!("{check}.log"));
         let mut follower = Follower {
@@ -380,16 +592,8 @@ pub fn find_run(
     }
 
     // 2. Else the newest that lists it; following, the newest still running first.
-    let mut names: Vec<String> = match runs.read_dir_utf8() {
-        Ok(entries) => (entries.flatten())
-            .map(|entry| entry.file_name().to_owned())
-            .filter(|name| uuid::Uuid::try_parse(name).is_ok())
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    names.sort_unstable_by(|a, b| b.cmp(a));
     let mut newest = None;
-    for name in &names {
+    for name in &run_names(runs) {
         let Some(found) = found_at(name, &runs.join(name))?.filter(lists) else {
             continue;
         };
@@ -401,13 +605,22 @@ pub fn find_run(
     newest.ok_or_else(|| {
         let mut error = invalid(format!("no run here ran the check {check}"), "run");
         error.details.insert("check".to_owned(), check.into());
-        let at = if at.is_empty() {
-            String::new()
-        } else {
-            format!(" {at}")
-        };
-        error.with_hint(format!("start one: swarmops check run{at}"))
+        let spaced = spaced(at);
+        error.with_hint(format!("start one: swarmops check run{spaced}"))
     })
+}
+
+/// The names of the runs in `runs`, newest first: a run's id sorts by its start.
+fn run_names(runs: &Utf8Path) -> Vec<String> {
+    let mut names: Vec<String> = match runs.read_dir_utf8() {
+        Ok(entries) => (entries.flatten())
+            .map(|entry| entry.file_name().to_owned())
+            .filter(|name| uuid::Uuid::try_parse(name).is_ok())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    names.sort_unstable_by(|a, b| b.cmp(a));
+    names
 }
 
 /// The run `id` in `dir`, if its record reads.

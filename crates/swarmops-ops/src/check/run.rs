@@ -677,7 +677,8 @@ fn record_failed(mut e: OpError, resp: &CheckRunResp) -> OpError {
 }
 
 /// `E_CHECK_FAILED` for the run `resp`: one line naming each check that did not pass, its
-/// details the whole result, its hint `check log` for the first, in the run's form `at`.
+/// details the whole result, its hint `check log` for the first, or `check log --failed` when
+/// two or more have a log to read, in the run's form `at`.
 fn failed(resp: &CheckRunResp, at: &str) -> OpError {
     // 1. One line.
     let not_passed: Vec<&CheckRunOut> = (resp.checks.iter())
@@ -709,13 +710,19 @@ fn failed(resp: &CheckRunResp, at: &str) -> OpError {
     };
 
     // 2. The details: the run; the hint: the first check's findings, if it has any, and its
-    //    log.
+    //    log, or the logs of all that did not pass when they are two or more.
     let mut error = error::error(ErrorCode::CheckFailed, error::one_line(message));
     let run = serde_json::to_value(resp).unwrap_or(Value::Null);
     error.details.insert("run".to_owned(), run);
-    let first = (resp.checks.iter().enumerate())
-        .find(|(_, c)| c.outcome != CheckOutcome::Passed && c.log.is_some());
+    let mut logged = (resp.checks.iter().enumerate())
+        .filter(|(_, c)| c.outcome != CheckOutcome::Passed && c.log.is_some());
+    let (first, several) = (logged.next(), logged.next().is_some());
+    let together = format!("swarmops check log --failed {at} --run {}", resp.run);
     match first {
+        Some((i, check)) if several && !check.findings.is_empty() => error.with_hint(format!(
+            "read its findings in details.run.checks[{i}].findings, then the logs: {together}"
+        )),
+        Some(_) if several => error.with_hint(format!("read their logs: {together}")),
         Some((i, check)) if !check.findings.is_empty() => error.with_hint(format!(
             "read its findings in details.run.checks[{i}].findings, then its log: swarmops \
              check log {} {at} --run {}",
