@@ -8,7 +8,7 @@
 # demand. `just check` keeps the in-process stand-in; this is the one harness through real
 # servers.
 #
-# Hardened as ci.yml is, and run where it runs: on the maintainers' own host, through the
+# Hardened as ci.yml is, and run on the maintainers' own host, through the
 # self-hosted runners labelled `swarmops-local`, each building into its runner's persistent
 # CARGO_TARGET_DIR, with docker on the host. Only the image build reaches the network (Ubuntu's
 # archive, behind a base pinned by digest); it is skipped while the image of the same

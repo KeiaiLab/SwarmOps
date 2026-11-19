@@ -8,7 +8,7 @@
 # and runs the remote suites (fetch, push, sync over smart HTTP and ssh) with each; the round trip
 # of mirrors of this host's repositories; the live run with GitHub, once a repository variable
 # names its scratch repository; alone, the benchmark gate; and, last and alone, those measurement
-# cases, optimized. Hardened as ci.yml is, and run where it runs: on the maintainers' own host,
+# cases, optimized. Hardened as ci.yml is, and run on the maintainers' own host,
 # through the self-hosted runners labelled `swarmops-local`, each building into its runner's
 # persistent CARGO_TARGET_DIR, so no build cache travels through GitHub.
 # `just check-ci-slow` runs first and alone: its runners share one host, and next to the git

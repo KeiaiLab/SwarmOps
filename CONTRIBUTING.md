@@ -323,8 +323,9 @@ each target's count and size before and after in the commit body. Crashes land i
 
 GitHub Actions runs `just check` on every push to `stable` and to `feat/**` branches and on every
 pull request to `stable`. Every workflow (CI, the weekly run, the site and the release) runs on
-self-hosted runners on the maintainers' host, labelled `swarmops-local`, but the release's macOS
-build, which runs on the maintainers' Mac (`macos-local`); a pull request from a
+self-hosted runners on the maintainers' host, labelled `swarmops-local`, but CI's `just check`
+job, which runs in a sandbox on the maintainers' cluster (`swarmops-sandbox`), and the release's
+macOS build, which runs on the maintainers' Mac (`macos-local`); a pull request from a
 fork runs on GitHub's `ubuntu-24.04` instead, so that the host never runs a stranger's code. The one check to look at is `tests-pass`: it passes only when every job
 it depends on passed. A weekly scheduled workflow runs `just check-ci-slow`, a 60-second fuzz
 smoke of every target, the `cargo deny`, format, lint and test commands of `bench/compare` (a
@@ -378,7 +379,7 @@ review them like any other change.
 A ruleset on `stable` makes `tests-pass` the one required check and blocks force pushes and
 deleting the branch. A push to `stable` is refused unless `tests-pass` is already green for the
 commit it moves `stable` to: push a local merge to its `feat/**` branch first, and push `stable`
-once CI has passed there. The rule stays: land on `stable` only what passed `just check` locally
+once CI has passed there. The rule stays: land on `stable` only what passed `just check`
 and has `tests-pass` green for the same commit.
 
 ## Commits
