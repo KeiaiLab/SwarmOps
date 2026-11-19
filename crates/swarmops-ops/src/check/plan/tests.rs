@@ -154,6 +154,32 @@ fn each_check_has_one_reason_by_its_inputs() {
     );
 }
 
+/// Inputs that are no pattern the matcher reads narrow nothing: the check is matched as the
+/// whole tree, and any changed path runs it.
+#[test]
+fn inputs_that_do_not_read_take_the_whole_tree() {
+    let unread = |text| {
+        let mut all = checks(text);
+        let docs = all.iter_mut().find(|check| check.name == "docs").unwrap();
+        docs.inputs = vec!["a/**/b".to_owned()];
+        all
+    };
+    let (candidate, target) = (unread(TARGET), unread(TARGET));
+    let stage = CheckStage::BeforeLand;
+    let mut matcher = Matcher::new(stage, &candidate);
+    let mut changed = Changed::none();
+    changed.path("src/x", &mut |path| matcher.see(path));
+    let plan = decide(
+        stage,
+        &candidate,
+        Target::Checks(&target),
+        &matcher,
+        &changed,
+    );
+    let docs = entry(&plan, "docs");
+    assert_eq!((docs.verdict, docs.reason), (RUN, NO_INPUTS));
+}
+
 /// An entry holds what its reason has and nothing else; each has its definition's digest.
 #[test]
 fn an_entry_holds_what_its_reason_has() {

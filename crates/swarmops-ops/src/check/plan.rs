@@ -100,6 +100,13 @@ impl Matcher {
         let slot = self.slots.iter().find(|slot| slot.name == name)?;
         slot.first.as_ref()
     }
+
+    /// Whether check `name` is matched as the whole tree: it declares no pattern, or none
+    /// that reads. A name the matcher does not hold is the whole tree too: nothing narrows it.
+    fn whole_tree(&self, name: &str) -> bool {
+        let slot = self.slots.iter().find(|slot| slot.name == name);
+        slot.is_none_or(|slot| slot.inputs.whole_tree())
+    }
 }
 
 /// What a plan compares the candidate's definitions with.
@@ -272,8 +279,8 @@ fn by_paths(
         return out;
     }
 
-    // 3. No inputs: the whole tree, so any changed path is one of its own.
-    if check.inputs.is_empty() && count > 0 {
+    // 3. No inputs, or none that read: the whole tree, so any changed path is one of its own.
+    if matcher.whole_tree(&check.name) && count > 0 {
         return entry(CheckPlanVerdict::Run, CheckPlanReason::NoInputs);
     }
     entry(
