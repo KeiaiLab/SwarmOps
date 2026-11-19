@@ -631,8 +631,7 @@ fn host(base: &Path, probes: usize) -> serde_json::Value {
             })
         })
         .max()
-        .map(|(_, m)| m)
-        .unwrap_or_default();
+        .map_or_default(|(_, m)| m);
     let git = |args: &[&str]| {
         Command::new("git")
             .arg("-C")
@@ -641,8 +640,7 @@ fn host(base: &Path, probes: usize) -> serde_json::Value {
             .output()
             .ok()
             .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-            .unwrap_or_default()
+            .map_or_default(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
     };
     let git = tree_name(
         &git(&["describe", "--always", "--dirty"]),
@@ -652,8 +650,7 @@ fn host(base: &Path, probes: usize) -> serde_json::Value {
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
         .output()
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .unwrap_or_default();
+        .map_or_default(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
     serde_json::json!({
         "date": date,
         "git": git,
