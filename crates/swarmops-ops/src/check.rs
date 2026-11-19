@@ -31,6 +31,7 @@ pub mod env;
 mod file;
 pub mod findings;
 pub mod follow;
+pub mod inputs;
 mod intake;
 pub mod junit;
 pub mod lines;
@@ -84,6 +85,12 @@ pub const MAX_ARGV_BYTES: u64 = 64 * 1024;
 
 /// The most reports a check's `reports` may declare.
 pub const MAX_CHECK_REPORTS: usize = 16;
+
+/// The most patterns a check's `inputs` may declare.
+pub const MAX_CHECK_INPUTS: usize = 64;
+
+/// The most bytes of one pattern of a check's `inputs`.
+pub const MAX_INPUT_PATTERN_BYTES: usize = 1_024;
 
 /// The most seconds a check's `timeout_s` may give: 24 hours.
 pub const MAX_CHECK_TIMEOUT_S: u64 = 86_400;

@@ -4,7 +4,8 @@
 //! ```text
 //!   bytes ─ size ─ UTF-8 ─ TOML (spans kept) ─ version = 1 ─ [check.<name>] each:
 //!                                                      name, argv, dir, timeout_s, stages,
-//!                                                      reports: [{format, path}, …]
+//!                                                      reports: [{format, path}, …],
+//!                                                      inputs: [pattern, …]
 //!   any key but those ─▶ unknown_key at its line (a later key fails closed here)
 //! ```
 //!
@@ -26,10 +27,11 @@ use toml::Spanned;
 use toml::de::{DeTable, DeValue};
 
 use super::digest;
+use super::inputs::Inputs;
 use super::{
     CHECK_FILE, CHECK_FILE_VERSION, LEGACY_FILE, MAX_ARGV_BYTES, MAX_ARGV_ITEMS,
-    MAX_CHECK_FILE_BYTES, MAX_CHECK_NAME_BYTES, MAX_CHECK_REPORTS, MAX_CHECK_TIMEOUT_S, MAX_CHECKS,
-    MAX_LEGACY_BYTES,
+    MAX_CHECK_FILE_BYTES, MAX_CHECK_INPUTS, MAX_CHECK_NAME_BYTES, MAX_CHECK_REPORTS,
+    MAX_CHECK_TIMEOUT_S, MAX_CHECKS, MAX_LEGACY_BYTES,
 };
 use crate::error::{line_of, one_line};
 
@@ -47,13 +49,14 @@ const VERSION_KEY: &str = "version";
 
 /// What the hint of a refused check file says it takes.
 const CHECK_FILE_HINT: &str = "version 1 of .swarmops/checks.toml takes version = 1, then one \
-[check.<name>] table a check, with argv (required), dir, timeout_s, stages and reports (tables \
-of format, junit or sarif, and path)";
+[check.<name>] table a check, with argv (required), dir, timeout_s, stages, reports (tables of \
+format, junit or sarif, and path) and inputs (path patterns from the tree's root: literal \
+segments, * for one segment, ** as the last for every depth below)";
 
 /// What the hint of a key version 1 does not take says.
 const UNKNOWN_KEY_HINT: &str = "version 1 of .swarmops/checks.toml takes version and \
-[check.<name>] tables of argv, dir, timeout_s, stages and reports (of format and path); a newer \
-swarmops may read this key";
+[check.<name>] tables of argv, dir, timeout_s, stages, reports (of format and path) and inputs; \
+a newer swarmops may read this key";
 
 /// What the hint of a refused `workspaces.json` says it takes.
 const LEGACY_HINT: &str = "check.argv of .swarmops/workspaces.json is an array of strings, the \
@@ -70,8 +73,8 @@ pub struct CheckFile {
     pub checks: Vec<Check>,
 }
 
-/// One check, its defaults filled in: its definition is `argv`, `dir`, `timeout_s` and
-/// `reports`; its `stages` say when its answer is wanted.
+/// One check, its defaults filled in: its definition is `argv`, `dir`, `timeout_s`, `reports`
+/// and `inputs`; its `stages` say when its answer is wanted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Check {
@@ -89,6 +92,9 @@ pub struct Check {
     /// The JUnit and SARIF reports it leaves in its tree, in the order the file declares them;
     /// none when it declares none.
     pub reports: Vec<Report>,
+    /// Its declared inputs: path patterns from the tree's root, in the order the file declares
+    /// them ([`Inputs`] reads them); none when it declares none, and it takes the whole tree.
+    pub inputs: Vec<String>,
     /// The line its table starts at; none for [`LEGACY_CHECK`].
     pub line: Option<u64>,
 }
@@ -116,9 +122,16 @@ impl Report {
 
 impl Check {
     /// The digest of its definition: 64 hex digits, by a provisional recipe that names the
-    /// program, its arguments, the directory, the timeout and the reports, not the check.
+    /// program, its arguments, the directory, the timeout, the reports and the inputs, not the
+    /// check.
     pub fn definition_digest(&self) -> String {
-        digest::definition(&self.argv, &self.dir, self.timeout_s, &self.reports)
+        digest::definition(
+            &self.argv,
+            &self.dir,
+            self.timeout_s,
+            &self.reports,
+            &self.inputs,
+        )
     }
 
     /// The check as `check list` gives it.
@@ -134,6 +147,7 @@ impl Check {
         out.reports = (self.reports.iter())
             .map(|report| CheckReportOut::new(report.format, report.path.clone()))
             .collect();
+        out.inputs.clone_from(&self.inputs);
         out.line = self.line;
         out
     }
@@ -399,6 +413,7 @@ pub fn parse_legacy(bytes: &[u8]) -> Result<Option<Check>, Refusal> {
         timeout_s,
         stages: vec![CheckStage::BeforeLand],
         reports: Vec::new(),
+        inputs: Vec::new(),
         line: None,
     }))
 }
@@ -540,6 +555,7 @@ fn check_of(lines: &Lines, name: &str, at: u64, fields: &DeTable<'_>) -> Result<
     let mut timeout_s = None;
     let mut stages = None;
     let mut reports = None;
+    let mut inputs = None;
     for (key, value) in in_file_order(fields) {
         let field: &str = key.get_ref();
         let path = dotted(&[CHECKS_KEY, name, field]);
@@ -560,6 +576,9 @@ fn check_of(lines: &Lines, name: &str, at: u64, fields: &DeTable<'_>) -> Result<
                 stages = Some(stages_of(value).map_err(|(what, span)| refused(what, span))?);
             }
             "reports" => reports = Some(reports_of(lines, name, value)?),
+            "inputs" => {
+                inputs = Some(inputs_of(value).map_err(|(what, span)| refused(what, span))?);
+            }
             _ => return Err(unknown_key(path, line(key.span()))),
         }
     }
@@ -577,6 +596,7 @@ fn check_of(lines: &Lines, name: &str, at: u64, fields: &DeTable<'_>) -> Result<
         timeout_s: timeout_s.unwrap_or(DEFAULT_CHECK_TIMEOUT_S),
         stages: stages.unwrap_or_else(|| vec![CheckStage::BeforeLand]),
         reports: reports.unwrap_or_default(),
+        inputs: inputs.unwrap_or_default(),
         line: Some(at),
     })
 }
@@ -684,6 +704,44 @@ fn reports_of(
         reports.push(Report::new(format, path));
     }
     Ok(reports)
+}
+
+/// `inputs`' patterns, in declared order, or what is wrong with them and where: not an array,
+/// empty, more than [`MAX_CHECK_INPUTS`] (at the first one past them), an item that is not a
+/// string, not a pattern ([`Inputs::parse`]) or given twice (at the second).
+fn inputs_of(
+    value: &Spanned<DeValue<'_>>,
+) -> Result<Vec<String>, (String, std::ops::Range<usize>)> {
+    // 1. An array of 1 to MAX_CHECK_INPUTS strings.
+    let DeValue::Array(items) = value.get_ref() else {
+        let what = format!("{}, not an array of patterns", shown(value.get_ref()));
+        return Err((what, value.span()));
+    };
+    if items.is_empty() {
+        let what = "empty: declare one pattern or more, or leave the key out".to_owned();
+        return Err((what, value.span()));
+    }
+    let mut patterns = Vec::with_capacity(items.len().min(MAX_CHECK_INPUTS));
+    for item in items {
+        if patterns.len() == MAX_CHECK_INPUTS {
+            let what = format!("holding more than {MAX_CHECK_INPUTS} patterns");
+            return Err((what, item.span()));
+        }
+        let DeValue::String(text) = item.get_ref() else {
+            let what = format!("holding {}, not a string", shown(item.get_ref()));
+            return Err((what, item.span()));
+        };
+        patterns.push(text.to_string());
+    }
+
+    // 2. Each a pattern of the grammar, none twice: the first fault, at its item.
+    match Inputs::parse(&patterns) {
+        Ok(_) => Ok(patterns),
+        Err((at, what)) => {
+            let what = format!("holding {}, {what}", quoted(&patterns[at]));
+            Err((what, items[at].span()))
+        }
+    }
 }
 
 /// `stages`' stages, in their own order, or what is wrong with them and where: not an array,

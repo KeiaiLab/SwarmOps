@@ -709,7 +709,7 @@ Kind: object. `swarmops schema CheckOut` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `argv` | array of `string` | yes | The program and its arguments, run with no shell: at least the program. |
-| `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
+| `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, `inputs`, the defaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
 | `dir` | `string` | yes | The directory of the tree it runs in, as a repository path; `.` is the root. |
 | `inputs` | array of `string` | no | Its declared inputs: path patterns from the tree's root, in the order the file declares them. A segment is a literal, or `*` (any one segment); the last may be `**` (every depth below). Omitted when it declares none: such a check takes the whole tree. |
 | `line` | `integer` (uint64) or `null` | no | The line of `.swarmops/checks.toml` that starts its table. Omitted for the check `default` read from `.swarmops/workspaces.json`. |

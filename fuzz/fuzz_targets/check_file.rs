@@ -6,9 +6,10 @@
 //! even ─▶ check::parse(.swarmops/checks.toml)   odd ─▶ check::parse_legacy(workspaces.json)
 //! accepted: names unique, sorted, of the grammar; argv, dir and timeout_s inside their rules;
 //!           stages (M30-6) never empty, known, none twice, in their own order; reports (M31-5)
-//!           at most 16, junit or sarif, repository paths, none twice, listed in order; each
-//!           digest the one its definition gives; written back by this target as TOML, read as
-//!           the same checks
+//!           at most 16, junit or sarif, repository paths, none twice, listed in order; inputs
+//!           (M30-3) at most 64, each at most 1,024 bytes and a pattern `Inputs::parse` takes,
+//!           none twice, listed in order; each digest the one its definition gives; written
+//!           back by this target as TOML, read as the same checks
 //! refused:  E_CHECK_FILE, a known reason, a line from 1 to the input's lines + 1, a message
 //!           of one line and at most 512 bytes
 //! ```
@@ -18,10 +19,11 @@ use std::fmt::Write as _;
 
 use libfuzzer_sys::fuzz_target;
 use swarmops_api::{CheckReportFormat, CheckStage};
+use swarmops_ops::check::inputs::Inputs;
 use swarmops_ops::check::{
     self, CHECK_FILE, Check, LEGACY_CHECK, LEGACY_FILE, MAX_ARGV_BYTES, MAX_ARGV_ITEMS,
-    MAX_CHECK_NAME_BYTES, MAX_CHECK_REPORTS, MAX_CHECK_TIMEOUT_S, MAX_CHECKS, ROOT_DIR, Reason,
-    Refusal,
+    MAX_CHECK_INPUTS, MAX_CHECK_NAME_BYTES, MAX_CHECK_REPORTS, MAX_CHECK_TIMEOUT_S, MAX_CHECKS,
+    MAX_INPUT_PATTERN_BYTES, ROOT_DIR, Reason, Refusal,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -45,6 +47,7 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(default.line, None);
             assert_eq!(default.stages, [CheckStage::BeforeLand]);
             assert!(default.reports.is_empty(), "{default:?}");
+            assert!(default.inputs.is_empty(), "{default:?}");
             accepted(std::slice::from_ref(&default));
         }
         Ok(None) => {}
@@ -128,6 +131,21 @@ fn accepted(checks: &[Check]) {
             .collect();
         assert_eq!(listed, declared);
 
+        assert!(check.inputs.len() <= MAX_CHECK_INPUTS, "{check:?}");
+        for (at, pattern) in check.inputs.iter().enumerate() {
+            assert!(pattern.len() <= MAX_INPUT_PATTERN_BYTES, "{check:?}");
+            assert!(!check.inputs[..at].contains(pattern), "{check:?}");
+        }
+        let inputs = Inputs::parse(&check.inputs).unwrap_or_else(|e| panic!("{check:?}: {e:?}"));
+        assert_eq!(inputs.whole_tree(), check.inputs.is_empty(), "{check:?}");
+        assert_eq!(out.inputs, check.inputs);
+        for pattern in &check.inputs {
+            // A pattern without `*` names one path, itself, and so matches it.
+            if !pattern.contains('*') {
+                assert!(inputs.matches(pattern), "{check:?}");
+            }
+        }
+
         let same = Check::clone(check);
         assert_eq!(same.definition_digest(), check.definition_digest());
         assert_eq!(check.definition_digest().len(), 64, "{check:?}");
@@ -156,6 +174,10 @@ fn round_trip(checks: &[Check]) {
                 .collect();
             let _ = writeln!(text, "reports = [{}]", reports.join(", "));
         }
+        if !check.inputs.is_empty() {
+            let inputs: Vec<String> = check.inputs.iter().map(|p| basic(p)).collect();
+            let _ = writeln!(text, "inputs = [{}]", inputs.join(", "));
+        }
     }
     let again = check::parse(text.as_bytes()).unwrap_or_else(|e| panic!("{text:?}: {e:?}"));
     assert_eq!(again.checks.len(), checks.len(), "{text:?}");
@@ -167,6 +189,7 @@ fn round_trip(checks: &[Check]) {
         );
         assert_eq!(read.stages, check.stages, "{text:?}");
         assert_eq!(read.reports, check.reports, "{text:?}");
+        assert_eq!(read.inputs, check.inputs, "{text:?}");
         assert_eq!(read.definition_digest(), check.definition_digest());
     }
 }

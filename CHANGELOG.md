@@ -91,6 +91,12 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   from (`run_lines`). `swarmops schema` prints them (242 types).
 - API type `CheckLogMoreOut`, the log of one more failed check in an answer of the failed checks'
   logs: one check's log, key for key. `swarmops schema` prints it (243 types).
+- The check file's `inputs` key: the paths a check depends on, 1 to 64 patterns in the grammar of
+  the store's `access.toml` (literal segments, `*` for one segment, a last `**` for every depth
+  below), at most 1,024 bytes each, none twice, from the tree's root whatever the check's `dir`.
+  A check without the key takes the whole tree. The patterns are part of the definition's digest,
+  in declared order; a check that declares none keeps its digest. A build from before this key
+  refuses a file that holds it, as an unknown key.
 
 ### Changed
 
@@ -107,6 +113,8 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - `SWARMOPS_CHECK_REPORT` is read: it is the check's report file of findings.
 - The MCP tool `check_list`'s description says that a check's declared JUnit and SARIF reports
   are listed.
+- `check list` and the MCP tool `check_list` give a check's `inputs`, in declared order, omitted
+  when it declares none.
 
 ## [0.13.0] - 2026-11-18
 

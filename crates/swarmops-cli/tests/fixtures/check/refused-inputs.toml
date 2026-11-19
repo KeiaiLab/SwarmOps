@@ -1,0 +1,10 @@
+# A version 1 check file whose one check declares an input that is no pattern: a `*` beside
+# other bytes in a segment.
+version = 1
+
+[check.site]
+argv = ["just", "site-check"]
+inputs = [
+  "web/**",
+  "fe*",
+]

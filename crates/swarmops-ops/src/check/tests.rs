@@ -28,6 +28,10 @@ const REFUSED_STAGE: &str =
 const REFUSED_REPORTS: &str =
     include_str!("../../../swarmops-cli/tests/fixtures/check/refused-reports.toml");
 
+/// A version 1 check file whose check declares an input that is no pattern, at a known line.
+const REFUSED_INPUTS: &str =
+    include_str!("../../../swarmops-cli/tests/fixtures/check/refused-inputs.toml");
+
 /// The checks of `text`, or the test fails.
 #[track_caller]
 fn checks(text: &str) -> Vec<Check> {
@@ -71,6 +75,7 @@ fn check(name: &str, argv: &[&str], dir: &str, timeout_s: u64) -> Check {
         timeout_s,
         stages: vec![CheckStage::BeforeLand],
         reports: Vec::new(),
+        inputs: Vec::new(),
         line: None,
     }
 }
@@ -306,14 +311,7 @@ fn the_refused_fixture_names_its_key_and_line() {
 /// unknown, so that a build that does not read them never lists a file without them.
 #[test]
 fn a_key_version_1_does_not_take_is_refused() {
-    for key in [
-        "stage",
-        "needs",
-        "inputs",
-        "variants",
-        "labels",
-        "parameters",
-    ] {
+    for key in ["stage", "needs", "variants", "labels", "parameters"] {
         let text = one("a", &format!("argv = [\"x\"]\n{key} = []"));
         let path = format!("check.a.{key}");
         refuses(&text, Reason::UnknownKey, Some(4), Some(&path));
@@ -325,10 +323,10 @@ fn a_key_version_1_does_not_take_is_refused() {
         Some("include"),
     );
     refuses(
-        "version = 1\n[check.a.inputs]\npaths = []\n",
+        "version = 1\n[check.a.needs]\nchecks = []\n",
         Reason::UnknownKey,
         Some(2),
-        Some("check.a.inputs"),
+        Some("check.a.needs"),
     );
     refuses(
         "version = 1\n\"a.b\" = 1\n",
@@ -1016,6 +1014,183 @@ fn reports_are_part_of_the_definition_digest() {
     );
 }
 
+// Declared inputs (M30-3).
+
+/// The inputs of the check `a` whose table holds `body` after its argv.
+fn inputs(body: &str) -> Vec<String> {
+    checks(&one("a", &format!("argv = [\"x\"]\n{body}")))[0]
+        .inputs
+        .clone()
+}
+
+/// `inputs` reads its patterns in declared order, each form of the grammar; `check list` gives
+/// them in that order, and a check without the key gives none and no key.
+#[test]
+fn inputs_read_in_their_declared_order() {
+    let declared = inputs("inputs = [\"web/**\", \"docs/*\", \"CHANGELOG.md\", \"*\", \"**\"]");
+    assert_eq!(declared, ["web/**", "docs/*", "CHANGELOG.md", "*", "**"]);
+    let over_lines = inputs("inputs = [\n  \"b\",\n  \"a/b c/ü.rs\",\n]");
+    assert_eq!(over_lines, ["b", "a/b c/ü.rs"]);
+
+    // As `check list` gives them; none, and no key, for a check that declares none.
+    let listed = checks(&one("a", "argv = [\"x\"]\ninputs = [\"b\", \"a\"]"))[0].out();
+    assert_eq!(listed.inputs, ["b", "a"]);
+    assert_eq!(
+        serde_json::to_value(&listed).unwrap()["inputs"],
+        json!(["b", "a"])
+    );
+    let bare = checks(&one("a", "argv = [\"x\"]"))[0].out();
+    assert_eq!(bare.inputs, Vec::<String>::new());
+    assert_eq!(serde_json::to_value(&bare).unwrap().get("inputs"), None);
+    assert_eq!(inputs(""), Vec::<String>::new());
+
+    // The longest pattern a check may declare; the legacy check declares none.
+    let longest = "a".repeat(MAX_INPUT_PATTERN_BYTES);
+    assert_eq!(inputs(&format!("inputs = [\"{longest}\"]")), [longest]);
+    let legacy = parse_legacy(br#"{"check": {"argv": ["./check.sh"]}}"#).unwrap();
+    assert_eq!(legacy.unwrap().inputs, Vec::<String>::new());
+}
+
+/// Each refusal of `inputs`: `value`, the key, the line of the item at fault.
+#[test]
+fn inputs_refuse_each_fault_at_its_line() {
+    let at = |body: &str| one("a", &format!("argv = [\"x\"]\n{body}"));
+    let too_long = format!(
+        "inputs = [\n  \"a\",\n  \"{}\",\n]",
+        "a".repeat(MAX_INPUT_PATTERN_BYTES + 1)
+    );
+    let cases: &[(&str, u64)] = &[
+        ("inputs = \"web/**\"", 4),
+        ("inputs = { web = true }", 4),
+        ("inputs = []", 4),
+        ("inputs = [\n  7,\n]", 5),
+        ("inputs = [\n  \"a\",\n  \"\",\n]", 6),
+        ("inputs = [\n  \"a//b\",\n]", 5),
+        ("inputs = [\n  \"/a\",\n]", 5),
+        ("inputs = [\n  \"a/\",\n]", 5),
+        ("inputs = [\n  \"fe*\",\n]", 5),
+        ("inputs = [\n  \"a/***\",\n]", 5),
+        ("inputs = [\n  \"a/**/b\",\n]", 5),
+        ("inputs = [\n  \"**/b\",\n]", 5),
+        ("inputs = [\n  \"./a\",\n]", 5),
+        ("inputs = [\n  \"a/..\",\n]", 5),
+        ("inputs = [\n  \"a\\u0000b\",\n]", 5),
+        (&too_long, 6),
+        ("inputs = [\n  \"a\",\n  \"b\",\n  \"a\",\n]", 7),
+    ];
+    for (body, line) in cases {
+        refuses(
+            &at(body),
+            Reason::Value,
+            Some(*line),
+            Some("check.a.inputs"),
+        );
+    }
+
+    // The fixture: a `*` beside other bytes at its line, said in one line, the hint naming
+    // `inputs`; the hint of an unknown key names it too.
+    refuses(
+        REFUSED_INPUTS,
+        Reason::Value,
+        Some(9),
+        Some("check.site.inputs"),
+    );
+    let error = refused(REFUSED_INPUTS.as_bytes()).into_error(true);
+    assert_eq!(error.code, "E_CHECK_FILE");
+    assert_eq!(
+        error.message,
+        ".swarmops/checks.toml has check.site.inputs holding \"fe*\", not a pattern: a * beside \
+         other bytes in a segment (line 9)"
+    );
+    assert_eq!(error.details["reason"], "value");
+    assert!(error.hint.unwrap().contains("inputs"));
+    let unknown = refused(at("needs = []").as_bytes());
+    assert!(unknown.into_error(true).hint.unwrap().contains("inputs"));
+
+    // A pattern given twice is said so, and a long one is cut in the message.
+    let twice = refused(at("inputs = [\"a\", \"a\"]").as_bytes());
+    assert_eq!(twice.what, "has check.a.inputs holding \"a\", given twice");
+    let long = refused(at(&too_long).as_bytes()).into_error(true);
+    assert!(long.message.len() <= 512, "{}", long.message);
+    assert!(
+        long.message.contains("of 1025 bytes, more than 1024"),
+        "{}",
+        long.message
+    );
+}
+
+/// Up to 64 patterns are taken; the 65th is refused at its line.
+#[test]
+fn at_most_64_inputs() {
+    let items = |n: usize| -> String {
+        let lines: Vec<String> = (0..n).map(|i| format!("  \"p{i}/**\",")).collect();
+        format!("inputs = [\n{}\n]", lines.join("\n"))
+    };
+    assert_eq!(inputs(&items(MAX_CHECK_INPUTS)).len(), 64);
+    refuses(
+        &one(
+            "a",
+            &format!("argv = [\"x\"]\n{}", items(MAX_CHECK_INPUTS + 1)),
+        ),
+        Reason::Value,
+        Some(69),
+        Some("check.a.inputs"),
+    );
+}
+
+/// The digest: unchanged by no `inputs`; changed by a pattern added, removed or reordered, and
+/// by `**`, which matches what no pattern does and is another definition; the bytes of tag 5 as
+/// the digest module documents them.
+#[test]
+fn inputs_are_part_of_the_definition_digest() {
+    // 1. Every change of the patterns shows in the digest; no pattern leaves it as it was.
+    let with = |patterns: &[&str]| {
+        let mut check = check("a", &["make"], ".", 900);
+        check.inputs = patterns.iter().map(|p| (*p).to_owned()).collect();
+        check.definition_digest()
+    };
+    let digests = [
+        with(&[]),
+        with(&["web/**"]),
+        with(&["web/**", "docs/**"]),
+        with(&["docs/**", "web/**"]),
+        with(&["docs/**"]),
+        with(&["**"]),
+        with(&["web/*"]),
+        with(&["web", "**"]),
+    ];
+    let unique: std::collections::BTreeSet<&String> = digests.iter().collect();
+    assert_eq!(unique.len(), digests.len(), "{digests:#?}");
+    assert_eq!(
+        digests[0],
+        "25fb129d52047b2d4fdc6f5c464153fd633dd6a40d8abee361f8a845211f3019"
+    );
+
+    // 2. Read from a file: the key left out is the digest of before, the key given another.
+    let bare = &checks(&one("a", "argv = [\"make\"]"))[0];
+    assert_eq!(bare.definition_digest(), digests[0]);
+    let narrowed = &checks(&one("a", "argv = [\"make\"]\ninputs = [\"web/**\"]"))[0];
+    assert_eq!(narrowed.definition_digest(), digests[1]);
+    assert_eq!(narrowed.out().definition_digest, digests[1]);
+
+    // 3. The documented bytes: tag 5 after the reports' tag 4.
+    let le = |n: u64| n.to_le_bytes().to_vec();
+    let mut bytes = b"swarmops:check-definition:v0\0".to_vec();
+    let argv = [le(1), le(4), b"make".to_vec()].concat();
+    bytes.extend([vec![1], le(20), argv].concat());
+    let reports = [le(1), vec![1], le(5), b"j.xml".to_vec()].concat();
+    bytes.extend([vec![4], le(u64::try_from(reports.len()).unwrap()), reports].concat());
+    let value = [le(2), le(6), b"web/**".to_vec(), le(4), b"docs".to_vec()].concat();
+    bytes.extend([vec![5], le(u64::try_from(value.len()).unwrap()), value].concat());
+    let mut both = check("a", &["make"], ".", 900);
+    both.reports = vec![Report::new(CheckReportFormat::Junit, "j.xml")];
+    both.inputs = vec!["web/**".to_owned(), "docs".to_owned()];
+    assert_eq!(
+        both.definition_digest(),
+        blake3::hash(&bytes).to_hex().to_string()
+    );
+}
+
 // The two forms of `check list`.
 
 /// A store whose main holds `files` (path, content), one of them maybe a link.
@@ -1307,7 +1482,7 @@ proptest! {
             prop_assert_eq!(&check.argv, argv);
             prop_assert_eq!(&check.dir, dir);
             prop_assert_eq!(check.timeout_s, *timeout_s);
-            let fresh = digest::definition(argv, dir, *timeout_s, &[]);
+            let fresh = digest::definition(argv, dir, *timeout_s, &[], &[]);
             prop_assert_eq!(check.definition_digest(), fresh);
         }
     }

@@ -9,9 +9,12 @@
 //!   tag 3  timeout_s  unless 900:          u64le(seconds)
 //!   tag 4  reports    unless none:         u64le(count) ‖ for each, in declared order:
 //!                                          u8(format: 1 junit, 2 sarif) ‖ u64le(len) ‖ path
+//!   tag 5  inputs     unless none:         u64le(count) ‖ for each, in declared order:
+//!                                          u64le(len) ‖ bytes
 //! ```
 //!
-//! The name is not hashed: a check renamed keeps its digest. A field at its default is left out,
+//! The name is not hashed: a check renamed keeps its digest. The inputs are, in the order the
+//! file declares them: a check that narrows or reorders them is another definition. A field at its default is left out,
 //! so a key added to the file later, while left out, changes no digest. `v0` says the recipe is
 //! provisional: it is no part of the hash contract, and a later release may replace it.
 
@@ -34,8 +37,18 @@ const TAG_TIMEOUT: u8 = 3;
 /// The tag of the reports.
 const TAG_REPORTS: u8 = 4;
 
-/// The digest of the definition `argv`, `dir`, `timeout_s`, `reports`: 64 lowercase hex digits.
-pub(crate) fn definition(argv: &[String], dir: &str, timeout_s: u64, reports: &[Report]) -> String {
+/// The tag of the inputs.
+const TAG_INPUTS: u8 = 5;
+
+/// The digest of the definition `argv`, `dir`, `timeout_s`, `reports`, `inputs`: 64 lowercase hex
+/// digits.
+pub(crate) fn definition(
+    argv: &[String],
+    dir: &str,
+    timeout_s: u64,
+    reports: &[Report],
+    inputs: &[String],
+) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(DOMAIN);
 
@@ -68,6 +81,16 @@ pub(crate) fn definition(argv: &[String], dir: &str, timeout_s: u64, reports: &[
             value.extend_from_slice(report.path.as_bytes());
         }
         field(&mut hasher, TAG_REPORTS, &value);
+    }
+
+    // 4. inputs, unless none: their count, then each pattern with its length, in order.
+    if !inputs.is_empty() {
+        let mut value = length(inputs.len()).to_vec();
+        for pattern in inputs {
+            value.extend_from_slice(&length(pattern.len()));
+            value.extend_from_slice(pattern.as_bytes());
+        }
+        field(&mut hasher, TAG_INPUTS, &value);
     }
     hasher.finalize().to_hex().to_string()
 }

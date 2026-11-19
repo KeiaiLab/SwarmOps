@@ -1488,7 +1488,7 @@ expression: s.redact(&all)
               "type": "array"
             },
             "definition_digest": {
-              "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled\nin; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
+              "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, `inputs`, the\ndefaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
               "type": "string"
             },
             "dir": {
@@ -2444,7 +2444,7 @@ expression: s.redact(&all)
           "type": "array"
         },
         "definition_digest": {
-          "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled\nin; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
+          "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, `inputs`, the\ndefaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
           "type": "string"
         },
         "dir": {

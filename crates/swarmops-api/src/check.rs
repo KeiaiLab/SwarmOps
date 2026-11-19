@@ -154,8 +154,8 @@ pub struct CheckOut {
     /// `.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does
     /// not read it, and takes its own `--check-timeout`.
     pub timeout_s: u64,
-    /// The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled
-    /// in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.
+    /// The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, `inputs`, the
+    /// defaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.
     /// Provisional: the recipe may change in a later release, so compare digests of one release
     /// only.
     pub definition_digest: String,

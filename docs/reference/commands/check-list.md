@@ -4,7 +4,7 @@
 
 List the checks REV's tree describes, or those of a directory with --dir.
 
-A tree names its checks in .swarmops/checks.toml (version 1): one \[check.NAME\] table a check, each one command (argv) run with no shell, with a directory (dir), a timeout (timeout\_s) and the stages its answer is wanted at (stages, default before-land); any other key is refused at its line. This reads .swarmops/checks.toml at REV (default main), resolved once; a tree without it lists check.argv of .swarmops/workspaces.json as the one check default, and a tree with neither lists no check. Each check comes with its argv, its directory, its timeout, the digest of its definition and its stages, sorted by name; --stage lists only the checks of one stage. --dir DIR reads the files below DIR on this host instead, and opens no store: the answer says vouched, since only the caller stands behind them. A file that does not read is E\_CHECK\_FILE, naming its line and key. Reads only: no identity, no lock.
+A tree names its checks in .swarmops/checks.toml (version 1): one \[check.NAME\] table a check, each one command (argv) run with no shell, with a directory (dir), a timeout (timeout\_s), the stages its answer is wanted at (stages, default before-land), the reports it leaves (reports) and the paths it depends on (inputs: patterns from the tree's root, \* one segment, a last \*\* every depth below; none is the whole tree); any other key is refused at its line. This reads .swarmops/checks.toml at REV (default main), resolved once; a tree without it lists check.argv of .swarmops/workspaces.json as the one check default, and a tree with neither lists no check. Each check comes with its argv, its directory, its timeout, the digest of its definition, its stages and what it declares, sorted by name; --stage lists only the checks of one stage. --dir DIR reads the files below DIR on this host instead, and opens no store: the answer says vouched, since only the caller stands behind them. A file that does not read is E\_CHECK\_FILE, naming its line and key. Reads only: no identity, no lock.
 
 ```yaml
 title: "swarmops check list"
@@ -184,6 +184,10 @@ stages = ["before-land", "after-land"]
 [check.test]
 argv = ["cargo", "nextest", "run", "--profile", "ci"]
 reports = [{ format = "junit", path = "target/nextest/ci/junit.xml" }]
+
+[check.site]
+argv = ["just", "site-check"]
+inputs = ["web/**", "docs/*", "CHANGELOG.md"]
 ```
 
 | Key | Required | Default | Rule |
@@ -196,24 +200,51 @@ reports = [{ format = "junit", path = "target/nextest/ci/junit.xml" }]
 | `stages` | no | `["before-land"]` | When its answer is wanted: 1 to 6 of `before-land`, `after-land`, `scheduled`, `release`, `manual` and `deploy`, none twice. An unknown stage, an empty array, an item that is not a string, or a stage given twice is refused as `value`, at the line of the item (or the array) at fault. The key is `stages`, plural: `stage` is refused as an unknown key. |
 | `reports` | no | none | The JUnit and SARIF reports the check leaves in its tree, which `check run` reads into findings once it has ended ([check run](../commands/check-run.md)): 1 to 16 tables, each of `format` (`junit` or `sarif`) and `path` (a repository path relative to the check's `dir`, no path twice in one check), as an inline table or a `[[check.<name>.reports]]` table. Not an array, an empty one, a 17th report or an item that is not a table is refused as `value` with `details.key` `check.<name>.reports`; a format or path outside its rule, or a table without one of them, as `value` with `details.key` `check.<name>.reports.format` or `.path`; any other key in a table as `unknown_key`. Each at the line at fault. |
 
-The file holds at most 1 MiB and 1,000 checks, and a check at most 16 reports. Any TOML table syntax
+| `inputs` | no | the whole tree | The paths the check depends on: 1 to 64 patterns, each at most 1,024 bytes, none twice ([Declared inputs](#declared-inputs)). Not an array, an empty one, a 65th pattern, an item that is not a string or not a pattern, or a pattern given twice is refused as `value` with `details.key` `check.<name>.inputs`, at the line of the item (or the array) at fault. |
+
+The file holds at most 1 MiB and 1,000 checks, and a check at most 16 reports and 64 inputs. Any TOML table syntax
 reads alike: a header, dotted keys (`check.unit.argv = [...]`) or an inline table. The
 [limits](../limits.md) page lists each bound with its constant.
 
 **Any other key is refused**, at its line, as `unknown_key`. Later releases add keys to version 1
-(what a check reads, when it runs, what it needs first); a build that does not know a key refuses
-the file instead of listing, or one day running, a check without it. A change to what an
-existing key means is a new version.
+(when a check runs, what it needs first); a build that does not know a key refuses the file
+instead of listing, or one day running, a check without it: a build from before `inputs` refuses
+a file that declares them. A change to what an existing key means is a new version.
+
+### Declared inputs
+
+`inputs` names the paths a check depends on, as patterns in the grammar the store's `access.toml`
+writes its agents and refs in. A pattern is `/`-separated segments; each is a literal, or `*`, any
+one segment; the last one may be `**`, every depth below it, at least one segment. An empty
+segment, a `*` beside other bytes in a segment (`server-*`), a `**` before the last segment, a
+segment `.` or `..`, and a NUL byte are refused. There is no negation and no escape.
+
+A pattern names paths **from the tree's root**, whatever the check's `dir`, and bytes are
+compared as they are: no case folding, no normalisation. A tree's entries are its files,
+executables and symbolic links; a directory is not an entry:
+
+| Pattern | Matches | Does not match |
+| --- | --- | --- |
+| `docs` | a file, an executable or a link named `docs` | anything below a directory `docs` |
+| `docs/*` | `docs/guide.md` | `docs/status/M1/a.txt`, `docs` |
+| `docs/**` | `docs/guide.md`, `docs/status/M1/a.txt` | `docs`, `documents/a.md` |
+
+A path is among a check's inputs when any of its patterns matches it. A check without the key
+takes the whole tree. `["**"]` matches the same paths, and is another definition: the patterns
+are part of the definition's digest, in declared order, so a check that narrows, widens or
+reorders its inputs is a changed definition. Nothing skips a check for its inputs: `check run`
+runs every check of its stage.
 
 ### The answer
 
 The checks come sorted by name, so moving a table in the file changes nothing but their `line`. Each
 has its `argv`, its `dir`, its `timeout_s` and its `stages` with the defaults filled in, the `line`
-its table starts on, its `reports` in declared order when it declares any, and `definition_digest`,
-a digest of `argv`, `dir`, `timeout_s` and `reports` (not of the name, nor of the stages, which say
-when an answer is wanted, not what the command computes): two checks that differ only in name or
-stages, or a check renamed, share a digest, and a default written out gives the same digest as one
-left out; a check that declares no report has the digest it had before the key existed. `stages`
+its table starts on, its `reports` and its `inputs` in declared order when it declares any, and
+`definition_digest`, a digest of `argv`, `dir`, `timeout_s`, `reports` and `inputs` (not of the
+name, nor of the stages, which say when an answer is wanted, not what the command computes): two
+checks that differ only in name or stages, or a check renamed, share a digest, and a default
+written out gives the same digest as one left out; a check that declares no report and no input
+has the digest it had before those keys existed. `stages`
 come in the stages' own order (`before-land`, `after-land`, `scheduled`, `release`, `manual`,
 `deploy`), whatever order the file wrote them in. The same tree gives the same `result` byte for
 byte, whichever changeset names it.
