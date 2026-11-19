@@ -1,0 +1,2 @@
+Each check that check run reaches appends a run line to a rotating diagnostics file: its name, tree, stage, wait, duration, outcome and peak memory.
+commit a5a13d36528463f62ebfd5a014cb3db226135912

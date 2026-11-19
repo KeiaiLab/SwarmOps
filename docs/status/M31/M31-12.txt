@@ -1,0 +1,2 @@
+check runs pages the run lines newest first, filtered by check, tree, outcome, run and time, and a cursor resumes; check_runs is its MCP tool.
+commit ba260283d90d9c0aa6fca6eb6d54979bfe546a82

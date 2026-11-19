@@ -1,0 +1,2 @@
+check log --failed gives the logs of the checks of a run that did not pass, each its last lines, and finds a run through the run lines.
+commit 905309c3a883c30ba5cc5034a59b20fcac80e9de

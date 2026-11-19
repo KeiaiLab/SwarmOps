@@ -108,7 +108,7 @@ Native sync is M11, planned.
 | Remotes, remote state and `sync` | 2, 3 | Built for git remotes (M13): `remotes.toml`, the mirror's refs, `so sync` | M13 (done), M11 (store remotes) |
 | Ref names beyond `main` and `release/<name>`, and tags | 1, 3 | Built (M6): free-form branches, `tags/<path>` and `remote/<remote>/<path>` in a `FORMAT 2` store; the git side maps them (M14): `git import`, `git export` and `serve` take branches and lightweight tags | M6 (done), M14 (done) |
 | Access control and identities for remote callers | 1, 3 | Built (M14): the store's `access.toml`, the caller named by the key line or the web server, `E_AUTH` and `E_POLICY_DENIED` | M14 (done), M11 |
-| Checks: a description of what runs for a tree | — | `.swarmops/checks.toml` with stages, `check list`, `check run` with findings and JUnit and SARIF reports, and `check log` (M30-1, M30-2, M30-6, M31-1 to M31-5); a checked land runs one command, the `check.argv` of `.swarmops/workspaces.json` | M30, M31 |
+| Checks: a description of what runs for a tree | — | `.swarmops/checks.toml` with stages, `check list`, `check run` with findings and JUnit and SARIF reports, `check log`, run lines and `check runs` (M30-1, M30-2, M30-6, M31-1 to M31-5, M31-11 to M31-13); a checked land runs one command, the `check.argv` of `.swarmops/workspaces.json` | M30, M31 |
 | Checks: results on a tree | — | Not built | M7, M32 |
 | Checks: triggers | — | Not built | M33 |
 | Checks: runners | — | Not built | M34 |
@@ -178,9 +178,10 @@ v0.11.0; G9's update and commit rows wait for a quiet run, and the commit row st
 change feed exists. The benchmark gate (condition 3) runs in the weekly Scheduled run.
 [Checks and delivery](#checks-and-delivery) (M30 to M40) is planned; of it, the check file and
 `check list` (M30-1 and M30-2, step 1 of the first steps), a check's stages, `check run`, the
-environment a check gets and its log with `check log` (M30-6 and M31-1 to M31-3, step 2), and a
-check's findings with its JUnit and SARIF reports (M31-4 and M31-5, step 3) are on `stable` and in
-no release yet, and nothing else is built. Step 2's CI half, the `check` job
+environment a check gets and its log with `check log` (M30-6 and M31-1 to M31-3, step 2), a
+check's findings with its JUnit and SARIF reports (M31-4 and M31-5, step 3), and the run line each
+check of a run leaves, with `check runs` and `check log --failed` (M31-11 to M31-13, step 4) are
+on `stable` and in no release yet, and nothing else is built. Step 2's CI half, the `check` job
 starting the gate with `check run` and a pinned build, waits for the first release that holds
 `check run`. It
 is deferred past usable but for the units of M30 and M31 behind steps 1 to 8 of its
@@ -901,9 +902,9 @@ land --check`. 22 units.
 | M31-8 | Exclusive groups on a host: a check names a group with the scope `host`; one check of a group runs on the host at a time, the others wait up to a bound; the lock's directory is an operator's setting, so that it can span several accounts of one machine | M31-1 | planned |
 | M31-9 | The stop contract: interrupt, then terminate after a grace, then kill the group; an `always` check still runs; the outcome is `cancelled`; a check that left its group is named in the outcome | M31-1 | planned |
 | M31-10 | `ws land --check` runs the `before-land` plan in place of one command; the tree landed is the tree every check ran on; `check.argv` keeps working | M31-1, M30-4, M5 | planned |
-| M31-11 | Run lines: each check run appends one line to a diagnostics file (beside the store, in the workspace's private state, or at a path the caller names): name, tree, stage, wait, duration, outcome, labels, peak memory; diagnostics, as the serve records are: nothing decides from them | M31-1 | planned |
-| M31-12 | `check runs`: the run lines, and from M33-1 on the run records, which are then the source; filtered by check, tree, outcome and time, paged | M31-11 | planned |
-| M31-13 | `check log <run>`: one check's log, or with `--failed` only the failed checks', with `--tail N` | M31-3, M31-11 | planned |
+| M31-11 | Run lines: each check run appends one line to a diagnostics file (beside the store, in the workspace's private state, or at a path the caller names): name, tree, stage, wait, duration, outcome, labels, peak memory; diagnostics, as the serve records are: nothing decides from them | M31-1 | on stable |
+| M31-12 | `check runs`: the run lines, and from M33-1 on the run records, which are then the source; filtered by check, tree, outcome and time, paged | M31-11 | on stable |
+| M31-13 | `check log <run>`: one check's log, or with `--failed` only the failed checks', with `--tail N` | M31-3, M31-11 | on stable |
 | M31-14 | Run again: `check run --again <run>` runs every check of a run again, `--failed` what failed and its dependants, `--check <name>` one; each is the run's next attempt, and earlier attempts stay listed | M31-12 | planned |
 | M31-15 | A check marked `may-fail` reports its failure without failing the plan | M31-1 | planned |
 | M31-16 | Container checks: a check names an image by digest; the host's container runtime runs it with the workspace mounted, unprivileged, with no network unless declared; Linux hosts | M31-1 | planned |
@@ -1199,7 +1200,12 @@ alone, which names each check's stage since step 2: maintainers and agents start
 until a release holds `check run`, built to CD-D18's text, which awaits the maintainer. Since
 step 3 its `check` check declares the gate's JUnit report, so that `check run`, started with
 nextest's `ci` profile, answers a red gate with the failed tests as findings, while CI's `check`
-job still runs `just check` and uploads the same report.
+job still runs `just check` and uploads the same report. Since step 4 a gate started with
+`check run` leaves a run line for each of its two checks beside that directory's runs, or in the
+directory `SWARMOPS_CHECK_RUN_LINES_DIR` names, which `check runs` and `check log --failed` read;
+CI's `check` job, which still runs `just check`, leaves none until it makes step 2's switch, and
+the runners then set that variable to a directory of the operator's, outside every checkout. No
+baseline is read from the lines yet: [perf.md](perf.md) holds no figure for them.
 
 **Two tracks.** Track A, steps 1 to 8, runs inside the jobs GitHub starts, with no store: it uses
 the directory form, writes nothing to any store, needs no new record kind and freezes nothing in
