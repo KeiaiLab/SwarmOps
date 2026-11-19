@@ -784,7 +784,7 @@ fn a_linked_report_is_refused_and_a_sarif_one_read() {
 
 /// The workspace form reads a declared report as the directory form does: a clean workspace
 /// whose committed check file declares the report, its check writing it below an ignored
-/// directory, gets the same findings; `vouched` is false.
+/// directory, gets the same findings; `vouched` is false. The MCP tool answers with the same.
 #[test]
 fn the_workspace_form_reads_a_declared_report() {
     let lab = Lab::new();
@@ -809,6 +809,18 @@ fn the_workspace_form_reads_a_declared_report() {
         test["findings"][1]["title"],
         "schema::check::a_check_run_request_defaults_to_the_whole_gate"
     );
+
+    // The MCP tool answers with the same findings and reports in `details.run`.
+    let mut server = crate::mcp::Server::start(&["--repo", lab.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let call = server.call("check_run", json!({"workspace": "w1"}));
+    let envelope = &call.envelope;
+    assert_eq!(envelope["error"]["code"], "E_CHECK_FAILED", "{envelope}");
+    let tool = check(&envelope["error"]["details"]["run"], "test");
+    assert_eq!(tool["findings"], test["findings"], "{tool}");
+    assert_eq!(tool["findings_total"], 2, "{tool}");
+    assert_eq!(tool["reports"], test["reports"], "{tool}");
+    server.finish_clean();
 }
 
 /// Stages (M30-6): a check of two stages runs under each; a check of one runs under that one
