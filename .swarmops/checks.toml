@@ -72,14 +72,18 @@ argv = ["just", "server-entrances"]
 timeout_s = 1800
 stages = ["manual"]
 # server.yml's `on.push.paths`. Its `scripts/server-*` is no pattern of the grammar, where `*` is
-# a whole segment: the three files it takes are written out.
+# a whole segment: the three files it takes are written out, and so is its `remote*.rs`.
 inputs = [
   "packaging/**",
   "scripts/server-acceptance.py",
   "scripts/server-entrance.py",
   "scripts/server-image.py",
   "scripts/packages.py",
+  "crates/swarmops-git/src/**",
   "crates/swarmops-ops/src/serve/**",
+  "crates/swarmops-ops/src/native/**",
+  "crates/swarmops-ops/src/remote.rs",
+  "crates/swarmops-cli/src/**",
   "crates/swarmops-cli/src/commands/serve.rs",
   ".github/workflows/server.yml",
 ]
@@ -96,7 +100,11 @@ inputs = [
   "scripts/server-entrance.py",
   "scripts/server-image.py",
   "scripts/packages.py",
+  "crates/swarmops-git/src/**",
   "crates/swarmops-ops/src/serve/**",
+  "crates/swarmops-ops/src/native/**",
+  "crates/swarmops-ops/src/remote.rs",
+  "crates/swarmops-cli/src/**",
   "crates/swarmops-cli/src/commands/serve.rs",
   ".github/workflows/server.yml",
 ]

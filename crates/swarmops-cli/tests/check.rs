@@ -468,14 +468,16 @@ fn this_repository_s_inputs_are_its_workflows_paths() {
     let mut server_paths = Vec::new();
     for entry in listed_paths {
         let (dir, name) = entry.rsplit_once('/').unwrap_or(("", entry));
-        let partial = |prefix: &&str| !prefix.is_empty() && !prefix.contains('*');
-        let Some(prefix) = name.strip_suffix('*').filter(partial) else {
+        let partial = |(prefix, suffix): &(&str, &str)| {
+            !prefix.is_empty() && !prefix.contains('*') && !suffix.contains('*')
+        };
+        let Some((prefix, suffix)) = name.split_once('*').filter(partial) else {
             server_paths.push(entry.to_owned());
             continue;
         };
         let mut files: Vec<String> = (fs::read_dir(root.join(dir)).unwrap())
             .map(|file| file.unwrap().file_name().into_string().unwrap())
-            .filter(|file| file.starts_with(prefix))
+            .filter(|file| file.starts_with(prefix) && file.ends_with(suffix))
             .map(|file| format!("{dir}/{file}"))
             .collect();
         files.sort();
