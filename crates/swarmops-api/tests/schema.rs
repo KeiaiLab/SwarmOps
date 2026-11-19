@@ -2812,7 +2812,8 @@ mod check {
 
     /// A directory's answer holds `vouched` and its checks, in the documented order; the store's
     /// also names the tree, the file and its version; a check read from workspaces.json has no
-    /// line.
+    /// line; a check that declares inputs gives them after its reports, in declared order, and one
+    /// that declares none has no such key.
     #[test]
     fn a_check_list_result_omits_what_it_lacks() {
         let mut check = CheckOut::new("default", vec!["make".to_owned()], ".", 900, "ab");
@@ -2830,6 +2831,7 @@ mod check {
             CheckReportOut::new(CheckReportFormat::Junit, "out/junit.xml"),
             CheckReportOut::new(CheckReportFormat::Sarif, "out/a.sarif"),
         ];
+        check.inputs = vec!["web/**".to_owned(), "docs/*".to_owned()];
         let mut stored = CheckListResp::new(false, vec![check]);
         stored.tree = Some("7f".to_owned());
         stored.file = Some(".swarmops/checks.toml".to_owned());
@@ -2843,7 +2845,8 @@ mod check {
                 r#""stage":"manual","checks":[{"name":"default","argv":["make"],"dir":".","#,
                 r#""timeout_s":900,"definition_digest":"ab","stages":["before-land","manual"],"#,
                 r#""reports":[{"format":"junit","path":"out/junit.xml"},"#,
-                r#"{"format":"sarif","path":"out/a.sarif"}],"line":4}]}"#,
+                r#"{"format":"sarif","path":"out/a.sarif"}],"inputs":["web/**","docs/*"],"#,
+                r#""line":4}]}"#,
             ]
             .concat()
         );

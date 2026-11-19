@@ -6,7 +6,7 @@
 //!   CheckListReq {rev, stage?} ──▶ the tree rev names ──▶ .swarmops/checks.toml (version 1)
 //!                                                         or workspaces.json's check.argv
 //!   CheckListResp {vouched, tree, file, version, stage, checks: [CheckOut sorted by name]}
-//!   CheckOut {name, argv, dir, timeout_s, definition_digest, stages, reports, line}
+//!   CheckOut {name, argv, dir, timeout_s, definition_digest, stages, reports, inputs, line}
 //! ```
 //!
 //! `check run` runs one stage's checks, one at a time, and answers one [`CheckRunResp`]: an
@@ -169,6 +169,11 @@ pub struct CheckOut {
     /// once it has ended, in the order the file declares them. Omitted when it declares none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reports: Vec<CheckReportOut>,
+    /// Its declared inputs: path patterns from the tree's root, in the order the file declares
+    /// them. A segment is a literal, or `*` (any one segment); the last may be `**` (every depth
+    /// below). Omitted when it declares none: such a check takes the whole tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<String>,
     /// The line of `.swarmops/checks.toml` that starts its table. Omitted for the check
     /// `default` read from `.swarmops/workspaces.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -176,7 +181,8 @@ pub struct CheckOut {
 }
 
 impl CheckOut {
-    /// Takes the required fields; `stages` is `before-land` alone, no report, `line` none.
+    /// Takes the required fields; `stages` is `before-land` alone, no report, no input, `line`
+    /// none.
     pub fn new(
         name: impl Into<String>,
         argv: Vec<String>,
@@ -192,6 +198,7 @@ impl CheckOut {
             definition_digest: definition_digest.into(),
             stages: default_stages(),
             reports: Vec::new(),
+            inputs: Vec::new(),
             line: None,
         }
     }

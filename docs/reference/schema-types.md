@@ -711,6 +711,7 @@ Kind: object. `swarmops schema CheckOut` prints its JSON Schema.
 | `argv` | array of `string` | yes | The program and its arguments, run with no shell: at least the program. |
 | `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
 | `dir` | `string` | yes | The directory of the tree it runs in, as a repository path; `.` is the root. |
+| `inputs` | array of `string` | no | Its declared inputs: path patterns from the tree's root, in the order the file declares them. A segment is a literal, or `*` (any one segment); the last may be `**` (every depth below). Omitted when it declares none: such a check takes the whole tree. |
 | `line` | `integer` (uint64) or `null` | no | The line of `.swarmops/checks.toml` that starts its table. Omitted for the check `default` read from `.swarmops/workspaces.json`. |
 | `name` | `string` | yes | Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit. |
 | `reports` | array of [`CheckReportOut`](#checkreportout) | no | The JUnit and SARIF reports it leaves in its tree, which `check run` reads into findings once it has ended, in the order the file declares them. Omitted when it declares none. |

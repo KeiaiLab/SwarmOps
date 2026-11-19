@@ -1495,6 +1495,13 @@ expression: s.redact(&all)
               "description": "The directory of the tree it runs in, as a repository path; `.` is the root.",
               "type": "string"
             },
+            "inputs": {
+              "description": "Its declared inputs: path patterns from the tree's root, in the order the file declares\nthem. A segment is a literal, or `*` (any one segment); the last may be `**` (every depth\nbelow). Omitted when it declares none: such a check takes the whole tree.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "line": {
               "description": "The line of `.swarmops/checks.toml` that starts its table. Omitted for the check\n`default` read from `.swarmops/workspaces.json`.",
               "format": "uint64",
@@ -2443,6 +2450,13 @@ expression: s.redact(&all)
         "dir": {
           "description": "The directory of the tree it runs in, as a repository path; `.` is the root.",
           "type": "string"
+        },
+        "inputs": {
+          "description": "Its declared inputs: path patterns from the tree's root, in the order the file declares\nthem. A segment is a literal, or `*` (any one segment); the last may be `**` (every depth\nbelow). Omitted when it declares none: such a check takes the whole tree.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "line": {
           "description": "The line of `.swarmops/checks.toml` that starts its table. Omitted for the check\n`default` read from `.swarmops/workspaces.json`.",
