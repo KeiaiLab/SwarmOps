@@ -99,7 +99,7 @@ A store is one directory:
   meta/external_ids/       the git commit ids of imported and exported changesets
 ```
 
-Objects are compressed one at a time with zstd when that makes them smaller. The index and the
+Each object is compressed on its own with zstd, and stored as it is when zstd would not shrink it. The index and the
 ref files are projections of the journal; every object is durable before any metadata names it.
 
 ## Writing: a commit

@@ -4,7 +4,7 @@
 # ///
 """Makes the .deb and .rpm packages of a SwarmOps release archive, and installs them in containers.
 
-    python3 -I scripts/packages.py build <archive> <out dir> [--kit <dir>]
+    python3 -I scripts/packages.py build [--in-image] <archive> <out dir> [--kit <dir>]
     python3 -I scripts/packages.py smoke <version> <package>... [--kit <dir>]
 
 `build` reads `swarmops-<version>-<target>.tar.gz`, as the release workflow packs it, and writes
@@ -17,6 +17,9 @@ date (the tagged commit's), with fixed modes. The dependencies are the binaries'
 library their ELF dynamic section needs, and for glibc the newest version they need that is not
 weak. A library the script does not know, a binary of another machine, an entry the archive
 should not hold or a version the formats cannot carry fails the run before anything is written.
+With `--in-image` the same build runs inside the `package-build` image
+packaging/entrance/Dockerfile names (docker, no network), so that the xz bytes come from that
+image's Python and liblzma and not from the host's.
 
 Beside them it writes the server kit's packages, `swarmops-server_<version>_<arch>.deb` and
 `swarmops-server-<version>-1.<arch>.rpm`, dated and ordered alike: every file each `MANIFEST`
@@ -32,8 +35,9 @@ the run before anything is written.
     swarmops-X-<target>/swarmops         control.tar.xz,            header, xz cpio payload
     swarmops-X-<target>/LICENSE ...      data.tar.xz
 
-`smoke` installs the packages of one target in containers pinned by digest: the .deb with dpkg
-in Debian 12, the .rpm with rpm in AlmaLinux 9 (glibc 2.34, the oldest the binaries run on). It
+`smoke` installs the packages of one target in containers pinned by digest (the digests are
+packaging/entrance/Dockerfile's, which Dependabot moves): the .deb with dpkg in Debian 12, the
+.rpm with rpm in AlmaLinux 9 (glibc 2.34, the oldest the binaries run on). It
 checks what dpkg and rpm record, that `so --version` and `swarmops --version` print the version,
 that the packages verify, that `rpm --verify` sees a byte appended to an installed binary, and
 that removing them removes their files. A target this host does not run is installed for its own
@@ -43,8 +47,11 @@ its dependencies against that architecture's glibc. On a target this host runs, 
 the server packages beside the client's with apt-get and dnf, which fetch their dependencies:
 the accounts, the directories and the units must exist, `so-kit check` must pass, and removing
 them must remove their files and keep a file in /srv/so. On an emulated target the server
-packages, which hold no binary, are not installed. Needs docker; an emulated target and the
-server packages download packages from Debian's and AlmaLinux's mirrors. Exit 1 on a failure.
+packages, which hold no binary, are not installed. Needs docker. An emulated target downloads
+its C library, libgcc and the emulator at the versions the images hold: Debian's from the
+snapshot the Debian image was made from, AlmaLinux's from the AlmaLinux image's minor release.
+The server packages download their dependencies from the distributions' mirrors. Exit 1 on a
+failure.
 """
 
 import argparse
@@ -53,6 +60,7 @@ import hashlib
 import io
 import lzma
 import math
+import os
 import platform
 import re
 import secrets
@@ -112,12 +120,25 @@ ARCHIVE = re.compile(r"swarmops-(?P<version>.+)-(?P<target>[a-z0-9_]+-unknown-li
 
 XZ_PRESET = 6
 
-# The containers `smoke` installs in, by digest: moved by hand, as release.yml's build image is.
-DEBIAN_IMAGE = "debian:12@sha256:d74df7598108a173a621eda4d58a2adbf850b2d9a9d81bc2cca1a6c21174a880"
-ALMALINUX_IMAGE = (
-    "almalinux:9@sha256:245f8aab832fe800aa42bdab5fad75ebbd8e0b4c9f24820a83c638b177857ae2"
-)
+# The containers, by digest. packaging/entrance/Dockerfile names them, one `FROM <image> AS
+# <stage>` line each, so that Dependabot moves the digests: this script holds none.
+IMAGES = ROOT / "packaging" / "entrance" / "Dockerfile"
+IMAGE_LINE = re.compile(r"FROM (?P<image>\S+@sha256:[0-9a-f]{64}) AS (?P<stage>\S+)")
+
+
+class Stage(enum.Enum):
+    """A stage of `IMAGES` that names an image this script runs."""
+
+    DEBIAN = "install-deb"  # where `smoke` installs the .deb
+    ALMALINUX = "install-rpm"  # where `smoke` installs the .rpm
+    BUILD = "package-build"  # where the release makes the packages
+
+
 ALMALINUX_RELEASE = "9"
+# The Debian image's APT sources: each stanza's URIs line follows a comment naming the snapshot
+# of the archive the image was made from (`# http://snapshot.debian.org/archive/debian/<time>`).
+DEBIAN_SOURCES = "/etc/apt/sources.list.d/debian.sources"
+SNAPSHOT_LINE = re.compile(r"# (?P<uri>http://snapshot\.debian\.org/archive/\S+)")
 # How long one command in a container may take: an emulated target's downloads are the slowest.
 COMMAND_TIMEOUT = 900
 
@@ -1052,6 +1073,47 @@ def build(archive: Path, out: Path, kit: Path) -> None:
         print(f"{name}: {len(data)} bytes, {what}")
 
 
+class Where(enum.Enum):
+    """Where `build` runs."""
+
+    HOST = "host"  # this Python, this liblzma
+    IMAGE = "image"  # the `package-build` image's, pinned by digest
+
+
+def build_in_image(archive: Path, out: Path, kit: Path) -> None:
+    """Runs `build` in the `package-build` image: the checkout read-only, the archive's directory
+    read-only, `out` writable and owned by the caller, no network."""
+    archive, out, kit = archive.resolve(), out.resolve(), kit.resolve()
+    if not kit.is_relative_to(ROOT):
+        raise Failure(f"--in-image reads the kit from the checkout: {kit} is outside it")
+    out.mkdir(parents=True, exist_ok=True)
+
+    # 1. The mounts: /src the checkout, /archive the archive's directory, /out the packages.
+    argv = ["docker", "run", "--rm", "--network", Network.NONE.value,
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--volume", f"{ROOT}:/src:ro", "--volume", f"{archive.parent}:/archive:ro",
+            "--volume", f"{out}:/out", image(Stage.BUILD),
+            "python3", "-I", "/src/scripts/packages.py", "build", f"/archive/{archive.name}",
+            "/out", "--kit", f"/src/{kit.relative_to(ROOT)}"]
+
+    # 2. The run: its output is the build's, its exit status too.
+    print(f"[{image(Stage.BUILD).split('@')[0]}] $ {shlex.join(argv[argv.index('python3'):])}",
+          flush=True)
+    done = subprocess.run(argv, timeout=COMMAND_TIMEOUT, check=False)
+    if done.returncode != 0:
+        raise Failure(f"the build in {image(Stage.BUILD)} exited {done.returncode}")
+
+
+def image(stage: Stage) -> str:
+    """The image `IMAGES` names for `stage`, which must be pinned by digest."""
+    lines = (IMAGE_LINE.fullmatch(line.strip()) for line in IMAGES.read_text().splitlines())
+    found = [line["image"] for line in lines if line and line["stage"] == stage.value]
+    if len(found) != 1:
+        where = IMAGES.relative_to(ROOT)
+        raise Failure(f"{where} has not one 'FROM <image>@sha256:<digest> AS {stage.value}' line")
+    return found[0]
+
+
 # `smoke`: each package installed with its own tool, in a container pinned by digest.
 
 
@@ -1127,6 +1189,55 @@ def expect_removed(box: Container, root: str) -> None:
         box.run("test", "-e", f"{root}{path}", expect=1)
 
 
+def snapshot_sources(sources: str) -> str:
+    """`sources` with each stanza's URIs moved to the snapshot its comment names, which never
+    expires: what apt then fetches is what the image's own packages came from, whatever the
+    mirrors hold today."""
+    lines, snapshot, moved = [], None, 0
+    for line in sources.splitlines():
+        found = SNAPSHOT_LINE.fullmatch(line.strip())
+        if found:
+            snapshot = found["uri"]
+        if not line.startswith("URIs:"):
+            lines.append(line)
+            continue
+        if snapshot is None:
+            raise Failure(f"{DEBIAN_SOURCES}: '{line}' has no snapshot comment above it")
+        lines += [f"URIs: {snapshot}", "Check-Valid-Until: no"]
+        snapshot, moved = None, moved + 1
+    if moved == 0:
+        raise Failure(f"{DEBIAN_SOURCES} has no URIs line")
+    return "\n".join(lines) + "\n"
+
+
+def deb_version(box: "Container", package: str) -> str:
+    """The version of `package` the container's image holds."""
+    return box.run("dpkg-query", "--show", "--showformat", "${Version}", package).strip()
+
+
+def rpm_version(box: "Container", package: str) -> str:
+    """The version-release of `package` the container's image holds."""
+    return box.run("rpm", "--query", "--queryformat", "%{VERSION}-%{RELEASE}", package).strip()
+
+
+def pin_snapshot(box: "Container") -> None:
+    """Points the Debian container's APT at the snapshot its image was made from."""
+    sources = snapshot_sources(box.run("cat", DEBIAN_SOURCES))
+    with tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / "debian.sources"
+        path.write_text(sources)
+        box.copy_in(path, DEBIAN_SOURCES)
+
+
+def almalinux_minor(box: "Container") -> str:
+    """The image's AlmaLinux release, `9.<minor>`: its repositories, current or in the vault,
+    keep every package version of that release."""
+    release = box.run("sh", "-c", '. /etc/os-release && printf %s "$VERSION_ID"').strip()
+    if not release.startswith(f"{ALMALINUX_RELEASE}."):
+        raise Failure(f"the AlmaLinux image is release '{release}', not {ALMALINUX_RELEASE}.x")
+    return release
+
+
 def qemu(target: Target) -> str:
     """Debian's statically linked user-mode emulator for the target."""
     return f"qemu-{target.rpm}-static"
@@ -1136,15 +1247,19 @@ def smoke_deb(deb: Path, version: str, target: Target, emulator: Path) -> None:
     """Installs the .deb in Debian with dpkg; for an emulated target, copies out its emulator."""
     emulated = target.rpm != platform.machine()
     network = Network.BRIDGE if emulated else Network.NONE
-    with Container(DEBIAN_IMAGE, deb.parent, network) as box:
+    with Container(image(Stage.DEBIAN), deb.parent, network) as box:
         run_with: list[str] = []
 
-        # 1. An emulated target: its C library and libgcc (multiarch), and the emulator.
+        # 1. An emulated target: its C library and libgcc (multiarch) at the versions the image
+        # holds for its own architecture, and the emulator, all from the image's snapshot.
         if emulated:
+            pin_snapshot(box)
             box.run("dpkg", "--add-architecture", target.deb)
             box.run("apt-get", "update", "--quiet")
+            libc6, libgcc = (deb_version(box, p) for p in ("libc6", "libgcc-s1"))
             box.run("apt-get", "install", "--yes", "--quiet", "--no-install-recommends",
-                    "qemu-user-static", f"libc6:{target.deb}", f"libgcc-s1:{target.deb}")
+                    "qemu-user-static", f"libc6:{target.deb}={libc6}",
+                    f"libgcc-s1:{target.deb}={libgcc}")
             run_with = [qemu(target)]
 
         # 2. Install; what dpkg records; both binaries; the files; their checksums.
@@ -1171,18 +1286,20 @@ def smoke_rpm(rpm: Path, version: str, target: Target, emulator: Path) -> None:
     is emulated, with the emulator `smoke_deb` left."""
     emulated = target.rpm != platform.machine()
     network = Network.BRIDGE if emulated else Network.NONE
-    with Container(ALMALINUX_IMAGE, rpm.parent, network) as box:
+    with Container(image(Stage.ALMALINUX), rpm.parent, network) as box:
         package = f"/packages/{rpm.name}"
         root, run_with, foreign = "", [], []
 
-        # 1. An emulated target: an AlmaLinux root of its architecture with glibc and libgcc,
-        # without scriptlets, which would run that architecture's programs.
+        # 1. An emulated target: an AlmaLinux root of its architecture with glibc and libgcc at
+        # the versions the image holds, from the image's minor release, without scriptlets,
+        # which would run that architecture's programs.
         if emulated:
             root = "/sysroot"
+            glibc, libgcc = (rpm_version(box, p) for p in ("glibc", "libgcc"))
             box.run("dnf", "--assumeyes", "--quiet", f"--forcearch={target.rpm}",
-                    f"--installroot={root}", f"--releasever={ALMALINUX_RELEASE}",
+                    f"--installroot={root}", f"--releasever={almalinux_minor(box)}",
                     "--setopt=install_weak_deps=False", "--setopt=tsflags=noscripts",
-                    "install", "glibc", "libgcc")
+                    "install", f"glibc-{glibc}", f"libgcc-{libgcc}")
             box.copy_in(emulator, f"/usr/local/bin/{qemu(target)}")
             run_with, foreign = [qemu(target), "-L", root], ["--ignorearch"]
 
@@ -1272,7 +1389,7 @@ def expect_server_removed(box: Container, state: KitState) -> None:
 def smoke_server_deb(client: Path, server: Path, version: str, target: Target,
                      state: KitState) -> None:
     """Installs the server .deb beside the client's with apt-get, which fetches its dependencies."""
-    with Container(DEBIAN_IMAGE, server.parent, Network.BRIDGE) as box:
+    with Container(image(Stage.DEBIAN), server.parent, Network.BRIDGE) as box:
         box.run("apt-get", "update", "--quiet")
         box.run("apt-get", "install", "--yes", "--quiet", "--no-install-recommends",
                 f"/packages/{client.name}", f"/packages/{server.name}")
@@ -1298,7 +1415,7 @@ def smoke_server_deb(client: Path, server: Path, version: str, target: Target,
 def smoke_server_rpm(client: Path, server: Path, version: str, target: Target,
                      state: KitState) -> None:
     """Installs the server .rpm beside the client's with dnf, which fetches its dependencies."""
-    with Container(ALMALINUX_IMAGE, server.parent, Network.BRIDGE) as box:
+    with Container(image(Stage.ALMALINUX), server.parent, Network.BRIDGE) as box:
         checked = box.run("rpm", "--checksig", "--verbose", f"/packages/{server.name}")
         if "Payload SHA256 digest: OK" not in checked:
             raise Failure(f"rpm --checksig does not find {server.name}'s payload digest OK")
@@ -1364,6 +1481,9 @@ def main() -> int:
     make.add_argument("archive", type=Path)
     make.add_argument("out", type=Path)
     make.add_argument("--kit", type=Path, default=KIT, help="the server kit (packaging/server)")
+    make.add_argument("--in-image", dest="where", action="store_const", const=Where.IMAGE,
+                      default=Where.HOST,
+                      help="build in the package-build image packaging/entrance/Dockerfile names")
     test = commands.add_parser("smoke", help="install one target's packages in containers")
     test.add_argument("version")
     test.add_argument("packages", type=Path, nargs="+")
@@ -1371,7 +1491,9 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        if args.command == "build":
+        if args.command == "build" and args.where is Where.IMAGE:
+            build_in_image(args.archive, args.out, args.kit)
+        elif args.command == "build":
             build(args.archive, args.out, args.kit)
         else:
             smoke(args.version, args.packages, args.kit)

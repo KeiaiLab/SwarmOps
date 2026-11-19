@@ -1,8 +1,8 @@
 // Which docs pages are generated reference pages, and the links between them. Command pages and
 // MCP tool pages link both ways through the command's `mcp_tool` metadata:
 //
-//   docs/reference/commands/cat.md   mcp_tool: "read_file"   ->  /docs/reference/mcp-tools/read_file
-//   docs/reference/mcp-tools/read_file.md                    ->  /docs/reference/commands/cat
+//   docs/reference/commands/cat.md   mcp_tool: "read_file"   ->  /docs/reference/mcp-tools/read-file
+//   docs/reference/mcp-tools/read-file.md                    ->  /docs/reference/commands/cat
 //
 // A link is made only when its target page exists, so a tool without a page shows as a name.
 import { readFileSync } from 'node:fs';
@@ -63,7 +63,7 @@ export function isCommandUrl(url: string): boolean {
   return url.startsWith(`${docUrl(COMMANDS_DIR + DIR_INDEX)}/`);
 }
 
-/** `docs/reference/mcp-tools/read_file.md` -> `read_file`. */
+/** `docs/reference/mcp-tools/read-file.md` -> `read-file`. */
 function stem(file: string): string {
   const base = file
     .split('/')

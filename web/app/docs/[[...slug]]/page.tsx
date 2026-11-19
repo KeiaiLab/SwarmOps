@@ -33,6 +33,7 @@ import { fileAhead } from '@/lib/stable';
 
 // The page title is the Markdown's own `# ` heading; the TOC lists the sections below it, and
 // only on a page with enough of them to need one.
+const TITLE_DEPTH = 1;
 const TOC_MIN_DEPTH = 2;
 const SECTION_DEPTH = 2;
 const TOC_MIN_SECTIONS = 3;
@@ -76,13 +77,13 @@ export default async function Page({ params }: Props) {
     .map((item) => ({ ...item, title: nodeText(item.title) }));
   const sections = toc.filter((item) => item.depth === SECTION_DEPTH).length;
 
-  // 2. The meta line goes under the first `# `, the page's title.
-  let titled = false;
+  // 2. The meta line goes under the first `# `, the page's title: the h1 the contents list first,
+  // known by its id, so a second render pass puts it in the same place.
+  const titleId = page.data.toc.find((item) => item.depth === TITLE_DEPTH)?.url.slice(1);
   function Title(props: ComponentProps<'h1'>) {
-    if (titled) {
+    if (props.id !== titleId) {
       return <headings.h1 {...props} />;
     }
-    titled = true;
     return (
       <>
         <headings.h1 {...props} />

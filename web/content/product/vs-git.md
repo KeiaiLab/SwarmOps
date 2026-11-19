@@ -1,6 +1,6 @@
 ---
 title: "SwarmOps and git"
-description: "Where SwarmOps stands against git, dimension by dimension, judged strictly: ahead, at parity, behind, or not yet comparable."
+description: "Where SwarmOps stands against git, dimension by dimension, judged from the design: ahead, at parity, behind, or not yet comparable; no benchmark against git exists."
 ---
 
 # SwarmOps and git

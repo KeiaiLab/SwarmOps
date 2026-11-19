@@ -353,6 +353,12 @@ a[aria-current]:not([aria-current='false']) {
   color: inherit;
 }
 
+/* In a table a code name keeps its letters together (E_EXISTS, never E_EX / ISTS): a column too
+   wide for the page scrolls in the table's box instead. */
+.prose:not(.prose-sm) :is(td, th) code:not(.not-prose *) {
+  overflow-wrap: normal;
+}
+
 /* Product pages: a list item's bold opening sentence (marked lead-in at build time) as a heading
    of its own line. */
 .prose:not(.prose-sm) .lead-in {

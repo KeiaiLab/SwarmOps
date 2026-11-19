@@ -235,7 +235,7 @@ class Method:
 
 
 DEB = Method(
-    "deb", PACKAGES.DEBIAN_IMAGE, DEB_NEEDS, "www-data",
+    "deb", PACKAGES.image(PACKAGES.Stage.DEBIAN), DEB_NEEDS, "www-data",
     # No init system in a container: nothing a package installs starts (Debian's convention).
     "printf '#!/bin/sh\\nexit 101\\n' >/usr/sbin/policy-rc.d && chmod 0755 /usr/sbin/policy-rc.d"
     " && DEBIAN_FRONTEND=noninteractive apt-get install --yes --quiet --no-install-recommends"
@@ -243,7 +243,7 @@ DEB = Method(
     "DEBIAN_FRONTEND=noninteractive apt-get purge --yes --quiet swarmops-server",
 )
 RPM = Method(
-    "rpm", PACKAGES.ALMALINUX_IMAGE, RPM_NEEDS, "nginx",
+    "rpm", PACKAGES.image(PACKAGES.Stage.ALMALINUX), RPM_NEEDS, "nginx",
     "dnf install --assumeyes --quiet --disablerepo='*' --setopt=install_weak_deps=False {files}",
     "dnf remove --assumeyes --quiet --disablerepo='*' swarmops-server",
 )

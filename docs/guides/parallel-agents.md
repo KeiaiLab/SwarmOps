@@ -221,6 +221,47 @@ compare-and-swap. A commit returns only once its journal frame is on disk, and t
 repairs whatever a crash cut short. [The store as a machine](https://swarmops.cc/explainers/store)
 draws it.
 
+**SwarmOps: eight agents commit and land at once**
+
+Each agent process commits a note on the `main` it read and lands it; ids are cut to eight hex
+digits (`…`). The store is a new one (`so init`), as in the [quick start](quick-start.md).
+
+```sh
+work() {  # one agent: commit a note, then land it on main
+  local me=agent/worker-$1 cs
+  printf '[{"path": "notes/%s.txt", "op": "put", "content": {"inline": "from worker %s\\n"}}]' $1 $1 > note-$1.json
+  cs=$(so --as $me --human commit -m "note $1" --changes note-$1.json | sed -n 's/^changeset: //p')
+  so --as $me --human land "$cs"
+}
+printf '[{"path": "README.md", "op": "put", "content": {"inline": "# acme\\n"}}]' > first.json
+so --as agent/worker-0 --human commit -m "first" --changes first.json --advance main >/dev/null
+for i in 1 2 3 4 5 6 7 8; do work $i > land-$i.txt & done; wait
+cat land-*.txt
+so --human ls main:notes | grep name
+```
+
+```text
+landed b661f17c… on main (onto 3d63f551…, attempt 1, relocated)
+landed 662c74ed… on main (onto b661f17c…, attempt 1, relocated)
+landed e616ec6c… on main (onto dc448545…, attempt 1)
+landed 3d63f551… on main (onto 55eeb7ed…, attempt 1, relocated)
+landed 67506989… on main (onto e616ec6c…, attempt 1, relocated)
+landed 55eeb7ed… on main (onto 2db19b84…, attempt 1, relocated)
+landed 7a254784… on main (onto 662c74ed…, attempt 1, relocated)
+landed 2db19b84… on main (onto 67506989…, attempt 1, relocated)
+entries[0].name: 1.txt
+entries[1].name: 2.txt
+entries[2].name: 3.txt
+entries[3].name: 4.txt
+entries[4].name: 5.txt
+entries[5].name: 6.txt
+entries[6].name: 7.txt
+entries[7].name: 8.txt
+```
+
+All eight landed, each onto the head the one before it made. `relocated` says `main` moved after
+the land read it, and the publish put the change on the new head itself, without another attempt.
+
 ### Landing: a three-way merge without a checkout
 
 An agent commits its change on the head it read: `so commit … --parent <the id main held>` records

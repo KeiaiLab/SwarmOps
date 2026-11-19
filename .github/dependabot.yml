@@ -16,6 +16,15 @@
 # purpose: it pins every version exactly (`=`) to the ones docs/perf.md's comparison names, so it
 # is refreshed by hand when the comparison is run again. `just check` does not build it; the
 # weekly scheduled workflow does.
+#
+# The docker entry reads packaging/entrance/Dockerfile, whose FROM lines name every container
+# image the automation runs, by digest. The install and package-build images are read from that
+# file, so its pull request moves them alone. The ubuntu:24.04 digest is also written in build.yml
+# and scheduled.yml, which Dependabot does not read: that pull request fails the gate
+# (`supply_chain::every_image_digest_is_the_dockerfiles`) until the same digest is pushed to it in
+# both workflows. The rustup-init release in those two workflows is moved by hand, in both.
+# A pull request that changes a tag (debian:13) and not a digest alone is declined: the tags are
+# the distributions the packages and the build promise.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -54,6 +63,17 @@ updates:
       default-days: 7
     groups:
       github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+  - package-ecosystem: docker
+    directory: /packaging/entrance
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      docker:
         patterns: ["*"]
     commit-message:
       prefix: "ci"

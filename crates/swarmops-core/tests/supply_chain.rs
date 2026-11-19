@@ -10,6 +10,10 @@
 //! Read the same way, every case the weekly slow suite (`just check-ci-slow`) leaves out still
 //! runs weekly: optimized, one at a time, in a job of `scheduled.yml`. And the gate, both ways,
 //! runs `scripts/check-stamped.py`, the one step that builds with `SWARMOPS_BUILD_COMMIT` set.
+//! The container images are read the same way: every image the automation runs is pinned by
+//! digest, each has one digest, the one `packaging/entrance/Dockerfile` names (the file Dependabot
+//! moves), and the workflows install one rustup-init release. And `release.yml` gives a write
+//! permission to no job that runs for anything but a pushed tag.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -596,4 +600,401 @@ fn a_policy_is_read_line_by_line_with_its_tables() {
     .map(|(table, line)| (table.to_string(), line.to_string()))
     .collect();
     assert_eq!(table_lines(&policy), want);
+}
+
+/// The file whose `FROM` lines are the one source of every image digest: Dependabot's `docker`
+/// entry reads it.
+const IMAGES: &str = "packaging/entrance/Dockerfile";
+
+/// The stages of `IMAGES` that build nothing: each names an image a script or a workflow runs.
+const NAMED_IMAGES: [&str; 4] = ["install-deb", "install-rpm", "package-build", "qemu-binfmt"];
+
+/// The marker of a digest in an image reference, `name:tag@sha256:<hex>`.
+const DIGEST: &str = "@sha256:";
+
+/// The image references pinned by digest in `text`, each `(name:tag, digest)`: a word that holds
+/// `@sha256:`, quotes and brackets around it dropped. Comment lines are read too, so that a
+/// comment cannot name another digest than the code under it.
+fn pins(text: &str) -> BTreeSet<(String, String)> {
+    let outside = |c: char| !(c.is_ascii_alphanumeric() || "@:./_-".contains(c));
+    text.split_whitespace()
+        .map(|word| word.trim_matches(outside))
+        .filter_map(|word| word.split_once(DIGEST))
+        .filter(|(name, digest)| is_image_name(name) && is_sha256(digest))
+        .map(|(name, digest)| (name.to_string(), digest.to_string()))
+        .collect()
+}
+
+/// Whether `name` reads as an image's `name:tag`, not as a pattern or a placeholder that
+/// mentions the digest marker (`(?P<image>\S+@sha256:...`).
+fn is_image_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ":./_-".contains(c))
+}
+
+/// Whether `digest` is a SHA-256 in hex: 64 lowercase hex digits.
+fn is_sha256(digest: &str) -> bool {
+    digest.len() == 64 && digest.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
+/// The images a Dockerfile's `FROM` lines name, each with its stage (`AS <stage>`, `""`
+/// without one), in order.
+fn from_lines(dockerfile: &str) -> Vec<(String, String)> {
+    let mut images = Vec::new();
+    for line in dockerfile.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        match words.as_slice() {
+            ["FROM", image] => images.push(((*image).to_string(), String::new())),
+            ["FROM", image, "AS" | "as", stage] => {
+                images.push(((*image).to_string(), (*stage).to_string()));
+            }
+            _ => {}
+        }
+    }
+    images
+}
+
+/// The images a workflow's jobs and services run in: the value of each `image:` key.
+fn job_images(workflow: &str) -> Vec<String> {
+    workflow
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("image: "))
+        .map(|image| image.trim().to_string())
+        .collect()
+}
+
+/// What keeps the images of `texts` (each a file's path and text) from having one source, one
+/// line each; empty when they do. Every `FROM` of the source is pinned by digest and no image
+/// has two digests there; a job's `image:` is pinned; and a pinned reference anywhere is one the
+/// source names, with its digest.
+fn image_problems(source: &str, texts: &[(String, String)]) -> Vec<String> {
+    let mut problems = Vec::new();
+
+    // 1. The source: every base pinned, one digest for each image.
+    let named = pins(source);
+    for (image, _) in from_lines(source) {
+        if !image.contains(DIGEST) {
+            problems.push(format!("{IMAGES}: `FROM {image}` is not pinned by digest"));
+        }
+    }
+    for (name, digest) in &named {
+        if named.iter().any(|(n, d)| n == name && d != digest) {
+            problems.push(format!("{IMAGES} names two digests of {name}"));
+        }
+    }
+
+    // 2. Every other file: a workflow job's image is pinned (a script's `image: str` is a type,
+    //    not a key), and each pin is the source's.
+    for (path, text) in texts {
+        let is_yml = Path::new(path).extension().is_some_and(|ext| ext == "yml");
+        let images = if is_yml { job_images(text) } else { Vec::new() };
+        for image in images {
+            if !image.contains(DIGEST) {
+                problems.push(format!("{path}: `image: {image}` is not pinned by digest"));
+            }
+        }
+        for (name, digest) in pins(text) {
+            if !named.contains(&(name.clone(), digest.clone())) {
+                problems.push(format!(
+                    "{path}: {name}{DIGEST}{digest} is not a digest {IMAGES} names"
+                ));
+            }
+        }
+    }
+    problems
+}
+
+/// The files that run or name a container image: the workflows and the Python scripts.
+fn image_users() -> Vec<(String, String)> {
+    let mut users = files(".github/workflows", ".yml");
+    users.extend(files("scripts", ".py"));
+    users
+        .into_iter()
+        .map(|path| {
+            let text = read(&path);
+            (path, text)
+        })
+        .collect()
+}
+
+/// Every image a workflow or a script runs is pinned by a digest `packaging/entrance/Dockerfile`
+/// names: the build image of build.yml and of scheduled.yml's git matrix is the entrance's base,
+/// and a digest moved in one file alone fails here, naming the file left behind.
+#[test]
+fn every_image_digest_is_the_dockerfiles() {
+    let problems = image_problems(&read(IMAGES), &image_users());
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// Dependabot moves the digests: its `docker` entry reads the directory of the one source, which
+/// names the images scripts/packages.py runs as stages, and that script holds no digest of its
+/// own to move by hand.
+#[test]
+fn dependabot_moves_every_image_digest() {
+    // 1. The entry, for the source's directory.
+    let dependabot = read(".github/dependabot.yml");
+    let directory = Path::new(IMAGES).parent().unwrap().to_str().unwrap();
+    let entries: Vec<&str> = dependabot.split("  - package-ecosystem: ").collect();
+    let tracked = entries.iter().any(|entry| {
+        entry.starts_with("docker\n") && entry.contains(&format!("    directory: /{directory}\n"))
+    });
+    assert!(
+        tracked,
+        "dependabot.yml has no docker entry for /{directory}"
+    );
+
+    // 2. The stages the script reads.
+    let source = read(IMAGES);
+    let stages: Vec<String> = (from_lines(&source).into_iter())
+        .map(|(_, stage)| stage)
+        .collect();
+    for stage in NAMED_IMAGES {
+        assert!(
+            stages.iter().any(|s| s == stage),
+            "{IMAGES} has no `FROM <image> AS {stage}`"
+        );
+    }
+
+    // 3. No digest Dependabot cannot read.
+    let script = read("scripts/packages.py");
+    assert_eq!(
+        pins(&script),
+        BTreeSet::new(),
+        "scripts/packages.py holds a digest of its own"
+    );
+}
+
+/// The check finds an image that is not pinned, a digest the source does not name, a second
+/// digest of one image, and a digest in a comment; and it passes files that agree.
+#[test]
+fn the_image_check_finds_each_gap() {
+    let a = "a".repeat(64);
+    let b = "b".repeat(64);
+    let source =
+        format!("FROM debian:12{DIGEST}{a} AS install-deb\nFROM ubuntu:24.04{DIGEST}{b}\n");
+    let file = |text: String| vec![("x.yml".to_string(), text)];
+
+    // 1. Files that agree, read through quotes and from a comment.
+    let agreeing = format!(
+        "    container:\n      image: ubuntu:24.04{DIGEST}{b}\nX = \"debian:12{DIGEST}{a}\"\n\
+         # debian:12{DIGEST}{a}\nLINE = r\"FROM (?P<image>\\S+{DIGEST}[0-9a-f]{{64}}) AS\"\n\
+         # 'FROM <image>{DIGEST}<digest> AS'\n"
+    );
+    assert_eq!(
+        image_problems(&source, &file(agreeing)),
+        Vec::<String>::new()
+    );
+
+    // A script's `image: str` is a type annotation, not a job's image.
+    let script = vec![("x.py".to_string(), "    image: str = \"\"\n".to_string())];
+    assert_eq!(image_problems(&source, &script), Vec::<String>::new());
+
+    // 2. Each gap is found.
+    let gaps = [
+        (source.clone(), "      image: ubuntu:24.04\n".to_string()),
+        (
+            source.clone(),
+            format!("      image: ubuntu:24.04{DIGEST}{a}\n"),
+        ),
+        (source.clone(), format!("# ubuntu:24.04{DIGEST}{a}\n")),
+        (source.clone(), format!("X = 'almalinux:9{DIGEST}{a}'\n")),
+        (
+            format!("{source}FROM debian:12{DIGEST}{b} AS other\n"),
+            String::new(),
+        ),
+        (format!("{source}FROM python:3.12\n"), String::new()),
+    ];
+    for (source, text) in gaps {
+        let problems = image_problems(&source, &file(text.clone()));
+        assert!(!problems.is_empty(), "{source}{text}");
+    }
+}
+
+/// The variables that name the rustup-init release a workflow installs and its SHA-256.
+const RUSTUP: [&str; 2] = ["RUSTUP_RELEASE: ", "RUSTUP_SHA256: "];
+
+/// The values a workflow gives each `RUSTUP` variable, by variable.
+fn rustup_pins(workflow: &str) -> BTreeSet<(String, String)> {
+    let mut found = BTreeSet::new();
+    for line in workflow.lines() {
+        for key in RUSTUP {
+            if let Some(value) = line.trim_start().strip_prefix(key) {
+                found.insert((key.to_string(), value.trim().to_string()));
+            }
+        }
+    }
+    found
+}
+
+/// The workflows that install rustup-init install one release by one SHA-256: build.yml's, the
+/// release build's. A release moved in one workflow alone fails here.
+#[test]
+fn the_workflows_install_one_rustup_init() {
+    let source = rustup_pins(&read(".github/workflows/build.yml"));
+    assert_eq!(source.len(), RUSTUP.len(), "build.yml: {source:?}");
+    let mut installers = 0;
+    for workflow in files(".github/workflows", ".yml") {
+        let found = rustup_pins(&read(&workflow));
+        if found.is_empty() {
+            continue;
+        }
+        installers += 1;
+        assert_eq!(found, source, "{workflow} installs another rustup-init");
+    }
+    assert!(installers >= 2, "the scan found one workflow or none");
+
+    let other = "      RUSTUP_RELEASE: 1.0.0\n      RUSTUP_SHA256: 00\n";
+    assert_ne!(rustup_pins(other), source);
+}
+
+/// The one condition under which a job of release.yml may hold a write permission: the run is a
+/// tag's push.
+const TAG_PUSH_ONLY: &str = "    if: github.event_name == 'push' && github.ref_type == 'tag'";
+
+/// What lets a run of `workflow` that is no tag's push write or displace a release, one line
+/// each; empty when nothing does. Every job with a `: write` permission carries
+/// `TAG_PUSH_ONLY`, the workflow starts from no permission, a push starts it for tags alone, and
+/// its concurrency group names the event, so that a run started by hand on a tag's ref shares no
+/// group with that tag's release.
+fn release_problems(workflow: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+
+    // 1. The jobs that write.
+    let mut writers = 0;
+    for (id, lines) in jobs(workflow) {
+        let grants_write = shell_lines(&lines).iter().any(|line| {
+            line.split('#')
+                .next()
+                .unwrap_or_default()
+                .trim_end()
+                .ends_with(": write")
+        });
+        if !grants_write {
+            continue;
+        }
+        writers += 1;
+        if !lines.lines().any(|line| line == TAG_PUSH_ONLY) {
+            problems.push(format!(
+                "job `{id}` writes without `{}`",
+                TAG_PUSH_ONLY.trim()
+            ));
+        }
+    }
+    if writers == 0 {
+        problems.push("no job holds a write permission: is the scan reading it?".to_string());
+    }
+
+    // 2. What the jobs do not set.
+    if !workflow.lines().any(|line| line == "permissions: {}") {
+        problems.push("the workflow does not start from `permissions: {}`".to_string());
+    }
+    let on: Vec<&str> = (workflow.lines())
+        .skip_while(|line| *line != "on:")
+        .skip(1)
+        .take_while(|line| line.is_empty() || line.starts_with(' '))
+        .collect();
+    if !on.contains(&"    tags: [\"v*\"]") || on.iter().any(|line| line.contains("branches")) {
+        problems.push("a push starts the workflow for more than `v*` tags".to_string());
+    }
+
+    // 3. The group.
+    let group = (workflow.lines())
+        .skip_while(|line| *line != "concurrency:")
+        .find_map(|line| line.strip_prefix("  group: "));
+    match group {
+        Some(group) if group.contains("github.event_name") && group.contains("github.ref") => {}
+        _ => problems.push("the concurrency group does not name the event and the ref".to_string()),
+    }
+    problems
+}
+
+/// release.yml publishes for a pushed tag only, and a run started by hand cannot replace a
+/// pending release run.
+#[test]
+fn only_a_pushed_tag_publishes() {
+    let problems = release_problems(&read(".github/workflows/release.yml"));
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// The check finds a publishing job without its condition or with a weaker one, a write
+/// permission granted to every job, a branch that starts the workflow, and a group by ref alone.
+#[test]
+fn the_release_check_finds_each_gap() {
+    let workflow = [
+        "on:",
+        "  push:",
+        "    tags: [\"v*\"]",
+        "  workflow_dispatch:",
+        "",
+        "permissions: {}",
+        "",
+        "concurrency:",
+        "  group: release-${{ github.event_name }}-${{ github.ref }}",
+        "",
+        "jobs:",
+        "  build:",
+        "    permissions:",
+        "      contents: read",
+        "  publish:",
+        "    if: github.event_name == 'push' && github.ref_type == 'tag'",
+        "    permissions:",
+        "      contents: write # why",
+        "",
+    ]
+    .join("\n");
+    assert_eq!(release_problems(&workflow), Vec::<String>::new());
+
+    let condition = TAG_PUSH_ONLY.trim_start();
+    let gaps = [
+        workflow.replace(&format!("    {condition}\n"), ""),
+        workflow.replace(condition, "if: github.event_name == 'push'"),
+        workflow.replace("permissions: {}", "permissions:\n  contents: write"),
+        workflow.replace(
+            "    tags: [\"v*\"]",
+            "    tags: [\"v*\"]\n    branches: [stable]",
+        ),
+        workflow.replace("${{ github.event_name }}-", ""),
+        workflow.replace("contents: write # why", "contents: read"),
+    ];
+    for gap in &gaps {
+        assert_eq!(release_problems(gap).len(), 1, "{gap}");
+    }
+}
+
+/// How a workflow makes the packages: `scripts/packages.py build`, run inside the
+/// `package-build` image `IMAGES` names, so that the bytes depend on that image's Python and
+/// liblzma and not on the runner's.
+const PACKAGE_BUILD: &str = "scripts/packages.py build";
+
+/// The flag of `PACKAGE_BUILD` that runs it in the pinned image.
+const IN_IMAGE: &str = "--in-image";
+
+/// The shell lines of `workflow` that make packages without `IN_IMAGE`, one line each.
+fn unpinned_builds(workflow: &str) -> Vec<String> {
+    shell_lines(workflow)
+        .into_iter()
+        .filter(|line| line.contains(PACKAGE_BUILD))
+        .filter(|line| !line.contains(&format!("{PACKAGE_BUILD} {IN_IMAGE} ")))
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
+/// release.yml makes its packages in the pinned image, never with the runner's Python.
+#[test]
+fn the_packages_are_built_in_the_pinned_image() {
+    let release = read(".github/workflows/release.yml");
+    let builds = shell_lines(&release)
+        .into_iter()
+        .filter(|line| line.contains(PACKAGE_BUILD))
+        .count();
+    assert!(builds > 0, "release.yml runs no `{PACKAGE_BUILD}`");
+    assert_eq!(unpinned_builds(&release), Vec::<String>::new());
+
+    // The check itself: a build on the runner is found, one in the image is not.
+    let runner = "          python3 -I scripts/packages.py build \"archive/$a\" dist\n";
+    let image = "          python3 -I scripts/packages.py build --in-image \"archive/$a\" dist\n";
+    assert_eq!(unpinned_builds(runner).len(), 1, "{runner}");
+    assert_eq!(unpinned_builds(image), Vec::<String>::new());
 }

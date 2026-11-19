@@ -4,9 +4,9 @@
     python3 -I scripts/third-party-licenses.py --check  # writes nothing; fails if it would differ
 
 The release builds `swarmops` and `so` with `cargo build --release --locked -p swarmops-cli
---bins`, for each target of release.yml's build matrix, without the `test-hooks` feature. This
-script lists every third-party crate that build compiles, by `cargo tree` on Cargo.lock, and takes
-each one's license files from its package, which `cargo metadata` finds in cargo's registry cache.
+--bins`, for each target of build.yml's and release.yml's build matrices, without the
+`test-hooks` feature. This script lists every third-party crate that build compiles, by
+`cargo tree` on Cargo.lock, and takes each one's license files from its package, which `cargo metadata` finds in cargo's registry cache.
 `just check` runs `--check`, so that the file cannot fall behind Cargo.lock, deny.toml or the
 targets. It reads only what cargo has already fetched, and needs nothing but Python 3.11 or newer.
 
@@ -151,11 +151,13 @@ def cargo(*args):
 
 
 def release_targets():
-    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-    targets = sorted(set(re.findall(r"^\s*- target: ([A-Za-z0-9_.-]+)\s*$", workflow, re.M)))
+    targets = set()
+    for name in ("build.yml", "release.yml"):
+        workflow = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+        targets.update(re.findall(r"^\s*- target: ([A-Za-z0-9_.-]+)\s*$", workflow, re.M))
     if not targets:
-        fail("release.yml's build matrix names no target (`- target: <triple>`)")
-    return targets
+        fail("build.yml and release.yml's build matrices name no target (`- target: <triple>`)")
+    return sorted(targets)
 
 
 def compiled(target, edges):

@@ -180,8 +180,9 @@ jobs:
   # git crate and the CLI from nothing, three times, inside the job's timeout. One per git, so
   # that the three jobs, which run at once, never wait for each other's build lock. The
   # container's paths are the same on every runner, so whichever runner takes a job finds its
-  # dependencies built. The digest and the rustup-init release are moved by hand, with
-  # release.yml's.
+  # dependencies built. The digest is packaging/entrance/Dockerfile's, which Dependabot moves
+  # (`just check` fails while this one differs); the rustup-init release is build.yml's, moved
+  # by hand with it.
   git-matrix:
     name: git matrix (${{ matrix.git }})
     needs: slow

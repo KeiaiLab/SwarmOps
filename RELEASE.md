@@ -22,9 +22,11 @@ the macOS build waits, and nothing is published without it.
    `Cargo.toml` (`v0.1.0` for `version = "0.1.0"`); `CHANGELOG.md` has a non-empty
    `## [X.Y.Z] - YYYY-MM-DD` section, which becomes the release notes (its relative links made
    absolute, to the tag's files, then a line on checking a download against `SHA256SUMS`; at
-   most the 125,000 characters a release takes); `stable` holds the tagged commit; and every
-   golden file of the previous release tag is unchanged (`just golden-frozen`). No other job
-   starts unless these pass.
+   most the 125,000 characters a release takes); the section's date is the UTC date the tagged
+   commit was committed; the file defines `[X.Y.Z]` as the compare link from the release before
+   (the first release's, its tag) and points `[Unreleased]` at `compare/vX.Y.Z...stable`;
+   `stable` holds the tagged commit; and every golden file of the previous release tag is
+   unchanged (`just golden-frozen`). No other job starts unless these pass.
 2. **Runs the release gate** (job `just check`): `just check` on the tagged commit, with the tools
    and versions of CI's `check` job but without its cache or the runner's target directory, so
    that it builds from clean.
@@ -64,7 +66,9 @@ the macOS build waits, and nothing is published without it.
 4. **Makes and installs the packages** (job `packages <target>`, one per Linux target):
    [`scripts/packages.py`](scripts/packages.py) makes `swarmops_X.Y.Z_<arch>.deb` and
    `swarmops-X.Y.Z-1.<arch>.rpm` (`amd64` and `x86_64`, `arm64` and `aarch64`) from the target's
-   archive alone, checked against its SHA-256 first: the archive's binaries, byte for byte, in
+   archive alone, checked against its SHA-256 first, inside the `package-build` image pinned by
+   digest (Python 3.12 and Debian 12's liblzma, not the runner's) without a network: the
+   archive's binaries, byte for byte, in
    `/usr/bin`, and its `LICENSE`, `THIRD-PARTY-LICENSES`, `README.md` and `CHANGELOG.md` in
    `/usr/share/doc/swarmops`, where the `.deb` adds `copyright`, both license files in Debian's
    machine-readable copyright format, which images without `/usr/share/doc` keep; entries sorted,
@@ -79,8 +83,11 @@ the macOS build waits, and nothing is published without it.
    binary, and removing the package must remove its files. The aarch64 packages are installed for
    aarch64, in Debian with that architecture's C library (multiarch) and into an AlmaLinux root of
    that architecture, against whose glibc `rpm` checks the dependencies, and run under QEMU's
-   user-mode emulator; these two containers download from Debian's and AlmaLinux's mirrors. The
-   job runs on the runner, which starts the containers; they mount the packages read-only.
+   user-mode emulator. These two containers download that C library, libgcc and the emulator at
+   the versions their images hold: Debian's from the snapshot (snapshot.debian.org) the Debian
+   image was made from, AlmaLinux's from the AlmaLinux image's minor release, which the vault
+   keeps; when Dependabot moves an image, they move with it. The job runs on the runner, which
+   starts the containers; they mount the packages read-only.
 5. **Publishes** (job `publish the release`, the only one with a write permission,
    `contents: write`, and only for a pushed tag): checks each archive and package against the
    SHA-256 its job wrote, writes `SHA256SUMS`, and creates the release `vX.Y.Z`, titled
@@ -95,12 +102,18 @@ the macOS build waits, and nothing is published without it.
 the workspace version of the branch's commit, and publishes nothing: `publish` runs for a pushed
 `v*` tag only, and the tag's checks and `just check` (which CI runs on every push) are skipped. The
 run's artifacts hold its archives and packages for 14 days. The macOS build is part of a rehearsal,
-so one shows whether the Mac's runner is there before a tag is pushed.
+so one shows whether the Mac's runner is there before a tag is pushed. A rehearsal never shares a
+concurrency group with a pushed tag's run, so one started on a tag's ref cannot replace a
+pending release. `just check` fails while a job with a write permission runs for anything but a
+pushed tag.
 
 Like CI, the workflow pins every action by commit, starts from `permissions: {}`, keeps no
 credentials in its checkouts, and CI's zizmor job audits it. The container images it builds and
-installs in are pinned by digest, the build image in the workflow and the install images in
-`scripts/packages.py`; Dependabot moves none of them. No job restores a cache: what a
+installs in are pinned by digest, each digest named once in `packaging/entrance/Dockerfile`,
+whose `FROM` lines Dependabot moves; `just check` fails while a workflow or a script names
+another digest, so the build image's digest in `build.yml` and `scheduled.yml` is moved in the
+same pull request. The rustup-init release the build installs is moved by hand, in both files
+at once (`just check` fails otherwise). No job restores a cache: what a
 release ships is built from the tagged commit and `Cargo.lock` alone. Its `just check` job
 installs the same tool versions as `ci.yml`'s: move them together.
 
@@ -127,8 +140,10 @@ installs the same tool versions as `ci.yml`'s: move them together.
 - **Packages are files on the release, not a repository.** There is no apt or dnf repository to
   add, so `apt upgrade` and `dnf upgrade` do not see a new release: install the next release's
   package. The packages carry no signature of their own (`rpm --checksig` finds their digests,
-  not a key's signature): check them against `SHA256SUMS`. No npm or PyPI package yet: those need
-  registry accounts.
+  not a key's signature): check them against `SHA256SUMS`. Fedora's dnf5 says "skipped OpenPGP
+  checks" for them, and an rpm set to require signatures needs `--nosignature`. Signing waits for
+  a key the maintainers provision, with the apt and dnf repository. No npm or PyPI package yet:
+  those need registry accounts.
 - **No crates.io publishing.** Every crate is `publish = false` until a release policy has been
   exercised on binary releases. Publishing a crate needs a decision of its own, and its own
   version and MSRV policy.
@@ -240,7 +255,9 @@ installs the same tool versions as `ci.yml`'s: move them together.
    `[X.Y.Z]: https://github.com/KeiaiLab/SwarmOps/compare/vA.B.C...vX.Y.Z` from the previous
    release `vA.B.C` (`[0.1.0]: https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.1.0` for the
    first), and point `[Unreleased]` at `compare/vX.Y.Z...stable`. The new section is the
-   release's notes: the workflow refuses a tag without one. It opens with a summary of at most
+   release's notes: the workflow refuses a tag without one, or with another date or other links.
+   A commit replayed onto `stable` gets a new commit date: date the section on the day the
+   release commit lands. It opens with a summary of at most
    60 words, in sentences of at most 25, that names no milestone or slice id. Incompatible
    changes and security fixes each get a group of their own; a release with neither says so in
    one line. A release that an installed build must not take unasked says so in a group's
