@@ -270,7 +270,7 @@ fn write_v2(v1: &Layout, v2: &Layout, fs: &StoreFs) -> Result<(), StoreError> {
 
     // 4. The checkpoint, at the frame FORMAT 1's is at, once the index files it vouches for
     //    are synced (they are both formats'); then everything read back as FORMAT 2 reads it.
-    let mut index = Index::open_in(v1, fs.clone())?;
+    let mut index = Index::open_in(v1, fs)?;
     index.set_parallelism(1);
     index.sync()?;
     let new = Journal::open_in(v2, fs.clone())?;
@@ -492,7 +492,7 @@ fn flush_v2(v2: &Layout, fs: &StoreFs) -> Result<(Journal, u64), StoreError> {
     journal.repair_tail()?;
     let ckpt = journal.ckpt()?;
     let past = || journal.tail_frames_from(ckpt);
-    let (mut index, frames) = Index::open_with_past(v2, fs.clone(), 0, past)?;
+    let (mut index, frames) = Index::open_with_past(v2, fs, 0, past)?;
     index.set_parallelism(1);
     index.repair_tail_with(&frames)?;
     replay::replay(&mut index, v2, fs, &frames)?;
@@ -647,7 +647,7 @@ fn check_v3(
     }
 
     // 3. The index, opened on the runs.
-    if Index::open_in(v3, fs.clone())?.len() != ckpt.records {
+    if Index::open_in(v3, fs)?.len() != ckpt.records {
         return Err(unequal_v3("its index"));
     }
     Ok(())

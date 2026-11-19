@@ -518,7 +518,7 @@ impl MetaStore {
                     first = past.first;
                     Ok(past.frames)
                 };
-                match Index::open_with_past(&self.layout, self.fs.clone(), fact_rows, past) {
+                match Index::open_with_past(&self.layout, &self.fs, fact_rows, past) {
                     Ok((index, frames)) => (index, PastFrames { first, frames }),
                     Err(NotOpened::Shrunk) => continue,
                     Err(NotOpened::Failed(e)) => return Err(e),
@@ -629,8 +629,7 @@ impl MetaStore {
         // The frames past the checkpoint vouch for the index's records past it, and are
         // replayed.
         let past = || self.journal.tail_frames_from(ckpt);
-        let (mut index, frames) =
-            Index::open_with_past(&self.layout, self.fs.clone(), fact_rows, past)?;
+        let (mut index, frames) = Index::open_with_past(&self.layout, &self.fs, fact_rows, past)?;
         index.set_parallelism(self.parallelism);
         let repaired = index.repair_tail_with(&frames)?;
         let replayed = replay::replay(&mut index, &self.layout, &self.fs, &frames)?;

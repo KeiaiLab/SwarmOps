@@ -968,7 +968,7 @@ fn open_journal(store: &MetaStore) -> Result<Result<Journal, String>, StoreError
 /// A handle on the changeset index, or what is wrong with its files if they are too
 /// damaged to open.
 fn open_index(store: &MetaStore) -> Result<Result<Index, &'static str>, StoreError> {
-    match Index::open_in(&store.layout, store.fs.clone()) {
+    match Index::open_in(&store.layout, &store.fs) {
         Ok(index) => Ok(Ok(index)),
         Err(StoreError::IndexCorrupt { what }) => Ok(Err(what)),
         Err(e) => Err(e),

@@ -115,6 +115,13 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   for a head that is no ref's head any more, and a ref that moved between the fetch's `wire_refs`
   and its `wire_list` was that case; the fetch now reads the refs again (up to 8 times, then
   `E_BUSY`, retryable).
+- A read of a FORMAT 3 store that raced a writer no longer fails with `the changeset index is
+  corrupt: a sorted view covers records the index columns do not hold` (or `a fact run covers rows
+  facts.col does not count`). An index open measures the columns, then reads the manifest; a
+  commit and a views step in between left it a manifest that covers more than it measured, which
+  it took for damage. It now measures again (up to 32 rounds, then `SnapshotContended`,
+  retryable); runs past the columns measured after their manifest was read are still corrupt. No
+  release makes a FORMAT 3 store yet.
 
 ## [0.13.0] - 2026-11-18
 

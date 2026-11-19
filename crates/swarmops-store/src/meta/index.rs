@@ -66,6 +66,7 @@ use super::parents::{self, MAX_PARENTS, MAX_PARENTS_LEN, PARENT_LEN, ParentsAt};
 use super::replay::{self, ChangesetRecord};
 use super::runs::{self, Manifest};
 use super::sorted::{self, Rebuild, SortedView, VIEW_FILES, ViewName, Views};
+use super::store::MetaStore;
 use crate::error::{FileOp, IoFailure, LimitKind, StoreError};
 use crate::format::StoreFormat;
 use crate::fs_ops::{FsMethod, FsOps, RealFs, StoreFs};
@@ -256,7 +257,7 @@ impl Index {
         fs.fsync_dir(idx.as_std_path())?;
         fs.fsync_dir(sorted.as_std_path())?;
         fs.fsync_dir(layout.meta_dir().as_std_path())?;
-        Self::open_in(layout, fs.clone())
+        Self::open_in(layout, fs)
     }
 
     /// Opens the index of `layout`, changes going through `fs`.
@@ -278,29 +279,24 @@ impl Index {
     /// renaming (or crashed renaming) counts as covering what it covers, or nothing. A writer
     /// repairs with [`Index::repair_tail`].
     pub fn open(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Index, StoreError> {
-        Self::open_in(layout, StoreFs::new(fs, layout.root()))
+        Self::open_in(layout, &StoreFs::new(fs, layout.root()))
     }
 
     /// [`Index::open`], through `fs`, whose root may be another than `layout`'s (see
     /// [`Index::create_in`]).
-    pub(crate) fn open_in(layout: &Layout, fs: StoreFs) -> Result<Index, StoreError> {
-        let mut index = Self::handle(layout, fs)?;
-        let lens = index.lens()?;
-        let whole = index.whole_of(lens, None)?;
-        let fact_views = index.open_runs()?;
-        index.set_count(&whole)?;
-        if let Some(views) = fact_views {
-            index.facts = Some(FactRows::open_alone(&index.layout, &index.fs, views)?);
-        }
+    pub(crate) fn open_in(layout: &Layout, fs: &StoreFs) -> Result<Index, StoreError> {
+        let (index, _) = Self::open_counted(layout, fs, 0, || Ok::<_, StoreError>(None))?;
         Ok(index)
     }
 
     /// [`Index::open`], with the frames past the checkpoint that `read_past` reads vouching
     /// for the records past it, in place of a read of the journal of its own: a snapshot reads
     /// those frames for its overlay and a write transaction for its replay, so vouching costs
-    /// them no read they did not make already. `read_past` runs once, after the files' lengths
-    /// are measured, so that every record they hold has its frame among what it reads (a writer
-    /// appends a frame before it materializes it); its frames come back with the handle. Its
+    /// them no read they did not make already. `read_past` runs once a round
+    /// ([`Index::open_counted`]: one round, unless a writer stepped the views meanwhile), after
+    /// the files' lengths are measured, so that every record they hold has its frame among what
+    /// it reads (a writer appends a frame before it materializes it); the frames of the last
+    /// round come back with the handle. Its
     /// error is the caller's own type, which the index's errors convert into, so that the
     /// caller can tell its own reasons for stopping from the index's ([`crate::MetaStore::read`]
     /// takes another round when `journal.off` shrank as the frames were read).
@@ -309,21 +305,70 @@ impl Index {
     /// checkpoint the caller read them from passed (`journal3.ckpt`, read with its offset).
     pub(crate) fn open_with_past<E: From<StoreError>>(
         layout: &Layout,
-        fs: StoreFs,
+        fs: &StoreFs,
         fact_rows: u64,
-        read_past: impl FnOnce() -> Result<Vec<Frame>, E>,
+        mut read_past: impl FnMut() -> Result<Vec<Frame>, E>,
     ) -> Result<(Index, Vec<Frame>), E> {
-        let mut index = Self::handle(layout, fs)?;
-        let lens = index.lens()?;
-        let past = read_past()?;
-        let whole = index.whole_of(lens, Some(&past))?;
-        let fact_views = index.open_runs()?;
-        index.set_count(&whole)?;
-        if let Some(views) = fact_views {
-            let facts = FactRows::open(&index.layout, &index.fs, fact_rows, &past, views)?;
-            index.facts = Some(facts);
+        let past = || read_past().map(Some);
+        let (index, past) = Self::open_counted(layout, fs, fact_rows, past)?;
+        Ok((index, past.unwrap_or_default()))
+    }
+
+    /// An open's rounds: the columns measured, the frames `read_past` gives read (`None`: the
+    /// index reads the journal itself), the records counted, then FORMAT 3's manifest read and
+    /// its runs opened.
+    ///
+    /// ```text
+    /// reader   measure columns . read frames ............. read MANIFEST -> covers > counted
+    /// writer                   .             append, step                    (no damage)
+    /// ```
+    ///
+    /// A writer that appends and steps the views in between leaves a manifest that covers
+    /// records, or fact rows, the round did not count. Whole records stay, so the next round,
+    /// which measures after that manifest was read, counts all it covers: runs that cover as much
+    /// as the round before's and still more than is counted are [`StoreError::IndexCorrupt`], and
+    /// a manifest that outran every one of [`MetaStore::SNAPSHOT_ROUNDS`] rounds
+    /// [`StoreError::SnapshotContended`] (retryable), as [`runs::open_views`] reads it. FORMAT 1's
+    /// and 2's views are read before the columns ([`Index::handle`]): past them, they are damage
+    /// at once.
+    fn open_counted<E: From<StoreError>>(
+        layout: &Layout,
+        fs: &StoreFs,
+        fact_rows: u64,
+        mut read_past: impl FnMut() -> Result<Option<Vec<Frame>>, E>,
+    ) -> Result<(Index, Option<Vec<Frame>>), E> {
+        let mut outran = None;
+        for _ in 0..MetaStore::SNAPSHOT_ROUNDS {
+            // 1. The round: what an open has always read, in its order, so that a damaged
+            //    journal shows before a damaged view.
+            let mut index = Self::handle(layout, fs.clone())?;
+            let lens = index.lens()?;
+            let past = read_past()?;
+            let whole = index.whole_of(lens, past.as_deref())?;
+            let fact_views = index.open_runs()?;
+            (index.len, index.parents_len) = (whole.records, whole.parents_len);
+            if let Some(views) = fact_views {
+                let (layout, fs) = (&index.layout, &index.fs);
+                index.facts = Some(match &past {
+                    Some(past) => FactRows::open(layout, fs, fact_rows, past, views)?,
+                    None => FactRows::open_alone(layout, fs, views)?,
+                });
+            }
+
+            // 2. Runs within what it counts: the handle.
+            let Err(past_count) = index.check_views() else {
+                return Ok((index, past));
+            };
+
+            // 3. Runs past it: damage, unless a newer manifest than the round before's.
+            let covered = index.covered();
+            if layout.format() != StoreFormat::V3 || outran == Some(covered) {
+                return Err(past_count.into());
+            }
+            outran = Some(covered);
         }
-        Ok((index, past))
+        let rounds = MetaStore::SNAPSHOT_ROUNDS;
+        Err(StoreError::SnapshotContended { rounds }.into())
     }
 
     /// A handle on the files of `layout`, counting no record yet.
@@ -368,10 +413,17 @@ impl Index {
         Ok(Some(facts))
     }
 
-    /// Makes what `whole` holds this handle's count, which the views must not cover more of.
-    fn set_count(&mut self, whole: &Whole) -> Result<(), StoreError> {
-        (self.len, self.parents_len) = (whole.records, whole.parents_len);
-        self.views.check_within(self.len)
+    /// Refuses views that cover more records than this handle counts, and fact runs that cover
+    /// more rows than its `facts.col` handle does.
+    fn check_views(&self) -> Result<(), StoreError> {
+        self.views.check_within(self.len)?;
+        self.facts.as_ref().map_or(Ok(()), FactRows::check_views)
+    }
+
+    /// How many records the views cover, and how many rows the fact runs do.
+    fn covered(&self) -> (u64, u64) {
+        let fact_rows = self.facts.as_ref().map_or(0, FactRows::covered);
+        (self.views.covered(), fact_rows)
     }
 
     /// How many records this handle counts.
@@ -1805,5 +1857,143 @@ impl Prefix {
         let whole = self.nibbles / 2;
         key[..whole] == self.low[..whole]
             && (self.nibbles.is_multiple_of(2) || key[whole] >> 4 == self.low[whole] >> 4)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use swarmops_core::{ObjectKind, hash_object};
+
+    use super::*;
+    use crate::{ChangesetMeta, Step};
+
+    /// Records in a frame: past [`runs::RUN_MIN`], so that a step builds their run.
+    const CHUNK: u64 = 1_100;
+
+    /// A fresh FORMAT 3 store on the real filesystem, with its journal and what an index open
+    /// goes through.
+    fn new_store() -> (tempfile::TempDir, Layout, MetaStore, Journal, StoreFs) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        let layout = Layout::with_format(root, StoreFormat::V3);
+        let store = MetaStore::create_in(layout.clone(), Arc::new(RealFs)).unwrap();
+        let journal = Journal::open(&layout, Arc::new(RealFs)).unwrap();
+        let fs = StoreFs::new(Arc::new(RealFs), root);
+        (dir, layout, store, journal, fs)
+    }
+
+    /// Commits changesets `range`, roots, as one frame, and steps the views over them.
+    fn insert_and_step(store: &MetaStore, range: Range<u64>) {
+        let changeset = |n: u64| {
+            let id = ChangesetId::new(hash_object(ObjectKind::Changeset, &n.to_le_bytes()));
+            ChangesetMeta::new(id, 0, 0, [7; 32], Vec::new())
+        };
+        let mut write = store.write().unwrap();
+        write
+            .insert_changesets_batch(range.map(changeset).collect())
+            .unwrap();
+        write.commit().unwrap();
+        assert_eq!(store.step_views().unwrap(), Step::Done);
+    }
+
+    /// A writer that appends records and steps the views between a reader's measurement of the
+    /// columns and its read of the manifest leaves the reader a manifest that covers more than it
+    /// measured: no damage. The reader measures again, and counts what the manifest covers.
+    #[test]
+    fn a_manifest_past_the_measurement_takes_a_round() {
+        let (_dir, layout, store, journal, fs) = new_store();
+        insert_and_step(&store, 0..CHUNK);
+        let ckpt = journal.ckpt3().unwrap();
+
+        // The frames are read once the columns are measured: the writer comes there, once.
+        let mut rounds = 0;
+        let past = || {
+            rounds += 1;
+            if rounds == 1 {
+                insert_and_step(&store, CHUNK..2 * CHUNK);
+            }
+            journal.tail_frames_from(ckpt.offset)
+        };
+        let opened = Index::open_with_past(&layout, &fs, ckpt.fact_rows, past);
+
+        let (index, _) = opened.unwrap();
+        assert_eq!((index.len(), index.sorted_count()), (2 * CHUNK, 2 * CHUNK));
+        assert_eq!(rounds, 2);
+    }
+
+    /// The same for the fact runs: facts committed, checkpointed and stepped after a reader read
+    /// the frames are rows its frames do not vouch for, which the manifest it reads next covers.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn fact_runs_past_the_frames_take_a_round() {
+        use crate::{Expect, FactKind, supported_for_tests};
+
+        let _guard = supported_for_tests(&["lineage"]);
+        let (_dir, layout, store, journal, fs) = new_store();
+        let ckpt = journal.ckpt3().unwrap();
+        let put_facts = || {
+            let mut write = store.write().unwrap();
+            for n in 0..CHUNK {
+                let subject = hash_object(ObjectKind::Blob, &n.to_le_bytes()).0;
+                let fact = Fact::new(
+                    FactKind::Lineage,
+                    0,
+                    subject,
+                    [0; 32],
+                    0,
+                    "a".to_owned(),
+                    vec![1; 32],
+                );
+                write.put_fact(fact.unwrap(), Expect::Any).unwrap();
+            }
+            write.commit().unwrap();
+            store.flush().unwrap();
+            assert_eq!(store.step_views().unwrap(), Step::Done);
+        };
+
+        // The writer comes once the reader has read the frames, in its first round.
+        let mut rounds = 0;
+        let past = || {
+            rounds += 1;
+            let frames = journal.tail_frames_from(ckpt.offset);
+            if rounds == 1 {
+                put_facts();
+            }
+            frames
+        };
+        let opened = Index::open_with_past(&layout, &fs, ckpt.fact_rows, past);
+
+        let (index, _) = opened.unwrap();
+        assert_eq!((index.fact_rows(), index.fact_tail()), (CHUNK, 0));
+        assert_eq!(rounds, 2);
+    }
+
+    /// Runs that cover records the columns do not hold, measured after the manifest was read, are
+    /// damage: the second round reports it.
+    #[test]
+    fn runs_past_the_columns_twice_are_corrupt() {
+        let (_dir, layout, store, journal, fs) = new_store();
+        insert_and_step(&store, 0..CHUNK);
+        let ckpt = journal.ckpt3().unwrap();
+        let ids = std::fs::OpenOptions::new()
+            .write(true)
+            .open(layout.meta_path(IDS))
+            .unwrap();
+        ids.set_len((CHUNK - 1) * 32).unwrap();
+
+        let mut rounds = 0;
+        let past = || {
+            rounds += 1;
+            journal.tail_frames_from(ckpt.offset)
+        };
+        let opened = Index::open_with_past(&layout, &fs, ckpt.fact_rows, past);
+
+        let what = "a sorted view covers records the index columns do not hold";
+        let is_damage =
+            |e: &StoreError| matches!(e, StoreError::IndexCorrupt { what: w } if *w == what);
+        assert!(opened.as_ref().is_err_and(is_damage), "{opened:?}");
+        assert_eq!(rounds, 2);
+        let alone = Index::open_in(&layout, &fs);
+        assert!(alone.as_ref().is_err_and(is_damage), "{alone:?}");
     }
 }

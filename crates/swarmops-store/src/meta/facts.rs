@@ -188,7 +188,9 @@ impl FactRows {
     /// those `past` vouches for: the frames past the checkpoint, whose facts the rows past it
     /// must be, in order, field by field. Fewer rows than `floor` is
     /// [`StoreError::IndexCorrupt`]; a missing file too: the store's creation made it. `views`
-    /// are the fact runs, which may cover no more than the rows counted (M2).
+    /// are the fact runs, which may cover no more than the rows counted (M2): the caller checks
+    /// that ([`FactRows::check_views`]), since a writer that stepped the views after `past` was
+    /// read leaves runs past them, which is no damage ([`super::index::Index::open`] takes another round).
     pub(crate) fn open(
         layout: &Layout,
         fs: &StoreFs,
@@ -249,12 +251,22 @@ impl FactRows {
             }
             Err(e) => return Err(e),
         };
-        if rows.views.covered() > rows.len {
+        Ok(rows)
+    }
+
+    /// Refuses fact runs that cover more rows than this handle counts (M2).
+    pub(crate) fn check_views(&self) -> Result<(), StoreError> {
+        if self.covered() > self.len {
             return Err(StoreError::IndexCorrupt {
                 what: "a fact run covers rows facts.col does not count",
             });
         }
-        Ok(rows)
+        Ok(())
+    }
+
+    /// How many rows the fact runs cover.
+    pub(crate) fn covered(&self) -> u64 {
+        self.views.covered()
     }
 
     /// [`FactRows::open`], the checkpoint and the frames past it read from the journal of
