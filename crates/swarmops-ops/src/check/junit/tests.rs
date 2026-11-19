@@ -303,6 +303,33 @@ fn text_outside_the_root_is_refused() {
     assert_eq!(said, "no root element: not XML");
 }
 
+/// A failure's text and a case's stderr are gathered within their bounds however long one piece
+/// of text is: the failure keeps its start, the stderr its end.
+#[test]
+fn one_long_text_is_gathered_within_its_bound() {
+    let long = format!("start{}é", "é".repeat(GATHERED_BYTES));
+    let mut walk = Walk::new(".", 1);
+    walk.cases.push(Case {
+        depth: 1,
+        ..Case::default()
+    });
+    walk.depth = 2;
+    walk.into = (Sink::Failure, 2);
+    walk.text(&long).unwrap();
+    walk.text(&long).unwrap();
+    walk.into = (Sink::Stderr, 2);
+    walk.text(&format!("{long}end")).unwrap();
+    let case = walk.cases.last().unwrap();
+    assert!(
+        case.failure.len() <= GATHERED_BYTES,
+        "{}",
+        case.failure.len()
+    );
+    assert!(case.failure.starts_with("starté"));
+    assert!(case.stderr.len() <= GATHERED_BYTES, "{}", case.stderr.len());
+    assert!(case.stderr.ends_with("éend"));
+}
+
 /// A UTF-8 byte order mark and a declaration of UTF-8, in any case, read.
 #[test]
 fn utf_8_reads_with_its_mark_or_its_name() {

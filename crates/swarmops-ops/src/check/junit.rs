@@ -397,13 +397,21 @@ impl<'d> Walk<'d> {
             return Ok(());
         };
         match into {
+            // Only what is kept is copied: the start of a failure, the end of the stderr.
             Sink::Failure => {
-                if case.failure.len() < GATHERED_BYTES {
-                    case.failure.push_str(text);
+                let room = GATHERED_BYTES.saturating_sub(case.failure.len());
+                let mut end = text.len().min(room);
+                while !text.is_char_boundary(end) {
+                    end -= 1;
                 }
+                case.failure.push_str(&text[..end]);
             }
             Sink::Stderr => {
-                case.stderr.push_str(text);
+                let mut from = text.len().saturating_sub(GATHERED_BYTES);
+                while !text.is_char_boundary(from) {
+                    from += 1;
+                }
+                case.stderr.push_str(&text[from..]);
                 if case.stderr.len() > 2 * GATHERED_BYTES {
                     let mut start = case.stderr.len() - GATHERED_BYTES;
                     while !case.stderr.is_char_boundary(start) {
