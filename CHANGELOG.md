@@ -72,7 +72,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   others' logs, each its last `--tail` lines; at most 20 logs and 100,000 lines, the rest counted
   in `logs_omitted`. A run with one failed check answers that log alone, and `--human` prints it
   as `check log NAME --human` does; with several it puts a line `==> NAME <==` before each. No
-  failed check is `E_INVALID_ARG` with `details.reason: none_failed`.
+  failed check is `E_INVALID_ARG` with `details.reason: none_failed`. Of a run still running it
+  gives the checks that have ended without passing so far: a run's `run.json` is written again
+  after each check.
 - `check log --run RUN --run-lines DIR` finds a run through its run lines, from any working
   directory: its line's `run_dir` names where the run was kept. `details.reason` is `run` for a
   run the lines do not hold, `run_dir` for a line that names no directory of it, and `run_gone`,

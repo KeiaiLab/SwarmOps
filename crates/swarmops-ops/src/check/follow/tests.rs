@@ -395,6 +395,17 @@ fn no_failed_check_is_refused() {
         (&"none_failed".into(), &true.into())
     );
     assert!(running.hint.unwrap().contains("wait"));
+
+    //    One that has failed already is given, the one not started left out.
+    let mut two = record.clone();
+    let mut bad = two["result"]["checks"][0].clone();
+    bad["name"] = "bad".into();
+    bad["outcome"] = "failed".into();
+    two["result"]["checks"] = Value::Array(vec![bad, record["result"]["checks"][0].clone()]);
+    std::fs::write(run_dir.join(RUN_FILE), two.to_string()).unwrap();
+    let so_far = failed_logs(&runs, "--dir .", None, 10).unwrap();
+    assert_eq!(so_far.failed, ["bad"]);
+    std::fs::write(run_dir.join(RUN_FILE), record.to_string()).unwrap();
     lock.unlock().unwrap();
 
     // 4. The same record once the run ended: a check never run, which has no log, did not

@@ -14,7 +14,8 @@
 //!                        report file and the reports it declares read (check::intake):
 //!                        findings, within the run's bound; a declared report is looked at
 //!                        before the check starts, so that one left from before is not read;
-//!                        then its run line appended (check::lines), before the next starts
+//!                        then its run line appended (check::lines) and run.json written
+//!                        again (running, the checks ended so far), before the next starts
 //!   run.json (ended), the lock let go ─▶ all passed: the result; else E_CHECK_FAILED{run}
 //! ```
 //!
@@ -291,7 +292,8 @@ fn select(
 }
 
 /// The run of `selected`, of `listed`'s file, on `subject`: its directory made and locked, each
-/// check run in turn, its record written at the start and the end. Every check passed: the
+/// check run in turn, its record written at the start, after each check and at the end. Every
+/// check passed: the
 /// result; else `E_CHECK_FAILED` with the result in `details.run`.
 fn run_checks(
     subject: &Subject,
@@ -374,6 +376,8 @@ fn run_checks(
         }
         let cancelled = out.outcome == CheckOutcome::Cancelled;
         resp.checks[at] = out;
+        // The record so far, for a reader of a run that still runs; diagnostics, as the lines.
+        let _ = write_record(&dir, "running", &resp);
         if cancelled {
             break;
         }

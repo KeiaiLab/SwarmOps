@@ -114,6 +114,31 @@ fn a_failing_check_fails_the_run_and_every_check_runs() {
     assert_eq!(record["result"], serde_json::to_value(&resp).unwrap());
 }
 
+/// The record of a run that still runs holds each check ended so far: the second check, which
+/// reads it, finds the first one's failure there, the state still `running`.
+#[test]
+fn a_running_record_holds_what_ended() {
+    let reads = r#"record="${SWARMOPS_CHECK_REPORT%/checks/*}/run.json"
+/usr/bin/grep -q '"state": "running"' "$record" || exit 3
+/usr/bin/grep -q '"outcome": "failed"' "$record" || exit 4"#;
+    let reads = toml::Value::from(reads);
+    let (_tmp, dir, runs) = tree(&format!(
+        "[check.a-bad]\nargv = [\"/bin/sh\", \"-c\", \"exit 1\"]\n\
+         [check.b-reads]\nargv = [\"/bin/sh\", \"-c\", {reads}]\n",
+    ));
+    let resp = run_of(&run(&dir, &runs, &[], &[]).unwrap_err());
+    let outcomes: Vec<(&str, CheckOutcome, Option<i32>)> = (resp.checks.iter())
+        .map(|c| (c.name.as_str(), c.outcome, c.exit_code))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("a-bad", CheckOutcome::Failed, Some(1)),
+            ("b-reads", CheckOutcome::Passed, Some(0))
+        ]
+    );
+}
+
 /// A check of `.swarmops/checks.toml` gets the pinned variables and, of the caller's, only the
 /// fixed list and what `--pass` names; a pinned name is never the caller's.
 #[test]

@@ -283,8 +283,8 @@ each.
 
 A run where no check failed is `E_INVALID_ARG` with `details.reason: none_failed`, `details.run`
 and `details.running`, whether the run's lock is held: of a run that still runs, a check not
-started yet is not counted, so the answer is `none_failed` until the run's record is written at
-its end, and the hint says to wait or to follow one check. `--failed` goes with neither `CHECK`
+started yet is not counted, so the answer is `none_failed` until a check of it has ended without
+passing, and the hint says to wait or to follow one check. `--failed` goes with neither `CHECK`
 nor `--follow`: the command line refuses both.
 
 ### `--follow`
