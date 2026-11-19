@@ -366,7 +366,34 @@ struct SarifResult {
     /// Its message.
     message: Option<Message>,
     /// Its locations: the first gives the path and lines.
-    locations: Option<Vec<Location>>,
+    locations: Option<FirstLocation>,
+}
+
+/// A result's `locations`, of which only the first is held: the rest are passed over as they
+/// are read, so a result holds no more for having many.
+struct FirstLocation(Option<Location>);
+
+impl<'de> Deserialize<'de> for FirstLocation {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        /// Reads an array's first location and passes over the rest.
+        struct First;
+
+        impl<'de> Visitor<'de> for First {
+            type Value = FirstLocation;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an array of locations")
+            }
+
+            fn visit_seq<S: SeqAccess<'de>>(self, mut seq: S) -> Result<FirstLocation, S::Error> {
+                let first = seq.next_element::<Location>()?;
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(FirstLocation(first))
+            }
+        }
+
+        de.deserialize_seq(First)
+    }
 }
 
 /// A result's `message`.
@@ -435,7 +462,8 @@ fn finding_of(result: SarifResult, place: Place<'_>) -> CheckFindingOut {
     finding.message = text.as_deref().and_then(message_of);
 
     // 2. Its path and lines, from the first location.
-    let physical = (result.locations.unwrap_or_default().into_iter().next())
+    let physical = (result.locations)
+        .and_then(|locations| locations.0)
         .and_then(|location| location.physical);
     let Some(physical) = physical else {
         return finding;

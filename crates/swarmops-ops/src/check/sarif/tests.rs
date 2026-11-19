@@ -185,6 +185,22 @@ fn a_location_s_path_is_a_tree_path_or_none() {
     assert_eq!(read.findings[0].path, None);
 }
 
+/// Only the first location is taken: a later one of any shape is passed over, not held.
+#[test]
+fn only_the_first_location_is_read() {
+    let json = log(
+        r#"{"ruleId":"r","locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/a.rs"},"region":{"startLine":4}}},7]}"#,
+    );
+    let read = read_ok(&json);
+    let finding = &read.findings[0];
+    assert_eq!(
+        (finding.path.as_deref(), finding.line),
+        (Some("src/a.rs"), Some(4))
+    );
+    let none = read_ok(&log(r#"{"ruleId":"r","locations":[]}"#));
+    assert_eq!(none.findings[0].path, None);
+}
+
 /// The title is the rule, else the message's first line that is not blank; the message is cut
 /// to 4 KiB.
 #[test]
