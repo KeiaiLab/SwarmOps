@@ -1661,8 +1661,9 @@ mod tests {
 
     pub(super) const ACTOR: &str = "test/queue";
 
-    /// How long a test waits for a file or a thread before it fails.
-    pub(super) const PATIENCE: Duration = Duration::from_secs(10);
+    /// How long a test waits for a file, a thread or the lock before it fails: a guard against
+    /// a hang, never a verdict, so as long as the testkit's `Hold::PATIENCE`.
+    pub(super) const PATIENCE: Duration = Duration::from_secs(60);
 
     /// The id of changeset `n`.
     pub(super) fn id(n: u64) -> ChangesetId {
@@ -1849,9 +1850,10 @@ mod tests {
         }
     }
 
-    /// The lock of `store`, held by the test.
+    /// The lock of `store`, held by the test. Waited for, [`PATIENCE`] at most: another handle
+    /// may have it for a moment yet, and a zero timeout read that moment as busy.
     pub(super) fn hold(store: &MetaStore) -> MetaLock {
-        MetaLock::acquire(&store.layout, Duration::ZERO).unwrap()
+        MetaLock::acquire(&store.layout, PATIENCE).unwrap()
     }
 
     /// Leads on `lock` with `ask` and `seams`, as a writer that found the lock free.
@@ -2272,21 +2274,49 @@ mod tests {
         assert!(files(&root, Kind::Req).is_empty(), "withdrawn");
     }
 
+    /// [`hold`] waits for a lock another handle still has, as a background run's is for a
+    /// moment after its command returned: taken here before `hold` is called, let go 20 ms
+    /// later. A hold that gave up at once would be busy.
+    #[test]
+    fn a_hold_waits_for_a_lock_let_go_late() {
+        let (_dir, root) = new_store();
+        let other = open(&root);
+        let taken = MetaLock::acquire(&other.layout, Duration::ZERO).unwrap();
+        let store = open(&root);
+        thread::scope(|s| {
+            s.spawn(move || {
+                thread::sleep(Duration::from_millis(20));
+                drop(taken);
+            });
+            drop(hold(&store));
+        });
+    }
+
+    /// A claimed request waits past its deadline for its answer, on the queue's own clock: the
+    /// test moves that clock past the deadline, an hour here, so that no load on the host
+    /// decides whether the deadline has passed.
     #[test]
     fn a_claimed_request_waits_past_its_deadline() {
         let (_dir, root) = new_store();
+        let timeout = Duration::from_secs(3_600);
         let holder = open(&root);
         let lock = hold(&holder);
+        let (added, clock) = fake_clock();
+        let seams = Seams {
+            clock,
+            ..Seams::real()
+        };
         let (tx, rx) = mpsc::channel();
         thread::scope(|s| {
             s.spawn(|| {
-                let store = open(&root).with_lock_timeout(Duration::from_millis(50));
-                tx.send(turn(&store, Ask::Frame(1))).unwrap();
+                let store = open(&root).with_lock_timeout(timeout);
+                tx.send(turn_with(&store, Ask::Frame(1), seams)).unwrap();
             });
             let rid = wait_files(&root, Kind::Req, 1).remove(0);
             let dir = queue(&root);
             fs::rename(Kind::Req.path(&dir, &rid), Kind::Com.path(&dir, &rid)).unwrap();
-            thread::sleep(Duration::from_millis(300));
+            added.store(clock_ms(timeout) + 1, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(100));
             assert!(
                 rx.try_recv().is_err(),
                 "a claimed request waits past its deadline"
@@ -3199,8 +3229,8 @@ mod tests {
 
     /// A declined waiter runs again on its first wait: the wait's helper, parked in `flock`, may
     /// take the lock the moment its holder lets go, and hands it to the rerun. Three rounds,
-    /// each let go once the answer is read; a helper the round before left parked would fail
-    /// the next round's zero-timeout hold.
+    /// each let go once the answer is read. A helper the round before left parked only delays
+    /// the next round's hold: `a_declined_rerun_starts_no_second_helper` counts them.
     #[test]
     fn a_declined_rerun_waits_on_its_first_wait() {
         let (_dir, root) = new_store();
