@@ -326,6 +326,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 
 ## See also
 
+- [`swarmops check plan`](check-plan.md)
 - [`swarmops check run`](check-run.md)
 - [`swarmops check runs`](check-runs.md)
 - [`swarmops check log`](check-log.md)

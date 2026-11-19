@@ -10,6 +10,7 @@ mod support;
 
 mod auth;
 mod check;
+mod check_plan;
 mod check_run;
 mod check_runs;
 mod cli;

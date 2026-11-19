@@ -86,6 +86,7 @@ Usage: so check [OPTIONS] <COMMAND>
 
 Commands:
   list  List the checks of a changeset's tree, or of a directory
+  plan  Say which checks of one stage a change needs, and why
   run   Run one stage's checks of a clean workspace or a directory
   runs  List the run lines of a workspace's or a directory's checks
   log   Read a check's log of a run, or follow it as it grows
@@ -94,8 +95,8 @@ Examples:
   $ mkdir -p .swarmops
   $ echo 'version = 1' > .swarmops/checks.toml
   $ echo 'check.test.argv = ["true"]' >> .swarmops/checks.toml
+  $ so --human check plan --dir . --changed README.md
   $ so --human check run --dir .
-  $ so --human check runs --dir .
 
 Learn more:
   A command's help  so check <command> --help

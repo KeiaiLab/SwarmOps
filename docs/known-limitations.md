@@ -1139,8 +1139,31 @@ check file with its stages, `check list` and `check run` are built
   `swarmops` or `swarmops mcp` is killed with SIGKILL, which it cannot catch. There is no grace
   before the kill, and the outcome does not name a process that left. *Target: M31-9. Found: the
   M31 plan; the M31-1 review.*
-- **A check is told no changed paths.** `SWARMOPS_CHECK_CHANGED` is set and empty: with no plan,
-  a check takes the whole tree as changed. *Target: M30-4. Found: the M31 plan.*
+- **A check is told no changed paths.** `SWARMOPS_CHECK_CHANGED` is set and empty: `check run`
+  takes no plan, so a check takes the whole tree as changed. `check plan` gives the verdicts of
+  the changed paths to its caller, not to a check. *Target: M31-20, M31-10. Found: the M31 plan.*
+- **A plan informs; `check run` runs every check of its stage.** `check plan` says which checks
+  a change needs, and nothing acts on it: no run skips a check a plan marks `not_applicable`, and
+  no land or gate reads a plan. A plan of a directory's paths is vouched for by its caller, and
+  no gate is to accept one. *Target: M31-20, M31-10, M32-7. Found: the M30 plan.*
+- **A check's input patterns are the access file's.** `*` is a whole segment and `**` only the
+  last one: a name such as `server-*` is written out file by file, and there is no negation and
+  no escape. *Unscheduled. Found: the M30 plan.*
+- **A plan of a directory cannot compare definitions.** `check plan --dir` has no target at
+  hand: a change to the check file there runs every check, and a second file to compare with is
+  not taken. When the check file is not among the changed paths, the caller vouches that the
+  definitions are the target's. *Target: the M30 plan. Found: the M30 plan.*
+- **A plan reads at most 100,000 changed paths.** Past them, and past the 1,000 paths a
+  `land-check` item lists, every check runs (`paths_truncated`): a larger change is planned as
+  one that needs everything. What a plan costs on a large change is not measured.
+  *Unscheduled. Found: the M30 plan.*
+- **A workspace's edits are planned from the command line only.** The MCP tool `check_plan`
+  plans a changeset or a land; for edits, an agent calls `ws_snapshot` first and plans the
+  changeset it returns. *Unscheduled. Found: the M30 plan.*
+- **Nothing lists the entries a check's inputs match.** A plan names the first changed path
+  and pattern of a check that runs; no command shows every entry of a tree that a check's inputs
+  match, nor reports a pattern that matches nothing. *Target: M30-16, M30-12. Found: the M30
+  plan.*
 - **A check's outputs, summary and artifacts are read by nothing.** `check run` gives each check
   the paths `SWARMOPS_CHECK_OUTPUTS`, `SWARMOPS_CHECK_SUMMARY` and `SWARMOPS_CHECK_ARTIFACTS`;
   what a check writes there changes no answer yet. *Target: M31-6, M31-18, M36-3. Found: the M31
@@ -1186,7 +1209,10 @@ check file with its stages, `check list` and `check run` are built
   and refuse the archive unless the tag still names that commit, since `swarmops --version` names
   no commit. Before the switch, the job's step times are to be read from recent runs and the
   gate's timeouts checked against them. So CI's runs leave no run line yet: only a gate started
-  through `check run` does. *Target: M31. Found: the M31 plan; the M31-1 review.*
+  through `check run` does. Nor does `site.yml` or `server.yml` ask `check plan` which of the
+  site and server checks a change needs: their path lists stay in the workflows, held equal to
+  the check file's `inputs` by a test, until a pinned build holds the command. *Target: M31.
+  Found: the M31 plan; the M31-1 review.*
 - **`check list` refuses some `workspaces.json` files that `ws land --check` runs.** It holds
   `check.argv` and `check.timeout_s` to version 1's rules, which the land does not read: a
   `check.timeout_s` of 0 or past 86,400, an empty program, or an argv past 1,024 strings is

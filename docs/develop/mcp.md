@@ -3,7 +3,7 @@
 After this page you can connect any MCP (Model Context Protocol) client to a store: register
 `swarmops mcp`, give each agent process its identity, call every tool and handle what goes wrong.
 
-**You need:** SwarmOps 0.1.0 or newer on Linux, 0.13.0 for all 54 tools (`swarmops --version`);
+**You need:** SwarmOps 0.1.0 or newer on Linux, past 0.13.0 for all 55 tools (`swarmops --version`);
 [Concepts](../concepts.md); a store (`swarmops info`); an MCP client on the same host.
 
 `swarmops mcp` serves a store's operations to an agent as an MCP server on stdin and stdout. An
@@ -132,7 +132,7 @@ ids for compare-and-swap, `land` to publish, small pages):
 {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.11.0"},"instructions":"SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. …"}}
 ```
 
-**`tools/list`.** One page of 54 tools. Each entry holds `name`, `title`, `description`,
+**`tools/list`.** One page of 55 tools. Each entry holds `name`, `title`, `description`,
 `inputSchema` and `annotations`; `read_file` alone also carries `_meta`:
 
 ```sh
@@ -297,7 +297,7 @@ Give every agent process its own instance name, and yourself one of your own, su
 
 ## The tools
 
-54 tools, one per operation (39 store operations and 15 workspace operations), each named as the
+55 tools, one per operation (40 store operations and 15 workspace operations), each named as the
 envelope's `op` is, in `tools/list`'s order. Its arguments are the CLI command's request;
 `swarmops schema <Request>` prints the type.
 
@@ -326,6 +326,7 @@ envelope's `op` is, in `tools/list`'s order. Its arguments are the CLI command's
 | `land_check` | `swarmops land-check HEAD...` | `LandCheckReq` | no |
 | `land_group` | `swarmops land-group HEAD...` | `LandGroupReq` | adds a changeset per clean change and moves the target once |
 | `check_list` | `swarmops check list [REV]` | `CheckListReq` | no |
+| `check_plan` | `swarmops check plan REV` | `CheckPlanReq` | no |
 | `rebase` | `swarmops rebase HEAD` | `RebaseReq` | adds a changeset |
 | `blob_put` | `swarmops blob put` | `BlobPutReq` | adds a blob |
 | `blob_has` | `swarmops blob has` | `BlobHasReq` | no |

@@ -504,7 +504,7 @@ static CONTRACT: [Limit; 31] = [
             || swarmops_ops::check::MAX_CHECK_FILE_BYTES,
         ),
         unit: Unit::Bytes,
-        commands: &["check list", "check run"],
+        commands: &["check list", "check plan", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "A tree's `.swarmops/checks.toml`: a longer one is refused by its size, not \
                    read, with `details.reason` `too_large`, `bytes` and `limit`.",
@@ -518,7 +518,7 @@ static CONTRACT: [Limit; 31] = [
             || bytes::to_u64(swarmops_ops::check::MAX_CHECKS),
         ),
         unit: Unit::Count("checks"),
-        commands: &["check list", "check run"],
+        commands: &["check list", "check plan", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "The `[check.<name>]` tables of one check file: one more is refused with \
                    `details.reason` `too_many`, at its line.",
@@ -532,7 +532,7 @@ static CONTRACT: [Limit; 31] = [
             || bytes::to_u64(swarmops_ops::check::MAX_CHECK_NAME_BYTES),
         ),
         unit: Unit::Bytes,
-        commands: &["check list", "check run"],
+        commands: &["check list", "check plan", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "A check's name, of `a-z`, `0-9`, `-` and `_`: a longer one is refused with \
                    `details.reason` `name`.",
@@ -546,7 +546,7 @@ static CONTRACT: [Limit; 31] = [
             || bytes::to_u64(swarmops_ops::check::MAX_ARGV_ITEMS),
         ),
         unit: Unit::Count("strings"),
-        commands: &["check list", "check run"],
+        commands: &["check list", "check plan", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "A check's `argv`, the program and its arguments: more are refused with \
                    `details.reason` `value`.",
@@ -560,7 +560,7 @@ static CONTRACT: [Limit; 31] = [
             || swarmops_ops::check::MAX_ARGV_BYTES,
         ),
         unit: Unit::Bytes,
-        commands: &["check list", "check run"],
+        commands: &["check list", "check plan", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "A check's `argv` strings together: more are refused with `details.reason` \
                    `value`.",
@@ -574,7 +574,7 @@ static CONTRACT: [Limit; 31] = [
             || swarmops_ops::check::MAX_CHECK_TIMEOUT_S,
         ),
         unit: Unit::Seconds,
-        commands: &["check list", "check run"],
+        commands: &["check list", "check plan", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "A check's `timeout_s`, from 1: a longer one, or 0, is refused with \
                    `details.reason` `value`. `check run` kills a check's process group past it.",
@@ -588,7 +588,7 @@ static CONTRACT: [Limit; 31] = [
             || bytes::to_u64(swarmops_ops::check::MAX_CHECK_REPORTS),
         ),
         unit: Unit::Count("reports"),
-        commands: &["check list", "check run"],
+        commands: &["check list", "check plan", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "The reports one check's `reports` declares, from 1: more are refused with \
                    `details.reason` `value` at the line of the first past it.",
@@ -602,7 +602,7 @@ static CONTRACT: [Limit; 31] = [
             || bytes::to_u64(swarmops_ops::check::MAX_CHECK_INPUTS),
         ),
         unit: Unit::Count("patterns"),
-        commands: &["check list", "check run"],
+        commands: &["check list", "check plan", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "The patterns one check's `inputs` declares, from 1: more are refused with \
                    `details.reason` `value` at the line of the first past it.",
@@ -616,7 +616,7 @@ static CONTRACT: [Limit; 31] = [
             || bytes::to_u64(swarmops_ops::check::MAX_INPUT_PATTERN_BYTES),
         ),
         unit: Unit::Bytes,
-        commands: &["check list", "check run"],
+        commands: &["check list", "check plan", "check run"],
         errors: &[ErrorCode::CheckFile],
         what: "One pattern of a check's `inputs`: a longer one is refused with \
                    `details.reason` `value` at its line.",
@@ -680,7 +680,10 @@ static CONTRACT: [Limit; 31] = [
 ];
 
 /// The bounds a response keeps without an error: what it leaves out, and how it says so.
-static BOUNDS: [Limit; 28] = [
+/// The file that declares what a plan reads of a change's paths (M30-4).
+const CHECK_CHANGED: &str = "crates/swarmops-ops/src/check/changed.rs";
+
+static BOUNDS: [Limit; 31] = [
     Limit {
         name: "Lossy commits listed",
         constant: code(
@@ -883,6 +886,49 @@ static BOUNDS: [Limit; 28] = [
         what: "The runs a directory (by its canonical path) or a workspace keeps, the new one \
                    among them: when a run starts the older ones are removed, but never one whose \
                    lock is held.",
+    },
+    Limit {
+        name: "Plan changed paths",
+        constant: code(
+            "swarmops_ops::check::MAX_PLAN_PATHS",
+            CHECK,
+            "pub const MAX_PLAN_PATHS: u64 = 100_000;",
+            || swarmops_ops::check::MAX_PLAN_PATHS,
+        ),
+        unit: Unit::Count("paths"),
+        commands: &["check plan"],
+        errors: &[],
+        what: "The changed paths a plan reads, from the store's diff, a workspace's edits or \
+                   the list given: past them reading stops and the plan is widened, every \
+                   check `run` with `widened` `paths_truncated`.",
+    },
+    Limit {
+        name: "Plan changed-path list",
+        constant: code(
+            "swarmops_ops::check::MAX_PLAN_LIST_BYTES",
+            CHECK,
+            "pub const MAX_PLAN_LIST_BYTES: u64 = 16 << 20;",
+            || swarmops_ops::check::MAX_PLAN_LIST_BYTES,
+        ),
+        unit: Unit::Bytes,
+        commands: &["check plan"],
+        errors: &[],
+        what: "The list `check plan --changed-from` reads: a longer one is read to this, its \
+                   last partial entry left out, and the plan is widened, `paths_truncated`.",
+    },
+    Limit {
+        name: "Plan changed path",
+        constant: code(
+            "swarmops_ops::check::MAX_PLAN_PATH_BYTES",
+            CHECK,
+            "pub const MAX_PLAN_PATH_BYTES: usize = 4_096;",
+            || bytes::to_u64(swarmops_ops::check::MAX_PLAN_PATH_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check plan"],
+        errors: &[],
+        what: "One changed path given to `check plan`: a longer one is not read as a path, \
+                   and the plan is widened, `path_unreadable`.",
     },
     Limit {
         name: "Run lines kept",
@@ -1316,7 +1362,31 @@ static DEFAULTS: [DefaultRow; 17] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 47] = [
+static INTERNAL: [Limit; 49] = [
+    internal_value(
+        "Plan diff page",
+        declared(
+            "swarmops_ops::check::changed::PLAN_DIFF_PAGE",
+            CHECK_CHANGED,
+            "pub(crate) const PLAN_DIFF_PAGE: usize = 1_000;",
+            || 1_000,
+        ),
+        Unit::Count("files"),
+        "The files of the store's diff a plan of `check plan` reads at once: a page is matched \
+             and dropped before the next is read.",
+    ),
+    internal_value(
+        "Input walk page",
+        declared(
+            "swarmops_ops::check::inputs::TREE_PAGE",
+            "crates/swarmops-ops/src/check/inputs.rs",
+            "const TREE_PAGE: usize = 1_000;",
+            || 1_000,
+        ),
+        Unit::Count("entries"),
+        "The entries of one directory read at once when a check's inputs are resolved \
+             against a tree.",
+    ),
     internal_value(
         "Writer lock wait",
         declared(

@@ -1,0 +1,182 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "--repo [tmp]/store check plan [change]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "check_plan",
+      "api": 1,
+      "result": {
+        "vouched": false,
+        "subject": "changeset",
+        "stage": "before-land",
+        "rev": "[change]",
+        "tree": "[tree_change]",
+        "target": "main",
+        "onto": "[main]",
+        "base": "[main]",
+        "file": ".swarmops/checks.toml",
+        "version": 1,
+        "changed": 1,
+        "checks": [
+          {
+            "name": "docs",
+            "verdict": "run",
+            "reason": "input_changed",
+            "path": "docs/guide.md",
+            "pattern": "docs/**",
+            "definition_digest": "[docs_digest]"
+          },
+          {
+            "name": "site",
+            "verdict": "run",
+            "reason": "input_changed",
+            "path": "docs/guide.md",
+            "pattern": "docs/**",
+            "definition_digest": "[site_digest]"
+          },
+          {
+            "name": "unit",
+            "verdict": "run",
+            "reason": "no_inputs",
+            "definition_digest": "[unit_digest]"
+          }
+        ]
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[change]": "[change]",
+          "[main]": "[main]",
+          "main": "[main]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "check plan --dir [tmp]/tree --changed-from [tmp]/changed.nul --nul",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "check_plan",
+      "api": 1,
+      "result": {
+        "vouched": true,
+        "subject": "paths",
+        "stage": "before-land",
+        "file": ".swarmops/checks.toml",
+        "version": 1,
+        "changed": 5,
+        "checks": [
+          {
+            "name": "docs",
+            "verdict": "run",
+            "reason": "input_changed",
+            "path": "docs/status/M1/a b.txt",
+            "pattern": "docs/**",
+            "definition_digest": "[docs_digest]"
+          },
+          {
+            "name": "site",
+            "verdict": "run",
+            "reason": "input_changed",
+            "path": "docs/status/M1/a b.txt",
+            "pattern": "docs/**",
+            "definition_digest": "[site_digest]"
+          },
+          {
+            "name": "unit",
+            "verdict": "run",
+            "reason": "no_inputs",
+            "definition_digest": "[unit_digest]"
+          }
+        ]
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "check plan --dir [tmp]/tree",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "check_plan",
+      "api": 1,
+      "result": {
+        "vouched": true,
+        "subject": "paths",
+        "stage": "before-land",
+        "file": ".swarmops/checks.toml",
+        "version": 1,
+        "changed": 0,
+        "widened": "paths_unknown",
+        "checks": [
+          {
+            "name": "docs",
+            "verdict": "run",
+            "reason": "widened",
+            "widened": "paths_unknown",
+            "definition_digest": "[docs_digest]"
+          },
+          {
+            "name": "site",
+            "verdict": "run",
+            "reason": "widened",
+            "widened": "paths_unknown",
+            "definition_digest": "[site_digest]"
+          },
+          {
+            "name": "unit",
+            "verdict": "run",
+            "reason": "widened",
+            "widened": "paths_unknown",
+            "definition_digest": "[unit_digest]"
+          }
+        ]
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "check plan --dir [tmp]/tree --changed docs/guide.md",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "check_plan",
+      "api": 1,
+      "error": {
+        "code": "E_CHECK_FILE",
+        "message": ".swarmops/checks.toml has check.site.inputs holding \"fe*\", not a pattern: a * beside other bytes in a segment (line 9)",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "file": ".swarmops/checks.toml",
+          "key": "check.site.inputs",
+          "line": 9,
+          "reason": "value",
+          "vouched": true
+        },
+        "hint": "version 1 of .swarmops/checks.toml takes version = 1, then one [check.<name>] table a check, with argv (required), dir, timeout_s, stages, reports (tables of format, junit or sarif, and path) and inputs (path patterns from the tree's root: literal segments, * for one segment, ** as the last for every depth below)"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

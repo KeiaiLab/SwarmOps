@@ -690,6 +690,94 @@ fn check_runs_golden() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// The plan fixtures: the target's check file, the same five changed paths NUL-ended, and a
+/// check file whose input is no pattern.
+const PLAN_TARGET: &str = include_str!("fixtures/check/plan/target.toml");
+const PLAN_CHANGED_NUL: &[u8] = include_bytes!("fixtures/check/plan/changed.nul");
+const PLAN_REFUSED: &str = include_str!("fixtures/check/refused-inputs.toml");
+
+/// `check plan` (M30-4, M30-5), its pinned JSON form: a changeset that edits a docs file,
+/// planned against main, runs the two checks whose inputs it is among and the one with none;
+/// a directory's plan over a NUL-ended list of five paths, vouched for by the caller; the same
+/// directory with no path given, widened, every check `run`; and a check file whose input is
+/// no pattern, E_CHECK_FILE at line 9, exit 1, with no plan.
+#[test]
+fn check_plan_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = Session::run_raw(&[], &["init", &store], None);
+    assert_eq!(init.exit, 0, "{}", init.stdout);
+
+    // 1. The target: the fixture's check file and a file for its checks' inputs, at main.
+    let target = json!([
+        {"path": ".swarmops/checks.toml", "op": "put", "content": {"inline": PLAN_TARGET}},
+        {"path": "docs/guide.md", "op": "put", "content": {"inline": "guide\n"}},
+        {"path": "web/app/page.tsx", "op": "put", "content": {"inline": "page\n"}},
+    ]);
+    let main = commit_to_main(&mut s, &store, &target, "main");
+
+    // 2. A change of a docs file, on main and not landed, as a step the transcript leaves out.
+    let edit = json!([{"path": "docs/guide.md", "op": "put", "content": {"inline": "more\n"}}]);
+    let file = s.file("change.json", &edit.to_string());
+    let line = [
+        "commit",
+        "-m",
+        "docs",
+        "--changes",
+        &file,
+        "--parent",
+        &main,
+    ];
+    let args = [&["--repo", &store, "--as", AGENT][..], &line].concat();
+    let made = Session::run_raw(&[], &args, None);
+    assert_eq!(made.exit, 0, "{}", made.stdout);
+    let made: Value = serde_json::from_str(&made.stdout).expect("an envelope");
+    let change = made["result"]["changeset"].as_str().expect("a changeset");
+    s.name(change, "change");
+
+    // 3. The changeset against main.
+    let planned = s.run(&["--repo", &store, "check", "plan", change]);
+    assert_eq!((planned.exit, &planned["op"]), (0, &json!("check_plan")));
+    s.name_at(&planned, "/result/tree", "tree_change");
+    for (at, name) in ["docs", "site", "unit"].iter().enumerate() {
+        let pointer = format!("/result/checks/{at}/definition_digest");
+        s.name_at(&planned, &pointer, &format!("{name}_digest"));
+    }
+    let result = &planned["result"];
+    assert_eq!(
+        (&result["subject"], &result["vouched"], &result["changed"]),
+        (&json!("changeset"), &json!(false), &json!(1))
+    );
+    assert_eq!(result["checks"][0]["reason"], "input_changed");
+
+    // 4. A directory's plan over a list of changed paths, NUL-ended: vouched, no store.
+    let dir = format!("{}/tree", s.tmp());
+    fs::create_dir_all(format!("{dir}/.swarmops")).unwrap();
+    fs::write(format!("{dir}/.swarmops/checks.toml"), PLAN_TARGET).unwrap();
+    let list = format!("{}/changed.nul", s.tmp());
+    fs::write(&list, PLAN_CHANGED_NUL).unwrap();
+    let of_dir = ["check", "plan", "--dir", &dir];
+    let listed = s.run(&[&of_dir[..], &["--changed-from", &list, "--nul"]].concat());
+    assert_eq!(listed.exit, 0, "{}", listed.json);
+    assert_eq!(
+        (&listed["result"]["vouched"], &listed["result"]["changed"]),
+        (&json!(true), &json!(5))
+    );
+    assert!(listed["meta"].get("repo").is_none(), "{}", listed.json);
+
+    // 5. No path given: the changed paths are not known, and every check runs.
+    let widened = s.run(&of_dir);
+    assert_eq!(widened.exit, 0, "{}", widened.json);
+    assert_eq!(widened["result"]["widened"], "paths_unknown");
+
+    // 6. A check file that does not read: an error, and no plan.
+    fs::write(format!("{dir}/.swarmops/checks.toml"), PLAN_REFUSED).unwrap();
+    let refused = s.run(&[&of_dir[..], &["--changed", "docs/guide.md"]].concat());
+    assert_eq!((refused.exit, refused.code()), (1, "E_CHECK_FILE"));
+    assert_eq!(refused["error"]["details"]["line"], 9);
+    insta::assert_json_snapshot!(s.transcript());
+}
+
 /// `check list` (M30-1, M30-2), its pinned JSON form: the plan's fixture at main lists its
 /// three checks sorted by name, each with its line and the digest of its definition, read from
 /// the store (`vouched: false`, the tree named); the same file in a directory lists the same

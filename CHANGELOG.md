@@ -94,6 +94,23 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - API types `CheckPlanReq`, `CheckPlanResp` and `CheckPlanOut`, a plan of one stage's checks, and
   its closed sets `CheckPlanSubject`, `CheckPlanVerdict`, `CheckPlanReason`, `CheckPlanWidened`
   and `CheckDefinitionChange`. `swarmops schema` prints them (251 types).
+- `check plan`, and the MCP tool `check_plan`: for one stage (`--stage`, `before-land` by
+  default), each check `run` or `not_applicable` with one reason, the first that holds:
+  `definition_changed` (`added`, `renamed` with `was`, `modified` or `deleted` against the check
+  file at the target's head), `widened`, `input_changed` (with the first changed `path` and the
+  `pattern` it matches), `no_inputs` or `inputs_unchanged`. Four subjects: a changeset against
+  `--target` (the paths it changed since their merge base); the change as `land-check` lands it
+  (`--landed`, with `--base`; a conflict is `E_CONFLICT`); a workspace's committed chain and its
+  edits (`--ws`, `--ws-path`, read without its lock); and, with `--dir`, the changed paths the
+  caller gives (`--changed`, `--changed-from FILE` or `-`, NUL-ended with `--nul`), which opens
+  no store and says `vouched`. A plan fails closed: changed paths that are unknown
+  (`paths_unknown`), cut (`paths_truncated`: past 100,000 paths, a 16 MiB list or a land-check
+  item's 1,000) or unreadable (`path_unreadable`), a check file that cannot be compared
+  (`check_file_changed`) and a target whose check file does not read (`target_unread`) widen the
+  whole plan, a candidate that narrows a check's own inputs changed its definition, and an error
+  gives no plan. `--check NAME` keeps only those checks. A plan informs: it reads only, starts
+  nothing, and `check run` runs every check of its stage whatever it says. The tool has the
+  changeset's and the land's forms; `swarmops mcp` lists 55 tools.
 - The check file's `inputs` key: the paths a check depends on, 1 to 64 patterns in the grammar of
   the store's `access.toml` (literal segments, `*` for one segment, a last `**` for every depth
   below), at most 1,024 bytes each, none twice, from the tree's root whatever the check's `dir`.

@@ -359,7 +359,7 @@ their values.
 | `SWARMOPS_CHECK_OUTPUTS` | A path for the check's outputs, not made; nothing reads it yet (M31-6). |
 | `SWARMOPS_CHECK_SUMMARY` | A path for the check's summary, not made; nothing reads it yet (M31-18). |
 | `SWARMOPS_CHECK_ARTIFACTS` | A directory for the check's artifacts, made empty; nothing reads it yet (M36-3). |
-| `SWARMOPS_CHECK_CHANGED` | Empty: no plan gives the changed paths yet (M30-4), so a check takes the whole tree as changed. |
+| `SWARMOPS_CHECK_CHANGED` | Empty: `check run` takes no plan yet (M31-20), so a check takes the whole tree as changed. [`check plan`](../commands/check-plan.md) gives the changed paths' verdicts to its caller. |
 | `SWARMOPS_WS` | The workspace's name, in the workspace form. |
 
 A `--pass` name is 1 to 128 bytes of `[A-Za-z_][A-Za-z0-9_]*`, not a `SWARMOPS_CHECK_` name nor
@@ -505,6 +505,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 ## See also
 
 - [`swarmops check list`](check-list.md)
+- [`swarmops check plan`](check-plan.md)
 - [`swarmops check runs`](check-runs.md)
 - [`swarmops check log`](check-log.md)
 - [CLI reference](../cli.md)

@@ -1701,6 +1701,97 @@ expression: golden.transcript()
             {
               "annotations": {
                 "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "Says which checks of one stage, before-land by default, the changeset rev needs against target, main by default: each check run or not_applicable with one reason, definition_changed (added, renamed, modified or deleted against the target's head), widened (the changed paths or the target's definitions are not known in full), input_changed (with the path and the pattern), no_inputs or inputs_unchanged. Reads the paths rev changed since the merge base; with landed, the paths and the tree land_check gives for it, and E_CONFLICT if it conflicts. Fails closed: what cannot be read or compared runs, and an error is no plan. Reads only. A plan informs and starts nothing: check_run runs every check of its stage. For a workspace's edits, ws_snapshot first, then plan the changeset it returns.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`check_plan` (CLI `check plan`): for one stage, which checks a change needs and why. The\nchange is the changeset `rev` against `target`, or, with `landed`, `rev` as `land_check`\nwould land it there. Reads only: no lock, no identity, nothing written. A plan informs: it\nstarts no check and skips none.",
+                "properties": {
+                  "base": {
+                    "anyOf": [
+                      {
+                        "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "With `landed`: where the change starts, as a land's `base`. `E_INVALID_ARG` with\n`details.reason: base` without `landed`."
+                  },
+                  "checks": {
+                    "description": "Only these checks of the plan; empty (the default): every one. A name the plan does not\nhold is `E_INVALID_ARG`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "landed": {
+                    "default": false,
+                    "description": "Plan the change as `land_check` lands it on `target`: its changed paths and its tree are\nthe landed changeset's. A change that conflicts is `E_CONFLICT`, with no plan.",
+                    "type": "boolean"
+                  },
+                  "rev": {
+                    "description": "The candidate: the changeset whose change to plan. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                    "type": "string"
+                  },
+                  "stage": {
+                    "default": "before-land",
+                    "description": "The stage to plan; `before-land` when omitted. A plan is of one stage. When a check's answer is wanted. A check names one or more; `check run` runs one stage's\nchecks.",
+                    "oneOf": [
+                      {
+                        "const": "before-land",
+                        "description": "Before a change lands: the gate. The default.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "after-land",
+                        "description": "After a change has landed.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "scheduled",
+                        "description": "On a schedule.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "release",
+                        "description": "Before a release is cut.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "manual",
+                        "description": "Only when someone asks for it.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "deploy",
+                        "description": "Before a deployment.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "target": {
+                    "default": "main",
+                    "description": "The ref the change would land on; `main` when omitted. The definitions are compared with\nthe check file at its head.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "rev"
+                ],
+                "title": "CheckPlanReq",
+                "type": "object"
+              },
+              "name": "check_plan",
+              "title": "Plan a change's checks"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
                 "idempotentHint": false,
                 "openWorldHint": false,
                 "readOnlyHint": false

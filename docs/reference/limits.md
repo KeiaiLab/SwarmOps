@@ -207,7 +207,7 @@ A tree's `.swarmops/checks.toml`: a longer one is refused by its size, not read,
 
 - Value: 1,048,576 bytes (1 MiB).
 - Constant: `swarmops_ops::check::MAX_CHECK_FILE_BYTES`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
+- Commands: [`check list`](commands/check-list.md), [`check plan`](commands/check-plan.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Checks of a file
@@ -216,7 +216,7 @@ The `[check.<name>]` tables of one check file: one more is refused with `details
 
 - Value: 1,000 checks.
 - Constant: `swarmops_ops::check::MAX_CHECKS`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
+- Commands: [`check list`](commands/check-list.md), [`check plan`](commands/check-plan.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Check name
@@ -225,7 +225,7 @@ A check's name, of `a-z`, `0-9`, `-` and `_`: a longer one is refused with `deta
 
 - Value: 64 bytes.
 - Constant: `swarmops_ops::check::MAX_CHECK_NAME_BYTES`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
+- Commands: [`check list`](commands/check-list.md), [`check plan`](commands/check-plan.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Check argv strings
@@ -234,7 +234,7 @@ A check's `argv`, the program and its arguments: more are refused with `details.
 
 - Value: 1,024 strings.
 - Constant: `swarmops_ops::check::MAX_ARGV_ITEMS`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
+- Commands: [`check list`](commands/check-list.md), [`check plan`](commands/check-plan.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Check argv size
@@ -243,7 +243,7 @@ A check's `argv` strings together: more are refused with `details.reason` `value
 
 - Value: 65,536 bytes (64 KiB).
 - Constant: `swarmops_ops::check::MAX_ARGV_BYTES`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
+- Commands: [`check list`](commands/check-list.md), [`check plan`](commands/check-plan.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Check timeout
@@ -252,7 +252,7 @@ A check's `timeout_s`, from 1: a longer one, or 0, is refused with `details.reas
 
 - Value: 86,400 s.
 - Constant: `swarmops_ops::check::MAX_CHECK_TIMEOUT_S`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
+- Commands: [`check list`](commands/check-list.md), [`check plan`](commands/check-plan.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Check reports
@@ -261,7 +261,7 @@ The reports one check's `reports` declares, from 1: more are refused with `detai
 
 - Value: 16 reports.
 - Constant: `swarmops_ops::check::MAX_CHECK_REPORTS`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
+- Commands: [`check list`](commands/check-list.md), [`check plan`](commands/check-plan.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Check inputs
@@ -270,7 +270,7 @@ The patterns one check's `inputs` declares, from 1: more are refused with `detai
 
 - Value: 64 patterns.
 - Constant: `swarmops_ops::check::MAX_CHECK_INPUTS`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
+- Commands: [`check list`](commands/check-list.md), [`check plan`](commands/check-plan.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Check input pattern
@@ -279,7 +279,7 @@ One pattern of a check's `inputs`: a longer one is refused with `details.reason`
 
 - Value: 1,024 bytes (1 KiB).
 - Constant: `swarmops_ops::check::MAX_INPUT_PATTERN_BYTES`, in `crates/swarmops-ops/src/check.rs`.
-- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
+- Commands: [`check list`](commands/check-list.md), [`check plan`](commands/check-plan.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 
 ### Variables passed
@@ -338,6 +338,9 @@ A response past these leaves the rest out, and says so in its fields; nothing fa
 | [Check sections](#check-sections) | 1,000 sections | `swarmops_ops::check::log::MAX_CHECK_SECTIONS` | [`check run`](commands/check-run.md) |
 | [Section title](#section-title) | 200 bytes | `swarmops_ops::check::log::MAX_SECTION_TITLE_BYTES` | [`check run`](commands/check-run.md) |
 | [Check runs kept](#check-runs-kept) | 20 runs | `swarmops_ops::check::run::KEPT_CHECK_RUNS` | [`check run`](commands/check-run.md) |
+| [Plan changed paths](#plan-changed-paths) | 100,000 paths | `swarmops_ops::check::MAX_PLAN_PATHS` | [`check plan`](commands/check-plan.md) |
+| [Plan changed-path list](#plan-changed-path-list) | 16,777,216 bytes (16 MiB) | `swarmops_ops::check::MAX_PLAN_LIST_BYTES` | [`check plan`](commands/check-plan.md) |
+| [Plan changed path](#plan-changed-path) | 4,096 bytes (4 KiB) | `swarmops_ops::check::MAX_PLAN_PATH_BYTES` | [`check plan`](commands/check-plan.md) |
 | [Run lines kept](#run-lines-kept) | 67,108,864 bytes (64 MiB) | `swarmops_ops::check::lines::MAX_RUN_LINES_BYTES` | [`check run`](commands/check-run.md) |
 | [Run line](#run-line) | 4,096 bytes (4 KiB) | `swarmops_ops::check::lines::MAX_RUN_LINE_BYTES` | [`check run`](commands/check-run.md) |
 | [Run line's run directory](#run-lines-run-directory) | 1,024 bytes (1 KiB) | `swarmops_ops::check::lines::MAX_RUN_LINE_DIR_BYTES` | [`check run`](commands/check-run.md) |
@@ -464,6 +467,30 @@ The runs a directory (by its canonical path) or a workspace keeps, the new one a
 - Value: 20 runs.
 - Constant: `swarmops_ops::check::run::KEPT_CHECK_RUNS`, in `crates/swarmops-ops/src/check/run.rs`.
 - Commands: [`check run`](commands/check-run.md).
+
+### Plan changed paths
+
+The changed paths a plan reads, from the store's diff, a workspace's edits or the list given: past them reading stops and the plan is widened, every check `run` with `widened` `paths_truncated`.
+
+- Value: 100,000 paths.
+- Constant: `swarmops_ops::check::MAX_PLAN_PATHS`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check plan`](commands/check-plan.md).
+
+### Plan changed-path list
+
+The list `check plan --changed-from` reads: a longer one is read to this, its last partial entry left out, and the plan is widened, `paths_truncated`.
+
+- Value: 16,777,216 bytes (16 MiB).
+- Constant: `swarmops_ops::check::MAX_PLAN_LIST_BYTES`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check plan`](commands/check-plan.md).
+
+### Plan changed path
+
+One changed path given to `check plan`: a longer one is not read as a path, and the plan is widened, `path_unreadable`.
+
+- Value: 4,096 bytes (4 KiB).
+- Constant: `swarmops_ops::check::MAX_PLAN_PATH_BYTES`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check plan`](commands/check-plan.md).
 
 ### Run lines kept
 
@@ -638,6 +665,8 @@ Not part of the contract: these tune the implementation, or bound the store's la
 
 | Value | Amount | Constant | What it does |
 | --- | --- | --- | --- |
+| Plan diff page | 1,000 files | `swarmops_ops::check::changed::PLAN_DIFF_PAGE` | The files of the store's diff a plan of `check plan` reads at once: a page is matched and dropped before the next is read. |
+| Input walk page | 1,000 entries | `swarmops_ops::check::inputs::TREE_PAGE` | The entries of one directory read at once when a check's inputs are resolved against a tree. |
 | Writer lock wait | 10 s | `swarmops_store::meta::store::DEFAULT_LOCK_TIMEOUT` | How long a write waits for the store's lock; a write that waits it out with its request still unclaimed in the write queue fails with `E_BUSY`, and nothing of it is recorded. A write that the lock's holder claimed into its batch waits past it for its answer, up to the claimed write wait. |
 | Claimed write wait | 60 s | `swarmops_store::meta::queue::CLAIMED_WAIT` | How long past the writer lock wait a write that the lock's holder claimed into its batch waits for its answer: a holder stopped, or stuck, after its claim answers nothing, and the write then fails with `E_BUSY`. |
 | Index sync threads | 6 threads | `swarmops_store::meta::store::DEFAULT_PARALLELISM` | How many threads a write transaction syncs the index files from: the six of a FORMAT 3 store, the five of FORMAT 1 and 2. |

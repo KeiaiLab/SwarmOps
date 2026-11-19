@@ -292,7 +292,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 39] = [
+static TOOLS: [Spec; 40] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -600,6 +600,26 @@ static TOOLS: [Spec; 39] = [
                       path patterns of its inputs (none: the whole tree) and the digest of \
                       its definition, sorted by name, with the tree they were read from. Reads only. A tree with neither file lists none; a file that \
                       does not read is E_CHECK_FILE with its line and key. Nothing runs a check.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::CheckPlan,
+        name: "check_plan",
+        request: "CheckPlanReq",
+        title: "Plan a change's checks",
+        description: "Says which checks of one stage, before-land by default, the changeset \
+                      rev needs against target, main by default: each check run or \
+                      not_applicable with one reason, definition_changed (added, renamed, \
+                      modified or deleted against the target's head), widened (the changed \
+                      paths or the target's definitions are not known in full), input_changed \
+                      (with the path and the pattern), no_inputs or inputs_unchanged. Reads \
+                      the paths rev changed since the merge base; with landed, the paths and \
+                      the tree land_check gives for it, and E_CONFLICT if it conflicts. Fails \
+                      closed: what cannot be read or compared runs, and an error is no plan. \
+                      Reads only. A plan informs and starts nothing: check_run runs every \
+                      check of its stage. For a workspace's edits, ws_snapshot first, then \
+                      plan the changeset it returns.",
         effect: Effect::Reads,
         result_chars: None,
     },
@@ -1634,6 +1654,7 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::LandCheck => how.read(|ops, req| ops.land_check(req)),
         Tool::LandGroup => how.mutate(|ops, who, req| ops.land_group(who, req)),
         Tool::CheckList => how.read(|ops, req| swarmops_ops::check::list(ops, req)),
+        Tool::CheckPlan => how.read(|ops, req| swarmops_ops::check::plan::plan(ops, req)),
         Tool::Rebase => how.mutate(|ops, who, req| ops.rebase(who, req)),
         Tool::BlobPut => how.mutate(|ops, who, req| ops.blob_put(who, req)),
         Tool::BlobHas => how.read(|ops, req| ops.blob_has(req)),
@@ -1983,6 +2004,7 @@ impl Refuse for RefLogReq {}
 impl Refuse for swarmops_api::LandCheckReq {}
 impl Refuse for swarmops_api::LandGroupReq {}
 impl Refuse for swarmops_api::CheckListReq {}
+impl Refuse for swarmops_api::CheckPlanReq {}
 impl Refuse for UndoReq {}
 impl Refuse for VerifyReq {}
 impl Refuse for swarmops_api::GcReq {}
@@ -2606,6 +2628,7 @@ enum Tool {
     LandCheck,
     LandGroup,
     CheckList,
+    CheckPlan,
     Rebase,
     BlobPut,
     BlobHas,
@@ -3204,8 +3227,6 @@ mod tests {
                     && *name != "CheckRunReq"
                     && *name != "CheckLogReq"
                     && *name != "CheckRunsReq"
-                    // Its tool comes with the command `check plan`.
-                    && *name != "CheckPlanReq"
                     && !client_side.contains(name)
                     && !no_tool.contains(name)
                     && !queue.contains(name)
@@ -3218,9 +3239,12 @@ mod tests {
             "one tool per operation's request type"
         );
 
-        // `check_list` (M30) is no `StoreOps` method: it reads a tree through the store's own
-        // reads, and the first of them resolves the revision once.
-        let composed = [("check_list", ("resolve_rev", "ResolveRevReq"))];
+        // `check_list` and `check_plan` (M30) are no `StoreOps` methods: each reads through
+        // the store's own reads, and the first of them resolves the revision once.
+        let composed = [
+            ("check_list", ("resolve_rev", "ResolveRevReq")),
+            ("check_plan", ("resolve_rev", "ResolveRevReq")),
+        ];
         for spec in &TOOLS {
             let (called, outcome) = (RefCell::new(Vec::new()), RefCell::new(Vec::new()));
             operate(spec.tool, Probe::new(&called, &outcome));

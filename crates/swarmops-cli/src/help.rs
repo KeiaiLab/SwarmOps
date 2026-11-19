@@ -423,6 +423,10 @@ pub(crate) const FAMILIES: [Family; 9] = [
                 "List the checks of a changeset's tree, or of a directory",
             ),
             entry(
+                "plan",
+                "Say which checks of one stage a change needs, and why",
+            ),
+            entry(
                 "run",
                 "Run one stage's checks of a clean workspace or a directory",
             ),
@@ -439,8 +443,16 @@ pub(crate) const FAMILIES: [Family; 9] = [
             Step::Shell("mkdir -p .swarmops"),
             Step::Shell("echo 'version = 1' > .swarmops/checks.toml"),
             Step::Shell("echo 'check.test.argv = [\"true\"]' >> .swarmops/checks.toml"),
+            run(&[
+                "--human",
+                "check",
+                "plan",
+                "--dir",
+                ".",
+                "--changed",
+                "README.md",
+            ]),
             run(&["--human", "check", "run", "--dir", "."]),
-            run(&["--human", "check", "runs", "--dir", "."]),
         ],
         needs: Needs::Nothing,
         guide: "https://swarmops.cc/docs/guides/parallel-agents",

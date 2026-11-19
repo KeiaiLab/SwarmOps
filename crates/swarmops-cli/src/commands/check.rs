@@ -5,6 +5,11 @@
 //! the caller's host and opens no store, so `--repo`, `SWARMOPS_REPO` and `--as` are read and not
 //! used, and its envelope has no `meta.repo`.
 //!
+//! `check plan` says which checks of one stage a change needs: a changeset's or a land's on the
+//! store, as `swarmops mcp`'s `check_plan` does; a workspace's, through the `ws` commands' store
+//! opening; or the changed paths the caller gives with `--dir`, which opens no store and reads
+//! the list of paths here, from its file or from standard input.
+//!
 //! `check run` runs one stage's checks: of the workspace `--ws`, `--ws-path` or the working
 //! directory names, through the `ws` commands' own store opening, or of a directory with
 //! `--dir`, which opens no store. Before the first check starts it makes SIGINT, SIGTERM and
@@ -13,6 +18,10 @@
 //! flag is set and the run ends with its outcomes (`cancelled`, then `not_run`).
 //!
 //! ```text
+//! so check plan REV [--landed]   ─▶ on_store ─▶ check::plan::plan(ops, CheckPlanReq)
+//! so check plan --ws N           ─▶ ws::on_named ─▶ check::plan::plan_ws(&WsCtx, …)
+//! so check plan --dir DIR --changed P… --changed-from FILE|- [--nul]
+//!                                ─▶ check::plan::plan_dir(DIR, stage, checks, Given)
 //! so check run [NAME…] --dir DIR ─▶ check::run::run_dir(DIR, stage, names, opts)
 //! so check run [NAME…] [--ws N]  ─▶ ws::on_named ─▶ check::run::run_ws(&WsCtx, req, opts)
 //!                          opts: --pass names, the stop flag, the environment, the runs root,
@@ -43,11 +52,13 @@ use std::time::Duration;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::Value;
 use swarmops_api::{
-    CheckListReq, CheckLogLineOut, CheckLogResp, CheckLogStream, CheckRunReq, CheckRunsReq,
-    CheckRunsResp, ErrorCode, OpError, Rev,
+    CheckListReq, CheckLogLineOut, CheckLogResp, CheckLogStream, CheckPlanReq, CheckRunReq,
+    CheckRunsReq, CheckRunsResp, ErrorCode, OpError, Rev,
 };
+use swarmops_ops::check::changed::{self, Sep};
 use swarmops_ops::check::follow::{self, Follower};
 use swarmops_ops::check::lines as check_lines;
+use swarmops_ops::check::plan::{self, Given};
 use swarmops_ops::check::run::{self as check_run, RunOpts, WS_RUNS_DIR};
 use swarmops_ops::check::runs;
 use swarmops_ws::RealFs;
@@ -55,7 +66,7 @@ use swarmops_ws::registry::Registry;
 use swarmops_ws::workspace::{self, Locate};
 
 use super::{Ctx, run as commands_run, ws};
-use crate::cli::{CheckCommand, OutcomeArg, RunsArgs, StageArg, WsAt};
+use crate::cli::{CheckCommand, OutcomeArg, PlanArgs, RunsArgs, StageArg, WsAt};
 use crate::context;
 use crate::output::{self, Format, Printed};
 
@@ -86,11 +97,99 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Pri
             },
             |ops, req| swarmops_ops::check::list(ops, req),
         ),
+        plan @ CheckCommand::Plan(_) => plan_checks(ctx, op, plan),
         run @ CheckCommand::Run { .. } => run_checks(ctx, op, run),
         runs @ CheckCommand::Runs(_) => list_runs(ctx, op, runs),
         log @ CheckCommand::Log { .. } => read_log(ctx, op, log),
     }
 }
+
+/// `check plan`, which names operation `op`: the plan of a directory's changed paths, with no
+/// store; of a workspace, through the `ws` commands' store opening; or of a changeset, on the
+/// store.
+fn plan_checks(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Printed {
+    let CheckCommand::Plan(args) = command else {
+        unreachable!("run passes check plan its own command alone");
+    };
+    let PlanArgs {
+        rev,
+        at,
+        dir,
+        target,
+        landed,
+        base,
+        changed,
+        changed_from,
+        nul,
+        stage,
+        checks,
+    } = *args;
+    let stage = stage.stage();
+
+    // 1. A directory: no store. The list is read here, from its file or from stdin, bounded.
+    if let Some(dir) = dir {
+        let sep = if nul { Sep::Nul } else { Sep::Line };
+        let planned = changed_list(changed_from.as_deref()).and_then(|list| {
+            let given = match &list {
+                None if changed.is_empty() => Given::None,
+                list => Given::Paths {
+                    flags: &changed,
+                    list: list.as_deref().map(|bytes| (bytes, sep)),
+                },
+            };
+            plan::plan_dir(&dir, stage, &checks, given)
+        });
+        return ctx.finish(op, (None, BTreeMap::new(), None), planned);
+    }
+
+    // 2. A workspace: its store, as the `ws` commands open it.
+    if at.name.is_some() || at.ws_path.is_some() {
+        return ws::on_named(
+            ctx,
+            op,
+            at,
+            |workspace| workspace,
+            |wctx, workspace| plan::plan_ws(wctx, &Locate::Name(workspace), stage, &checks),
+        );
+    }
+
+    // 3. A changeset, or the change as it would land: the store.
+    ctx.on_store(
+        op,
+        || {
+            let Some(rev) = rev else {
+                let what = "check plan names no changeset, workspace or directory";
+                return Err(OpError::new(ErrorCode::InvalidArg, what));
+            };
+            let mut req = CheckPlanReq::new(Rev::from(rev));
+            if let Some(target) = target {
+                req.target = target;
+            }
+            req.landed = landed;
+            req.base = base.map(Rev::from);
+            req.stage = stage;
+            req.checks = checks;
+            Ok(req)
+        },
+        |ops, req| plan::plan(ops, req),
+    )
+}
+
+/// The bytes of the list of changed paths `from` names, if one is named: a file's, or
+/// standard input's for `-`, at most one byte past the bound a plan reads. A list that does
+/// not read is `E_IO`: an error, never a plan.
+fn changed_list(from: Option<&Utf8Path>) -> Result<Option<Vec<u8>>, OpError> {
+    match from {
+        None => Ok(None),
+        Some(stdin) if stdin == STDIN => changed::read_bounded(io::stdin().lock())
+            .map(Some)
+            .map_err(|e| changed::unread(STDIN, &e)),
+        Some(file) => changed::read_from(file).map(Some),
+    }
+}
+
+/// What `--changed-from` names for standard input.
+const STDIN: &str = "-";
 
 /// `check run`, which names operation `op`: the checks of a directory, with no store, or of a
 /// workspace, through the `ws` commands' store opening.

@@ -50,8 +50,8 @@ pub const ENV_SUMMARY: &str = "SWARMOPS_CHECK_SUMMARY";
 /// The check's artifacts directory, made empty: M36-3's.
 pub const ENV_ARTIFACTS: &str = "SWARMOPS_CHECK_ARTIFACTS";
 
-/// The path of a file of the changed paths, one a line: empty until plans exist (M30-4), and a
-/// check then takes the whole tree as changed.
+/// The path of a file of the changed paths, one a line: empty until a run takes a plan
+/// (M31-20), and a check then takes the whole tree as changed.
 pub const ENV_CHANGED: &str = "SWARMOPS_CHECK_CHANGED";
 
 /// The workspace's name, in the workspace form, as `ws land --check` gives it.

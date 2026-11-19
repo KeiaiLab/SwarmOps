@@ -868,12 +868,12 @@ pub enum Command {
     ///
     /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log, ancestry,
     /// path_history, diff, merge_base, op_log, ref_list, ref_set, ref_delete, ref_log, ref_txn,
-    /// undo, commit, land, revert, land_check, land_group, check_list, rebase, blob_put,
-    /// blob_has, verify, the maintenance's gc, repair and upgrade, the git remotes' remote_list,
-    /// fetch, push, sync and sync_status, the landing queue's queue_enqueue, queue_status,
-    /// queue_withdraw and queue_wait, and the workspaces' ws_create, ws_status, ws_diff,
-    /// ws_commit, ws_rebase, ws_resolve, ws_land, ws_materialize, ws_discard, ws_snapshot,
-    /// ws_list, ws_info, check_run, check_log and check_runs), each
+    /// undo, commit, land, revert, land_check, land_group, check_list, check_plan, rebase,
+    /// blob_put, blob_has, verify, the maintenance's gc, repair and upgrade, the git remotes'
+    /// remote_list, fetch, push, sync and sync_status, the landing queue's queue_enqueue,
+    /// queue_status, queue_withdraw and queue_wait, and the workspaces' ws_create, ws_status,
+    /// ws_diff, ws_commit, ws_rebase, ws_resolve, ws_land, ws_materialize, ws_discard,
+    /// ws_snapshot, ws_list, ws_info, check_run, check_log and check_runs), each
     /// taking the operation's request as its arguments and returning the envelope the other
     /// commands print. The store and the identity are the server's, --repo and --as or their
     /// variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
@@ -1343,7 +1343,8 @@ pub enum LandModeArg {
     Exact,
 }
 
-/// A check's stage, as `check list --stage` and `check run --stage` name it.
+/// A check's stage, as `check list --stage`, `check plan --stage` and `check run --stage` name
+/// it.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StageArg {
     /// Before a change lands: the gate.
@@ -1708,6 +1709,33 @@ pub enum CheckCommand {
         #[arg(long, value_enum, value_name = "STAGE")]
         stage: Option<StageArg>,
     },
+    /// Say which checks of one stage a change needs, and why.
+    ///
+    /// Gives each check of STAGE (default before-land) one verdict, run or not_applicable, with
+    /// one reason, the first that holds: definition_changed (its definition is not the one the
+    /// target's head has under its name: added, renamed, modified or deleted), widened (the
+    /// changed paths or the target's definitions are not known in full, so every check runs),
+    /// input_changed (a changed path is among its inputs, named with the pattern it matches),
+    /// no_inputs (it declares none, so it takes the whole tree), or inputs_unchanged, the one
+    /// reason of not_applicable. A plan fails closed: paths that are unknown, cut or unreadable
+    /// and a definition that cannot be compared give run, and an error gives no plan. The same
+    /// subject gives the same answer byte for byte.
+    ///
+    /// REV plans a changeset against --target (default main): the paths it changed since their
+    /// merge base, with the check file of its own tree, each definition compared with the check
+    /// file at the target's head. --landed plans REV as land-check would land it there, from
+    /// --base if given: the landed tree and its paths; a change that conflicts is E_CONFLICT.
+    /// --ws or --ws-path plans a workspace: its committed chain and its edits on disk, read
+    /// with no lock. --dir DIR plans the paths you give, --changed PATH for each or
+    /// --changed-from FILE for a list (one a line, or NUL-ended with --nul; - is stdin),
+    /// against the check file below DIR, and opens no store: the answer says vouched, since
+    /// only you stand behind the file and the paths, and no gate accepts it. With neither
+    /// --changed nor --changed-from the paths are not known, and every check runs; a check
+    /// file among them runs every check too, since no target is at hand to compare it with.
+    ///
+    /// A plan informs: it starts no check and skips none, and check run runs every check of
+    /// its stage whatever a plan says. Reads only: no identity, no lock, nothing written.
+    Plan(Box<PlanArgs>),
     /// Run the checks of one stage of a clean workspace, or of a directory with --dir.
     ///
     /// Runs the checks of STAGE (default before-land) that .swarmops/checks.toml names, or the
@@ -1840,6 +1868,68 @@ pub enum CheckCommand {
         )]
         interval_ms: u64,
     },
+}
+
+/// What `check plan` takes: one subject (a changeset, a workspace or a directory with its
+/// changed paths), the stage, and the checks asked for. Boxed in its command, so that the
+/// commands stay of one size.
+///
+/// A flag of one subject both requires its subject and conflicts with the others: clap drops
+/// a requirement whose target conflicts with what is given, so `requires` alone would let
+/// `REV --changed PATH` through.
+#[derive(Args, Debug)]
+pub struct PlanArgs {
+    /// The changeset whose change to plan.
+    #[arg(
+        value_name = "REV",
+        required_unless_present_any = ["name", "ws_path", "dir"],
+        conflicts_with_all = ["name", "ws_path", "dir"]
+    )]
+    pub rev: Option<String>,
+    #[command(flatten)]
+    pub at: WsAt,
+    /// Plan the changed paths given, against the check file below DIR on this host.
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["name", "ws_path"])]
+    pub dir: Option<Utf8PathBuf>,
+    /// The ref the change would land on (default: main).
+    #[arg(
+        long,
+        value_name = "REF",
+        requires = "rev",
+        conflicts_with_all = ["name", "ws_path", "dir"]
+    )]
+    pub target: Option<String>,
+    /// Plan the change as land-check lands it on the target.
+    #[arg(long, requires = "rev", conflicts_with_all = ["name", "ws_path", "dir"])]
+    pub landed: bool,
+    /// With --landed: where the change starts.
+    #[arg(long, value_name = "REV", requires = "landed")]
+    pub base: Option<String>,
+    /// A changed path, from the directory's root; repeatable.
+    #[arg(
+        long = "changed",
+        value_name = "PATH",
+        requires = "dir",
+        conflicts_with_all = ["rev", "name", "ws_path"]
+    )]
+    pub changed: Vec<String>,
+    /// A list of changed paths, one a line; - is stdin.
+    #[arg(
+        long = "changed-from",
+        value_name = "FILE",
+        requires = "dir",
+        conflicts_with_all = ["rev", "name", "ws_path"]
+    )]
+    pub changed_from: Option<Utf8PathBuf>,
+    /// The list's paths end with a NUL byte, not with a line feed.
+    #[arg(long, requires = "changed_from")]
+    pub nul: bool,
+    /// The stage to plan.
+    #[arg(long, value_enum, value_name = "STAGE", default_value_t = StageArg::BeforeLand)]
+    pub stage: StageArg,
+    /// Only these checks of the plan; repeatable.
+    #[arg(long = "check", value_name = "NAME")]
+    pub checks: Vec<String>,
 }
 
 /// What `check runs` takes: where the lines are, the filters, and the page. Boxed in its
@@ -2269,6 +2359,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ws", "delete"] => "ws_delete",
         ["ws", "hook"] => "ws_hook",
         ["check", "list"] => "check_list",
+        ["check", "plan"] => "check_plan",
         ["check", "run"] => "check_run",
         ["check", "runs"] => "check_runs",
         ["check", "log"] => "check_log",
@@ -2452,10 +2543,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 74);
+        assert_eq!(ops.len(), 75);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 74, "two subcommands name one op");
+        assert_eq!(ops.len(), 75, "two subcommands name one op");
 
         // Automatic update follows every operation but these, and not `serve --prepare`,
         // which a flag names and no subcommand.
