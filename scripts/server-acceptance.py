@@ -94,6 +94,11 @@ FIRST_PUSH_LIMIT_S = 300
 COMMAND_WAIT_S = 900
 WAIT_STEP_S = 0.2
 READY_WAIT_S = 60
+RELEASE_TAGS = "v*"
+
+# git as this script runs it: no system or user configuration, plain messages.
+GIT_ENV = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+           "LC_ALL": "C"}
 
 # What an install needs beyond each base image, by method: the server package's dependencies
 # and recommendations, and the run's own tools. The bucket stand-in runs python3 on Debian.
@@ -279,13 +284,29 @@ def fetch_deps(method: Method, cache: Path, needs: tuple[str, ...]) -> None:
 # The release under test and the previous one
 
 
-def previous_release() -> str:
-    """The newest release CHANGELOG.md names."""
-    for line in (ROOT / "CHANGELOG.md").read_text().splitlines():
+def release_tags(root: Path) -> set[str]:
+    """The release tags merged into HEAD of the repository at `root`."""
+    done = subprocess.run(["git", "-C", str(root), "tag", "--merged", "HEAD", "--list",
+                           RELEASE_TAGS], capture_output=True, text=True, env=GIT_ENV,
+                          check=False)
+    check(done.returncode == 0, f"git tag --merged HEAD: {done.stderr.strip()}")
+    return set(done.stdout.split())
+
+
+def previous_release(root: Path = ROOT) -> str:
+    """The newest release CHANGELOG.md names whose tag is merged into HEAD: a heading with no
+    tag yet is a release still being cut, and has no packages to fetch."""
+
+    # 1. No tag at all is a checkout without its history, not a reason to trust a heading.
+    tags = release_tags(root)
+    check(bool(tags), f"no release tag ({RELEASE_TAGS}) is merged into HEAD: fetch the tags")
+
+    # 2. Headings run newest first; the first one that is tagged was released.
+    for line in (root / "CHANGELOG.md").read_text().splitlines():
         found = re.match(r"## \[(\d+\.\d+\.\d+)\]", line)
-        if found:
+        if found and f"v{found.group(1)}" in tags:
             return found.group(1)
-    raise Failure("CHANGELOG.md names no release")
+    raise Failure("CHANGELOG.md names no release whose tag is merged into HEAD")
 
 
 def tested_version(previous: str) -> str:
@@ -1071,11 +1092,46 @@ def image_run_reaches_the_kit_ports() -> None:
     check(f":{ports['ssh_port']}/" in served_url(int(ports["ssh_port"])), "the served URL")
 
 
+def crafted_repo(root: Path, headings: list[str], tags: list[str]) -> None:
+    """A repository at `root`: a CHANGELOG.md with `headings`, one commit, and `tags` on it."""
+    lines = ["# Changelog", "", "## [Unreleased]", ""]
+    for version in headings:
+        lines += [f"## [{version}] - 2026-01-01", ""]
+    (root / "CHANGELOG.md").write_text("\n".join(lines))
+    identity = ["-c", "user.name=selftest", "-c", "user.email=selftest@invalid"]
+    for argv in (["init", "--quiet"], ["add", "CHANGELOG.md"],
+                 [*identity, "commit", "--quiet", "--no-gpg-sign", "--message", "crafted"],
+                 *(["tag", tag] for tag in tags)):
+        done = subprocess.run(["git", "-C", str(root), *argv], capture_output=True, text=True,
+                              env=GIT_ENV, check=False)
+        check(done.returncode == 0, f"git {argv[0]}: {done.stderr.strip()}")
+
+
+def previous_release_is_the_newest_tagged_heading() -> None:
+    """An untagged heading is passed over for the newest tagged one, a tagged newest heading
+    is taken, and a repository with no release tag fails rather than taking a heading."""
+    headings = ["0.13.0", "0.12.0", "0.11.0"]
+    for tags, wanted in ((["v0.11.0", "v0.12.0"], "0.12.0"),
+                         (["v0.11.0", "v0.12.0", "v0.13.0"], "0.13.0")):
+        with tempfile.TemporaryDirectory(prefix="server-acceptance-") as scratch:
+            crafted_repo(Path(scratch), headings, tags)
+            found = previous_release(Path(scratch))
+            check(found == wanted, f"tags {tags}: the previous release is {found}, not {wanted}")
+    with tempfile.TemporaryDirectory(prefix="server-acceptance-") as scratch:
+        crafted_repo(Path(scratch), headings, [])
+        try:
+            found = previous_release(Path(scratch))
+        except Failure:
+            return
+        raise Failure(f"no tag: the previous release is {found}, not a failure")
+
+
 SELFTESTS: dict[str, Callable[[], None]] = {
     "accept_cases_are_one_implementation": accept_cases_are_one_implementation,
     "accept_is_installed_where_so_kit_runs_it": accept_is_installed_where_so_kit_runs_it,
     "accept_refuses_bad_settings": accept_refuses_bad_settings,
     "image_run_reaches_the_kit_ports": image_run_reaches_the_kit_ports,
+    "previous_release_is_the_newest_tagged_heading": previous_release_is_the_newest_tagged_heading,
 }
 
 
