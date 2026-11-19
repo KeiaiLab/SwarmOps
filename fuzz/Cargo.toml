@@ -31,7 +31,8 @@ swarmops-git = { path = "../crates/swarmops-git", version = "0.13.0" }
 # serve parsers' wrappers (`serve_entry`, `serve_hook_input`); the check file's reader
 # (`check_file`); a check's log, its writer and its reader (`check_log`); a check's report file
 # of findings (`check_findings`); the JUnit and SARIF reports a check declares (`check_junit`,
-# `check_sarif`); the run lines' reader, its page and its cursor (`check_runs`).
+# `check_sarif`); the run lines' reader, its page and its cursor (`check_runs`); a plan of a
+# stage's checks and its changed paths (`check_plan`).
 swarmops-ops = { path = "../crates/swarmops-ops", version = "0.13.0", features = ["fuzzing"] }
 swarmops-store = { path = "../crates/swarmops-store", version = "0.13.0" }
 # The filesystem doubles only (`NoSyncFs`): without its default features, which hold the CLI
@@ -183,6 +184,15 @@ bench = false
 [[bin]]
 name = "check_runs"
 path = "fuzz_targets/check_runs.rs"
+test = false
+doc = false
+bench = false
+
+# A plan of a stage's checks and the list of changed paths it reads (M30-4, M30-5): files
+# and paths the caller of `check plan --dir` gives.
+[[bin]]
+name = "check_plan"
+path = "fuzz_targets/check_plan.rs"
 test = false
 doc = false
 bench = false
