@@ -21,8 +21,9 @@ use swarmops_api::{EntryKindOut, OpError, ReadTreeReq, StoreOps};
 use super::{MAX_CHECK_INPUTS, MAX_INPUT_PATTERN_BYTES};
 use crate::pattern::{DEEP, Pattern};
 
-/// A check's inputs, read: its patterns in declared order. None is the whole tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A check's inputs, read: its patterns in declared order. None is the whole tree, and the
+/// default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Inputs {
     /// The patterns, in declared order.
     patterns: Vec<Pattern>,

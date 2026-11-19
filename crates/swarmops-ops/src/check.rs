@@ -26,6 +26,7 @@
 //!   check run ─ each check reached ─▶ lines::Sink ─▶ <dir>/run-lines.jsonl (rotating, unsynced)
 //! ```
 
+pub mod changed;
 mod digest;
 pub mod env;
 mod file;
@@ -36,6 +37,7 @@ mod intake;
 pub mod junit;
 pub mod lines;
 pub mod log;
+pub mod plan;
 pub mod run;
 pub mod runs;
 pub mod sarif;
@@ -92,6 +94,17 @@ pub const MAX_CHECK_INPUTS: usize = 64;
 /// The most bytes of one pattern of a check's `inputs`.
 pub const MAX_INPUT_PATTERN_BYTES: usize = 1_024;
 
+/// The most changed paths a plan of `check plan` reads: past them every check runs.
+pub const MAX_PLAN_PATHS: u64 = 100_000;
+
+/// The most bytes of a list of changed paths `check plan` reads: 16 MiB. A longer list is read
+/// to it, and every check runs.
+pub const MAX_PLAN_LIST_BYTES: u64 = 16 << 20;
+
+/// The most bytes of one changed path given to `check plan`: a longer one is unreadable, and
+/// every check runs.
+pub const MAX_PLAN_PATH_BYTES: usize = 4_096;
+
 /// The most seconds a check's `timeout_s` may give: 24 hours.
 pub const MAX_CHECK_TIMEOUT_S: u64 = 86_400;
 
@@ -140,24 +153,31 @@ pub fn list(store: &dyn StoreOps, req: CheckListReq) -> Result<CheckListResp, Op
     show.max_changes = 1;
     let tree = store.show(show)?.root;
 
-    // 2. The check file, or else the legacy one; with neither, a `.swarmops` that is a link,
-    //    through which neither path is found, is refused as the directory form refuses it.
-    let (file, version, checks) = match stored(store, &id, CHECK_FILE, MAX_CHECK_FILE_BYTES)? {
-        Some(bytes) => {
-            let read = parse(&bytes).map_err(|refusal| refusal.into_error(false))?;
-            (Some(CHECK_FILE), Some(read.version), read.checks)
-        }
-        None => match stored(store, &id, LEGACY_FILE, MAX_LEGACY_BYTES)? {
-            Some(bytes) => legacy(&bytes, false)?,
-            None if linked_in_store(store, &id)? => {
-                return Err(Refusal::linked_dir(CHECK_FILE).into_error(false));
-            }
-            None => (None, None, Vec::new()),
-        },
-    };
+    // 2. Its checks, of the stage asked for.
+    let (file, version, checks) = checks_at(store, &id)?;
     let mut resp = answer(false, file, version, &checks, req.stage);
     resp.tree = Some(tree);
     Ok(resp)
+}
+
+/// The checks the tree of changeset `id`, a full id, describes: the check file's, or else the
+/// legacy one's; with neither, a `.swarmops` that is a link, through which neither path is
+/// found, is refused as the directory form refuses it. What `check list` lists and a plan
+/// decides from.
+fn checks_at(store: &dyn StoreOps, id: &str) -> Result<Listed, OpError> {
+    match stored(store, id, CHECK_FILE, MAX_CHECK_FILE_BYTES)? {
+        Some(bytes) => {
+            let read = parse(&bytes).map_err(|refusal| refusal.into_error(false))?;
+            Ok((Some(CHECK_FILE), Some(read.version), read.checks))
+        }
+        None => match stored(store, id, LEGACY_FILE, MAX_LEGACY_BYTES)? {
+            Some(bytes) => legacy(&bytes, false),
+            None if linked_in_store(store, id)? => {
+                Err(Refusal::linked_dir(CHECK_FILE).into_error(false))
+            }
+            None => Ok((None, None, Vec::new())),
+        },
+    }
 }
 
 /// `check list --dir`: the checks the files below `dir`, a directory of the caller's host,
@@ -165,6 +185,14 @@ pub fn list(store: &dyn StoreOps, req: CheckListReq) -> Result<CheckListResp, Op
 /// stands behind them. Neither `.swarmops` nor a file in it is followed if it is a symbolic
 /// link.
 pub fn list_dir(dir: &Utf8Path, stage: Option<CheckStage>) -> Result<CheckListResp, OpError> {
+    let (file, version, checks) = checks_in(dir)?;
+    Ok(answer(true, file, version, &checks, stage))
+}
+
+/// The checks the files below `dir`, a directory of the caller's host, describe: the check
+/// file's, or else the legacy one's, neither followed through a link. What `check list --dir`
+/// lists and a plan of a directory decides from.
+fn checks_in(dir: &Utf8Path) -> Result<Listed, OpError> {
     // 1. A directory.
     if !std::fs::metadata(dir).is_ok_and(|meta| meta.is_dir()) {
         let mut error = error::error(
@@ -194,17 +222,16 @@ pub fn list_dir(dir: &Utf8Path, stage: Option<CheckStage>) -> Result<CheckListRe
             Ok(None)
         }
     };
-    let (file, version, checks) = match read(CHECK_FILE, MAX_CHECK_FILE_BYTES)? {
+    match read(CHECK_FILE, MAX_CHECK_FILE_BYTES)? {
         Some(bytes) => {
             let read = parse(&bytes).map_err(|refusal| refusal.into_error(true))?;
-            (Some(CHECK_FILE), Some(read.version), read.checks)
+            Ok((Some(CHECK_FILE), Some(read.version), read.checks))
         }
         None => match read(LEGACY_FILE, MAX_LEGACY_BYTES)? {
-            Some(bytes) => legacy(&bytes, true)?,
-            None => (None, None, Vec::new()),
+            Some(bytes) => legacy(&bytes, true),
+            None => Ok((None, None, Vec::new())),
         },
-    };
-    Ok(answer(true, file, version, &checks, stage))
+    }
 }
 
 /// What a file and its version gave: the file's name, its version, its checks.
