@@ -16,6 +16,7 @@ use swarmops_store::{
     ChangesetMeta, Layout, MAX_FEATURES, MetaStore, SUPPORTED_FEATURES, Serve, StoreError,
     StoreFormat,
 };
+use swarmops_testkit::stop::StopOnDrop;
 use swarmops_testkit::store::{new_root, real_fs};
 use tempfile::TempDir;
 #[cfg(feature = "test-hooks")]
@@ -340,10 +341,11 @@ fn a_reader_racing_a_feature_enable_reads_right() {
                 }
             });
         }
+        let stop = StopOnDrop::new(&done);
         for _ in 0..50 {
             append_lineage(&layout, real_fs()).unwrap();
         }
-        done.store(true, Ordering::Relaxed);
+        drop(stop);
     });
     assert!(store.read().is_ok());
 }

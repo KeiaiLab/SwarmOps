@@ -13,7 +13,12 @@ fixture_switches := 'not test(regenerate_golden) and not test(regenerate_git_fix
 # four large workspace cases (the sparse workspace of a 1,000,000-file tree, the status of 500,000
 # files, 50 creates at once, the update across 1,000 lands), each sized under half the ci-perf kill;
 # and A22's landing queue (`queue_perf::perf::fifty_entries_with_thirty_second_checks`, 50
-# processes each enqueuing and waiting, a check of 30 s, about 2 minutes).
+# processes each enqueuing and waiting, a check of 30 s, about 2 minutes); and three that judge a
+# time and so need the optimized build their bounds are set for: the 200,000-commit reads
+# (`history::reads_at_200k_meet_the_targets`, unoptimized its 100-step walk takes about 40 ms
+# against a 10 ms bound, on every commit), the lookups on a wide history
+# (`index::index_on_wide_history_is_fast`) and the upgrade of a large journal
+# (`upgrade::the_upgrade_of_a_large_journal_is_measured`).
 # `check-ci-slow` leaves them out, `check-ci-perf` runs them, `check-slow` runs them optimized.
 # swarmops-core's `supply_chain` tests fail a case `check-ci-slow` leaves out that no scheduled
 # job runs optimized and one at a time.
@@ -36,7 +41,10 @@ ci_perf_cases := \
     'test(=ws_processes::perf::perf_update_across_1000_lands) | ' + \
     'test(=queue_perf::perf::fifty_entries_with_thirty_second_checks) | ' + \
     'test(=format3_perf::commits_1m_next_decile) | ' + \
-    'test(=scale_perf::fixture_next_part)'
+    'test(=scale_perf::fixture_next_part) | ' + \
+    'test(=history::reads_at_200k_meet_the_targets) | ' + \
+    'test(=index::index_on_wide_history_is_fast) | ' + \
+    'test(=upgrade::the_upgrade_of_a_large_journal_is_measured)'
 
 # The cases only `perf` runs, excluded from `check-slow` and `check-ci-slow` (and not in
 # `ci_perf_cases`): `format3_perf::a5_verdict` reads the ten deciles of
@@ -45,8 +53,14 @@ ci_perf_cases := \
 # `commits_1m_next_decile` itself asserts only what it ran and stays runnable everywhere.
 perf_recipe_only := 'test(=format3_perf::a5_verdict)'
 
+# The two 32-process contention measurements (`thirty_two_processes_*`), which `just perf` runs,
+# store and CLI each in a step of its own: each takes minutes of fsync'd work on this host, and
+# their assertions (no `Busy`) assume a disk at most about a third slower than its own. Not in
+# `perf_recipe_only`: `perf` runs that filter in swarmops-cli alone.
+perf_contention := 'test(thirty_two_processes)'
+
 # What `check-slow` and `check-ci-slow` leave out of their unoptimized run.
-perf_skips := '(' + ci_perf_cases + ') | ' + perf_recipe_only
+perf_skips := '(' + ci_perf_cases + ') | ' + perf_recipe_only + ' | ' + perf_contention
 
 # A bare `just` runs `check`, the definition of done.
 default: check
@@ -198,19 +212,17 @@ check-slow:
         || status=1
     exit "$status"
 
-# `check-slow` without the two 32-process contention measurements (`thirty_two_processes_*`),
-# which `just perf` runs: each takes minutes of fsync'd work on this host, and their assertions
-# (no `Busy`) assume a disk at most about a third slower than its own, far too heavy a load for a
-# 2-vCPU hosted runner. Nor the measurement cases on 12,000 or 13,000 commits or 12,000
-# changesets and the load lanes (`ci_perf_cases`), which need a longer kill than the `ci-slow`
+# `check-slow`'s unoptimized run alone: without the two 32-process contention measurements
+# (`perf_contention`), far too heavy a load for a 2-vCPU hosted runner, and without the
+# measurement cases (`ci_perf_cases`), most of which need a longer kill than the `ci-slow`
 # profile's 20 minutes: in the Scheduled run of 2026-10-28 on `c7baf861` four ran into it and the
 # other five took 775 to 912 s, and three take over 20 minutes even optimized; `check-ci-perf`
 # runs them under a profile of their own. The crash sweeps and the other ignored tests stay. CI
 # runs it with `NEXTEST_PROFILE=ci-slow` (.config/nextest.toml).
-# The weekly CI slow suite (scheduled.yml): check-slow less the 32-process and large-history cases.
+# The weekly CI slow suite (scheduled.yml): check-slow's unoptimized run.
 check-ci-slow:
     PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all \
-        -E '{{ fixture_switches }} and not test(thirty_two_processes) and not ({{ perf_skips }})'
+        -E '{{ fixture_switches }} and not ({{ perf_skips }})'
 
 # `ci_perf_cases` optimized and one at a time (`--no-capture`), as `perf` runs them, printing their
 # `remote-perf: `, `serve-perf: `, `intake-perf: `, `serve-load: `, `landing-perf: `, `sync-load: `

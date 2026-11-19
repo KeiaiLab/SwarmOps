@@ -50,6 +50,7 @@ use swarmops_testkit::serve::ServeSite;
 use swarmops_testkit::served_load::{
     Counts, GitClient, Server, Step, Traffic, first_attempt, outcome_counts,
 };
+use swarmops_testkit::stop::StopOnDrop;
 use tempfile::TempDir;
 
 use crate::serve_perf::fast_import;
@@ -777,13 +778,15 @@ fn served_traffic_under_load() {
         let go = Instant::now();
         thread::sleep(LEAD);
 
-        // 1a. G20 beside the agents, then the clients on copies of serve's clone.
+        // 1a. G20 beside the agents, then the clients on copies of serve's clone. A failure
+        //     here still stops the agents, which the scope joins.
+        let stopper = StopOnDrop::new(stop);
         let first = served.first_clones(&shape, work.path());
         let mut clients = served.clients(&shape, &first, work.path());
         let (traffic, _) = drive(&mut clients, &shape, Some(&served.root));
 
         // 1b. The agents stop.
-        stop.store(true, Ordering::Relaxed);
+        drop(stopper);
         let lands: Vec<Vec<LandRecord>> = (agents.into_iter())
             .map(|agent| {
                 agent

@@ -26,6 +26,7 @@ use swarmops_core::{LeafKind, ObjectKind, RepoPath, Signature, hash_object};
 use swarmops_repo::{Change, ChangeOp, CommitRequest, LocalRepo};
 use swarmops_store::{Layout, MetaLock, RealFs};
 use swarmops_testkit::fs::{Call, Watch, Watched};
+use swarmops_testkit::stop::StopOnDrop;
 
 use crate::support::{BIN, Racers, Run, Store, agent, retry_busy, run, run_bin_within, run_within};
 
@@ -575,6 +576,7 @@ fn thousand_three_ref_txns_race_a_snapshot_reader() {
         });
 
         // 2. The writer: the three refs between c1 and c2, one transaction each round.
+        let stop = StopOnDrop::new(&done);
         let (mut from, mut to) = (&c1, &c2);
         for round in 0..TXN_ROUNDS {
             let moves: Vec<String> = TXN_REFS
@@ -593,7 +595,7 @@ fn thousand_three_ref_txns_race_a_snapshot_reader() {
             );
             (from, to) = (to, from);
         }
-        done.store(true, Ordering::Release);
+        drop(stop);
         reader.join().expect("the reader saw no mixed snapshot")
     });
 

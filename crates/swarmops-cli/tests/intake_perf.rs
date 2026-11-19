@@ -32,6 +32,7 @@ use serde_json::Value;
 use swarmops_testkit::accounting::{LockHolders, PeakWatch};
 use swarmops_testkit::child::Child;
 use swarmops_testkit::remote::GitServer;
+use swarmops_testkit::stop::StopOnDrop;
 use tempfile::TempDir;
 
 use crate::serve_perf::{fast_import, mib};
@@ -320,9 +321,11 @@ fn commits_beside_an_import() {
             }
             reads
         });
+        // A failed or overdue import still ends the loops, which the scope joins.
+        let stop = StopOnDrop::new(&done);
         let imported = import(&shared, &long);
         let ended = Instant::now();
-        done.store(true, Ordering::Relaxed);
+        drop(stop);
         (
             committing.join().expect("the committers ran"),
             reader.join().expect("the reader ran"),

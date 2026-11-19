@@ -21,6 +21,7 @@ use swarmops_store::{
 };
 use swarmops_testkit::child::{run, this_test};
 use swarmops_testkit::fs::{Call, Watch, Watched};
+use swarmops_testkit::stop::StopOnDrop;
 use swarmops_testkit::store::{new_root, real_fs};
 use swarmops_testkit::test_name;
 use tempfile::TempDir;
@@ -546,13 +547,14 @@ fn a_reader_racing_a_merge_retries_then_reads_right() {
     thread::scope(|scope| {
         // 1. The writer: chunks just past RUN_MIN, each stepped, so most steps merge.
         scope.spawn(|| {
+            let stop = StopOnDrop::new(&done);
             let mut n = 1_100;
             for _ in 0..40 {
                 insert(&store, n..n + 1_100);
                 n += 1_100;
                 store.step_views().unwrap();
             }
-            done.store(true, Ordering::Relaxed);
+            drop(stop);
         });
 
         // 2. The reader, all the while.

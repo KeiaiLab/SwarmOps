@@ -55,6 +55,12 @@ const ACTOR_PREFIX: &str = "remote/";
 /// The store ref a native clone makes.
 const MAIN: &str = "main";
 
+/// How many times a fetch reads the upstream's refs when a head moves under its `wire_list`.
+const HEADS_READS: usize = 8;
+
+/// The `details.reason` of a `wire_list` of a changeset no ref heads now.
+const NOT_A_REF_HEAD: &str = "not_a_ref_head";
+
 /// What a server that does not speak native sync is reached by instead.
 const GIT_WIRE_HINT: &str = "this server takes the git wire: use its ssh:// address";
 
@@ -95,8 +101,32 @@ pub(crate) fn fetch(
     link: &mut dyn Link,
     remote: &str,
 ) -> Result<Fetched, OpError> {
-    // 1. The session, then every ref the upstream lists that a host fetches.
+    // 1. The session, then the refs read again while a move of one between the read and the
+    //    list refuses its head: another host's push (`not_a_ref_head`).
     hello(link)?;
+    for _ in 1..HEADS_READS {
+        match read_refs(repo, link, remote) {
+            Err(e) if is_head_moved(&e) => {}
+            done => return done,
+        }
+    }
+    read_refs(repo, link, remote).map_err(|e| {
+        if is_head_moved(&e) {
+            return moved_meanwhile("the upstream's refs");
+        }
+        e
+    })
+}
+
+/// Whether `e` is the upstream's `not_a_ref_head`: a `wire_list` of a head that moved since
+/// `wire_refs`.
+fn is_head_moved(e: &OpError) -> bool {
+    e.code == ErrorCode::RevNotFound.as_str()
+        && e.details.get("reason").and_then(Value::as_str) == Some(NOT_A_REF_HEAD)
+}
+
+/// F1 (refs) to F6 of [the module documentation](self) once, on the session `fetch` opened.
+fn read_refs(repo: &LocalRepo, link: &mut dyn Link, remote: &str) -> Result<Fetched, OpError> {
     let heads = refs(link)?;
     let before = tracking(repo, remote)?;
 
@@ -582,7 +612,7 @@ pub(super) fn not_native(remote: &str, said: &str) -> OpError {
 mod tests {
     use std::collections::HashSet;
     use std::io::BufReader;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::thread;
 
     use camino::{Utf8Path, Utf8PathBuf};
@@ -610,11 +640,16 @@ mod tests {
     /// The power-loss sweep's seeds: 0 keeps nothing not durable, 1 everything.
     const SEEDS: [u64; 2] = [0, 1];
 
+    /// Another host's move, run on the upstream.
+    type Race = Box<dyn FnOnce(&Upstream) + Send>;
+
     /// An upstream store, written through its operations.
     struct Upstream {
         _dir: tempfile::TempDir,
         ops: LocalOps,
         who: Identity,
+        /// Run once, before the next `wire_list` is answered: another host's move.
+        before_list: Mutex<Option<Race>>,
     }
 
     impl Upstream {
@@ -628,6 +663,7 @@ mod tests {
                 _dir: dir,
                 ops,
                 who,
+                before_list: Mutex::new(None),
             }
         }
 
@@ -682,6 +718,18 @@ mod tests {
                 let request: Value = serde_json::from_str(&line.unwrap()).unwrap();
                 let op = request["op"].as_str().unwrap().to_owned();
                 let req = request["req"].clone();
+                if op == WIRE_LIST {
+                    if let Some(race) = self.before_list.lock().unwrap().take() {
+                        race(self);
+                    }
+                    if let Some(refusal) = self.refuse_list(&req) {
+                        let mut line = serde_json::to_vec(&refusal).unwrap();
+                        line.push(b'\n');
+                        output.write_all(&line).unwrap();
+                        output.flush().unwrap();
+                        continue;
+                    }
+                }
                 let (result, chunk) = self.handle(&op, req);
                 let envelope = json!({"ok": true, "op": op, "api": 1, "result": result});
                 let mut line = serde_json::to_vec(&envelope).unwrap();
@@ -690,6 +738,24 @@ mod tests {
                 output.write_all(&chunk).unwrap();
                 output.flush().unwrap();
             }
+        }
+
+        /// The refusal a server gives a `wire_list` whose `want` heads no ref now, as `serve`
+        /// does (`E_REV_NOT_FOUND`, `not_a_ref_head`, not retryable).
+        fn refuse_list(&self, req: &Value) -> Option<Value> {
+            let want = req["want"].as_str().unwrap();
+            if self.refs().values().any(|id| id.to_string() == want) {
+                return None;
+            }
+            let error = json!({
+                "code": "E_REV_NOT_FOUND",
+                "message": format!("{want} is the head of no ref"),
+                "retryable": false,
+                "exit": 6,
+                "details": {"reason": "not_a_ref_head"},
+                "hint": "read the refs again (wire_refs)",
+            });
+            Some(json!({"ok": false, "op": WIRE_LIST, "api": 1, "error": error}))
         }
 
         /// The result of `op` with `req`, and the chunk bytes after its line.
@@ -857,6 +923,26 @@ mod tests {
             }
         }
         assert!(seen.len() > 10, "{} images", seen.len());
+    }
+
+    /// A ref the upstream moves between the host's `wire_refs` and its `wire_list` is read
+    /// again, not failed with `not_a_ref_head`: the fetch ends on the new head.
+    #[test]
+    fn a_ref_moved_between_refs_and_list_is_read_again() {
+        let up = Upstream::new();
+        up.advance("main", "a.txt");
+        *up.before_list.lock().unwrap() = Some(Box::new(|up| {
+            up.advance("main", "b.txt");
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("host")).unwrap();
+        let host = LocalRepo::create_as(&root, "host", StoreFormat::V2).unwrap();
+
+        let fetched = up.serve(|link| fetch(&host, link, HUB)).unwrap();
+
+        let main = up.refs()["main"];
+        assert_eq!(fetched.heads["main"], main, "{fetched:?}");
+        assert_eq!(tracked(&host)["remote/hub/main"], main);
     }
 
     /// A tag the host lacks is made; one that names the same changeset stays; one that names
