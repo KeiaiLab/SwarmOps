@@ -17,6 +17,8 @@
 //! so check run [NAME…] [--ws N]  ─▶ ws::on_named ─▶ check::run::run_ws(&WsCtx, req, opts)
 //!                          opts: --pass names, the stop flag, the environment, the runs root,
 //!                                the directory named for the run lines (context::run_lines_dir)
+//! so check runs --dir DIR | [--ws N] | --run-lines DIR ─▶ check::runs::runs_dir | runs_at
+//!                          (no store opened): a page of the run lines, filtered, newest first
 //! so check log CHECK --dir DIR | [--ws N] ─▶ the runs found (no store opened)
 //!                                         ─▶ check::follow::Follower: its last lines, and
 //!                                            with --follow one envelope a line as they come
@@ -36,16 +38,18 @@ use std::time::Duration;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::Value;
 use swarmops_api::{
-    CheckListReq, CheckLogResp, CheckLogStream, CheckRunReq, ErrorCode, OpError, Rev,
+    CheckListReq, CheckLogResp, CheckLogStream, CheckRunReq, CheckRunsReq, CheckRunsResp,
+    ErrorCode, OpError, Rev,
 };
 use swarmops_ops::check::follow::{self, Follower};
 use swarmops_ops::check::run::{self as check_run, RunOpts, WS_RUNS_DIR};
+use swarmops_ops::check::runs;
 use swarmops_ws::RealFs;
 use swarmops_ws::registry::Registry;
 use swarmops_ws::workspace::{self, Locate};
 
 use super::{Ctx, run as commands_run, ws};
-use crate::cli::{CheckCommand, StageArg, WsAt};
+use crate::cli::{CheckCommand, OutcomeArg, RunsArgs, StageArg, WsAt};
 use crate::context;
 use crate::output::{self, Format, Printed};
 
@@ -77,6 +81,7 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Pri
             |ops, req| swarmops_ops::check::list(ops, req),
         ),
         run @ CheckCommand::Run { .. } => run_checks(ctx, op, run),
+        runs @ CheckCommand::Runs(_) => list_runs(ctx, op, runs),
         log @ CheckCommand::Log { .. } => read_log(ctx, op, log),
     }
 }
@@ -137,6 +142,68 @@ fn run_checks(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Printed
             check_run::run_ws(wctx, req, &opts)
         },
     )
+}
+
+/// `check runs`, which names operation `op`: a page of the run lines of a directory, of a
+/// workspace, or of the directory the caller names. No store is opened.
+fn list_runs(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Printed {
+    let CheckCommand::Runs(args) = command else {
+        unreachable!("run passes check runs its own command alone");
+    };
+    let RunsArgs {
+        at,
+        dir,
+        run_lines,
+        checks,
+        tree,
+        outcomes,
+        run,
+        since,
+        until,
+        limit,
+        cursor,
+    } = *args;
+
+    // 1. The request: the filters and the page, as the tool takes them. The workspace's name
+    //    is not read here: the lines' directory is found below.
+    let mut req = CheckRunsReq::new(at.name.clone().unwrap_or_default());
+    req.checks = checks;
+    req.tree = tree;
+    req.outcomes = outcomes.into_iter().map(OutcomeArg::outcome).collect();
+    req.run = run;
+    req.since = since;
+    req.until = until;
+    req.limit = limit;
+    req.cursor = cursor;
+
+    // 2. The lines: where the caller says, else beside the directory's runs, else in the
+    //    workspace's state.
+    let page = context::run_lines_dir(run_lines.as_deref(), ctx.env)
+        .and_then(|named| lines_page(ctx, &at, dir.as_deref(), named.as_deref(), &req));
+    let meta = match dir {
+        Some(_) => (None, BTreeMap::new(), None),
+        None => ctx.used.meta(),
+    };
+    ctx.finish(op, meta, page)
+}
+
+/// The page `req` asks of the run lines in the directory `named`, if the caller named one;
+/// else of those beside the runs of `dir`; else of those of the workspace `at` names.
+fn lines_page(
+    ctx: &Ctx<'_>,
+    at: &WsAt,
+    dir: Option<&Utf8Path>,
+    named: Option<&Utf8Path>,
+    req: &CheckRunsReq,
+) -> Result<CheckRunsResp, OpError> {
+    match (dir, named) {
+        (Some(dir), _) => {
+            let root = context::check_runs_root(ctx.env)?;
+            runs::runs_dir(dir, root.as_deref(), named, req)
+        }
+        (None, Some(named)) => runs::runs_at(named, true, req),
+        (None, None) => runs::runs_at(&ws_runs(ctx, at)?, false, req),
+    }
 }
 
 /// `check log`, which names operation `op`: a check's log of a run, once or followed.

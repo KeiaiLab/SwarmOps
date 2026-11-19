@@ -101,7 +101,13 @@ const PARITY_EXEMPT: &[(&str, &str)] = &[
     ("ws_snapshot", MUTATES),
     ("check_run", RUNS),
     ("check_log", LOGS),
+    ("check_runs", LINES),
 ];
+
+/// Why the run lines are not compared: the fixture has run no checks, so it holds none.
+const LINES: &str = "it lists the run lines of a workspace's checks, and the fixture has run no \
+                     checks: check_runs.rs compares the tool's and the command's pages, filters \
+                     and cursor on a workspace's runs";
 
 /// Why a check's log is not compared: the fixture holds no run of the checks to read one of.
 const LOGS: &str = "it reads a check's log of a run, and the fixture has run no checks: \

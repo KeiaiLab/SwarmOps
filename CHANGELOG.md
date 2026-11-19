@@ -58,6 +58,14 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   line that cannot be appended is a `warning: run lines:` line on stderr, once a run, that
   changes no outcome, envelope or exit code. `peak_rss_kib` is the sampled sum of the resident
   memory of the check's process group, on Linux. The MCP tool `check_run` leaves the same lines.
+- `check runs`, and the MCP tool `check_runs`: the run lines of a workspace (`--ws`,
+  `--ws-path`, or the one around the working directory), of a directory (`--dir`), or of the
+  directory `--run-lines` or `SWARMOPS_CHECK_RUN_LINES_DIR` names, newest first by the time each
+  check started, filtered by `--check`, `--tree` (a prefix of 12 to 64 hex digits), `--outcome`,
+  `--run`, `--since` and `--until`, at most `--limit` a page (1 to 1,000, 100 by default) with a
+  `cursor` for the page after. A line that does not read is passed over and counted in
+  `skipped`; no lines file is an empty page. It reads only, opens no store, and says where the
+  lines came from (`source: run_lines`). `swarmops mcp` lists 54 tools.
 - API type `CheckRunLine`, the run line a check of a run leaves: when it started, its run, name,
   attempt, stage, tree, definition digest, wait, duration, outcome, exit code, findings, labels,
   sampled peak memory and run directory. `swarmops schema CheckRunLine` prints it (239 types).

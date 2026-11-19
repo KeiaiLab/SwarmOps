@@ -1169,6 +1169,10 @@ check file with its stages, `check list` and `check run` are built
   the check's process group's resident memory seen once a second: a spike between two samples
   and a process that left the group are missed, and the key is omitted on other hosts and for a
   check over within 100 ms. *Target: M31-22, M34. Found: the M31 plan.*
+- **`check runs` reads both files whole for each page.** A page of run lines streams
+  `run-lines.1.jsonl` and `run-lines.jsonl` from their starts, at most 128 MiB together, whatever
+  the cursor: there is no index, and the time a page takes on full files is not measured.
+  *Target: M33-1. Found: the M31 plan.*
 - **This repository's CI does not start its gate through `check run` yet.** The `check` job of
   `ci.yml` runs `just check` and `just check-compare` itself; it moves to
   `check run --dir . --stage before-land` with a pinned build once a release holds `check run`,

@@ -61,7 +61,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 /// remotes (M13), then the landing queue's (M22), in the order `tools/list` gives them, each with the request type its arguments
 /// are and the response type its envelope's `result` is. A task that adds a tool adds its line
 /// here and in `mcp_parity.rs`' `PARITY` or `PARITY_EXEMPT`, in the same commit.
-pub(crate) const TOOLS: [(&str, &str, &str); 53] = [
+pub(crate) const TOOLS: [(&str, &str, &str); 54] = [
     ("repo_info", "InfoReq", "RepoInfo"),
     ("resolve_rev", "ResolveRevReq", "ResolvedRev"),
     ("read_file", "ReadFileReq", "FileContent"),
@@ -115,6 +115,7 @@ pub(crate) const TOOLS: [(&str, &str, &str); 53] = [
     ("ws_info", "WsInfoReq", "WsInfo"),
     ("check_run", "CheckRunReq", "CheckRunResp"),
     ("check_log", "CheckLogReq", "CheckLogResp"),
+    ("check_runs", "CheckRunsReq", "CheckRunsResp"),
 ];
 
 /// The tools [`mcp_tool_calls_golden`] does not call: the git remotes' (M13), whose operations
@@ -152,7 +153,7 @@ const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 // ---------------------------------------------------------------------------------------------
 
 /// The tools of the workspace table that are not named `ws_*`: the checks run in a workspace.
-const WS_CHECK_TOOLS: [&str; 2] = ["check_run", "check_log"];
+const WS_CHECK_TOOLS: [&str; 3] = ["check_run", "check_log", "check_runs"];
 
 /// The pages, from the repository's root, that may state how many tools `swarmops mcp` lists.
 const COUNTED: [&str; 4] = ["README.md", "docs", "web/app", "web/components"];
@@ -758,13 +759,15 @@ fn workspace_calls(golden: &mut Golden, tmp: &Path, landed: &str) {
     golden.ok("ws_list", json!({}));
     golden.ok("ws_info", json!({"workspace": "ws1"}));
 
-    // 6. The workspace's checks: its tree names none, so there is nothing to run.
+    // 6. The workspace's checks: its tree names none, so there is nothing to run, no log to
+    //    read, and no run line yet.
     golden.err("check_run", json!({"workspace": "ws1"}), "E_INVALID_ARG");
     golden.err(
         "check_log",
         json!({"workspace": "ws1", "check": "unit"}),
         "E_INVALID_ARG",
     );
+    golden.ok("check_runs", json!({"workspace": "ws1"}));
 }
 
 /// `resolve_rev` is listed as a read whose description names the CLI command it stands for,

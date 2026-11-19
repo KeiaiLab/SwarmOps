@@ -49,14 +49,14 @@ are not served. The results of `server/discover` and `tools/list` may be kept fo
 
 ### Tools
 
-`tools/list` gives 53 tools, one per operation, named as the envelope's `op` is: the 39 store
+`tools/list` gives 54 tools, one per operation, named as the envelope's `op` is: the 39 store
 operations `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`,
 `path_history`, `diff`, `merge_base`, `op_log`, `ref_list`, `ref_set`, `ref_delete`, `ref_log`,
 `ref_txn`, `undo`, `commit`, `land`, `revert`, `land_check`, `land_group`, `check_list`, `rebase`,
 `blob_put`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`, `fetch`, `push`, `sync`,
-`sync_status`, `queue_enqueue`, `queue_status`, `queue_withdraw` and `queue_wait`, then the 14 workspace operations `ws_create`, `ws_status`, `ws_diff`,
+`sync_status`, `queue_enqueue`, `queue_status`, `queue_withdraw` and `queue_wait`, then the 15 workspace operations `ws_create`, `ws_status`, `ws_diff`,
 `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize`, `ws_discard`, `ws_snapshot`,
-`ws_list`, `ws_info`, `check_run` and `check_log`. A tool's input schema is its request type's JSON
+`ws_list`, `ws_info`, `check_run`, `check_log` and `check_runs`. A tool's input schema is its request type's JSON
 Schema (`swarmops schema <Req>`), with every reference inlined so that it stands alone. Its
 annotations say what it does to the store:
 

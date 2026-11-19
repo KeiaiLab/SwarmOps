@@ -3301,6 +3301,125 @@ expression: golden.transcript()
               },
               "name": "check_log",
               "title": "Read a check's log"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "Lists the run lines of a workspace's checks, newest first: one line for each check a run reached, with its run, name, stage and tree, how long it waited and ran, how it ended and, on Linux, its sampled peak memory. Filters by checks, tree (12 to 64 hex digits), outcomes, run, since and until (Unix milliseconds); pass a limit of 100 or less, and the cursor a page returns, with the same filters, for the page after. Diagnostics: nothing decides from a run line.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`check_runs` (CLI `check runs`): the run lines of a workspace's checks, newest first, those\nthat match every filter given, a page at a time. Reads only: no lock, no identity, nothing\nwritten. Diagnostics: nothing decides from a run line.",
+                "properties": {
+                  "checks": {
+                    "description": "Only the lines of these checks; every check when empty (the default).",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "cursor": {
+                    "description": "The cursor a page gave, to read the page after it, with the same filters: pass it back\nas it was returned.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "default": 100,
+                    "description": "The most lines of a page: 1 to 1,000; 100 when omitted.",
+                    "format": "uint",
+                    "maximum": 1000,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "outcomes": {
+                    "description": "Only the lines that ended as one of these: `passed`, `failed`, `timed_out`, `cancelled`\nor `not_started` (`not_run` leaves no line, and is refused); every outcome when empty.",
+                    "items": {
+                      "description": "How a check of a run ended. Only `passed` passes.",
+                      "oneOf": [
+                        {
+                          "const": "passed",
+                          "description": "It exited 0.",
+                          "type": "string"
+                        },
+                        {
+                          "const": "failed",
+                          "description": "It exited with another code, or a signal it was not sent by the runner ended it.",
+                          "type": "string"
+                        },
+                        {
+                          "const": "timed_out",
+                          "description": "It ran past its timeout, and its process group was killed.",
+                          "type": "string"
+                        },
+                        {
+                          "const": "not_started",
+                          "description": "Its directory is missing, or its program did not start.",
+                          "type": "string"
+                        },
+                        {
+                          "const": "cancelled",
+                          "description": "It was running when a signal stopped the run, and its process group was killed.",
+                          "type": "string"
+                        },
+                        {
+                          "const": "not_run",
+                          "description": "The run was stopped before it started: no process, no log.",
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    "type": "array"
+                  },
+                  "run": {
+                    "description": "Only the lines of this run, by its id.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "since": {
+                    "description": "Only the lines of checks that started at or after this time, in Unix milliseconds.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "tree": {
+                    "description": "Only the lines whose tree starts with these 12 to 64 lowercase hex digits. A line with\nno tree (a run of the directory form) never matches.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "until": {
+                    "description": "Only the lines of checks that started before this time, in Unix milliseconds.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "workspace": {
+                    "description": "The workspace, by its name in the store's registry.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace"
+                ],
+                "title": "CheckRunsReq",
+                "type": "object"
+              },
+              "name": "check_runs",
+              "title": "List a workspace's check runs"
             }
           ]
         }

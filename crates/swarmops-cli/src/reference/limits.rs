@@ -199,7 +199,7 @@ const fn internal_value(
 // ---- The tables ----
 
 /// The limits a request is refused past, with the error it gets.
-static CONTRACT: [Limit; 28] = [
+static CONTRACT: [Limit; 29] = [
     Limit {
         name: "Request text",
         constant: code(
@@ -635,6 +635,20 @@ static CONTRACT: [Limit; 28] = [
         what: "`check log --tail` (`tail`), from 1: more are refused with `details.reason` \
                    `tail`.",
     },
+    Limit {
+        name: "Check runs page",
+        constant: code(
+            "swarmops_api::MAX_CHECK_RUNS_LIMIT",
+            CHECK_API,
+            "pub const MAX_CHECK_RUNS_LIMIT: usize = 1_000;",
+            || bytes::to_u64(swarmops_api::MAX_CHECK_RUNS_LIMIT),
+        ),
+        unit: Unit::Count("lines"),
+        commands: &["check runs"],
+        errors: &[ErrorCode::InvalidArg],
+        what: "`check runs --limit` (`limit`), from 1: more are refused with `details.reason` \
+                   `limit`.",
+    },
 ];
 
 /// The bounds a response keeps without an error: what it leaves out, and how it says so.
@@ -1033,7 +1047,7 @@ static BOUNDS: [Limit; 27] = [
 ];
 
 /// The paging defaults a request takes when it does not say.
-static DEFAULTS: [DefaultRow; 16] = [
+static DEFAULTS: [DefaultRow; 17] = [
     paged(
         "CheckLogReq",
         "tail",
@@ -1046,6 +1060,19 @@ static DEFAULTS: [DefaultRow; 16] = [
         Unit::Count("lines"),
         "check log",
         Some("tail"),
+    ),
+    paged(
+        "CheckRunsReq",
+        "limit",
+        code(
+            "swarmops_api::DEFAULT_CHECK_RUNS_LIMIT",
+            CHECK_API,
+            "pub const DEFAULT_CHECK_RUNS_LIMIT: usize = 100;",
+            || bytes::to_u64(swarmops_api::DEFAULT_CHECK_RUNS_LIMIT),
+        ),
+        Unit::Count("lines"),
+        "check runs",
+        Some("limit"),
     ),
     paged(
         "ReadFileReq",

@@ -1,5 +1,7 @@
 //! Run lines, `check runs` and `check log --failed` (M31-11, M31-12, M31-13) through the binary:
-//! the line each check of a run leaves, where it goes, its rotation, and a failed append.
+//! the line each check of a run leaves, where it goes, its rotation, and a failed append; the
+//! lines read back filtered, newest first, a page at a time with a cursor, by the command and by
+//! the MCP tool.
 //!
 //! Every fixture check is a program with its arguments: `sh -c …` where a script is wanted.
 
@@ -14,7 +16,49 @@ use swarmops_ops::check::lines::{
 };
 
 use crate::check_run::{Tree, check, checked_lab, failed_run};
-use crate::ws::run_in;
+use crate::ws::{AGENT, Out, run_in};
+
+/// The fixture the reader's unit tests read: twelve lines of three runs and four checks, two
+/// more of keys already seen, then three lines that do not read.
+const FIXTURE: &[u8] = include_bytes!("fixtures/check/run-lines.jsonl");
+
+/// The fixture's three runs, oldest first.
+const R1: &str = "0193f1e2-0000-7000-8000-0000000000a1";
+const R2: &str = "0193f1e2-0000-7000-8000-0000000000a2";
+const R3: &str = "0193f1e2-0000-7000-8000-0000000000a3";
+
+/// A directory holding the fixture as its run lines, in a temp dir.
+fn fixture_lines() -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("lines");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join(RUN_LINES_FILE), FIXTURE).unwrap();
+    (tmp, dir)
+}
+
+/// `check runs --run-lines <dir>` and `args`, run in `cwd`, which is no workspace.
+fn runs(cwd: &Path, dir: &Path, args: &[&str]) -> Out {
+    let mut line = vec!["check", "runs", "--run-lines", dir.to_str().unwrap()];
+    line.extend_from_slice(args);
+    run_in(cwd, &[], &line, None)
+}
+
+/// `(run, check)` of each line of a page.
+fn named(page: &Value) -> Vec<(String, String)> {
+    (page["runs"].as_array().unwrap().iter())
+        .map(|line| {
+            let text = |key: &str| line[key].as_str().unwrap().to_owned();
+            (text("run"), text("check"))
+        })
+        .collect()
+}
+
+/// `pairs` as [`named`] gives them.
+fn pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    (pairs.iter())
+        .map(|(run, check)| ((*run).to_owned(), (*check).to_owned()))
+        .collect()
+}
 
 /// Three checks, in run order `bad` (two lines, exit 3), `ok` and `slow` (half a second).
 const THREE: &str = "[check.bad]\nargv = [\"sh\", \"-c\", \"echo one; echo two >&2; exit 3\"]\n\
@@ -137,6 +181,17 @@ fn the_file_rotates_past_its_bound() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert_eq!(lines[0]["run"], second["run"]);
     assert_eq!(fs::metadata(&older).unwrap().len(), text.len() as u64);
+
+    // 4. `check runs` reads both files: both runs' lines, newest first, and the long line of
+    //    the sparse file skipped, never held.
+    let page = runs(tree.tmp(), &lines_dir, &[]).ok();
+    let got: Vec<&Value> = page["runs"].as_array().unwrap().iter().collect();
+    assert_eq!(got.len(), 2, "{page}");
+    assert_eq!(
+        (&got[0]["run"], &got[1]["run"]),
+        (&second["run"], &first["run"])
+    );
+    assert_eq!((&page["scanned"], &page["skipped"]), (&json!(3), &json!(1)));
 }
 
 /// Where lines go: with no flag and no variable, beside the directory's runs, or in the
@@ -267,4 +322,279 @@ fn a_check_that_lasts_leaves_its_peak_memory() {
         slow["peak_rss_kib"].as_u64().is_some_and(|kib| kib > 0),
         "{slow}"
     );
+}
+
+/// Filters over a fixture file give pinned pages (M31-12): each of the filters, and two
+/// together, name the lines they should, newest first; the lines that do not read are counted.
+#[test]
+fn filters_over_a_fixture_file_give_pinned_pages() {
+    // 1. No filter: the twelve lines, newest first by key, from the directory named.
+    let (tmp, dir) = fixture_lines();
+    let plain = runs(tmp.path(), &dir, &[]);
+    assert_eq!(plain.envelope()["op"], "check_runs", "{plain}");
+    let whole = plain.ok();
+    let checks = ["unit", "test", "lint", "build"];
+    let newest_first: Vec<(&str, &str)> = [R3, R2, R1]
+        .iter()
+        .flat_map(|run| checks.iter().map(move |check| (*run, *check)))
+        .collect();
+    assert_eq!(named(&whole), pairs(&newest_first));
+    assert_eq!(
+        (&whole["source"], &whole["vouched"], &whole["dir"]),
+        (
+            &json!("run_lines"),
+            &json!(true),
+            &json!(dir.to_str().unwrap())
+        )
+    );
+    assert_eq!(
+        (&whole["scanned"], &whole["skipped"]),
+        (&json!(17), &json!(3))
+    );
+    assert!(whole.get("cursor").is_none(), "{whole}");
+
+    // 2. A line as the file holds it, field for field.
+    let build = &whole["runs"][11];
+    let first: Value =
+        serde_json::from_slice(FIXTURE.split(|b| *b == b'\n').next().unwrap()).unwrap();
+    assert_eq!(*build, first);
+    assert_eq!(
+        (&build["peak_rss_kib"], &build["wait_ms"]),
+        (&json!(20_480), &json!(0))
+    );
+
+    // 3. Each filter.
+    let of = |args: &[&str]| named(&runs(tmp.path(), &dir, args).ok());
+    assert_eq!(
+        of(&["--check", "lint"]),
+        pairs(&[(R3, "lint"), (R2, "lint"), (R1, "lint")])
+    );
+    assert_eq!(of(&["--check", "lint", "--check", "unit"]).len(), 6);
+    assert_eq!(
+        of(&["--tree", "bbbbbbbbbbbb"]),
+        pairs(&[(R2, "unit"), (R2, "test"), (R2, "lint"), (R2, "build")])
+    );
+    assert_eq!(
+        of(&["--outcome", "failed"]),
+        pairs(&[(R3, "test"), (R1, "lint")])
+    );
+    assert_eq!(
+        of(&[
+            "--outcome",
+            "timed_out",
+            "--outcome",
+            "cancelled",
+            "--outcome",
+            "not_started"
+        ]),
+        pairs(&[(R3, "build"), (R2, "unit"), (R1, "test")])
+    );
+    assert_eq!(of(&["--run", R1]), pairs(&newest_first[8..]));
+    assert_eq!(
+        of(&["--since", "1700000100000", "--until", "1700000200000"]),
+        pairs(&newest_first[4..8])
+    );
+
+    // 4. Two together.
+    assert_eq!(
+        of(&["--check", "test", "--check", "lint", "--outcome", "passed"]),
+        pairs(&[(R3, "lint"), (R2, "test"), (R2, "lint")])
+    );
+
+    // 5. What does not read as a filter: its reason; `not_run` is no outcome of a line.
+    let reason = |args: &[&str]| {
+        let error = runs(tmp.path(), &dir, args).err("E_INVALID_ARG", 2);
+        error["details"]["reason"].as_str().unwrap().to_owned()
+    };
+    assert_eq!(reason(&["--limit", "0"]), "limit");
+    assert_eq!(reason(&["-n", "1001"]), "limit");
+    assert_eq!(reason(&["--tree", "abc"]), "tree");
+    assert_eq!(reason(&["--since", "2", "--until", "1"]), "time");
+    assert_eq!(reason(&["--check", "Lint"]), "check");
+    assert_eq!(reason(&["--run", "nope"]), "run");
+    let not_run = runs(tmp.path(), &dir, &["--outcome", "not_run"]);
+    assert_eq!(not_run.exit, 2, "{not_run}");
+    assert!(
+        not_run.stderr.contains("not_run") || not_run.stdout.contains("not_run"),
+        "{not_run}"
+    );
+}
+
+/// A cursor resumes (M31-12): three pages of four are the one page of a hundred, the last with
+/// no cursor; lines a run appends between two pages change no later page; a mangled cursor is
+/// refused.
+#[test]
+fn a_cursor_resumes() {
+    // 1. The whole, then its first page of four.
+    let (tmp, dir) = fixture_lines();
+    let whole = runs(tmp.path(), &dir, &["--limit", "100"]).ok();
+    let first = runs(tmp.path(), &dir, &["--limit", "4"]).ok();
+    let cursor = first["cursor"].as_str().expect("more match").to_owned();
+
+    // 2. A run appends its lines to the same directory between the two pages.
+    let tree = Tree::new(THREE);
+    let ran = failed_run(&tree.run(&["--run-lines", dir.to_str().unwrap()], &[]));
+    let text = fs::read_to_string(dir.join(RUN_LINES_FILE)).unwrap();
+    assert_eq!(
+        text.lines().count(),
+        17 + 2,
+        "the first appended line ends the torn one"
+    );
+
+    // 3. The second and third pages are what they would have been.
+    let second = runs(tmp.path(), &dir, &["--limit", "4", "--cursor", &cursor]).ok();
+    let cursor = second["cursor"].as_str().expect("more match").to_owned();
+    let third = runs(tmp.path(), &dir, &["-n", "4", "--cursor", &cursor]).ok();
+    assert!(third.get("cursor").is_none(), "the last page: {third}");
+    let joined: Vec<Value> = [&first, &second, &third]
+        .iter()
+        .flat_map(|page| page["runs"].as_array().unwrap().clone())
+        .collect();
+    assert_eq!(Value::from(joined), whole["runs"]);
+
+    // 4. A first page now starts with the run that appended.
+    let fresh = runs(tmp.path(), &dir, &["--limit", "4"]).ok();
+    assert_eq!(fresh["runs"][0]["run"], ran["run"], "{fresh}");
+    assert_eq!(fresh["runs"][3]["run"], R3, "{fresh}");
+
+    // 5. A mangled cursor is refused with its reason.
+    let mangled = format!("{cursor}.x");
+    for bad in [mangled.as_str(), "r1", "0"] {
+        let error = runs(tmp.path(), &dir, &["--cursor", bad]).err("E_INVALID_ARG", 2);
+        assert_eq!(error["details"]["reason"], "cursor", "{bad}: {error}");
+    }
+}
+
+/// A directory or a workspace with no run yet gives an empty page, exit 0; a lines file that is
+/// a link is `E_IO`; a named directory that is a file is refused; the directory form reads the
+/// lines beside its runs.
+#[test]
+fn no_lines_is_an_empty_page_and_a_file_that_is_none_is_refused() {
+    // 1. A directory never run: an empty page, vouched, nothing made.
+    let tree = Tree::new(THREE);
+    let dir = tree.dir();
+    let line = ["check", "runs", "--dir", dir.to_str().unwrap()];
+    let runs_root = tree.runs();
+    let env = [("SWARMOPS_CHECK_RUNS_DIR", runs_root.to_str().unwrap())];
+    let none = run_in(tree.tmp(), &env, &line, None).ok();
+    assert_eq!(
+        (&none["runs"], &none["scanned"], &none["vouched"]),
+        (&json!([]), &json!(0), &json!(true))
+    );
+    assert!(!runs_root.exists(), "reading makes nothing");
+
+    // 2. After a run: its three lines, newest first, from beside its runs.
+    let ran = failed_run(&tree.run(&[], &[]));
+    let page = run_in(tree.tmp(), &env, &line, None).ok();
+    assert_eq!(
+        named(&page)
+            .iter()
+            .map(|(_, check)| check.as_str())
+            .collect::<Vec<_>>(),
+        ["slow", "ok", "bad"]
+    );
+    let keyed = PathBuf::from(ran["dir"].as_str().unwrap());
+    assert_eq!(page["dir"], keyed.parent().unwrap().to_str().unwrap());
+    let failed = run_in(
+        tree.tmp(),
+        &env,
+        &[&line[..], &["--outcome", "failed"]].concat(),
+        None,
+    )
+    .ok();
+    assert_eq!(named(&failed).len(), 1, "{failed}");
+
+    // 3. The lines file a link: E_IO, naming it. A named directory that is a file: refused.
+    let (tmp, lines) = fixture_lines();
+    let file = lines.join(RUN_LINES_FILE);
+    fs::rename(&file, lines.join("elsewhere")).unwrap();
+    std::os::unix::fs::symlink(lines.join("elsewhere"), &file).unwrap();
+    let linked = runs(tmp.path(), &lines, &[]).err("E_IO", 1);
+    assert_eq!(
+        linked["details"]["path"],
+        file.to_str().unwrap(),
+        "{linked}"
+    );
+    let refused = runs(tmp.path(), &lines.join("elsewhere"), &[]).err("E_INVALID_ARG", 2);
+    assert_eq!(refused["details"]["reason"], "run_lines_dir", "{refused}");
+}
+
+/// The workspace form and the tool: `check runs --ws` reads the workspace's own lines, not
+/// vouched, and the MCP tool `check_runs` answers as the command does, filters and cursor
+/// included.
+#[test]
+fn the_tool_check_runs_answers_as_the_command_does() {
+    // 1. Two runs of a workspace's checks.
+    let (lab, ws) = checked_lab();
+    let first = lab.so(&["check", "run", "--ws", "w1"]).ok();
+    let second = lab.so(&["check", "run", "--ws", "w1"]).ok();
+
+    // 2. The command: both runs' lines, newest first, from the workspace's state.
+    let page = lab.so(&["check", "runs", "--ws", "w1"]).ok();
+    let state = ws.join(".swarmws/check-runs");
+    assert_eq!(
+        (&page["vouched"], &page["dir"]),
+        (&json!(false), &json!(state.to_str().unwrap()))
+    );
+    let got: Vec<&Value> = page["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|line| &line["run"])
+        .collect();
+    assert_eq!(got, [&second["run"], &first["run"]]);
+    assert_eq!(page["runs"][0]["tree"], second["tree"]);
+
+    // 3. The tool, with no filter, with filters, and with a cursor.
+    let mut server = crate::mcp::Server::start(&["--repo", lab.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let tool = server.ok("check_runs", json!({"workspace": "w1"}));
+    assert_eq!(tool["result"], page);
+    let run = first["run"].as_str().unwrap();
+    let tree = &first["tree"].as_str().unwrap()[..12];
+    let filtered = lab
+        .so(&[
+            "check",
+            "runs",
+            "--ws",
+            "w1",
+            "--run",
+            run,
+            "--check",
+            "env",
+            "--tree",
+            tree,
+            "--outcome",
+            "passed",
+        ])
+        .ok();
+    assert_eq!(filtered["runs"].as_array().unwrap().len(), 1, "{filtered}");
+    let arguments = json!({"workspace": "w1", "run": run, "checks": ["env"], "tree": tree, "outcomes": ["passed"]});
+    assert_eq!(server.ok("check_runs", arguments)["result"], filtered);
+    let one = lab
+        .so(&["check", "runs", "--ws", "w1", "--limit", "1"])
+        .ok();
+    let cursor = one["cursor"].as_str().expect("one more");
+    let next = lab
+        .so(&["check", "runs", "--ws", "w1", "-n", "1", "--cursor", cursor])
+        .ok();
+    assert_eq!(next["runs"][0]["run"], first["run"]);
+    let by_tool = server.ok(
+        "check_runs",
+        json!({"workspace": "w1", "limit": 1, "cursor": cursor}),
+    );
+    assert_eq!(by_tool["result"], next);
+
+    // 4. An outcome a line never has, and a workspace the store does not know.
+    let call = server.call(
+        "check_runs",
+        json!({"workspace": "w1", "outcomes": ["not_run"]}),
+    );
+    assert_eq!(
+        call.envelope["error"]["details"]["reason"], "outcome",
+        "{:?}",
+        call.envelope
+    );
+    let unknown = lab.so(&["check", "runs", "--ws", "nope"]);
+    assert_ne!(unknown.exit, 0, "{unknown}");
 }

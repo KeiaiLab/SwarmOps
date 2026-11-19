@@ -122,11 +122,11 @@ SwarmOps records an identity and does not verify it: every envelope's `meta.auth
 treats every agent that runs against a store as a trusted local user acting for the same owner, and
 the store directory's permissions are the access boundary.
 
-## The 53 MCP tools
+## The 54 MCP tools
 
 A changeset is what a commit records, and a ref, such as `main`, is a name that points at one.
 `swarmops mcp` lists one tool for each store operation but `derive`, which `swarmops derive` runs
-beside the store as maintenance, and `blob_get`, which the workspaces use; then fourteen workspace
+beside the store as maintenance, and `blob_get`, which the workspaces use; then fifteen workspace
 tools.
 
 A tool's arguments are the operation's request. Its result is the envelope the CLI prints for that
@@ -301,16 +301,17 @@ annotations say whether it changes the store and how.
   undone. While one runs, another fails at once with `E_MAINTENANCE_BUSY` (exit 4): retry
   ([Verify and repair](../operate/verify-and-repair.md), [Making room](../operate/making-room.md)).
 
-### Fourteen workspace tools
+### Fifteen workspace tools
 
 `ws_create`, `ws_status`, `ws_diff`, `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`,
-`ws_materialize`, `ws_discard`, `ws_snapshot`, `ws_list`, `ws_info`, `check_run` and `check_log`
-work on a workspace, a directory on the server's host, named by its name in the store's registry.
+`ws_materialize`, `ws_discard`, `ws_snapshot`, `ws_list`, `ws_info`, `check_run`, `check_log` and
+`check_runs` work on a workspace, a directory on the server's host, named by its name in the store's registry.
 Each mutation's result carries `status_after`, the workspace's status after it.
 [Workspaces](#workspaces-for-worktree-sessions-and-subagents) below has the flow. `check_run` runs
 the checks of one stage of a clean workspace, one at a time, and answers every check's outcome; a
 check that did not pass makes it `E_CHECK_FAILED`, with the whole run in `details.run`; `check_log`
-reads one check's log of a run, its last lines and how it ended.
+reads one check's log of a run, its last lines and how it ended; `check_runs` lists the run lines
+the workspace's checks left, newest first, a page at a time.
 
 `init`, `whoami` and `schema` live in the CLI, and so do `blob get`, `ws delete`, `ws hook`,
 `git import`, `git export`, `clone` and `remote add|remove`: an agent runs them as commands, not as

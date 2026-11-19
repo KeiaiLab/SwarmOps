@@ -1,7 +1,8 @@
-//! The workspace tools of `swarmops mcp` (M5): fourteen tools, one per workspace operation but
+//! The workspace tools of `swarmops mcp` (M5): fifteen tools, one per workspace operation but
 //! `ws_delete`, which removes a directory tree (an agent ends its own workspace by landing it, and
-//! the hook adapter removes it), and `check_run` and `check_log` (M31), which run the checks of a
-//! stage of a clean workspace and read a check's log of a run. Each names its workspace by
+//! the hook adapter removes it), and `check_run`, `check_log` and `check_runs` (M31), which run
+//! the checks of a stage of a clean workspace, read a check's log of a run, and list the run
+//! lines its checks left. Each names its workspace by
 //! `workspace`, a registry name, and runs the function of its name on the store the server opens
 //! for the call.
 //!
@@ -26,9 +27,9 @@ use std::sync::{Arc, OnceLock};
 use camino::Utf8Path;
 use serde_json::{Value, json};
 use swarmops_api::{
-    CheckLogReq, CheckRunReq, Identity, StoreOps, WsCommitReq, WsCreateReq, WsDiffReq,
-    WsDiscardReq, WsInfoReq, WsLandReq, WsListReq, WsMaterializeReq, WsRebaseReq, WsResolveReq,
-    WsSnapshotReq, WsStatusReq,
+    CheckLogReq, CheckRunReq, CheckRunsReq, Identity, StoreOps, WsCommitReq, WsCreateReq,
+    WsDiffReq, WsDiscardReq, WsInfoReq, WsLandReq, WsListReq, WsMaterializeReq, WsRebaseReq,
+    WsResolveReq, WsSnapshotReq, WsStatusReq,
 };
 use swarmops_ws::Ctx as WsCtx;
 
@@ -38,7 +39,7 @@ use super::{Named, Operate, Refuse};
 use crate::commands::ws;
 
 /// The workspace tools, in the order `tools/list` gives them, after the store's.
-pub(super) static WS_TOOLS: [WsSpec; 14] = [
+pub(super) static WS_TOOLS: [WsSpec; 15] = [
     WsSpec {
         tool: WsTool::Create,
         name: "ws_create",
@@ -168,6 +169,19 @@ pub(super) static WS_TOOLS: [WsSpec; 14] = [
                       the check's start, its stream and its text, and whether the log has ended \
                       and how the check ended.",
     },
+    WsSpec {
+        tool: WsTool::CheckRuns,
+        name: "check_runs",
+        request: "CheckRunsReq",
+        title: "List a workspace's check runs",
+        description: "Lists the run lines of a workspace's checks, newest first: one line for \
+                      each check a run reached, with its run, name, stage and tree, how long it \
+                      waited and ran, how it ended and, on Linux, its sampled peak memory. \
+                      Filters by checks, tree (12 to 64 hex digits), outcomes, run, since and \
+                      until (Unix milliseconds); pass a limit of 100 or less, and the cursor a \
+                      page returns, with the same filters, for the page after. Diagnostics: \
+                      nothing decides from a run line.",
+    },
 ];
 
 /// One workspace tool: which operation it runs, and what `tools/list` says of it.
@@ -209,6 +223,7 @@ pub(super) enum WsTool {
     Info,
     CheckRun,
     CheckLog,
+    CheckRuns,
 }
 
 impl WsTool {
@@ -216,9 +231,12 @@ impl WsTool {
     /// `ws_discard` alone overwrites what is there (the edits it restores from the head).
     pub(super) fn annotations(self) -> Value {
         let (read_only, destructive, idempotent) = match self {
-            WsTool::Status | WsTool::Diff | WsTool::List | WsTool::Info | WsTool::CheckLog => {
-                (true, false, true)
-            }
+            WsTool::Status
+            | WsTool::Diff
+            | WsTool::List
+            | WsTool::Info
+            | WsTool::CheckLog
+            | WsTool::CheckRuns => (true, false, true),
             // A commit run again records another changeset, or finds nothing to commit; a run of
             // the checks is a run of its own each time, its logs beside the others.
             WsTool::Commit | WsTool::CheckRun => (false, false, false),
@@ -297,6 +315,13 @@ pub(super) fn operate_ws<O: Operate>(tool: WsTool, how: O) -> O::Done {
         }),
         WsTool::CheckLog => how.workspace(|store, root, who, _, req| {
             swarmops_ops::check::follow::log_ws(&ws_ctx(store, root, who), req)
+        }),
+        // The lines the server's environment names, if it names any; else the workspace's own.
+        WsTool::CheckRuns => how.workspace(|store, root, who, _, req: CheckRunsReq| {
+            let lookup = |name: &str| std::env::var_os(name);
+            let named = crate::context::run_lines_dir(None, &lookup)?;
+            let ctx = ws_ctx(store, root, who);
+            swarmops_ops::check::runs::runs_ws(&ctx, &req, named.as_deref())
         }),
     }
 }
@@ -396,6 +421,7 @@ impl Refuse for WsListReq {}
 impl Refuse for WsInfoReq {}
 impl Refuse for CheckRunReq {}
 impl Refuse for CheckLogReq {}
+impl Refuse for CheckRunsReq {}
 
 #[cfg(test)]
 mod tests {
@@ -405,12 +431,13 @@ mod tests {
     use super::super::probe::Probe;
     use super::*;
 
-    /// One tool per workspace operation but `ws_delete`, and `check_run` and `check_log`, each
-    /// running the function of its name on the store the server opens, with the root it opened
-    /// it at.
+    /// One tool per workspace operation but `ws_delete`, and `check_run`, `check_log` and
+    /// `check_runs`, each running the function of its name on the store the server opens, with
+    /// the root it opened it at.
     #[test]
-    fn the_ws_tools_are_the_fourteen_workspace_operations() {
-        // 1. One tool per Ws*Req, but WsDeleteReq, and CheckRunReq and CheckLogReq.
+    fn the_ws_tools_are_the_fifteen_workspace_operations() {
+        // 1. One tool per Ws*Req, but WsDeleteReq, and CheckRunReq, CheckLogReq and
+        //    CheckRunsReq.
         let all = swarmops_api::schema_for_all();
         let requests: BTreeSet<&str> = all
             .as_object()
@@ -421,12 +448,13 @@ mod tests {
                 (name.starts_with("Ws") && name.ends_with("Req"))
                     || *name == "CheckRunReq"
                     || *name == "CheckLogReq"
+                    || *name == "CheckRunsReq"
             })
             .filter(|name| *name != "WsDeleteReq")
             .collect();
         let advertised: BTreeSet<&str> = WS_TOOLS.iter().map(|spec| spec.request).collect();
         assert_eq!(advertised, requests, "one tool per workspace request type");
-        assert_eq!(WS_TOOLS.len(), 14);
+        assert_eq!(WS_TOOLS.len(), 15);
 
         // 2. Each arm runs the function of its name, which answers as it does on a store
         //    without workspaces.
@@ -461,7 +489,8 @@ mod tests {
             | WsTool::Resolve
             | WsTool::Land
             | WsTool::CheckRun
-            | WsTool::CheckLog => r#"the store has no workspace named "probe""#,
+            | WsTool::CheckLog
+            | WsTool::CheckRuns => r#"the store has no workspace named "probe""#,
             // `from` is checked before anything is made: the probe's sample is not a path.
             WsTool::Create => "is relative: give an absolute one",
             WsTool::Materialize => "ws materialize needs at least one path",

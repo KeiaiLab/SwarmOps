@@ -25,7 +25,7 @@ Record and land changes:
   blob        Store content as a blob for a commit to name
 
 Checks:
-  check       List and run a tree's checks, and read their logs
+  check       List and run a tree's checks, and read their runs and logs
 
 Read history:
   log         List history along first parents, newest first

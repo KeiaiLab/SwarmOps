@@ -167,6 +167,7 @@ List the checks a tree names in .swarmops/checks.toml, run one stage of them, re
 
 - [`swarmops check list`](commands/check-list.md): List the checks REV's tree describes, or those of a directory with --dir.
 - [`swarmops check run`](commands/check-run.md): Run the checks of one stage of a clean workspace, or of a directory with --dir.
+- [`swarmops check runs`](commands/check-runs.md): List the run lines of a workspace's or a directory's checks, newest first.
 - [`swarmops check log`](commands/check-log.md): Read a check's log of a run of a workspace, or of a directory with --dir.
 
 ## Server

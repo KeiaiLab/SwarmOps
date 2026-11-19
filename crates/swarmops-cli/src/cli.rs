@@ -10,7 +10,9 @@ use clap::{
     ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
 };
 use swarmops_api::remote::{DEFAULT_REMOTE, DEFAULT_SYNC_STATUS_LIMIT};
-use swarmops_api::{CheckStage, DEFAULT_CHECK_LOG_TAIL, RefTxnMoveIn, Rev};
+use swarmops_api::{
+    CheckOutcome, CheckStage, DEFAULT_CHECK_LOG_TAIL, DEFAULT_CHECK_RUNS_LIMIT, RefTxnMoveIn, Rev,
+};
 use swarmops_api::{
     DEFAULT_ANCESTRY_LIMIT, DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES,
     DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_MAX_CHANGESETS,
@@ -871,7 +873,7 @@ pub enum Command {
     /// fetch, push, sync and sync_status, the landing queue's queue_enqueue, queue_status,
     /// queue_withdraw and queue_wait, and the workspaces' ws_create, ws_status, ws_diff,
     /// ws_commit, ws_rebase, ws_resolve, ws_land, ws_materialize, ws_discard, ws_snapshot,
-    /// ws_list, ws_info, check_run and check_log), each
+    /// ws_list, ws_info, check_run, check_log and check_runs), each
     /// taking the operation's request as its arguments and returning the envelope the other
     /// commands print. The store and the identity are the server's, --repo and --as or their
     /// variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
@@ -1373,6 +1375,37 @@ impl StageArg {
     }
 }
 
+/// How a check of a run ended, as `check runs --outcome` names it: the outcomes that leave a run
+/// line, in the words the lines hold.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutcomeArg {
+    /// It exited 0.
+    Passed,
+    /// It exited with another code, or a signal ended it.
+    Failed,
+    /// It ran past its timeout.
+    #[value(name = "timed_out")]
+    TimedOut,
+    /// A signal stopped the run while it ran.
+    Cancelled,
+    /// Its directory is missing, or its program did not start.
+    #[value(name = "not_started")]
+    NotStarted,
+}
+
+impl OutcomeArg {
+    /// The API's outcome.
+    pub fn outcome(self) -> CheckOutcome {
+        match self {
+            OutcomeArg::Passed => CheckOutcome::Passed,
+            OutcomeArg::Failed => CheckOutcome::Failed,
+            OutcomeArg::TimedOut => CheckOutcome::TimedOut,
+            OutcomeArg::Cancelled => CheckOutcome::Cancelled,
+            OutcomeArg::NotStarted => CheckOutcome::NotStarted,
+        }
+    }
+}
+
 /// A kind of file, as `ws commit --mode` gives it.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModeArg {
@@ -1721,6 +1754,20 @@ pub enum CheckCommand {
         #[arg(value_name = "NAME")]
         names: Vec<String>,
     },
+    /// List the run lines of a workspace's or a directory's checks, newest first.
+    ///
+    /// Each check a run of check run reaches leaves one run line on the host that ran it: its
+    /// name, run, stage and tree, how long it waited and ran, how it ended and, on Linux, its
+    /// sampled peak memory. This reads the lines of the workspace (--ws, --ws-path, else the one
+    /// around the working directory) from its .swarmws/check-runs/, or those beside the runs of
+    /// the directory --dir names, or the lines in the directory --run-lines names, else
+    /// SWARMOPS_CHECK_RUN_LINES_DIR, whatever wrote them there. It gives those that match every
+    /// filter given (--check and --outcome may be given several times), newest first by the
+    /// time each check started, at most --limit of them, with a cursor when more match: pass it
+    /// back as --cursor, with the same filters, for the page after. A line that does not read is
+    /// passed over and counted in skipped. The lines are diagnostics, appended unsynced: nothing
+    /// decides from them. Reads only: no identity, no lock, nothing written, no store operation.
+    Runs(Box<RunsArgs>),
     /// Read a check's log of a run of a workspace, or of a directory with --dir.
     ///
     /// The run is --run RUN, else the newest run that ran CHECK (with --follow, the newest still
@@ -1765,6 +1812,44 @@ pub enum CheckCommand {
         )]
         interval_ms: u64,
     },
+}
+
+/// What `check runs` takes: where the lines are, the filters, and the page. Boxed in its
+/// command, so that the commands stay of one size.
+#[derive(Args, Debug)]
+pub struct RunsArgs {
+    #[command(flatten)]
+    pub at: WsAt,
+    /// Read the lines beside the runs of the checks of DIR on this host.
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["name", "ws_path"])]
+    pub dir: Option<Utf8PathBuf>,
+    /// Read the lines in DIR, whatever run wrote them there.
+    #[arg(long = "run-lines", value_name = "DIR")]
+    pub run_lines: Option<Utf8PathBuf>,
+    /// Only the lines of this check; repeatable.
+    #[arg(long = "check", value_name = "NAME")]
+    pub checks: Vec<String>,
+    /// Only the lines of the tree whose id starts with these 12 to 64 hex digits.
+    #[arg(long, value_name = "TREE")]
+    pub tree: Option<String>,
+    /// Only the lines that ended this way; repeatable.
+    #[arg(long = "outcome", value_enum, value_name = "OUTCOME")]
+    pub outcomes: Vec<OutcomeArg>,
+    /// Only the lines of this run, by its id.
+    #[arg(long, value_name = "RUN")]
+    pub run: Option<String>,
+    /// Only the checks that started at or after this time, in Unix milliseconds.
+    #[arg(long, value_name = "MS")]
+    pub since: Option<u64>,
+    /// Only the checks that started before this time, in Unix milliseconds.
+    #[arg(long, value_name = "MS")]
+    pub until: Option<u64>,
+    /// The most lines to list, 1 to 1,000.
+    #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_CHECK_RUNS_LIMIT)]
+    pub limit: usize,
+    /// Resume a list: the previous page's cursor, exactly as it was returned.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 /// `remote`'s operations.
@@ -2157,6 +2242,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ws", "hook"] => "ws_hook",
         ["check", "list"] => "check_list",
         ["check", "run"] => "check_run",
+        ["check", "runs"] => "check_runs",
         ["check", "log"] => "check_log",
         ["cat"] => "read_file",
         ["ls"] => "read_tree",
@@ -2338,10 +2424,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 73);
+        assert_eq!(ops.len(), 74);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 73, "two subcommands name one op");
+        assert_eq!(ops.len(), 74, "two subcommands name one op");
 
         // Automatic update follows every operation but these, and not `serve --prepare`,
         // which a flag names and no subcommand.

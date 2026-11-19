@@ -639,6 +639,45 @@ fn check_log_golden() {
     insta::assert_snapshot!("check_log_golden_human", text);
 }
 
+/// The run lines `check runs` reads in its golden: the fixture of the reader's own tests.
+const RUN_LINES_FIXTURE: &[u8] = include_bytes!("fixtures/check/run-lines.jsonl");
+
+/// `check runs` (M31-12), its pinned JSON form over a fixture file of run lines in a directory
+/// the caller names: the passed checks, two a page, newest first, with a cursor and the three
+/// lines that do not read counted; the page after it, by that cursor; a cursor that no page
+/// gave, refused with its reason.
+#[test]
+fn check_runs_golden() {
+    // 1. The fixture, as the run lines of a directory.
+    let mut s = Session::new();
+    let lines = format!("{}/lines", s.tmp());
+    fs::create_dir_all(&lines).unwrap();
+    fs::write(format!("{lines}/run-lines.jsonl"), RUN_LINES_FIXTURE).unwrap();
+    let page = [
+        "check",
+        "runs",
+        "--run-lines",
+        &lines,
+        "--outcome",
+        "passed",
+        "-n",
+        "2",
+    ];
+
+    // 2. A filtered page with its cursor, then the next.
+    let first = s.run(&page);
+    assert_eq!((first.exit, &first["op"]), (0, &json!("check_runs")));
+    let cursor = first["result"]["cursor"].as_str().unwrap().to_owned();
+    let next = s.run(&[&page[..], &["--cursor", &cursor]].concat());
+    assert_eq!(next["result"]["runs"].as_array().unwrap().len(), 2);
+    assert_ne!(next["result"]["runs"][0], first["result"]["runs"][1]);
+
+    // 3. A cursor no page gave.
+    let refused = s.run(&[&page[..], &["--cursor", "r1.17"]].concat());
+    assert_eq!((refused.exit, refused.code()), (2, "E_INVALID_ARG"));
+    insta::assert_json_snapshot!(s.transcript());
+}
+
 /// `check list` (M30-1, M30-2), its pinned JSON form: the plan's fixture at main lists its
 /// three checks sorted by name, each with its line and the digest of its definition, read from
 /// the store (`vouched: false`, the tree named); the same file in a directory lists the same
