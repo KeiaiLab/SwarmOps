@@ -199,7 +199,8 @@ installs the same tool versions as `ci.yml`'s: move them together.
    - the units of `docs/roadmap.md`'s tables whose state is `on stable` name the release instead
      (`in X.Y.Z`), each one the release holds;
    - when a page was added since the last release, `web/addresses.txt` lists it: run
-     `node scripts/check-site.mjs --write-addresses` in `web/` and commit the result;
+     `node --experimental-strip-types scripts/check-site.mjs --write-addresses` in `web/` and
+     commit the result;
    - the macOS sentences name the right releases: 0.11.0 is the last release without a macOS
      archive and 0.12.0 the first with one. The installer's `MACOS_AFTER`
      (`scripts/install.sh` and its copy `web/public/install.sh`), the message
@@ -293,9 +294,7 @@ installs the same tool versions as `ci.yml`'s: move them together.
    before the tag: the workflow refuses a tagged commit that `stable` does not hold. Then rehearse
    the release on it, `gh workflow run release.yml --ref stable --repo KeiaiLab/SwarmOps`, and
    wait for its build and packages jobs to pass, the macOS build among them: a packaging failure
-   or a missing runner found there costs no tag. The Site workflow's run for this commit fails
-   its `readme-home-drift` rule and deploys nothing: the README names `X.Y.Z` and Home the
-   newest tag, which is the last release's until step 7. The tag's own Site run passes.
+   or a missing runner found there costs no tag.
 7. **Tag** the commit with an annotated tag, unsigned until a signing key is registered (then
    `git tag -s`), and push the tag:
 

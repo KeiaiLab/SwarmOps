@@ -63,7 +63,8 @@ looser `script-src` lets the per-page policy bind.
 
 ## Checks
 
-`npm run check` (what `just web-check` runs) runs, in this order:
+`npm run check` (what `just web-check` runs) runs, in this order. `check-site.mjs` reads the
+CHANGELOG headings with `lib/facts.ts`, so node runs it with `--experimental-strip-types`:
 
 1. `scripts/check-site.mjs --selftest`: builds a small site in a temporary directory that passes
    every rule below, then plants one violation per rule; it fails unless each rule reports its
@@ -87,8 +88,9 @@ looser `script-src` lets the per-page policy bind.
 
 `addresses.txt` lists every page address the site has published. A line that is neither a page
 in `out/` nor the source of a rule in `_redirects` fails `addresses`: a page that moves keeps its
-old address as a redirect. After adding pages, `node scripts/check-site.mjs --write-addresses`
-rewrites the list from `out/`; review the diff, as a removed line is a published address gone.
+old address as a redirect. After adding pages,
+`node --experimental-strip-types scripts/check-site.mjs --write-addresses` rewrites the list from
+`out/`; review the diff, as a removed line is a published address gone.
 
 The budget is a ceiling taken from measurement, not a goal: product pages (`/`, `/product`,
 `/roadmap`) loaded 139.3 kB of JS (gzip) at the first build, and an empty page of the pinned

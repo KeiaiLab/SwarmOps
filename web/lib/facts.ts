@@ -43,26 +43,31 @@ const GROUP = /^### (.+?)\s*$/;
 const ENTRY = /^- (.*)$/;
 const CONTINUATION = /^\s+\S/;
 
-/** The heading line of `version`'s released section, e.g. `## [0.11.0] - 2026-11-09`. */
-function releaseHeading(version: string): RegExp {
-  const escaped = version.replace(/\./g, '\\.');
-  return new RegExp(`^## \\[${escaped}\\] - (\\d{4}-\\d{2}-\\d{2})\\s*$`);
+// A released section's heading line; `## [Unreleased]` has no date and is none.
+const RELEASE_HEADING = /^## \[([^\]]+)\] - (\d{4}-\d{2}-\d{2})\s*$/;
+
+/** The released section a line opens, e.g. `## [0.11.0] - 2026-11-09`, or null. */
+function headingOf(line: string): ReleaseHeading | null {
+  const match = RELEASE_HEADING.exec(line);
+  return match ? { version: match[1], date: match[2] } : null;
 }
 
 function noSection(version: string): Error {
   return new Error(`CHANGELOG.md: no \`## [${version}] - YYYY-MM-DD\` section for the tag v${version}`);
 }
 
+/** Every released section's heading in file order, the newest first. */
+export function releaseHeadings(changelog: string): ReleaseHeading[] {
+  return changelog.split('\n').flatMap((line) => headingOf(line) ?? []);
+}
+
 /** The released section of `version`, wherever it sits; throws when the changelog has none. */
 export function releaseSection(changelog: string, version: string): ReleaseHeading {
-  const heading = releaseHeading(version);
-  for (const line of changelog.split('\n')) {
-    const match = heading.exec(line);
-    if (match) {
-      return { version, date: match[1] };
-    }
+  const section = releaseHeadings(changelog).find((heading) => heading.version === version);
+  if (!section) {
+    throw noSection(version);
   }
-  throw noSection(version);
+  return section;
 }
 
 /**
@@ -80,7 +85,6 @@ export function parseUnreleased(changelog: string, version: string): UnreleasedG
   }
 
   // 2. Walk down to the tag's section; groups of one name merge, first appearance first.
-  const tagHeading = releaseHeading(version);
   const groups = new Map<string, string[]>();
   let group: string[] | null = null;
   let entry: string[] = [];
@@ -92,7 +96,7 @@ export function parseUnreleased(changelog: string, version: string): UnreleasedG
   };
   for (const line of lines.slice(start + 1)) {
     // 2a. The tag's section ends the scan.
-    if (tagHeading.test(line)) {
+    if (headingOf(line)?.version === version) {
       close();
       return [...groups].map(([name, entries]) => ({ group: name, entries }));
     }

@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { CadenceVerdict, cadence, parseUnreleased, releaseSection } from '../lib/facts.ts';
+import { CadenceVerdict, cadence, parseUnreleased, releaseHeadings, releaseSection } from '../lib/facts.ts';
 
 const LIMITS = { maxDays: 7, maxCommits: 200 };
 
@@ -119,4 +119,13 @@ test('cadence_at_limit_is_within', () => {
 test('entry_outside_group_throws', () => {
   const text = ['## [Unreleased]', '', '- No group.', '', '## [0.11.0] - 2026-11-09', ''].join('\n');
   assert.throws(() => parseUnreleased(text, '0.11.0'), /entry outside a `###` group/);
+});
+
+test('release_headings_newest_first_without_unreleased', () => {
+  // Only dated headings count: `## [Unreleased]` and `## Next` open no released section.
+  const text = ['## [Unreleased]', '', '## Next', '', '## [0.12.0] - 2026-11-12', '', '## [0.11.0] - 2026-11-09', ''].join('\n');
+  assert.deepEqual(releaseHeadings(text), [
+    { version: '0.12.0', date: '2026-11-12' },
+    { version: '0.11.0', date: '2026-11-09' },
+  ]);
 });

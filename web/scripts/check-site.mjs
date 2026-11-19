@@ -39,7 +39,8 @@
 //   twin-links         every docs page names its Markdown twin; twin links resolve [D45, D49]
 //   lookup             /api/lookup holds every command, tool and E_* code, each resolves [S24, D32]
 //   addresses          every line of addresses.txt is a page or a redirect source [D18]
-//   readme-home-drift  README's install line, version and status word equal Home's [S48]
+//   readme-home-drift  README's install line, version and status word equal Home's; a release
+//                      heading not yet tagged may put the README one version ahead [S48]
 //   home-samples       each line of Home's output samples is a line a guide recorded from a run,
 //                      ids and meta aside
 //   home-transfer      Home's gzip transfer reported; above 300 kB fails [S38]
@@ -47,10 +48,10 @@
 // A rule in ENFORCED fails the run; any other rule's findings print as PENDING, for a fix
 // slice to clear before the rule joins ENFORCED. An empty input (no page, no table) fails.
 //
-//   node scripts/check-site.mjs                    every check over out/
-//   node scripts/check-site.mjs --selftest         each rule finds a planted violation
-//   node scripts/check-site.mjs --pending          as the first, with every PENDING line
-//   node scripts/check-site.mjs --write-addresses  rewrites addresses.txt from out/
+//   node --experimental-strip-types scripts/check-site.mjs                    every check over out/
+//   node --experimental-strip-types scripts/check-site.mjs --selftest         each rule finds a planted violation
+//   node --experimental-strip-types scripts/check-site.mjs --pending          as the first, with every PENDING line
+//   node --experimental-strip-types scripts/check-site.mjs --write-addresses  rewrites addresses.txt from out/
 //
 // Exit 0 when every check passes, 1 otherwise, with one line per failure.
 import { createHash, randomBytes } from 'node:crypto';
@@ -58,6 +59,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { gzipSync } from 'node:zlib';
+
+// The CHANGELOG heading rule the build reads; a .ts file, so node runs this script with
+// --experimental-strip-types.
+import { releaseHeadings } from '../lib/facts.ts';
 
 const WEB = path.resolve(import.meta.dirname, '..');
 const REPO = path.resolve(WEB, '..');
@@ -307,6 +312,7 @@ const VERSION = /\bv?(\d+)\.(\d+)\.(\d+)\b/g; // S17
 const RELEASED_HEADING = /^## \[(\d+)\.(\d+)\.(\d+)\] - \d{4}-\d{2}-\d{2}\s*$/m; // S17
 const STATUS_WORD = /\b(pre-release|alpha|beta|experimental)\b/i; // S48
 const README_VERSION = /\bv(\d+\.\d+\.\d+)\b/; // S48
+const VERSION_PAIR = 'version'; // S48: the pair an untagged release heading excuses
 const LITERAL_SIZE = 'text-['; // S32
 // S33: a spacing utility with a pixel literal or a half step. `mt-[3px]`, `gap-2.5`, `-mb-0.5`.
 const SPACING = 'p|px|py|pt|pr|pb|pl|ps|pe|m|mx|my|mt|mr|mb|ml|ms|me|gap|gap-x|gap-y|space-x|space-y';
@@ -1361,7 +1367,25 @@ function homeSamples(site) {
   return found;
 }
 
-// S48: README's install line, version and status word equal Home's.
+/**
+ * Whether the README is one release ahead of Home by design: between a release commit and its
+ * tag, the README names the newest dated CHANGELOG heading and Home the newest tag, a heading
+ * below it.
+ *
+ *   ## [0.13.0] - 2026-11-18   <- README (`ours`), no tag yet
+ *   ## [0.12.0] - 2026-11-18   <- Home (`theirs`), the newest tag
+ */
+function aheadOfTag(site, ours, theirs) {
+  const file = path.join(site.repo, 'CHANGELOG.md');
+  if (!existsSync(file)) {
+    return false;
+  }
+  const versions = releaseHeadings(readFileSync(file, 'utf8')).map((heading) => heading.version);
+  return versions[0] === ours && versions.indexOf(theirs) > 0;
+}
+
+// S48: README's install line and status word equal Home's; its version too, or it is the newest
+// CHANGELOG heading above Home's, a release commit not yet tagged.
 function readmeHomeDrift(site) {
   const found = [];
   const html = homeOf(site, found);
@@ -1381,11 +1405,12 @@ function readmeHomeDrift(site) {
     found.push(`README.md:0: install line "${install}" not on Home`);
   }
   const pairs = [
-    ['version', README_VERSION.exec(prose)?.[1], README_VERSION.exec(home)?.[1]],
+    [VERSION_PAIR, README_VERSION.exec(prose)?.[1], README_VERSION.exec(home)?.[1]],
     ['status word', STATUS_WORD.exec(prose)?.[1]?.toLowerCase(), STATUS_WORD.exec(home)?.[1]?.toLowerCase()],
   ];
   for (const [what, ours, theirs] of pairs) {
-    if (!ours || ours !== theirs) {
+    const untagged = what === VERSION_PAIR && Boolean(ours && theirs) && aheadOfTag(site, ours, theirs);
+    if (!ours || (ours !== theirs && !untagged)) {
       found.push(`README.md:0: ${what} "${ours}" differs from Home's "${theirs}"`);
     }
   }
@@ -1670,6 +1695,28 @@ const MUTATIONS = {
   },
 };
 
+// readme-home-drift between a release commit and its tag: Home shows the newest tag, the README the
+// version of the newest dated CHANGELOG heading. Each case: what it is, its edit, whether it passes.
+const FX_NEXT = '0.12.0';
+const FX_NO_HEADING = '0.14.0';
+const headNext = (f) => edit(f, 'CHANGELOG.md', `## [${FX_RELEASE}]`, `## [${FX_NEXT}] - 2026-11-12\n\n## [${FX_RELEASE}]`);
+const readmeAt = (f, version) => edit(f, 'README.md', `v${FX_RELEASE}`, `v${version}`);
+const DRIFT_CASES = [
+  ['README at the newest heading, untagged, above Home\'s', (f) => {
+    headNext(f);
+    readmeAt(f, FX_NEXT);
+  }, true],
+  ['README at a version no heading holds', (f) => readmeAt(f, FX_NO_HEADING), false],
+  ['README at a version no heading holds, an untagged heading above Home\'s', (f) => {
+    headNext(f);
+    readmeAt(f, FX_NO_HEADING);
+  }, false],
+  ['README at the newest heading, Home at a version no heading holds', (f) => {
+    edit(f, 'CHANGELOG.md', `## [${FX_RELEASE}]`, `## [${FX_NEXT}]`);
+    readmeAt(f, FX_NEXT);
+  }, false],
+];
+
 /** Writes a fixture tree into a fresh temporary directory and runs the rules over it. */
 function runFixture(files, only = null) {
   const root = mkdtempSync(path.join(tmpdir(), 'check-site-'));
@@ -1709,6 +1756,18 @@ function selftest() {
       continue;
     }
     console.log(`check-site: selftest ${name} finds ${findings[0].slice(0, 110)}`);
+  }
+
+  // 3. The version pair of readme-home-drift, case by case.
+  for (const [what, mutate, passes] of DRIFT_CASES) {
+    const files = fixture();
+    mutate(files);
+    const findings = runFixture(files, 'readme-home-drift').get('readme-home-drift');
+    if ((findings.length === 0) !== passes) {
+      problems.push(`readme-home-drift: ${what}: ${passes ? `reported: ${findings[0]}` : 'not reported'}`);
+      continue;
+    }
+    console.log(`check-site: selftest readme-home-drift: ${what}: ${passes ? 'passes' : `finds ${findings[0].slice(0, 80)}`}`);
   }
 
   for (const problem of problems) {
