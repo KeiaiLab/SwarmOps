@@ -426,6 +426,142 @@ fn this_repository_s_gate_fits_its_job() {
     );
 }
 
+/// This repository's site and server checks declare, as their `inputs`, the paths their workflows
+/// already decide by: `site-check` the `site_paths` of `.github/freshness.json`, string for
+/// string, and the two server checks `server.yml`'s `on.push.paths`, an entry with `*` inside a
+/// segment (which the grammar does not take) written out as the files of this checkout it
+/// takes. Until the workflows ask `check plan`, the lists live twice, and this holds them
+/// equal: a path added to one side alone, or a fourth `scripts/server-*` file, fails here. Then
+/// the binary plans a table of paths as the workflows decide them.
+#[test]
+fn this_repository_s_inputs_are_its_workflows_paths() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |path: &str| fs::read_to_string(root.join(path)).unwrap();
+    let lab = Lab::new();
+    let listed = list_dir(&lab, &root).ok();
+    let inputs_of = |name: &str| -> Vec<String> {
+        let checks = listed["checks"].as_array().unwrap();
+        let check = checks.iter().find(|c| c["name"] == name).expect(name);
+        let inputs = check["inputs"].as_array().map_or(&[][..], Vec::as_slice);
+        (inputs.iter())
+            .map(|p| p.as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // 1. The site check: freshness.json's `site_paths`.
+    let freshness: Value = serde_json::from_str(&read(".github/freshness.json")).unwrap();
+    let site_paths: Vec<String> = (freshness["site_paths"].as_array().unwrap().iter())
+        .map(|p| p.as_str().unwrap().to_owned())
+        .collect();
+    assert!(site_paths.len() >= 5, "{site_paths:?}");
+    assert_eq!(inputs_of("site-check"), site_paths);
+
+    // 2. The server checks: server.yml's `on.push.paths`, a `name-*` entry as its files here.
+    let server = read(".github/workflows/server.yml");
+    let listed_paths: Vec<&str> = (server.lines())
+        .skip_while(|line| line.trim() != "paths:")
+        .skip(1)
+        .map_while(|line| line.trim().strip_prefix("- "))
+        .map(|entry| entry.trim_matches('"'))
+        .collect();
+    assert!(listed_paths.len() >= 5, "{listed_paths:?}");
+    let mut server_paths = Vec::new();
+    for entry in listed_paths {
+        let (dir, name) = entry.rsplit_once('/').unwrap_or(("", entry));
+        let partial = |prefix: &&str| !prefix.is_empty() && !prefix.contains('*');
+        let Some(prefix) = name.strip_suffix('*').filter(partial) else {
+            server_paths.push(entry.to_owned());
+            continue;
+        };
+        let mut files: Vec<String> = (fs::read_dir(root.join(dir)).unwrap())
+            .map(|file| file.unwrap().file_name().into_string().unwrap())
+            .filter(|file| file.starts_with(prefix))
+            .map(|file| format!("{dir}/{file}"))
+            .collect();
+        files.sort();
+        assert!(!files.is_empty(), "{entry} takes no file");
+        server_paths.extend(files);
+    }
+    assert_eq!(inputs_of("server-entrances"), server_paths);
+    assert_eq!(inputs_of("server-acceptance"), server_paths);
+
+    // 3. The gate's checks declare nothing: one recipe on the whole tree.
+    for whole in ["check", "check-compare", "lint-workflows"] {
+        assert_eq!(inputs_of(whole), Vec::<String>::new(), "{whole}");
+    }
+
+    // 4. Planned through the binary, as the workflows decide.
+    assert_plans_as_the_workflows_decide(&lab, &root);
+}
+
+/// This repository's site and server checks, planned through the binary for a table of changed
+/// paths, as the workflows decide them: `root` is the repository's, read in the directory form.
+fn assert_plans_as_the_workflows_decide(lab: &Lab, root: &Path) {
+    // 1. Which of the three a path needs.
+    let plan = |changed: &[&str]| -> Value {
+        let mut line = vec!["check", "plan", "--dir", root.to_str().unwrap()];
+        line.extend(["--stage", "manual"]);
+        for path in changed {
+            line.extend(["--changed", path]);
+        }
+        run_in(lab.store.tmp(), &[], &line, None).ok()
+    };
+    let verdict = |planned: &Value, name: &str| -> (String, String) {
+        let checks = planned["checks"].as_array().unwrap();
+        let check = checks.iter().find(|c| c["name"] == name).expect(name);
+        let word = |key: &str| check[key].as_str().unwrap().to_owned();
+        (word("verdict"), word("reason"))
+    };
+    let (run, skip) = (
+        ("run".to_owned(), "input_changed".to_owned()),
+        ("not_applicable".to_owned(), "inputs_unchanged".to_owned()),
+    );
+    let table: [(&str, bool, bool); 7] = [
+        ("web/app/page.tsx", true, false),
+        ("docs/roadmap.md", true, false),
+        ("justfile", true, false),
+        ("crates/swarmops-core/src/lib.rs", false, false),
+        ("packaging/x", false, true),
+        ("scripts/server-image.py", false, true),
+        ("crates/swarmops-ops/src/serve/access.rs", false, true),
+    ];
+    for (path, site, server) in table {
+        let planned = plan(&[path]);
+        let expect = |needed: bool| if needed { &run } else { &skip };
+        assert_eq!(&verdict(&planned, "site-check"), expect(site), "{path}");
+        assert_eq!(
+            &verdict(&planned, "server-entrances"),
+            expect(server),
+            "{path}"
+        );
+        assert_eq!(
+            &verdict(&planned, "server-acceptance"),
+            expect(server),
+            "{path}"
+        );
+        let lint = verdict(&planned, "lint-workflows");
+        assert_eq!(lint, ("run".to_owned(), "no_inputs".to_owned()), "{path}");
+    }
+
+    // 2. No path given, and the check file itself among them: everything runs.
+    for (changed, cause) in [
+        (&[][..], "paths_unknown"),
+        (&[".swarmops/checks.toml"], "check_file_changed"),
+    ] {
+        let planned = plan(changed);
+        assert_eq!(planned["widened"], cause, "{planned}");
+        for name in [
+            "site-check",
+            "server-entrances",
+            "server-acceptance",
+            "lint-workflows",
+        ] {
+            let widened = ("run".to_owned(), "widened".to_owned());
+            assert_eq!(verdict(&planned, name), widened, "{cause}: {name}");
+        }
+    }
+}
+
 /// What the `check` job's steps before the gate (checkout, the toolchain, install-action, the
 /// cache, and after the switch the pinned build's download) are allowed: a minute. Stated, not
 /// measured: it is to be read from the runners' recent runs before ci.yml switches to

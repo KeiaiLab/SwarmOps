@@ -3,6 +3,12 @@
 # parse fails the gate. Each timeout is its job's `timeout-minutes` in the workflow file, the two
 # `before-land` checks sharing the check job's; no run was measured.
 #
+# Inputs: the site and server checks declare the paths their workflows already decide by, so
+# that `so check plan --dir . --stage manual --changed-from <list> --nul` says which of them a
+# change needs. The test `check::this_repository_s_inputs_are_its_workflows_paths` holds each list
+# to its workflow's. The gate's checks declare none: one recipe on the whole tree, which every
+# change needs. A plan informs; no workflow asks it yet.
+#
 # Stages: `before-land` is the gate, what ci.yml's `check` job runs and what
 # `so check run --dir . --stage before-land` runs before a push. The `manual` checks run on
 # GitHub, in their own jobs, as before; later steps of M30 and M31 give them stages of their own.
@@ -45,6 +51,19 @@ stages = ["manual"]
 argv = ["just", "site-check"]
 timeout_s = 900
 stages = ["manual"]
+# What the site is built from: `site_paths` of .github/freshness.json, string for string, which
+# site.yml's `scope` job decides by (`docs/status/**` is under `docs/**`, and kept so that the two
+# lists are equal).
+inputs = [
+  "web/**",
+  "docs/**",
+  "CHANGELOG.md",
+  "scripts/install.sh",
+  "justfile",
+  ".github/workflows/site.yml",
+  ".github/freshness.json",
+  "docs/status/**",
+]
 
 # server.yml, job `entrances`, on its paths and weekly: stock git and so through sshd and nginx
 # (docker).
@@ -52,9 +71,32 @@ stages = ["manual"]
 argv = ["just", "server-entrances"]
 timeout_s = 1800
 stages = ["manual"]
+# server.yml's `on.push.paths`. Its `scripts/server-*` is no pattern of the grammar, where `*` is
+# a whole segment: the three files it takes are written out.
+inputs = [
+  "packaging/**",
+  "scripts/server-acceptance.py",
+  "scripts/server-entrance.py",
+  "scripts/server-image.py",
+  "scripts/packages.py",
+  "crates/swarmops-ops/src/serve/**",
+  "crates/swarmops-cli/src/commands/serve.rs",
+  ".github/workflows/server.yml",
+]
 
 # server.yml, job `acceptance`: the packages installed and accepted.
 [check.server-acceptance]
 argv = ["just", "server-acceptance"]
 timeout_s = 2700
 stages = ["manual"]
+# server.yml's `on.push.paths`, as `server-entrances` writes them.
+inputs = [
+  "packaging/**",
+  "scripts/server-acceptance.py",
+  "scripts/server-entrance.py",
+  "scripts/server-image.py",
+  "scripts/packages.py",
+  "crates/swarmops-ops/src/serve/**",
+  "crates/swarmops-cli/src/commands/serve.rs",
+  ".github/workflows/server.yml",
+]
