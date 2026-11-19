@@ -36,6 +36,7 @@ pub mod junit;
 pub mod lines;
 pub mod log;
 pub mod run;
+pub mod runs;
 pub mod sarif;
 
 use std::fs::OpenOptions;
