@@ -3,7 +3,8 @@
 //! append, rotation and read.
 //!
 //! ```text
-//!   append: one line < 4 KiB, one O_APPEND write, unsynced
+//!   append: one line < 4 KiB, one O_APPEND write, unsynced; the file a regular one, a link
+//!           not followed and a FIFO not waited on (the lock too)
 //!           └─ past the bound: the writer that takes <lock> renames <current> to <older>
 //!   lines:  <older>, then <current>; a torn last line is the reader's to skip
 //! ```
@@ -13,12 +14,17 @@
 
 use std::fs::{self, File, TryLockError};
 use std::io::{self, BufRead as _, BufReader, Write as _};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 
 use serde::Serialize;
 
 /// The longest line appended: one `write` of it is not interleaved with another's.
 pub(crate) const MAX_LINE: usize = 4 << 10;
+
+/// How a file written here is opened: a link is not followed and a FIFO does not block the open,
+/// since the directory may be one several accounts write.
+const OPEN_FLAGS: i32 = libc::O_NOFOLLOW | libc::O_NONBLOCK;
 
 /// The files of one kind of record, in their directory.
 #[derive(Debug, Clone, Copy)]
@@ -58,7 +64,12 @@ pub(crate) fn append<T: Serialize>(
 
     // 2. Appended, unsynced: diagnostics.
     let path = dir.join(files.current);
-    let mut file = File::options().append(true).create(true).open(&path)?;
+    let mut file = File::options()
+        .append(true)
+        .create(true)
+        .custom_flags(OPEN_FLAGS)
+        .open(&path)?;
+    regular(&file)?;
     file.write_all(&line)?;
     if file.metadata()?.len() <= bound {
         return Ok(());
@@ -76,7 +87,9 @@ pub(crate) fn rotate(dir: &Path, files: &Files, bound: u64) -> io::Result<()> {
         .write(true)
         .create(true)
         .truncate(false)
+        .custom_flags(OPEN_FLAGS)
         .open(dir.join(files.lock))?;
+    regular(&lock)?;
     match lock.try_lock() {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => return Ok(()),
@@ -88,6 +101,15 @@ pub(crate) fn rotate(dir: &Path, files: &Files, bound: u64) -> io::Result<()> {
         fs::rename(&path, dir.join(files.older))?;
     }
     Ok(())
+}
+
+/// An error unless `file`, opened to write, is a regular file: nothing is written to a device
+/// or a FIFO left where a records file belongs.
+fn regular(file: &File) -> io::Result<()> {
+    if file.metadata()?.is_file() {
+        return Ok(());
+    }
+    Err(io::Error::other("not a regular file"))
 }
 
 /// The lines of `files` in `dir`, streamed: the older file's, then the current one's. A file

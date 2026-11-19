@@ -56,8 +56,10 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   `E_INVALID_ARG` with `details.reason: run_lines_dir`). Past 64 MiB the file is renamed to the
   one older file, `run-lines.1.jsonl`. Nothing decides from a line: the file is not synced, and a
   line that cannot be appended is a `warning: run lines:` line on stderr, once a run, that
-  changes no outcome, envelope or exit code. `peak_rss_kib` is the sampled sum of the resident
-  memory of the check's process group, on Linux. The MCP tool `check_run` leaves the same lines.
+  changes no outcome, envelope or exit code; a link or a FIFO at the file's or its lock's path
+  is such a failure, not followed and not waited on. `peak_rss_kib` is the sampled sum of the
+  resident memory of the check's process group, on Linux. The MCP tool `check_run` leaves the
+  same lines.
 - `check runs`, and the MCP tool `check_runs`: the run lines of a workspace (`--ws`,
   `--ws-path`, or the one around the working directory), of a directory (`--dir`), or of the
   directory `--run-lines` or `SWARMOPS_CHECK_RUN_LINES_DIR` names, newest first by the time each

@@ -223,6 +223,53 @@ fn a_failed_append_warns_once() {
     assert_eq!(written(&dir).len(), 2);
 }
 
+/// A link or a FIFO where the lines' file or the rotation's lock belongs, as another account
+/// can leave in a shared directory: the link is not followed, its target unchanged, and the
+/// FIFO does not block; each is the one warning.
+#[test]
+fn a_file_that_is_not_regular_is_not_written() {
+    let line = CheckRunLine::new(1, RUN, "unit", CheckStage::BeforeLand, CheckOutcome::Passed);
+    let fifo = |path: &Utf8Path| {
+        let made = std::process::Command::new("mkfifo").arg(path).status();
+        assert!(made.unwrap().success());
+    };
+
+    // 1. The lines' file a link to another file.
+    let (_tmp, dir) = scratch();
+    let target = dir.join("precious");
+    std::fs::write(&target, "precious\n").unwrap();
+    let lines = dir.join("linked");
+    std::fs::create_dir(&lines).unwrap();
+    std::os::unix::fs::symlink(&target, lines.join(RUN_LINES_FILE)).unwrap();
+    let mut sink = Sink::resolve(Some(&lines), &dir);
+    let warning = sink.append(&line).expect("a link warns");
+    assert!(warning.contains(RUN_LINES_FILE), "{warning}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious\n");
+
+    // 2. The lines' file a FIFO no one reads.
+    let lines = dir.join("fifo");
+    std::fs::create_dir(&lines).unwrap();
+    fifo(&lines.join(RUN_LINES_FILE));
+    let mut sink = Sink::resolve(Some(&lines), &dir);
+    assert!(sink.append(&line).is_some(), "a FIFO warns");
+
+    // 3. The rotation's lock a link, then a FIFO: the append past the bound fails, the link's
+    //    target is not made, nothing is rotated.
+    for linked in [true, false] {
+        let lines = dir.join(format!("lock-{linked}"));
+        std::fs::create_dir(&lines).unwrap();
+        let made = dir.join(format!("made-{linked}"));
+        if linked {
+            std::os::unix::fs::symlink(&made, lines.join(RUN_LINES.lock)).unwrap();
+        } else {
+            fifo(&lines.join(RUN_LINES.lock));
+        }
+        assert!(append_within(&lines, &line, 0).is_err());
+        assert!(!made.exists());
+        assert!(lines.join(RUN_LINES_FILE).exists(), "not rotated");
+    }
+}
+
 /// Where lines go: the directory the flag names, made absolute; else the variable's, which must
 /// be absolute; else the form's own place. A named directory that is not there is made, its
 /// owner's alone; one that is there keeps its mode.
