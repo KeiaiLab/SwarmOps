@@ -27,8 +27,8 @@ pub use check::{
     CheckFindingLevel, CheckFindingOut, CheckListReq, CheckListResp, CheckLogEnd, CheckLogLineOut,
     CheckLogReq, CheckLogResp, CheckLogStream, CheckNotStarted, CheckOut, CheckOutcome,
     CheckReportFault, CheckReportFormat, CheckReportOut, CheckReportReadOut, CheckReportState,
-    CheckRunOut, CheckRunReq, CheckRunResp, CheckSectionOut, CheckStage, DEFAULT_CHECK_LOG_TAIL,
-    MAX_CHECK_LOG_TAIL,
+    CheckRunLine, CheckRunOut, CheckRunReq, CheckRunResp, CheckSectionOut, CheckStage,
+    DEFAULT_CHECK_LOG_TAIL, MAX_CHECK_LOG_TAIL,
 };
 pub use envelope::{API_VERSION, Envelope, LogCutOut, Meta, RecoveredOut};
 pub use error::{ErrorCode, OpError};

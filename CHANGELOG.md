@@ -49,6 +49,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - API types `CheckFindingOut`, `CheckFindingLevel`, `CheckReportReadOut`, `CheckReportFormat`,
   `CheckReportState` and `CheckReportFault`, a check's findings and the reports they came from;
   `CheckReportOut`, a report a check declares. `swarmops schema` prints them (238 types).
+- API type `CheckRunLine`, the run line a check of a run leaves: when it started, its run, name,
+  attempt, stage, tree, definition digest, wait, duration, outcome, exit code, findings, labels,
+  sampled peak memory and run directory. `swarmops schema CheckRunLine` prints it (239 types).
 
 ### Changed
 

@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 238 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 239 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -47,6 +47,7 @@ The 238 request, response and value types of the API, as `swarmops schema` print
 | [`CheckReportOut`](#checkreportout) | object | A report a check declares: a file in its tree, of a format `check run` reads into findings. |
 | [`CheckReportReadOut`](#checkreportreadout) | object | A report a check's findings were read from, as one run read it, after the check ended. |
 | [`CheckReportState`](#checkreportstate) | enumeration | What came of a report after its check. |
+| [`CheckRunLine`](#checkrunline) | object | One run line: one check of one run of `check run`, as the host that ran it appends it to its run lines file (`run-lines.jsonl`), one JSON object a line. |
 | [`CheckRunOut`](#checkrunout) | object | One check of a run: how it ended, and where its log is. |
 | [`CheckRunReq`](#checkrunreq) | object | `check_run` (CLI `check run`): run the checks of one stage of a workspace's tree, one at a time in name order. |
 | [`CheckRunResp`](#checkrunresp) | object | `check_run`: every selected check's outcome, in the order they ran. |
@@ -776,6 +777,32 @@ Kind: enumeration. `swarmops schema CheckReportState` prints its JSON Schema.
 | `"missing"` | Not there after the check. |
 | `"stale"` | There, but not written by this run of the check: left from before, and not read. |
 | `"refused"` | There, and not read as its format: `fault` says why. |
+
+## CheckRunLine
+
+One run line: one check of one run of `check run`, as the host that ran it appends it to its run lines file (`run-lines.jsonl`), one JSON object a line. Diagnostics: the file is not synced and nothing decides from it. Later releases add keys; none is removed or changes its meaning.
+
+Kind: object. `swarmops schema CheckRunLine` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `at` | `integer` (uint64) | yes | When the check started (for `not_started`: when it was tried), in Unix milliseconds on the host that ran it. |
+| `attempt` | `integer` (uint32) | yes | Which attempt of the check in its run this is, from 1. |
+| `check` | `string` | yes | The check's name. |
+| `definition_digest` | `string` | yes | The digest of the check's definition, as `check list` gives it (provisional). |
+| `duration_ms` | `integer` (uint64) | yes | The check's milliseconds, from its start to the end of its output; 0 for `not_started`. |
+| `exit_code` | `integer` (int32) or `null` | no | Its exit code, when it exited. |
+| `findings` | `integer` (uint64) | no | The findings read from its reports. Omitted when 0. |
+| `labels` | array of `string` | no | The runner labels the check requires. Omitted when it requires none. |
+| `outcome` | [`CheckOutcome`](#checkoutcome) | yes | How it ended; never `not_run`, which leaves no line. |
+| `peak_rss_kib` | `integer` (uint64) or `null` | no | The most resident memory the check's process group held at once, in KiB, as the runner sampled it: the sum over the group's processes, about once a second, on Linux. A spike between two samples is not seen. Omitted on other hosts, and for a check no sample saw. |
+| `run` | `string` | yes | The run's id: a UUID v7. |
+| `run_dir` | `string` or `null` | no | The run's directory on the host it ran on, absolute: where its record and logs are while the host keeps the run. Omitted when longer than 1,024 bytes. |
+| `stage` | [`CheckStage`](#checkstage) | yes | The stage run. |
+| `tree` | `string` or `null` | no | The root tree the check ran on: 64 hex digits. Omitted in the directory form, which knows no tree. |
+| `vouched` | `boolean` | yes | Whether only the caller stands behind the files the check ran on: `true` in the directory form. |
+| `wait_ms` | `integer` (uint64) | yes | The milliseconds from the run's start to the check's start: in a run of one check at a time, the time the checks before it took. |
+| `workspace` | `string` or `null` | no | The workspace's name. Omitted in the directory form. |
 
 ## CheckRunOut
 

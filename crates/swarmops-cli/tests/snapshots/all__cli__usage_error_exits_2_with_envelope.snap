@@ -323,6 +323,7 @@ expression: s.transcript()
             "CheckReportOut",
             "CheckReportReadOut",
             "CheckReportState",
+            "CheckRunLine",
             "CheckRunOut",
             "CheckRunReq",
             "CheckRunResp",

@@ -34,8 +34,8 @@ use swarmops_api::{
 use swarmops_api::{
     CheckFindingLevel, CheckFindingOut, CheckListReq, CheckListResp, CheckLogLineOut, CheckLogReq,
     CheckLogResp, CheckLogStream, CheckOut, CheckOutcome, CheckReportFormat, CheckReportOut,
-    CheckReportReadOut, CheckReportState, CheckRunOut, CheckRunReq, CheckRunResp, CheckSectionOut,
-    CheckStage,
+    CheckReportReadOut, CheckReportState, CheckRunLine, CheckRunOut, CheckRunReq, CheckRunResp,
+    CheckSectionOut, CheckStage,
 };
 use swarmops_api::{SnapshotWrite, WsSnapshotReq, WsSnapshotResp};
 use swarmops_api::{UpdateOut, UpdatePending, UpdatePendingKind};
@@ -209,6 +209,13 @@ fn every_item_new_fills_the_serde_defaults() {
     reads_back(&ChangeOut::new("x", ChangeOp::Put));
     reads_back(&CheckOut::new("x", Vec::new(), "x", 7, "x"));
     reads_back(&CheckRunOut::new("x", CheckOutcome::NotRun, "x", 7));
+    reads_back(&CheckRunLine::new(
+        7,
+        "x",
+        "x",
+        CheckStage::Manual,
+        CheckOutcome::Failed,
+    ));
     reads_back(&CheckSectionOut::new("x", 7, 7));
     reads_back(&CheckFindingOut::new(CheckFindingLevel::Error, "x"));
     reads_back(&CheckReportOut::new(CheckReportFormat::Sarif, "x"));

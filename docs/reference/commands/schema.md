@@ -98,6 +98,7 @@ swarmops schema NoSuchType
         "CheckReportOut",
         "CheckReportReadOut",
         "CheckReportState",
+        "CheckRunLine",
         "CheckRunOut",
         "CheckRunReq",
         "CheckRunResp",

@@ -118,6 +118,7 @@ const RESPONSES: &[&str] = &[
     "CheckFindingOut",
     "CheckReportOut",
     "CheckReportReadOut",
+    "CheckRunLine",
     "CheckRunOut",
     "CheckRunResp",
     "CheckSectionOut",

@@ -26,6 +26,16 @@
 //! `check log` reads one check's log of a run ([`CheckLogResp`]): its lines, each with its time
 //! and stream, and whether it has ended.
 //!
+//! Each check a run reaches leaves one run line ([`CheckRunLine`]) in a diagnostics file on the
+//! host that ran it: which check, of which run and tree, how long it waited and ran, and how it
+//! ended. Nothing decides from a run line.
+//!
+//! ```text
+//!   run-lines.jsonl:  {at, run, check, attempt, stage, tree?, vouched, workspace?,
+//!                      definition_digest, wait_ms, duration_ms, outcome, exit_code?, findings?,
+//!                      labels?, peak_rss_kib?, run_dir?}      one JSON object a line
+//! ```
+//!
 //! No request carries a path of the caller's host: a directory the caller names is read and
 //! run by the CLI alone, and its answer is the same type with `vouched` set. A result names the
 //! host's paths of its run directory and logs: a run happens on one host, and its logs stay
@@ -752,6 +762,95 @@ pub enum CheckReportFault {
     Io,
 }
 
+/// One run line: one check of one run of `check run`, as the host that ran it appends it to its
+/// run lines file (`run-lines.jsonl`), one JSON object a line. Diagnostics: the file is not
+/// synced and nothing decides from it. Later releases add keys; none is removed or changes its
+/// meaning.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckRunLine {
+    /// When the check started (for `not_started`: when it was tried), in Unix milliseconds on
+    /// the host that ran it.
+    pub at: u64,
+    /// The run's id: a UUID v7.
+    pub run: String,
+    /// The check's name.
+    pub check: String,
+    /// Which attempt of the check in its run this is, from 1.
+    pub attempt: u32,
+    /// The stage run.
+    pub stage: CheckStage,
+    /// The root tree the check ran on: 64 hex digits. Omitted in the directory form, which knows
+    /// no tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
+    /// Whether only the caller stands behind the files the check ran on: `true` in the directory
+    /// form.
+    pub vouched: bool,
+    /// The workspace's name. Omitted in the directory form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// The digest of the check's definition, as `check list` gives it (provisional).
+    pub definition_digest: String,
+    /// The milliseconds from the run's start to the check's start: in a run of one check at a
+    /// time, the time the checks before it took.
+    pub wait_ms: u64,
+    /// The check's milliseconds, from its start to the end of its output; 0 for `not_started`.
+    pub duration_ms: u64,
+    /// How it ended; never `not_run`, which leaves no line.
+    pub outcome: CheckOutcome,
+    /// Its exit code, when it exited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// The findings read from its reports. Omitted when 0.
+    #[serde(default, skip_serializing_if = "crate::ops::is_zero")]
+    pub findings: u64,
+    /// The runner labels the check requires. Omitted when it requires none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// The most resident memory the check's process group held at once, in KiB, as the runner
+    /// sampled it: the sum over the group's processes, about once a second, on Linux. A spike
+    /// between two samples is not seen. Omitted on other hosts, and for a check no sample saw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_rss_kib: Option<u64>,
+    /// The run's directory on the host it ran on, absolute: where its record and logs are while
+    /// the host keeps the run. Omitted when longer than 1,024 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_dir: Option<String>,
+}
+
+impl CheckRunLine {
+    /// The line of `check` of `run`, started at `at`, of `stage`, ended as `outcome`: attempt
+    /// 1, not vouched, no digest, no wait, no duration, nothing else known.
+    pub fn new(
+        at: u64,
+        run: impl Into<String>,
+        check: impl Into<String>,
+        stage: CheckStage,
+        outcome: CheckOutcome,
+    ) -> Self {
+        Self {
+            at,
+            run: run.into(),
+            check: check.into(),
+            attempt: 1,
+            stage,
+            tree: None,
+            vouched: false,
+            workspace: None,
+            definition_digest: String::new(),
+            wait_ms: 0,
+            duration_ms: 0,
+            outcome,
+            exit_code: None,
+            findings: 0,
+            labels: Vec::new(),
+            peak_rss_kib: None,
+            run_dir: None,
+        }
+    }
+}
+
 /// `check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines. Reads
 /// only: no lock, nothing written.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
@@ -903,4 +1002,77 @@ fn default_rev() -> Rev {
 
 fn default_stages() -> Vec<CheckStage> {
     vec![CheckStage::BeforeLand]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use serde_json::Value;
+
+    use super::{CheckOutcome, CheckRunLine, CheckStage};
+
+    /// The names of the properties `T`'s schema declares.
+    fn properties<T: schemars::JsonSchema>() -> BTreeSet<String> {
+        let schema = schemars::schema_for!(T).to_value();
+        let names = schema["properties"].as_object().map(|p| p.keys().cloned());
+        names.into_iter().flatten().collect()
+    }
+
+    /// A run line with every field set writes each of them, the schema names exactly those, and
+    /// the line reads back.
+    #[test]
+    fn every_run_line_field_is_in_the_schema() {
+        // 1. Every field set.
+        let run = "0193a5b0-0000-7000-8000-000000000001";
+        let mut line = CheckRunLine::new(1, run, "unit", CheckStage::Manual, CheckOutcome::Failed);
+        line.attempt = 2;
+        line.tree = Some("ab".repeat(32));
+        line.vouched = true;
+        line.workspace = Some("w".to_owned());
+        line.definition_digest = "cd".repeat(32);
+        line.wait_ms = 3;
+        line.duration_ms = 4;
+        line.exit_code = Some(5);
+        line.findings = 6;
+        line.labels = vec!["linux".to_owned()];
+        line.peak_rss_kib = Some(7);
+        line.run_dir = Some("/runs/r".to_owned());
+
+        // 2. Written, its keys are the schema's properties, in the struct's order, and it reads
+        //    back.
+        let text = serde_json::to_string(&line).unwrap();
+        let Value::Object(written) = serde_json::from_str(&text).unwrap() else {
+            panic!("a run line is written as an object");
+        };
+        let keys: BTreeSet<String> = written.keys().cloned().collect();
+        assert_eq!(
+            keys,
+            properties::<CheckRunLine>(),
+            "fields against the schema"
+        );
+        assert!(text.starts_with(r#"{"at":1,"run":"#), "{text}");
+        let read: CheckRunLine = serde_json::from_value(Value::Object(written)).unwrap();
+        assert_eq!(read, line, "read back");
+    }
+
+    /// A line of the fewest keys reads, with a key no build knows; one without a required key
+    /// does not.
+    #[test]
+    fn a_run_line_reads_with_its_required_keys_alone() {
+        let least = serde_json::json!({
+            "at": 1, "run": "r", "check": "unit", "attempt": 1, "stage": "before-land",
+            "vouched": false, "definition_digest": "", "wait_ms": 0, "duration_ms": 0,
+            "outcome": "passed", "later": true,
+        });
+        let read: CheckRunLine = serde_json::from_value(least.clone()).unwrap();
+        let built = CheckRunLine::new(1, "r", "unit", CheckStage::BeforeLand, CheckOutcome::Passed);
+        assert_eq!(read, built, "the constructor's defaults");
+        let mut short = least;
+        short.as_object_mut().unwrap().remove("outcome");
+        assert!(
+            serde_json::from_value::<CheckRunLine>(short).is_err(),
+            "no outcome"
+        );
+    }
 }
