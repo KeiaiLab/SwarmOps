@@ -1768,7 +1768,7 @@ pub enum CheckCommand {
     /// passed over and counted in skipped. The lines are diagnostics, appended unsynced: nothing
     /// decides from them. Reads only: no identity, no lock, nothing written, no store operation.
     Runs(Box<RunsArgs>),
-    /// Read a check's log of a run of a workspace, or of a directory with --dir.
+    /// Read a check's log of a run, or with --failed the logs of its checks that did not pass.
     ///
     /// The run is --run RUN, else the newest run that ran CHECK (with --follow, the newest still
     /// running first), of the workspace (--ws, --ws-path, else the one around the working
@@ -1779,6 +1779,16 @@ pub enum CheckCommand {
     /// line for each batch of lines the check writes, looking again every --interval-ms, and
     /// ends with the envelope that holds the log's end, exit 0; --human prints the lines as the
     /// log holds them. Reads only: no identity, nothing written, no store operation.
+    ///
+    /// --failed, in place of CHECK, reads the log of every check that did not pass in the run
+    /// --run names, else in the newest run: the first one's log is the answer, as check log
+    /// gives it for that check, failed names all of them in run order, and more holds the logs
+    /// of the others, each its last --tail lines; at most 20 logs and 100,000 lines, the rest
+    /// counted in logs_omitted. A run with one failed check answers that log alone. A run where
+    /// none failed is E_INVALID_ARG. --human prints the logs one after another, a line
+    /// ==> NAME <== before each when there are several. --run-lines DIR, with --run, finds the
+    /// run through the run lines in DIR instead of a workspace or --dir: its line names where
+    /// the run was kept.
     Log {
         #[command(flatten)]
         at: WsAt,
@@ -1786,12 +1796,27 @@ pub enum CheckCommand {
         #[arg(long, value_name = "DIR", conflicts_with_all = ["name", "ws_path"])]
         dir: Option<Utf8PathBuf>,
         /// The check whose log to read.
-        #[arg(value_name = "CHECK")]
-        check: String,
-        /// The run, by its id (default: the newest that ran CHECK).
+        #[arg(
+            value_name = "CHECK",
+            required_unless_present = "failed",
+            conflicts_with = "failed"
+        )]
+        check: Option<String>,
+        /// Read the logs of the checks of the run that did not pass, in place of CHECK's.
+        #[arg(long, conflicts_with = "follow")]
+        failed: bool,
+        /// Find the run through the run lines in DIR, which name where it was kept.
+        #[arg(
+            long = "run-lines",
+            value_name = "DIR",
+            requires = "run",
+            conflicts_with_all = ["name", "ws_path", "dir"]
+        )]
+        run_lines: Option<Utf8PathBuf>,
+        /// The run, by its id (default: the newest that ran CHECK, or with --failed the newest).
         #[arg(long, value_name = "RUN")]
         run: Option<String>,
-        /// The most lines to give first, the last ones.
+        /// The most lines to give first, the last ones; with --failed, of each log.
         #[arg(
             long,
             value_name = "N",

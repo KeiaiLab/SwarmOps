@@ -1,7 +1,7 @@
 //! Run lines, `check runs` and `check log --failed` (M31-11, M31-12, M31-13) through the binary:
 //! the line each check of a run leaves, where it goes, its rotation, and a failed append; the
 //! lines read back filtered, newest first, a page at a time with a cursor, by the command and by
-//! the MCP tool.
+//! the MCP tool; and the logs of a run's failed checks, also for a run found through its lines.
 //!
 //! Every fixture check is a program with its arguments: `sh -c …` where a script is wanted.
 
@@ -597,4 +597,246 @@ fn the_tool_check_runs_answers_as_the_command_does() {
     );
     let unknown = lab.so(&["check", "runs", "--ws", "nope"]);
     assert_ne!(unknown.exit, 0, "{unknown}");
+}
+
+/// `check log` and `args` for the run `run` of `tree`'s directory, in the format `format`.
+fn log_of(tree: &Tree, format: &[&str], run: &str, args: &[&str]) -> Out {
+    let runs_root = tree.runs();
+    let env = [("SWARMOPS_CHECK_RUNS_DIR", runs_root.to_str().unwrap())];
+    let dir = tree.dir();
+    let mut line = format.to_vec();
+    line.extend_from_slice(&["check", "log", "--dir", dir.to_str().unwrap(), "--run", run]);
+    line.extend_from_slice(args);
+    run_in(tree.tmp(), &env, &line, None)
+}
+
+/// `--failed` on a run with one failure prints that log alone (M31-13): the envelope is that
+/// check's log with its name in `failed`, `--human` prints byte for byte what `check log NAME`
+/// prints, no line of another check is in it, and `--tail` bounds it.
+#[test]
+fn failed_on_a_run_with_one_failure_prints_that_log_alone() {
+    // 1. Three checks, one failed.
+    let tree = Tree::new(THREE);
+    let run = failed_run(&tree.run(&[], &[]));
+    let id = run["run"].as_str().unwrap();
+    assert_eq!(run["failed"], json!(["bad"]));
+
+    // 2. The envelope: `check log bad`'s, and `failed`.
+    let failed = log_of(&tree, &[], id, &["--failed"]).ok();
+    let mut alone = log_of(&tree, &[], id, &["bad"]).ok();
+    assert!(
+        alone.get("failed").is_none(),
+        "one check's log names no failed: {alone}"
+    );
+    alone["failed"] = json!(["bad"]);
+    assert_eq!(failed, alone);
+    assert!(
+        failed.get("more").is_none() && failed.get("logs_omitted").is_none(),
+        "{failed}"
+    );
+    let texts: Vec<&str> = (failed["lines"].as_array().unwrap().iter())
+        .map(|line| line["text"].as_str().unwrap())
+        .collect();
+    assert!(
+        texts.contains(&"one") && texts.contains(&"two"),
+        "{texts:?}"
+    );
+    assert!(
+        !texts.contains(&"fine"),
+        "another check's output: {texts:?}"
+    );
+
+    // 3. `--human`: byte for byte the one log, with no heading.
+    let human = log_of(&tree, &["--human"], id, &["--failed"]);
+    let human_alone = log_of(&tree, &["--human"], id, &["bad"]);
+    assert_eq!(
+        (human.exit, human.stdout.as_str()),
+        (0, human_alone.stdout.as_str())
+    );
+    assert!(
+        human.stdout.contains(" out one\n") && !human.stdout.contains("==>"),
+        "{human}"
+    );
+    assert!(!human.stdout.contains("fine"), "{human}");
+
+    // 4. `--tail 1`: one line, the last; the newest run when none is named.
+    let last = log_of(&tree, &[], id, &["--failed", "--tail", "1"]).ok();
+    assert_eq!(last["lines"].as_array().unwrap().len(), 1, "{last}");
+    assert_eq!(last["first_line"], last["total_lines"]);
+    let dir = tree.dir();
+    let runs_root = tree.runs();
+    let env = [("SWARMOPS_CHECK_RUNS_DIR", runs_root.to_str().unwrap())];
+    let newest = run_in(
+        tree.tmp(),
+        &env,
+        &["check", "log", "--dir", dir.to_str().unwrap(), "--failed"],
+        None,
+    )
+    .ok();
+    assert_eq!(newest, failed);
+}
+
+/// Several failures come in run order, the first at the top and the rest in `more`, with a
+/// heading before each in `--human`; a green run has none to read; `--failed` goes with neither
+/// a check nor `--follow`.
+#[test]
+fn several_failures_come_in_run_order_and_none_is_refused() {
+    // 1. Two failed checks and one that passes between them.
+    let tree = Tree::new(
+        "[check.a-bad]\nargv = [\"sh\", \"-c\", \"echo first; exit 1\"]\n\
+         [check.b-ok]\nargv = [\"sh\", \"-c\", \"echo fine\"]\n\
+         [check.c-bad]\nargv = [\"sh\", \"-c\", \"echo second >&2; exit 2\"]\n",
+    );
+    let out = tree.run(&[], &[]);
+    let hint = out.envelope()["error"]["hint"].as_str().unwrap().to_owned();
+    let run = failed_run(&out);
+    let id = run["run"].as_str().unwrap();
+    assert!(
+        hint.contains("check log --failed --dir") && hint.ends_with(&format!("--run {id}")),
+        "{hint}"
+    );
+
+    // 2. The first at the top, the second in `more`, both named, in run order.
+    let failed = log_of(&tree, &[], id, &["--failed"]).ok();
+    assert_eq!(
+        (&failed["check"], &failed["failed"]),
+        (&json!("a-bad"), &json!(["a-bad", "c-bad"]))
+    );
+    let more = failed["more"].as_array().unwrap();
+    assert_eq!(more.len(), 1, "{failed}");
+    assert_eq!(
+        more[0],
+        log_of(&tree, &[], id, &["c-bad"]).ok(),
+        "as `check log c-bad` gives it"
+    );
+    assert!(failed.get("logs_omitted").is_none(), "{failed}");
+
+    // 3. `--human`: a heading before each log, the logs as `check log` prints them.
+    let human = log_of(&tree, &["--human"], id, &["--failed"]);
+    let first = log_of(&tree, &["--human"], id, &["a-bad"]).stdout;
+    let second = log_of(&tree, &["--human"], id, &["c-bad"]).stdout;
+    assert_eq!(
+        human.stdout,
+        format!("==> a-bad <==\n{first}==> c-bad <==\n{second}"),
+        "{human}"
+    );
+    assert!(!human.stdout.contains("fine"), "{human}");
+
+    // 4. A green run: nothing failed.
+    let green = Tree::new("[check.ok]\nargv = [\"true\"]\n");
+    let ran = green.run(&[], &[]).ok();
+    let none =
+        log_of(&green, &[], ran["run"].as_str().unwrap(), &["--failed"]).err("E_INVALID_ARG", 2);
+    assert_eq!(
+        (
+            &none["details"]["reason"],
+            &none["details"]["run"],
+            &none["details"]["running"]
+        ),
+        (&json!("none_failed"), &ran["run"], &json!(false))
+    );
+    assert!(
+        none["hint"]
+            .as_str()
+            .unwrap()
+            .contains("check log NAME --dir"),
+        "{none}"
+    );
+
+    // 5. With a check, with --follow, or with neither a check nor --failed: the command line's
+    //    own refusal, nothing read.
+    for args in [&["--failed", "a-bad"][..], &["--failed", "--follow"], &[]] {
+        let refused = log_of(&tree, &[], id, args);
+        assert_eq!(refused.exit, 2, "{args:?}: {refused}");
+        assert_eq!(
+            refused.envelope()["error"]["code"],
+            "E_INVALID_ARG",
+            "{args:?}: {refused}"
+        );
+    }
+}
+
+/// Through the lines: `check log --run R --run-lines L` finds the run by its line, from any
+/// working directory and with no `--dir`; a run the lines do not hold, and one whose directory
+/// is gone, are refused with their reasons.
+#[test]
+fn a_run_s_logs_are_found_through_its_lines() {
+    // 1. A run whose lines went to a directory of their own.
+    let tree = Tree::new(THREE);
+    let lines = tree.tmp().join("lines");
+    let run = failed_run(&tree.run(&["--run-lines", lines.to_str().unwrap()], &[]));
+    let id = run["run"].as_str().unwrap();
+    let direct = log_of(&tree, &[], id, &["--failed"]).ok();
+
+    // 2. From another directory, with the lines alone: the same answers, for the failed checks
+    //    and for one check, and with no variable naming the runs.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let through = |args: &[&str]| {
+        let mut line = vec![
+            "check",
+            "log",
+            "--run",
+            id,
+            "--run-lines",
+            lines.to_str().unwrap(),
+        ];
+        line.extend_from_slice(args);
+        run_in(
+            elsewhere.path(),
+            &[("SWARMOPS_CHECK_RUNS_DIR", "")],
+            &line,
+            None,
+        )
+    };
+    assert_eq!(through(&["--failed"]).ok(), direct);
+    assert_eq!(through(&["ok"]).ok(), log_of(&tree, &[], id, &["ok"]).ok());
+    let human = through(&["--failed", "--tail", "1"]);
+    assert_eq!(human.ok()["lines"].as_array().unwrap().len(), 1);
+
+    // 3. A run the lines do not hold; the flag without a run, and with --dir.
+    let other = "0193f1e2-0000-7000-8000-000000000000";
+    let line = [
+        "check",
+        "log",
+        "--failed",
+        "--run",
+        other,
+        "--run-lines",
+        lines.to_str().unwrap(),
+    ];
+    let unknown = run_in(elsewhere.path(), &[], &line, None).err("E_INVALID_ARG", 2);
+    assert_eq!(
+        (&unknown["details"]["reason"], &unknown["details"]["run"]),
+        (&json!("run"), &json!(other))
+    );
+    let no_run = [
+        "check",
+        "log",
+        "--failed",
+        "--run-lines",
+        lines.to_str().unwrap(),
+    ];
+    assert_eq!(
+        run_in(elsewhere.path(), &[], &no_run, None).exit,
+        2,
+        "--run-lines needs --run"
+    );
+    let both = [&line[..], &["--dir", "."]].concat();
+    assert_eq!(
+        run_in(elsewhere.path(), &[], &both, None).exit,
+        2,
+        "--run-lines or --dir"
+    );
+
+    // 4. The run's directory removed, as past the runs kept: `run_gone`, naming what failed.
+    fs::remove_dir_all(run["dir"].as_str().unwrap()).unwrap();
+    let gone = through(&["--failed"]).err("E_INVALID_ARG", 2);
+    assert_eq!(
+        (&gone["details"]["reason"], &gone["details"]["failed"]),
+        (&json!("run_gone"), &json!(["bad"]))
+    );
+    assert!(
+        gone["hint"].as_str().unwrap().contains("newest 20 runs"),
+        "{gone}"
+    );
 }

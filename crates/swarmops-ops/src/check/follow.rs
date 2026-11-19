@@ -183,9 +183,6 @@ pub fn failed_logs(
         .filter(|check| found.ended || check.outcome != CheckOutcome::NotRun)
         .map(|check| check.name.clone())
         .collect();
-    if failed.is_empty() {
-        return Err(none_failed(&found, at));
-    }
 
     // 3. As many logs as the bounds give, each as `check log` reads it.
     let within_lines = (MAX_CHECK_LOG_TAIL / tail).max(1);
@@ -196,7 +193,7 @@ pub fn failed_logs(
         logs.push(log);
     }
 
-    // 4. The first at the top, the others beside it.
+    // 4. The first at the top, the others beside it; none failed: refused.
     let mut logs = logs.into_iter();
     let Some(mut first) = logs.next() else {
         return Err(none_failed(&found, at));

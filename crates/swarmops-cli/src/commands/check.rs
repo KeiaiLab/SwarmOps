@@ -22,12 +22,17 @@
 //! so check log CHECK --dir DIR | [--ws N] ─▶ the runs found (no store opened)
 //!                                         ─▶ check::follow::Follower: its last lines, and
 //!                                            with --follow one envelope a line as they come
+//! so check log --failed …                 ─▶ check::follow::failed_logs: the logs of the run's
+//!                                            checks that did not pass, in one envelope
+//! so check log … --run R --run-lines DIR  ─▶ check::follow::run_through_lines: the runs found
+//!                                            by the run's line, in place of --dir or --ws
 //! ```
 //!
 //! `check log --follow` prints more than one envelope: the first with the last `--tail` lines,
 //! then one for each look that found whole lines, flushed at once as `derive --follow` writes its
 //! envelopes, the last the one that holds the log's end, exit 0. With `--human` it prints the
-//! lines as the log holds them, control characters escaped, and nothing else.
+//! lines as the log holds them, control characters escaped, and nothing else; of several failed
+//! checks' logs, a line `==> NAME <==` before each.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write as _};
@@ -38,10 +43,11 @@ use std::time::Duration;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::Value;
 use swarmops_api::{
-    CheckListReq, CheckLogResp, CheckLogStream, CheckRunReq, CheckRunsReq, CheckRunsResp,
-    ErrorCode, OpError, Rev,
+    CheckListReq, CheckLogLineOut, CheckLogResp, CheckLogStream, CheckRunReq, CheckRunsReq,
+    CheckRunsResp, ErrorCode, OpError, Rev,
 };
 use swarmops_ops::check::follow::{self, Follower};
+use swarmops_ops::check::lines as check_lines;
 use swarmops_ops::check::run::{self as check_run, RunOpts, WS_RUNS_DIR};
 use swarmops_ops::check::runs;
 use swarmops_ws::RealFs;
@@ -206,12 +212,15 @@ fn lines_page(
     }
 }
 
-/// `check log`, which names operation `op`: a check's log of a run, once or followed.
+/// `check log`, which names operation `op`: a check's log of a run, once or followed, or the
+/// logs of the run's checks that did not pass.
 fn read_log(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Printed {
     let CheckCommand::Log {
         at,
         dir,
         check,
+        failed,
+        run_lines,
         run,
         tail,
         follow,
@@ -221,15 +230,30 @@ fn read_log(ctx: &Ctx<'_>, op: &'static str, command: CheckCommand) -> Printed {
         unreachable!("run passes check log its own command alone");
     };
 
-    // 1. The runs: of the directory, or of the workspace.
-    let runs = match &dir {
-        Some(dir) => context::check_runs_root(ctx.env)
-            .and_then(|root| follow::dir_runs(dir, root.as_deref())),
-        None => ws_runs(ctx, &at),
+    // 1. The runs: found through the run's line, or of the directory, or of the workspace.
+    let through = run_lines.as_deref().zip(run.as_deref());
+    let (runs, named) = match (through, &dir) {
+        (Some((lines_dir, run)), _) => {
+            let found = check_lines::named(Some(lines_dir), None)
+                .and_then(|lines_dir| lines_dir.ok_or_else(no_lines_dir))
+                .and_then(|lines_dir| follow::run_through_lines(&lines_dir, run));
+            (found, format!("--run-lines {lines_dir}"))
+        }
+        (None, Some(dir)) => {
+            let found = context::check_runs_root(ctx.env)
+                .and_then(|root| follow::dir_runs(dir, root.as_deref()));
+            (found, named_at(Some(dir), &at))
+        }
+        (None, None) => (ws_runs(ctx, &at), named_at(None, &at)),
     };
 
-    // 2. The log's last lines; with --follow, the rest as it comes.
-    let named = named_at(dir.as_deref(), &at);
+    // 2. The failed checks' logs, in one envelope.
+    let Some(check) = check.filter(|_| !failed) else {
+        let logs = runs.and_then(|runs| follow::failed_logs(&runs, &named, run.as_deref(), tail));
+        return log_printed(ctx, op, logs);
+    };
+
+    // 3. The check's log: its last lines; with --follow, the rest as it comes.
     let started =
         runs.and_then(|runs| Follower::start(&runs, &named, &check, run.as_deref(), tail, follow));
     let (follower, first) = match started {
@@ -326,21 +350,41 @@ fn follow_log(
 
 /// The answer of `check log`, printed: in the human format the log's lines as the log holds
 /// them, each control character escaped (`output::printable`, so that what a check printed cannot
-/// drive the terminal), and nothing else; else its envelope.
+/// drive the terminal), and nothing else; else its envelope. Several failed checks' logs come
+/// one after another, a line `==> NAME <==` before each; one log comes with no such line.
 fn log_printed(ctx: &Ctx<'_>, op: &str, resp: Result<CheckLogResp, OpError>) -> Printed {
-    match (ctx.format, resp) {
-        (Format::Human, Ok(resp)) => Printed {
-            stdout: (resp.lines.iter())
-                .map(|line| output::printable(&as_logged(line)) + "\n")
-                .collect(),
-            exit: 0,
-        },
-        (_, resp) => ctx.finish(op, ctx.used.meta(), resp),
+    let resp = match (ctx.format, resp) {
+        (Format::Human, Ok(resp)) => resp,
+        (_, resp) => return ctx.finish(op, ctx.used.meta(), resp),
+    };
+    let printed = |lines: &[CheckLogLineOut]| -> String {
+        (lines.iter())
+            .map(|line| output::printable(&as_logged(line)) + "\n")
+            .collect()
+    };
+    let mut stdout = String::new();
+    if resp.more.is_empty() {
+        stdout.push_str(&printed(&resp.lines));
+    } else {
+        let logs = std::iter::once((&resp.check, &resp.lines))
+            .chain(resp.more.iter().map(|log| (&log.check, &log.lines)));
+        for (check, lines) in logs {
+            let heading = output::printable(&format!("==> {check} <=="));
+            stdout.push_str(&heading);
+            stdout.push('\n');
+            stdout.push_str(&printed(lines));
+        }
     }
+    Printed { stdout, exit: 0 }
+}
+
+/// `E_INVALID_ARG` for a `--run-lines` that named no directory.
+fn no_lines_dir() -> OpError {
+    OpError::new(ErrorCode::InvalidArg, "--run-lines names no directory")
 }
 
 /// `line` as the log holds it: its time, its stream and its text; a line of `other` as it is.
-fn as_logged(line: &swarmops_api::CheckLogLineOut) -> String {
+fn as_logged(line: &CheckLogLineOut) -> String {
     let kind = match line.stream {
         CheckLogStream::Out => "out",
         CheckLogStream::Err => "err",

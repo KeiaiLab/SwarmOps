@@ -167,7 +167,10 @@ pub(super) static WS_TOOLS: [WsSpec; 15] = [
         description: "Reads a check's log of a workspace's run (the newest that ran it unless run \
                       is given): its last lines (tail, 1,000 by default), each with its time since \
                       the check's start, its stream and its text, and whether the log has ended \
-                      and how the check ended.",
+                      and how the check ended. With failed true in place of check, reads the \
+                      logs of every check that did not pass in the run (the newest unless run is \
+                      given): the first one's log, failed naming all of them, and the others' \
+                      logs in more, each its last tail lines; pass a tail of 200 or less.",
     },
     WsSpec {
         tool: WsTool::CheckRuns,

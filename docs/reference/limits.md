@@ -321,6 +321,7 @@ A response past these leaves the rest out, and says so in its fields; nothing fa
 | [Run lines kept](#run-lines-kept) | 67,108,864 bytes (64 MiB) | `swarmops_ops::check::lines::MAX_RUN_LINES_BYTES` | [`check run`](commands/check-run.md) |
 | [Run line](#run-line) | 4,096 bytes (4 KiB) | `swarmops_ops::check::lines::MAX_RUN_LINE_BYTES` | [`check run`](commands/check-run.md) |
 | [Run line's run directory](#run-lines-run-directory) | 1,024 bytes (1 KiB) | `swarmops_ops::check::lines::MAX_RUN_LINE_DIR_BYTES` | [`check run`](commands/check-run.md) |
+| [Failed checks' logs](#failed-checks-logs) | 20 logs | `swarmops_api::MAX_FAILED_LOGS` | [`check log`](commands/check-log.md) |
 | [Followed lines](#followed-lines) | 1,000 lines | `swarmops_ops::check::follow::MAX_FOLLOW_LINES` | [`check log`](commands/check-log.md) |
 | [Findings of a run](#findings-of-a-run) | 10,000 findings | `swarmops_ops::check::MAX_RUN_FINDINGS` | [`check run`](commands/check-run.md) |
 | [Findings' text of a run](#findings-text-of-a-run) | 4,194,304 bytes (4 MiB) | `swarmops_ops::check::MAX_RUN_FINDING_BYTES` | [`check run`](commands/check-run.md) |
@@ -467,6 +468,14 @@ The run's directory a run line names in `run_dir`: a longer path is left out of 
 - Value: 1,024 bytes (1 KiB).
 - Constant: `swarmops_ops::check::lines::MAX_RUN_LINE_DIR_BYTES`, in `crates/swarmops-ops/src/check/lines.rs`.
 - Commands: [`check run`](commands/check-run.md).
+
+### Failed checks' logs
+
+The logs one answer of `check log --failed` gives, the first failed checks' in run order, and no more of them than keep `--tail` times their count within 100,000 lines: the rest are named in `failed` and counted in `logs_omitted`.
+
+- Value: 20 logs.
+- Constant: `swarmops_api::MAX_FAILED_LOGS`, in `crates/swarmops-api/src/check.rs`.
+- Commands: [`check log`](commands/check-log.md).
 
 ### Followed lines
 

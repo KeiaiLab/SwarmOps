@@ -1381,6 +1381,47 @@ fn check_log_reads_a_workspace_s_run_as_its_tool_does() {
     );
     assert_eq!(tool["result"], read);
 
+    // The failed checks' logs: none in a green run; after a run with one, the tool answers as
+    // the command does, for the newest run and for a run named.
+    let none = lab
+        .so(&["check", "log", "--ws", "w1", "--failed"])
+        .err("E_INVALID_ARG", 2);
+    assert_eq!(none["details"]["reason"], "none_failed", "{none}");
+    let mut line = vec!["check", "run", "--ws", "w1", "--stage", "manual", "locked"];
+    line.extend(&ISOLATED);
+    let broke = failed_run(&lab.so(&line));
+    let failed = lab
+        .so(&["check", "log", "--ws", "w1", "--failed", "--tail", "5"])
+        .ok();
+    assert_eq!(
+        (&failed["run"], &failed["failed"], &failed["check"]),
+        (&broke["run"], &json!(["locked"]), &json!("locked"))
+    );
+    let tool = server.ok(
+        "check_log",
+        json!({"workspace": "w1", "failed": true, "tail": 5}),
+    );
+    assert_eq!(tool["result"], failed);
+    let run = broke["run"].as_str().unwrap();
+    let named = server.ok(
+        "check_log",
+        json!({"workspace": "w1", "failed": true, "run": run}),
+    );
+    assert_eq!(named["result"]["failed"], json!(["locked"]));
+    let green = ran["run"].as_str().unwrap();
+    let call = server.call(
+        "check_log",
+        json!({"workspace": "w1", "failed": true, "run": green}),
+    );
+    assert_eq!(call.envelope["error"]["details"]["reason"], "none_failed");
+    for arguments in [
+        json!({"workspace": "w1"}),
+        json!({"workspace": "w1", "check": "env", "failed": true}),
+    ] {
+        let call = server.call("check_log", arguments);
+        assert_eq!(call.envelope["error"]["details"]["reason"], "check");
+    }
+
     let other = lab
         .so(&["check", "log", "--ws", "w1", "nope"])
         .err("E_INVALID_ARG", 2);

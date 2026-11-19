@@ -1872,7 +1872,8 @@ mod tests {
 
     /// The grammar's lines that `cli::parse` refuses with their placeholders filled, so that
     /// [`shadowed`] cannot check them; each named, so that a new one is seen. A group without
-    /// its subcommand, or a leaf that needs one flag of a group, or a value other than `x`.
+    /// its subcommand, or a leaf that needs one flag of a group, or a value other than `x`, or
+    /// one of an optional argument and a flag (`check log`: `CHECK` or `--failed`).
     const SKIPPED: &[&str] = &[
         "",
         "queue",
@@ -1881,6 +1882,7 @@ mod tests {
         "ws resolve",
         "ws hook x",
         "check",
+        "check log",
         "ref",
         "ref set x x",
         "ref txn --move x",

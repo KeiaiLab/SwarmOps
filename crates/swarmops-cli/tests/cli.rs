@@ -576,7 +576,8 @@ const CHECK_LOG_FIXTURE: &str =
 /// `check log` (M31-3), its pinned JSON form, of a run kept as `check run --dir` keeps it (its
 /// record and its log written by the test, so that every time is the log's own): the whole log,
 /// each line with its time, its stream and its text, the sections as the runner's lines, the end
-/// with the outcome; `--tail 2` the last two lines; a check the run does not list, refused.
+/// with the outcome; `--tail 2` the last two lines; a check the run does not list, refused;
+/// `--failed`, the log of the run's one failed check, with its name in `failed`.
 #[test]
 fn check_log_golden() {
     // 1. A tree, and a run of it below the runs directory, as `check run --dir` keeps one.
@@ -594,11 +595,17 @@ fn check_log_golden() {
     let record = json!({"format": 1, "state": "ended", "result": {
         "vouched": true, "run": id, "stage": "before-land", "file": ".swarmops/checks.toml",
         "version": 1, "dir": run, "inherited_env": [], "inherited_all": false,
-        "cancelled": false, "failed": [], "duration_ms": 614,
-        "checks": [{"name": "sections", "outcome": "passed", "definition_digest": "ab",
+        "cancelled": false, "failed": ["broken"], "duration_ms": 614,
+        "checks": [{"name": "broken", "outcome": "failed", "definition_digest": "ef",
+                    "timeout_s": 900, "duration_ms": 12, "exit_code": 3,
+                    "log": format!("{run}/logs/broken.log")},
+                   {"name": "sections", "outcome": "passed", "definition_digest": "ab",
                     "timeout_s": 900, "duration_ms": 614, "exit_code": 0,
                     "log": format!("{run}/logs/sections.log")}]}});
     fs::write(format!("{run}/run.json"), record.to_string()).unwrap();
+    let broken = "    0.000 run start {\"check\":\"broken\"}\n    0.004 err no such file: x\n    \
+                  0.012 run end {\"outcome\":\"failed\",\"exit_code\":3,\"duration_ms\":12}\n";
+    fs::write(format!("{run}/logs/broken.log"), broken).unwrap();
     let runs = format!("{tmp}/runs");
     let env = [("SWARMOPS_CHECK_RUNS_DIR", runs.as_str())];
 
@@ -614,6 +621,11 @@ fn check_log_golden() {
     assert_eq!(tail["result"]["first_line"], 5);
     let other = s.run_env(&env, &["check", "log", "--dir", &dir, "lint"]);
     assert_eq!((other.exit, other.code()), (2, "E_INVALID_ARG"));
+
+    // The run's one failed check: its log alone, with its name in `failed`.
+    let failed = s.run_env(&env, &["check", "log", "--dir", &dir, "--failed"]);
+    assert_eq!(failed.exit, 0, "{}", failed.json);
+    assert_eq!(failed["result"]["failed"], json!(["broken"]));
     insta::assert_json_snapshot!(s.transcript());
 
     // 3. With --human, the lines as the log holds them, control characters escaped: a check's

@@ -1,6 +1,5 @@
 ---
 source: crates/swarmops-cli/tests/cli.rs
-assertion_line: 606
 expression: s.transcript()
 ---
 [
@@ -134,6 +133,58 @@ expression: s.transcript()
           "reason": "run"
         },
         "hint": "start one: swarmops check run --dir [tmp]/tree"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "check log --dir [tmp]/tree --failed",
+    "env": {
+      "SWARMOPS_CHECK_RUNS_DIR": "[tmp]/runs"
+    },
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "check_log",
+      "api": 1,
+      "result": {
+        "vouched": true,
+        "run": "0193f1e2-0000-7000-8000-00000000c10c",
+        "check": "broken",
+        "log": "[tmp]/runs/[dir_key]/0193f1e2-0000-7000-8000-00000000c10c/logs/broken.log",
+        "ended": true,
+        "ended_by": "end",
+        "outcome": "failed",
+        "duration_ms": "[duration_ms]",
+        "first_line": 1,
+        "total_lines": 3,
+        "lines": [
+          {
+            "n": 1,
+            "at_ms": "[at_ms]",
+            "stream": "run",
+            "text": "start {\"check\":\"broken\"}"
+          },
+          {
+            "n": 2,
+            "at_ms": "[at_ms]",
+            "stream": "err",
+            "text": "no such file: x"
+          },
+          {
+            "n": 3,
+            "at_ms": "[at_ms]",
+            "stream": "run",
+            "text": "end {\"outcome\":\"failed\",\"exit_code\":3,\"duration_ms\":12}"
+          }
+        ],
+        "failed": [
+          "broken"
+        ]
       },
       "meta": {
         "elapsed_ms": "[elapsed_ms]",

@@ -652,7 +652,7 @@ static CONTRACT: [Limit; 29] = [
 ];
 
 /// The bounds a response keeps without an error: what it leaves out, and how it says so.
-static BOUNDS: [Limit; 27] = [
+static BOUNDS: [Limit; 28] = [
     Limit {
         name: "Lossy commits listed",
         constant: code(
@@ -898,6 +898,21 @@ static BOUNDS: [Limit; 27] = [
         errors: &[],
         what: "The run's directory a run line names in `run_dir`: a longer path is left out of \
                    the line.",
+    },
+    Limit {
+        name: "Failed checks' logs",
+        constant: code(
+            "swarmops_api::MAX_FAILED_LOGS",
+            CHECK_API,
+            "pub const MAX_FAILED_LOGS: usize = 20;",
+            || bytes::to_u64(swarmops_api::MAX_FAILED_LOGS),
+        ),
+        unit: Unit::Count("logs"),
+        commands: &["check log"],
+        errors: &[],
+        what: "The logs one answer of `check log --failed` gives, the first failed checks' in \
+                   run order, and no more of them than keep `--tail` times their count within \
+                   100,000 lines: the rest are named in `failed` and counted in `logs_omitted`.",
     },
     Limit {
         name: "Followed lines",

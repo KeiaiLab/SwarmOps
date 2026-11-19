@@ -2,13 +2,15 @@
 
 # swarmops check log
 
-Read a check's log of a run of a workspace, or of a directory with --dir.
+Read a check's log of a run, or with --failed the logs of its checks that did not pass.
 
 The run is --run RUN, else the newest run that ran CHECK (with --follow, the newest still running first), of the workspace (--ws, --ws-path, else the one around the working directory) or of the directory --dir names, on this host. Gives the log's last --tail lines, each with its number, its time since the check's start, its stream (out, err, run for the runner's own lines, or other) and its text, and whether the log ended and how: end, with the check's outcome, or runner\_gone. With --follow it then prints one envelope a line for each batch of lines the check writes, looking again every --interval-ms, and ends with the envelope that holds the log's end, exit 0; --human prints the lines as the log holds them. Reads only: no identity, nothing written, no store operation.
 
+--failed, in place of CHECK, reads the log of every check that did not pass in the run --run names, else in the newest run: the first one's log is the answer, as check log gives it for that check, failed names all of them in run order, and more holds the logs of the others, each its last --tail lines; at most 20 logs and 100,000 lines, the rest counted in logs\_omitted. A run with one failed check answers that log alone. A run where none failed is E\_INVALID\_ARG. --human prints the logs one after another, a line ==&gt; NAME &lt;== before each when there are several. --run-lines DIR, with --run, finds the run through the run lines in DIR instead of a workspace or --dir: its line names where the run was kept.
+
 ```yaml
 title: "swarmops check log"
-description: "Read a check's log of a run of a workspace, or of a directory with --dir."
+description: "Read a check's log of a run, or with --failed the logs of its checks that did not pass."
 group: "checks"
 since: "0.13.0"
 mutates: false
@@ -17,22 +19,18 @@ mcp_tool: "check_log"
 envelope_op: "check_log"
 exit_codes: [0, 2]
 errors: [E_INVALID_ARG]
-syntax: "swarmops check log [OPTIONS] <CHECK>"
+syntax: "swarmops check log [OPTIONS] [CHECK]"
 ```
 
 ## Syntax
 
 ```text
-swarmops check log [OPTIONS] <CHECK>
+swarmops check log [OPTIONS] [CHECK]
 ```
 
 ## Required arguments
 
-### `CHECK`
-
-Syntax: `<CHECK>`.
-
-The check whose log to read.
+None.
 
 ## Optional arguments
 
@@ -56,18 +54,36 @@ Syntax: `--dir <DIR>`.
 
 Read a run of the checks of DIR on this host, as check run --dir kept it.
 
+### `CHECK`
+
+Syntax: `<CHECK>`.
+
+The check whose log to read.
+
+### `--failed`
+
+Syntax: `--failed`.
+
+Read the logs of the checks of the run that did not pass, in place of CHECK's.
+
+### `--run-lines`
+
+Syntax: `--run-lines <DIR>`.
+
+Find the run through the run lines in DIR, which name where it was kept.
+
 ### `--run`
 
 Syntax: `--run <RUN>`.
 
-The run, by its id (default: the newest that ran CHECK).
+The run, by its id (default: the newest that ran CHECK, or with --failed the newest).
 
 ### `--tail`
 
 Syntax: `--tail <N>`.
 Default: `1000`.
 
-The most lines to give first, the last ones.
+The most lines to give first, the last ones; with --failed, of each log.
 
 ### `--follow`
 
@@ -162,7 +178,8 @@ No recorded example yet.
 ## Details
 
 `check log` reads one check's log of a run of `check run`, on the host the run ran on, once or as
-it grows. It reads only: nothing is written, no store operation is called, and the run's lock is
+it grows; with `--failed`, in place of a check's name, it reads the logs of every check of the run
+that did not pass. It reads only: nothing is written, no store operation is called, and the run's lock is
 only tried, for an instant, on a descriptor opened to read, to tell a running run from one whose
 runner is gone; a lock it cannot open or try (another account's run) is taken as held.
 
@@ -175,6 +192,23 @@ commands find it, with no store opened), kept in its `.swarmws/check-runs/`, or 
 those of `DIR` below `SWARMOPS_CHECK_RUNS_DIR` or the state directory, as `check run --dir` kept
 them. No run that ran `CHECK`, or a `--run` that is not there, is `E_INVALID_ARG` with
 `details.reason: run`.
+
+With `--failed` the run is `--run RUN`, else the newest run of the workspace or directory, by its
+id, whether it still runs or has ended.
+
+`--run-lines DIR`, with `--run RUN`, finds the run through its
+[run lines](../commands/check-run.md#run-lines) in `DIR` instead: it goes with neither `--dir`
+nor `--ws`, and reads from any working directory. The newest line of that run names its run
+directory, `run_dir`, which must be absolute and named as the run; the run is then read there as
+any other, its record and its logs, for `CHECK` and for `--failed` alike. Only the flag does
+this: `SWARMOPS_CHECK_RUN_LINES_DIR` does not change how `check log` finds a run. Refused, each
+`E_INVALID_ARG`:
+
+| `details.reason` | When |
+| --- | --- |
+| `run` | The lines hold no line of that run, or `RUN` is not a run's id. |
+| `run_dir` | Its line names no run directory (a path past 1,024 bytes is left out of a line), or one of another name. The hint names `--dir` and `--ws`. |
+| `run_gone` | The directory is not there any more: a host keeps the newest 20 runs of a directory or workspace. `details.failed` names the checks of the run that its lines say did not pass. |
 
 ### The log's format
 
@@ -224,6 +258,35 @@ check's `outcome` and `duration_ms`), or the run's record of a check it never st
 no `log`); or `runner_gone`, the run's lock free with no `end` line, as a `check run` killed by
 SIGKILL leaves it.
 
+### The failed checks' logs
+
+`check log --failed` answers for every check of the run's record whose outcome is not `passed`,
+in run order: `failed`, `timed_out`, `not_started`, `cancelled` and, once the run has ended,
+`not_run`. Each one's log is read as `check log NAME --run RUN --tail N` reads it, so a check
+with no log answers no line and its outcome from the record.
+
+| Field | Type | Present | Meaning |
+| --- | --- | --- | --- |
+| `failed` | array of strings | with `--failed` | Every check of the run that did not pass, in run order. |
+| `more` | array of logs | with `--failed`, when more than one log is given | The logs of the failed checks after the first, in run order, each with the keys of the answer above. |
+| `logs_omitted` | integer | when not 0 | The failed checks whose logs this answer leaves out; `failed` names them. |
+
+The rest of the answer is the first failed check's log. **A run with one failed check answers
+that log alone**: the envelope is what `check log NAME` gives, with `failed` naming it and no
+`more`, and `--human` prints byte for byte what `check log NAME --human` prints. With several,
+`--human` prints the logs one after another, a line `==> NAME <==` before each.
+
+One answer gives at most 20 logs, and no more than keep `--tail` times their count within 100,000
+lines: the first `min(failed, 20, max(1, 100,000 / tail))` in run order. With the default tail of
+1,000, that is 20 logs; with `--tail 100000`, one. The others are read with a `check log NAME`
+each.
+
+A run where no check failed is `E_INVALID_ARG` with `details.reason: none_failed`, `details.run`
+and `details.running`, whether the run's lock is held: of a run that still runs, a check not
+started yet is not counted, so the answer is `none_failed` until the run's record is written at
+its end, and the hint says to wait or to follow one check. `--failed` goes with neither `CHECK`
+nor `--follow`: the command line refuses both.
+
 ### `--follow`
 
 `check log --follow` first prints the answer above, then, each time the check wrote whole lines
@@ -239,8 +302,10 @@ exit 1, with a line on stderr. A log is followed on its own host only.
 ### The MCP tool
 
 `swarmops mcp` serves the workspace form as the tool `check_log` (`CheckLogReq`: `workspace`,
-`check`, `run`, `tail`), one answer per call: there is no `--follow`, since a tool call answers
-once, and no directory form.
+`check` or `failed`, `run`, `tail`), one answer per call: there is no `--follow`, since a tool
+call answers once, no directory form and no `--run-lines`. Exactly one of `check` and
+`failed: true` is given; neither or both is `E_INVALID_ARG` with `details.reason: check`. With
+`failed` the answer is the one above, each log its last `tail` lines.
 
 ## Return information
 

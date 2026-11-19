@@ -1173,6 +1173,11 @@ check file with its stages, `check list` and `check run` are built
   `run-lines.1.jsonl` and `run-lines.jsonl` from their starts, at most 128 MiB together, whatever
   the cursor: there is no index, and the time a page takes on full files is not measured.
   *Target: M33-1. Found: the M31 plan.*
+- **A run's logs last as long as its run directory.** A host keeps the newest 20 runs of a
+  directory or a workspace; the run lines outlast them, so `check log --failed --run RUN
+  --run-lines DIR` answers `run_gone` for an older run its lines still name, with the names of
+  what failed and no log. Of a run that still runs, `check log --failed` knows no failed check
+  until the run's record is written at its end. *Target: M36-1. Found: the M31 plan.*
 - **This repository's CI does not start its gate through `check run` yet.** The `check` job of
   `ci.yml` runs `just check` and `just check-compare` itself; it moves to
   `check run --dir . --stage before-land` with a pinned build once a release holds `check run`,

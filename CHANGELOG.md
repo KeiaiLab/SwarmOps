@@ -66,6 +66,17 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   `cursor` for the page after. A line that does not read is passed over and counted in
   `skipped`; no lines file is an empty page. It reads only, opens no store, and says where the
   lines came from (`source: run_lines`). `swarmops mcp` lists 54 tools.
+- `check log --failed`, and `failed` on the MCP tool `check_log`: the logs of every check that
+  did not pass in a run (`--run`, else the newest), in one envelope: the first failed check's
+  log as `check log NAME` gives it, `failed` naming them all in run order, `more` holding the
+  others' logs, each its last `--tail` lines; at most 20 logs and 100,000 lines, the rest counted
+  in `logs_omitted`. A run with one failed check answers that log alone, and `--human` prints it
+  as `check log NAME --human` does; with several it puts a line `==> NAME <==` before each. No
+  failed check is `E_INVALID_ARG` with `details.reason: none_failed`.
+- `check log --run RUN --run-lines DIR` finds a run through its run lines, from any working
+  directory: its line's `run_dir` names where the run was kept. `details.reason` is `run` for a
+  run the lines do not hold, `run_dir` for a line that names no directory of it, and `run_gone`,
+  with the names of what failed, once the host no longer keeps the run.
 - API type `CheckRunLine`, the run line a check of a run leaves: when it started, its run, name,
   attempt, stage, tree, definition digest, wait, duration, outcome, exit code, findings, labels,
   sampled peak memory and run directory. `swarmops schema CheckRunLine` prints it (239 types).
@@ -79,6 +90,7 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 - `E_CHECK_FAILED`'s `details.run`, the whole result of a run of `check run`, holds each check's
   findings.
+- `check log`'s `CHECK` is optional: exactly one of it and `--failed` is given.
 - `E_CHECK_FAILED`'s hint names `swarmops check log --failed ... --run RUN` when two or more
   checks of the run did not pass and have logs; for one failed check it names that check's log,
   as before.

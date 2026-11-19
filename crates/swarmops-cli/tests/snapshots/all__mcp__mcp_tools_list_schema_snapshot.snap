@@ -3216,7 +3216,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Reads a check's log of a workspace's run (the newest that ran it unless run is given): its last lines (tail, 1,000 by default), each with its time since the check's start, its stream and its text, and whether the log has ended and how the check ended.",
+      "description": "Reads a check's log of a workspace's run (the newest that ran it unless run is given): its last lines (tail, 1,000 by default), each with its time since the check's start, its stream and its text, and whether the log has ended and how the check ended. With failed true in place of check, reads the logs of every check that did not pass in the run (the newest unless run is given): the first one's log, failed naming all of them, and the others' logs in more, each its last tail lines; pass a tail of 200 or less.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`check_log` (CLI `check log`): a check's log of a run of a workspace, its last lines; or,\nwith `failed`, the logs of the checks of a run that did not pass. Exactly one of `check` and\n`failed` is given. Reads only: no lock, nothing written.",
