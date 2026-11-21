@@ -582,6 +582,10 @@ role_all() {
     [ $# -eq 0 ] || fail "usage: so-kit run all"
     role_setup
 
+    # The root page before anything listens: the timers write it again each hour, and a client
+    # that asks for `/` as soon as the web role answers must not find it missing.
+    (cmd_page) || printf 'so-kit: the root page was not written\n' >&2
+
     # Every serving role beside the others; one ending ends the rest.
     SO_KIT_CONF=$conf
     export SO_KIT_CONF

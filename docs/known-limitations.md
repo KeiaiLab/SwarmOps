@@ -1499,9 +1499,17 @@ installation past it.
   NetworkPolicy with pod selectors, made beside the release, opens them. *Unscheduled. Found:
   the first installation on a cluster.*
 - **Nothing schedules the restore drill beside a served release.** The drill is the chart's
-  second mode, a release of its own with its own key and credential; without it the daily check
-  mails that no rehearsal passed once the last record is older than eight days. The first
-  installation ran one drill by hand. *Unscheduled. Found: the first installation on a cluster.*
+  second mode, a release of its own with its own key and credential, to which the three items
+  above apply again; without it the daily check mails that no rehearsal passed once the last
+  record is older than eight days. The first installation runs `so-backup rehearse` from a
+  CronJob of its own, with the image, the backup's settings and the rehearsal key.
+  *Unscheduled. Found: the first installation on a cluster.*
+- **A drill that cannot write a state directory says only that `verify --deep` failed.**
+  `verify --deep` makes a memo key under the account's state directory; in a pod whose home is
+  on a read-only root that is `E_INVALID_ARG` (`the memo key ... cannot be made`), and
+  `so-backup` drops the message and reports `<store> fails verify --deep`. Got past by giving
+  the drill's pod a `HOME` it can write. *Unscheduled. Found: the first installation on a
+  cluster.*
 - **The image is in no registry, and the chart names no digest.** A release holds the image as
   an OCI archive (`swarmops-server-<version>-oci.tar`); the chart's default repository is not
   published and its default digest is zeros. An operator copies the archive's index into a
