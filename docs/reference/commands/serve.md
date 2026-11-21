@@ -4,7 +4,7 @@
 
 Serve the stores under --root to stock git: fetch, clone and push over ssh as a forced command, or over smart HTTP as a CGI program. One process per connection, no daemon.
 
-Over ssh, an authorized\_keys line runs it: command="swarmops serve --root /srv/so --as person/ada",restrict ssh-ed25519 .... The client's git-upload-pack '&lt;store&gt;.git' or git-receive-pack '&lt;store&gt;.git' (SSH\_ORIGINAL\_COMMAND) names a store by its directory under --root. With --cgi, a web server runs it for smart HTTP, its PATH\_INFO starting with the store's name; TLS and authentication are the web server's.
+Over ssh, an authorized\_keys line runs it: command="swarmops serve --root /srv/so --as person/ada",restrict ssh-ed25519 .... The client's git-upload-pack '&lt;store&gt;.git' or git-receive-pack '&lt;store&gt;.git' (SSH\_ORIGINAL\_COMMAND) names a store by its directory under --root: &lt;name&gt;, or &lt;owner&gt;/&lt;name&gt; for a store in an owner's directory. With --cgi, a web server runs it for smart HTTP, its PATH\_INFO starting with the store's name; TLS and authentication are the web server's.
 
 The caller is named by --as alone, or with --cgi by --user-family &lt;family&gt; as &lt;family&gt;/$REMOTE\_USER: the global --as default, $SWARMOPS\_AGENT, does not apply to serve, nor does $SWARMOPS\_RUN\_ID, so that the serving account's environment names no caller. A connection that names none is refused with E\_AUTH (details.reason no\_identity), whatever it asks for. The store's access.toml grants read, push, force and land; a caller it names but does not grant is refused with E\_POLICY\_DENIED.
 

@@ -313,8 +313,9 @@ no daemon.
 Over ssh, an authorized_keys line runs it: command=\"swarmops serve --root /srv/so --as \
 person/ada\",restrict ssh-ed25519 .... The client's git-upload-pack '<store>.git' or \
 git-receive-pack '<store>.git' (SSH_ORIGINAL_COMMAND) names a store by its directory under \
---root. With --cgi, a web server runs it for smart HTTP, its PATH_INFO starting with the store's \
-name; TLS and authentication are the web server's.
+--root: <name>, or <owner>/<name> for a store in an owner's directory. With --cgi, a web server \
+runs it for smart HTTP, its PATH_INFO starting with the store's name; TLS and authentication are \
+the web server's.
 
 The caller is named by --as alone, or with --cgi by --user-family <family> as \
 <family>/$REMOTE_USER: the global --as default, $SWARMOPS_AGENT, does not apply to serve, nor \

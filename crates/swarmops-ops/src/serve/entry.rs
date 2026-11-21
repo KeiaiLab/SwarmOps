@@ -125,7 +125,7 @@ pub fn parse_ssh(command: &str) -> Result<SshRequest, OpError> {
     let path =
         dequote(quoted).ok_or_else(|| bad_path("the path is not quoted as git quotes it"))?;
 
-    // 3. The store's name: the path without its usual decorations, one segment.
+    // 3. The store's name: the path without its usual decorations.
     let store = store_name(&path).ok_or_else(|| bad_path("the path names no store"))?;
     Ok(SshRequest::new(service, store))
 }
@@ -134,8 +134,8 @@ pub fn parse_ssh(command: &str) -> Result<SshRequest, OpError> {
 /// canonical path. A name the remote-name grammar refuses, or a link out of the root, is
 /// `E_INVALID_ARG` `bad_path`; no such directory `E_NOT_A_REPO`. No error names a host path.
 pub fn store_under(root: &Utf8Path, name: &str) -> Result<Utf8PathBuf, OpError> {
-    // 1. One segment of the grammar: no separator, no `..`.
-    if swarmops_store::check_remote_segment(name).is_err() {
+    // 1. A store's name: one or two segments of the grammar, no `..`.
+    if !is_store_name(name) {
         return Err(bad_path("the path names no store"));
     }
 
@@ -184,8 +184,22 @@ fn dequote(quoted: &str) -> Option<String> {
     }
 }
 
+/// The most segments a store's name has: `<name>`, or `<owner>/<name>` as a forge writes a
+/// repository's address.
+const STORE_SEGMENTS: usize = 2;
+
+/// Whether `name` is a store's name under a served root: one segment of the remote-name
+/// grammar, or an owner's segment and the store's joined by one `/`. An empty segment (a
+/// leading, trailing or doubled `/`), `.` and `..` are no segment of that grammar.
+pub fn is_store_name(name: &str) -> bool {
+    name.split('/').count() <= STORE_SEGMENTS
+        && name
+            .split('/')
+            .all(|segment| swarmops_store::check_remote_segment(segment).is_ok())
+}
+
 /// The store `path` names: one `/` or `~/` off its front, then one `/` and one `.git` off its
-/// end; `None` unless what is left is one segment of the remote-name grammar.
+/// end; `None` unless what is left is a store's name ([`is_store_name`]).
 fn store_name(path: &str) -> Option<String> {
     let path = PATH_PREFIXES
         .iter()
@@ -193,8 +207,7 @@ fn store_name(path: &str) -> Option<String> {
         .unwrap_or(path);
     let path = path.strip_suffix('/').unwrap_or(path);
     let path = path.strip_suffix(GIT_SUFFIX).unwrap_or(path);
-    swarmops_store::check_remote_segment(path).ok()?;
-    Some(path.to_owned())
+    is_store_name(path).then(|| path.to_owned())
 }
 
 /// `E_INVALID_ARG` `bad_path`, saying `why`.
@@ -239,6 +252,10 @@ mod tests {
             ("'~/acme.git'", "acme"),
             ("'/acme.git/'", "acme"),
             ("'acme/'", "acme"),
+            // An owner's segment before the store's.
+            ("'/keiailab/swarmops.git'", "keiailab/swarmops"),
+            ("'a/b'", "a/b"),
+            ("'~/a/b.git/'", "a/b"),
             ("'/a.b_c-1.git'", "a.b_c-1"),
             ("'a'\\''b'", "a'b"),
             ("'a'\\!'b'", "a!b"),
@@ -265,8 +282,10 @@ mod tests {
             "'..'",
             "'/../x'",
             "'../x.git'",
-            "'/a/b'",
-            "'a/b.git'",
+            "'/a/b/c'",
+            "'a//b.git'",
+            "'a/../b'",
+            "'a/B'",
             "'/srv/so/acme.git'",
             "'~/'",
             "'.git'",
@@ -326,11 +345,16 @@ mod tests {
         let request = SshRequest::new(Service::UploadPack, "acme");
         assert_eq!(git, SshCommand::Git(request));
 
-        // 3. No store, or not one.
+        // 3. An owner's segment and the store's.
+        let owned = parse_command("swarmops serve --stdio 'keiailab/swarmops'").unwrap();
+        let store = "keiailab/swarmops".to_owned();
+        assert_eq!(owned, SshCommand::Native { store });
+
+        // 4. No store, or not one.
         for line in [
             "swarmops serve --stdio",
             "swarmops serve --stdio acme",
-            "swarmops serve --stdio '/a/b'",
+            "swarmops serve --stdio '/a/b/c'",
             "swarmops serve --stdio 'acme' 'x'",
         ] {
             let error = parse_command(line).unwrap_err();
@@ -347,7 +371,11 @@ mod tests {
         let base = Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
         let root = base.join("root");
         let outside = base.join("outside");
-        for store in [root.join("acme"), outside.clone()] {
+        for store in [
+            root.join("acme"),
+            root.join("owner").join("inner"),
+            outside.join("held"),
+        ] {
             std::fs::create_dir_all(store).unwrap();
         }
         symlink(root.join("acme"), root.join("alias")).unwrap();
@@ -357,16 +385,27 @@ mod tests {
         let canonical = root.join("acme").canonicalize_utf8().unwrap();
         assert_eq!(store_under(&root, "acme").unwrap(), canonical);
         assert_eq!(store_under(&root, "alias").unwrap(), canonical);
+        let inner = root
+            .join("owner")
+            .join("inner")
+            .canonicalize_utf8()
+            .unwrap();
+        assert_eq!(store_under(&root, "owner/inner").unwrap(), inner);
 
         // 3. The refusals.
-        let escape = store_under(&root, "escape").unwrap_err();
-        assert_eq!(escape.code.as_str(), "E_INVALID_ARG", "{escape:?}");
-        assert_eq!(reason(&escape), "bad_path", "{escape:?}");
+        for name in ["escape", "escape/held", "owner/..", "a/b/c"] {
+            let escape = store_under(&root, name).unwrap_err();
+            assert_eq!(escape.code.as_str(), "E_INVALID_ARG", "{name}: {escape:?}");
+            assert_eq!(reason(&escape), "bad_path", "{name}: {escape:?}");
+        }
         let missing = store_under(&root, "missing").unwrap_err();
         assert_eq!(missing.code.as_str(), "E_NOT_A_REPO", "{missing:?}");
         let invalid = store_under(&root, "..").unwrap_err();
         assert_eq!(reason(&invalid), "bad_path", "{invalid:?}");
-        for error in [escape, missing, invalid] {
+        let escape = store_under(&root, "escape/held").unwrap_err();
+        let inner = store_under(&root, "owner/missing").unwrap_err();
+        assert_eq!(inner.code.as_str(), "E_NOT_A_REPO", "{inner:?}");
+        for error in [escape, missing, invalid, inner] {
             let text = serde_json::to_string(&error).unwrap();
             assert!(!text.contains(base.as_str()), "{text}");
         }

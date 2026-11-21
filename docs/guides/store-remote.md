@@ -133,7 +133,8 @@ whose answer was lost; the tracking ref moved, nothing was sent. Run once more, 
 ## The native form: `so://`
 
 From 0.12.0 a store also reaches a served store with no git in between. A `so://` URL names the
-host and the store, `so://[user@]host[:port]/<store>`, without `.git`; the client runs
+host and the store, `so://[user@]host[:port]/<store>`, without `.git`, the store `<name>` or
+`<owner>/<name>` as the served root holds it; the client runs
 `swarmops serve --stdio '<store>'` on the host over ssh (`$GIT_SSH_COMMAND`, else `ssh`), and the
 key line that answers git answers it, under the same `access.toml`. There is no HTTPS form.
 

@@ -159,17 +159,23 @@ fn side_of(request: &CgiRequest, vars: &BTreeMap<String, String>) -> Side {
     Side::Fetch
 }
 
-/// The request `path_info` makes: `/<name>[.git]/<smart path>`. A first segment that is no
-/// store's name is `E_INVALID_ARG` `bad_path` (400); another path `E_NOT_A_REPO`
-/// `not_smart_http` (404).
+/// The request `path_info` makes: `/<store>[.git]/<smart path>`, the store `<name>` or
+/// `<owner>/<name>`. A path that ends in none of git's smart HTTP requests is `E_NOT_A_REPO`
+/// `not_smart_http` (404); one whose front is no store's name `E_INVALID_ARG` `bad_path` (400).
 fn parse_path(path_info: &str) -> Result<CgiRequest, OpError> {
-    // 1. The first segment, which must name a store.
+    // 1. The end, one of git's smart HTTP requests; what stands before it names the store.
     let path = path_info.strip_prefix('/').unwrap_or(path_info);
-    let Some((segment, rest)) = path.split_once('/') else {
+    let found = SMART_PATHS.iter().find_map(|smart| {
+        let named = path.strip_suffix(smart)?.strip_suffix('/')?;
+        Some((named, *smart))
+    });
+    let Some((named, rest)) = found else {
         return Err(not_smart_http());
     };
-    let store = segment.strip_suffix(GIT_SUFFIX).unwrap_or(segment);
-    if swarmops_store::check_remote_segment(store).is_err() {
+
+    // 2. The store's name, one segment or an owner's and the store's.
+    let store = named.strip_suffix(GIT_SUFFIX).unwrap_or(named);
+    if !super::entry::is_store_name(store) {
         return Err(refused(
             ErrorCode::InvalidArg,
             "bad_path",
@@ -177,11 +183,6 @@ fn parse_path(path_info: &str) -> Result<CgiRequest, OpError> {
         )
         .with_hint(PATH_HINT));
     }
-
-    // 2. The rest, one of git's smart HTTP requests.
-    let Some(rest) = SMART_PATHS.iter().find(|smart| **smart == rest) else {
-        return Err(not_smart_http());
-    };
     Ok(CgiRequest {
         store: store.to_owned(),
         rest,
@@ -289,6 +290,17 @@ mod tests {
                 "a.b_c-1",
                 "git-receive-pack",
             ),
+            // An owner's segment before the store's, as a forge writes an address.
+            (
+                "/keiailab/swarmops.git/info/refs",
+                "keiailab/swarmops",
+                "info/refs",
+            ),
+            (
+                "/acme/inner/git-upload-pack",
+                "acme/inner",
+                "git-upload-pack",
+            ),
         ] {
             let request = parse_path(path).unwrap();
             let expected = CgiRequest {
@@ -299,11 +311,16 @@ mod tests {
         }
     }
 
-    /// A first segment that names no store is `bad_path`; any other path is `not_smart_http`.
+    /// A front that names no store is `bad_path`; a path that ends in no smart request is
+    /// `not_smart_http`.
     #[test]
     fn parse_path_refuses_other_paths() {
         for path in [
             "/../x/info/refs",
+            "/a/b/c/info/refs",
+            "/a//info/refs",
+            "/a/../info/refs",
+            "/a/B.git/info/refs",
             "/..git/info/refs",
             "/.git/info/refs",
             "//info/refs",
@@ -322,7 +339,7 @@ mod tests {
             "/acme.git/HEAD",
             "/acme.git/objects/info/packs",
             "/acme.git/info/refs/x",
-            "/acme/inner.git/info/refs",
+            "/info/refs",
         ] {
             let error = parse_path(path).unwrap_err();
             assert_eq!(error.code.as_str(), "E_NOT_A_REPO", "{path:?}");

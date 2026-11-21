@@ -108,15 +108,28 @@ check_identity() {
     esac
 }
 
+# A store's name: one segment, or an owner's and the store's joined by one `/`, as serve reads a
+# path (`<name>` or `<owner>/<name>`).
 check_name() {
     case $1 in
+    */*/* | /* | */) fail "a store name is <name> or <owner>/<name>: $1" ;;
+    */*)
+        check_segment "${1%%/*}"
+        check_segment "${1#*/}"
+        ;;
+    *) check_segment "$1" ;;
+    esac
+}
+
+check_segment() {
+    case $1 in
     [a-z0-9]*) ;;
-    *) fail "a store name starts with [a-z0-9]: $1" ;;
+    *) fail "a store name's segment starts with [a-z0-9]: $1" ;;
     esac
     case $1 in
-    *[!a-z0-9._-]*) fail "a store name is [a-z0-9._-]: $1" ;;
+    *[!a-z0-9._-]*) fail "a store name's segment is [a-z0-9._-]: $1" ;;
     esac
-    [ ${#1} -le 63 ] || fail "a store name has at most 63 characters"
+    [ ${#1} -le 63 ] || fail "a store name's segment has at most 63 characters"
 }
 
 # One public key, without options: sets key_type and key_blob.
@@ -206,7 +219,17 @@ cmd_create_store() {
     [ "$(stat -c %u "$root")" = "$(id -u)" ] || fail "run as the owner of the stores' directory"
     [ ! -e "$root/$name" ] || fail "a store named $name exists"
 
-    "$swarmops" init "$root/$name" --name "$name" >/dev/null || fail "swarmops init failed"
+    # An owner's directory holds stores and nothing else: it is made here, and a directory that
+    # is a store itself owns no other.
+    case $name in
+    */*)
+        owner=$root/${name%%/*}
+        [ ! -e "$owner/FORMAT" ] || fail "${name%%/*} is a store, not an owner"
+        [ -d "$owner" ] || mkdir -m 0700 "$owner" || fail "cannot make the owner's directory"
+        ;;
+    esac
+
+    "$swarmops" init "$root/$name" --name "${name##*/}" >/dev/null || fail "swarmops init failed"
 
     # The creator reads and lands onto main; more grants are the operator's edit.
     temporary="$root/$name/.access.toml.$$"
@@ -462,7 +485,7 @@ http {
             try_files /index.html =404;
         }
 
-        location ~ "^(/[a-z0-9][a-z0-9._-]{0,62}/(?:info/refs|git-upload-pack|git-receive-pack))\$" {
+        location ~ "^((?:/[a-z0-9][a-z0-9._-]{0,62}){1,2}/(?:info/refs|git-upload-pack|git-receive-pack))\$" {
             auth_basic "SwarmOps";
             auth_basic_user_file /etc/swarmops-server/web.htpasswd;
             client_max_body_size 0;

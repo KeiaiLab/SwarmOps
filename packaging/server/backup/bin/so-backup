@@ -15,7 +15,8 @@
 # a tar archive:
 #
 #   manifest                 swarmops-backup 1 / release / time / part lines / refs lines
-#   parts/stores/<name>.tar  a store as copied under meta/lock, its caches left out
+#   parts/stores/<name>.tar  a store as copied under meta/lock, its caches left out; a store
+#                            named <owner>/<name> lies under the owner's directory
 #   parts/settings.tar       the settings files, as kit.conf and backup.conf
 #   parts/secrets.tar        the files backup_secrets names
 #
@@ -294,11 +295,14 @@ cmd_backup() {
     #    copy holds the files listed under the lock: objects and the derived cache are written
     #    without it, so a directory may gain entries while tar reads it.
     : >"$work/refs"
-    for store in "$root"/*/; do
+    for store in "$root"/*/ "$root"/*/*/; do
         store=${store%/}
         [ -f "$store/meta/lock" ] || continue
-        name=${store##*/}
+        # A store's name is its path under the root: <name>, or <owner>/<name>, whose part
+        # lies under the owner's directory.
+        name=${store#"$root"/}
         part="$work/parts/stores/$name.tar"
+        mkdir -p "${part%/*}"
         flock "$store/meta/lock" sh -c '
             cd "$1" &&
                 find . \( -path ./objects/tmp -o -path ./meta/derived -o -path ./git/serve.git \
@@ -306,7 +310,7 @@ cmd_backup() {
                     -o -type f -print >"$3" &&
                 tar -c -f "$2" --no-recursion -T "$3"' copy "$store" "$part" "$work/listed" ||
             failed "cannot copy the store $name"
-        mkdir "$work/check/$name"
+        mkdir -p "$work/check/$name"
         tar -x -f "$part" -C "$work/check/$name" || failed "cannot unpack the copy of $name"
         verified "$work/check/$name" || failed "the copy of $name fails verify --deep"
         refs=$(refs_of "$work/check/$name") || failed "cannot list the refs of $name"
@@ -336,7 +340,8 @@ cmd_backup() {
         printf '%s\n' "$FORMAT_HEADER"
         printf 'release %s\n' "$release"
         printf 'time %s\n' "$stamp"
-        for part in "$work"/parts/stores/*.tar "$work/parts/settings.tar" "$work/parts/secrets.tar"; do
+        for part in "$work"/parts/stores/*.tar "$work"/parts/stores/*/*.tar \
+            "$work/parts/settings.tar" "$work/parts/secrets.tar"; do
             [ -f "$part" ] || continue
             printf 'part %s %s\n' "${part#"$work"/}" "$(size_and_digest "$part")"
         done
@@ -397,11 +402,11 @@ cmd_rehearse() {
     # 3. Each store onto the empty directory: verify --deep, every ref as the manifest has it.
     mkdir "$target/stores" "$target/settings" "$target/secrets"
     stores=0
-    for part in "$work"/open/parts/stores/*.tar; do
+    for part in "$work"/open/parts/stores/*.tar "$work"/open/parts/stores/*/*.tar; do
         [ -f "$part" ] || continue
-        name=${part##*/}
+        name=${part#"$work"/open/parts/stores/}
         name=${name%.tar}
-        mkdir "$target/stores/$name"
+        mkdir -p "$target/stores/$name"
         tar -x -f "$part" -C "$target/stores/$name" || failed "rehearsal: cannot restore $name"
         verified "$target/stores/$name" || failed "rehearsal: $name fails verify --deep"
         refs=$(refs_of "$target/stores/$name") || failed "rehearsal: cannot list the refs of $name"

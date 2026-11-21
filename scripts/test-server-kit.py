@@ -588,7 +588,13 @@ def create_store_writes_access(scratch: Path) -> None:
     assert "version = 1" in access and 'who = ["person/ada"]' in access, access
     assert 'land = ["main"]' in access and "read = true" in access, access
     assert (scratch / "srv" / "acme" / "FORMAT").exists(), "init did not run"
-    for label, name in (("exists", "acme"), ("upper", "Acme"), ("slash", "a/b"),
+    owned = run_kit(scratch, "create-store", "team/inner", "person/ada")
+    assert owned.returncode == 0, f"an owner's segment and the store's: {owned.stderr}"
+    assert (scratch / "srv" / "team" / "inner" / "FORMAT").exists(), "the owned store"
+    assert (scratch / "srv" / "team" / "inner" / "access.toml").exists(), "its access.toml"
+    for label, name in (("exists", "acme"), ("upper", "Acme"), ("three", "a/b/c"),
+                        ("owner is a store", "acme/x"), ("empty owner", "/b"),
+                        ("empty name", "a/"), ("upper owner", "Team/x"),
                         ("dot", ".acme"), ("long", "a" * 64)):
         done = run_kit(scratch, "create-store", name, "person/ada")
         assert done.returncode == 2, f"{label}: {done}"

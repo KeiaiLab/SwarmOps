@@ -22,6 +22,17 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Added
 
+- A served store's name may have an owner's segment before the store's, `<owner>/<name>`, as a
+  forge writes a repository's address: the store `<root>/acme-co/app` is
+  `ssh://host/acme-co/app.git` and `host:acme-co/app.git` over ssh,
+  `https://host/<prefix>/acme-co/app.git` over smart HTTP, and `so://host/acme-co/app` for a
+  store client. Each segment is a remote's name (`[a-z0-9][a-z0-9._-]{0,62}`); a store of one
+  segment is served as before, and a third segment, an empty one or `..` is `E_INVALID_ARG`
+  `bad_path` (for a `so://` URL, `details.reason: url`). `so-kit create-store <owner>/<name>`
+  makes the owner's directory; the package's nginx site and the chart's `installation.stores`
+  take such a name, and a backup holds the store as `parts/stores/<owner>/<name>.tar`. A web
+  server set up by hand passes one or two segments in `PATH_INFO`
+  ([Serve over HTTP](docs/operate/serve-over-http.md)).
 - A check's findings: a check writes them to its report file, at `SWARMOPS_CHECK_REPORT`, one
   JSON object a line with `level` (`error`, `warning`, `notice`), `title`, and optionally
   `message`, `path` (a repository path), `line` and `end_line`. Once the check has ended (and
