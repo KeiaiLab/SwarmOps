@@ -68,6 +68,9 @@ JOBS = "/usr/lib/swarmops-server/jobs"
 # A job's period line, in systemd's time span units.
 PERIOD = re.compile(r"^# period: ([1-9][0-9]*(?:s|min|h|d|w))$", re.MULTILINE)
 SYSTEMD_UNITS = "/usr/lib/systemd/system/"
+# Programs whose timer the package installs for a machine other than the serving host (the
+# status probe, as its MANIFEST says): no job of the serving host, so not the runner's.
+ELSEWHERE = {"/usr/bin/so-status"}
 # Seconds a started so-kit or a stub it starts gets before the case fails.
 KIT_DEADLINE = 30
 # The roles `so-kit run all` starts beside each other.
@@ -661,6 +664,9 @@ def timer_jobs(kit: Path) -> dict[str, str]:
                             fallback=Path(destination).with_suffix(".service").name)
         assert SYSTEMD_UNITS + service in units, f"{name}: no service {service}"
         program = unit(kit / units[SYSTEMD_UNITS + service]).get("Service", "ExecStart")
+        # A leading `-` is systemd's: the program's failure does not fail the unit.
+        if program.split()[0].lstrip("-") in ELSEWHERE:
+            continue
         jobs[program.split()[0]] = timer.get("Timer", "OnUnitActiveSec", fallback="")
     return jobs
 
