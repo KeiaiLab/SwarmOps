@@ -1442,6 +1442,55 @@ check file with its stages, `check list` and `check run` are built
   back, but the entries it landed stay landed: they are not queued again. *Unscheduled (undo of
   queue records, the M22 core design §8). Found: the M22 core design.*
 
+## The server kit on Kubernetes
+
+What the first installation of the server's Helm chart on a cluster found: chart 0.11.0 with the
+0.12.0 image, one pod on a new block volume, its Secrets synced from a secret store
+(2026-11-21). The chart's own tests render it and start no pod. Each item names what got that
+installation past it.
+
+- **A new volume stops `setup`.** The chart mounts the data volume by `subPath` (`srv` and
+  `lib`). The kubelet makes a missing subPath directory as root, and `so-kit create-store` runs
+  only as the owner of the stores' directory, so on a new volume the init container ends with
+  `so-kit: run as the owner of the stores' directory` and the pod never starts. Got past with an
+  init container before it that mounts the volume's root and makes the two directories as the
+  pod's user. *Unscheduled. Found: the first installation on a cluster.*
+- **sshd refuses every key.** The chart points sshd's `AuthorizedKeysFile` into the access
+  Secret's mount. A Secret volume's directory is writable by all with the sticky bit, which
+  sshd's `StrictModes` refuses (`bad ownership or modes for directory`), so every key is
+  `Permission denied (publickey)`; HTTPS logins are not affected. Got past by copying the key
+  lines into a directory of the serving account when the container starts and pointing the
+  kit's `authorized_keys` setting at the copy. *Unscheduled. Found: the first installation on a
+  cluster.*
+- **A store the kit makes has no `main`.** `so-kit create-store`, and so `so-kit run setup`,
+  runs `init` and writes an `access.toml` that grants the identity `read` and `land` on `main`;
+  the store holds no changeset. A push to `refs/land/main` is `E_REV_NOT_FOUND: main: not
+  found`, a store client's `sync` is `neither main nor main on the remote exists`, and the grant
+  lets no caller make `main`. The operator makes the root commit on the host
+  (`commit --allow-empty --advance main`). A store client's `sync` over the git wire needs
+  `push` on `main` as well, which that grant lacks. *Unscheduled. Found: the first installation
+  on a cluster.*
+- **The chart's Service is ports 22 and 443, and takes no label.** A cluster that shares one
+  load-balancer address between Services, or picks the address pool by a Service's label, cannot
+  give the chart's Service that address: it runs it as `ClusterIP` behind entrances of its own.
+  *Unscheduled. Found: the first installation on a cluster.*
+- **The root page job fails when the pod starts.** `so-kit run timers` runs the page job before
+  `www` exists under the run directory (`cannot create …/www/.index.html: Directory
+  nonexistent`), and `/` answered 404 for as long as the installation was watched. git's paths
+  are not affected. *Unscheduled. Found: the first installation on a cluster.*
+- **The server image prints a loader line on every connection.** The image is Debian 12, whose
+  glibc is 2.36, and the release binary prints
+  `weak version 'GLIBC_2.39' not found (required by /usr/bin/swarmops)` there
+  ([Platforms](#platforms)): stock git shows it as a `remote:` line on each fetch and push, and
+  it is on `setup`'s log. Nothing fails. *Unscheduled. Found: the first installation on a
+  cluster.*
+- **The image is in no registry, and the chart names no digest.** A release holds the image as
+  an OCI archive (`swarmops-server-<version>-oci.tar`); the chart's default repository is not
+  published and its default digest is zeros, and the chart's version is 0.11.0 beside a 0.13.0
+  workspace. An operator copies the archive's index into a registry of their own, under its
+  digest, and sets `image.repository` and `image.digest`. *Unscheduled. Found: the first
+  installation on a cluster.*
+
 ## Performance
 
 - **Part of each lock pass through the binary is unexplained.** In the quiet-window run the lock
