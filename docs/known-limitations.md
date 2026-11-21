@@ -1484,6 +1484,24 @@ installation past it.
   ([Platforms](#platforms)): stock git shows it as a `remote:` line on each fetch and push, and
   it is on `setup`'s log. Nothing fails. *Unscheduled. Found: the first installation on a
   cluster.*
+- **The chart gives the backup no settings.** It mounts the backup Secret as a directory, and
+  `so-backup` reads the image's `/etc/swarmops-server/backup.conf`, whose keys are empty, so
+  every run ends with `the settings name no backup_endpoint`. Got past by keeping a
+  `backup.conf` in that Secret and pointing the timers' `SO_BACKUP_CONF` at it. *Unscheduled.
+  Found: the first installation on a cluster.*
+- **The alert program cannot run from the alerts Secret.** The chart mounts every Secret with
+  mode 0400, and `backup_alert` names a program to run. Got past by copying it to `/tmp` with
+  the execute bit when the timers start. *Unscheduled. Found: the first installation on a
+  cluster.*
+- **The chart's egress names addresses, not pods.** `wiring.networkPolicy.egress` takes
+  `(cidr, port)` pairs. A bucket or an alert receiver inside the same cluster is a set of pods,
+  which a network plugin that enforces policy by identity does not match by address; a second
+  NetworkPolicy with pod selectors, made beside the release, opens them. *Unscheduled. Found:
+  the first installation on a cluster.*
+- **Nothing schedules the restore drill beside a served release.** The drill is the chart's
+  second mode, a release of its own with its own key and credential; without it the daily check
+  mails that no rehearsal passed once the last record is older than eight days. The first
+  installation ran one drill by hand. *Unscheduled. Found: the first installation on a cluster.*
 - **The image is in no registry, and the chart names no digest.** A release holds the image as
   an OCI archive (`swarmops-server-<version>-oci.tar`); the chart's default repository is not
   published and its default digest is zeros. An operator copies the archive's index into a
