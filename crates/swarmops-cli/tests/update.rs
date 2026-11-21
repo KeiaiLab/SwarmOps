@@ -1186,7 +1186,11 @@ fn at_a_terminal(site: &Site, env: &[(&str, &str)]) -> Option<String> {
         let line = format!("'{so}' whoami");
         site.run_program(SCRIPT, &["-qec", &line, "/dev/null"], env)
     };
-    assert!(run.stdout.contains("\"ok\""), "an envelope: {run}");
+    // Nothing names a format, so a terminal gets the text rendering and no envelope.
+    assert!(
+        run.stdout.contains("auth: ") && !run.stdout.contains("\"ok\""),
+        "the text rendering: {run}"
+    );
     Some(run.stdout)
 }
 
