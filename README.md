@@ -154,9 +154,9 @@ Every page, by group: [docs/README.md](docs/README.md).
 
 Each milestone's deliverable and exit criteria are in [docs/roadmap.md](docs/roadmap.md#milestones),
 under "Milestones"; the macOS build ships from 0.12.0 on, and Windows is planned (M12).
-Checks described in the tree, lands gated on their recorded results, and delivery from a store are
-planned; the roadmap's [Checks and delivery](docs/roadmap.md#checks-and-delivery) section says in
-what order.
+A tree's checks are described in it and run where the caller is (`check list`, `check run`, from
+0.13.0 on); lands gated on their recorded results and delivery from a store are planned; the
+roadmap's [Checks and delivery](docs/roadmap.md#checks-and-delivery) section says in what order.
 [CHANGELOG.md](CHANGELOG.md) says what each release shipped, and
 [docs/known-limitations.md](docs/known-limitations.md) what is still open, with the milestone that
 takes each item.
