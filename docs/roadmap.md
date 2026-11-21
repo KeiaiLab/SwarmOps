@@ -92,10 +92,16 @@ commits. The round trip through a bare clone, with
 
 ### Topology 3 today: local SwarmOps, remote SwarmOps
 
-Works through a git remote, one writing host at a time: the writer exports and pushes with git, the
-others fetch with git and import. Two hosts that both write stop on `E_GIT_EXPORT_DIVERGED` or
-`E_GIT_IMPORT_DIVERGED` rather than merge ([Git round trip](guides/git-round-trip.md#limits-to-know-first)).
-Native sync is M11, planned.
+Two ways work, from v0.12.0, both through the server entry of M14
+([A store as a remote](guides/store-remote.md)). Over the git wire, a store that `swarmops serve`
+serves is a git remote of other stores: `so clone`, `fetch`, `push` and `sync` over ssh or HTTPS,
+several hosts syncing one served store, each client landing onto the served head. Over `so://`,
+with no git in between and over ssh alone, `clone`, `fetch`, `sync` and the `push` of a branch or
+a tag: the upstream lands each change of `main`, and a changeset has one id on both stores.
+Open of M11: its acceptance criteria, which need M9's simulator (partitions, two hosts pushing at
+once, a process killed during a push), and its targets, which are not measured. Without a served
+store, a git remote still carries history between two stores, one writing host at a time
+([Git round trip](guides/git-round-trip.md#limits-to-know-first)).
 
 ### What is missing, in one table
 
@@ -105,7 +111,7 @@ Native sync is M11, planned.
 | Git's fetch and push protocols, as a client | 2 | Built (M13), by running the user's git | M13 (done) |
 | Git's fetch and push protocols, as a server | 1 | Built (M14), by running the host git | M14 (done) |
 | A server entry over ssh | 1, 3 | Built for git clients (M14): `swarmops serve` as a forced command; M11 plans `ssh <host> swarmops serve --stdio` ([architecture](architecture.md#crates-and-layering)) | M14 (done), reused by M11 |
-| Remotes, remote state and `sync` | 2, 3 | Built for git remotes (M13): `remotes.toml`, the mirror's refs, `so sync` | M13 (done), M11 (store remotes) |
+| Remotes, remote state and `sync` | 2, 3 | Built for git remotes (M13): `remotes.toml`, the mirror's refs, `so sync`; built for store remotes over the git wire and over `so://` (v0.12.0), M11's acceptance open | M13 (done), M11 (store remotes) |
 | Ref names beyond `main` and `release/<name>`, and tags | 1, 3 | Built (M6): free-form branches, `tags/<path>` and `remote/<remote>/<path>` in a `FORMAT 2` store; the git side maps them (M14): `git import`, `git export` and `serve` take branches and lightweight tags | M6 (done), M14 (done) |
 | Access control and identities for remote callers | 1, 3 | Built (M14): the store's `access.toml`, the caller named by the key line or the web server, `E_AUTH` and `E_POLICY_DENIED` | M14 (done), M11 |
 | Checks: a description of what runs for a tree | — | `.swarmops/checks.toml` with stages, `check list`, `check run` with findings and JUnit and SARIF reports, `check log`, run lines and `check runs` (M30-1, M30-2, M30-6, M31-1 to M31-5, M31-11 to M31-13); a checked land runs one command, the `check.argv` of `.swarmops/workspaces.json` | M30, M31 |
@@ -209,7 +215,7 @@ Deferred past usable, with what stands in until then:
 | --- | --- | --- |
 | M7, blame and review | No condition needs it, and its annotations need `FORMAT 3` (M20) | Review in GitHub pull requests (topology 2); `so log` and `so diff`; `git blame` on the export |
 | M9's simulator | No condition needs it; only the benchmark gate is pulled forward, into v0.6.0; it needs M20 | M6's literal `SIGKILL` test, power-loss images, crash sweeps and fuzz targets |
-| M11, native sync (topology 3) | No condition needs it, and it needs M14, M9 and M24 first | Sync through a git remote, one writing host at a time ([Topology 3 today](#topology-3-today-local-swarmops-remote-swarmops)) |
+| M11, native sync (topology 3) | No condition needs it, and it needs M14, M9 and M24 first | A served store as a remote, over the git wire or over `so://`, without M11's acceptance ([Topology 3 today](#topology-3-today-local-swarmops-remote-swarmops)) |
 | M12, macOS and Windows | The pilot and CI run on Linux | The Linux releases; M12 is developed separately, and its macOS part builds, passes its tests and is packed by the release workflow, from v0.12.0 on |
 | M20, `FORMAT 3` | One layout decision serves M7's records, the queue, withdrawal, lineage and the manifest that takes compaction out of the write; its design comes first | `FORMAT 2`; compaction inside the write |
 | M21, health, drift and housekeeping | It reads the records M17 adds | `info`'s exit status; the envelope counts of [Monitoring](operate/monitoring.md#summarise-the-envelopes) |

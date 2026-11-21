@@ -10,7 +10,9 @@ The caller is named by --as alone, or with --cgi by --user-family &lt;family&gt;
 
 The branches are served as refs/heads/&lt;name&gt;, main among them, and the tags as refs/tags/&lt;path&gt;. A push moves a store ref by compare-and-swap: main only forward along first parents. A push with one refused ref is refused whole, inside git's quarantine: every ref gets pre-receive hook declined, a remote: line per ref says why, and no object of it enters serve.git. A push to refs/land/&lt;target&gt; lands its commits onto &lt;target&gt; as swarmops land does, and reports a conflict on git's remote: lines.
 
-A refusal before git starts prints one ERR pkt-line on stdout, which git shows as remote error: &lt;CODE&gt;: &lt;message&gt;, and the envelope on stderr; with --cgi, a Status: header and the same text. --hook pre-receive and --hook proc-receive are the entries git runs inside a push, from the hook files serve writes; they take no --as. --stdio, the store-to-store sync, is not served yet.
+A refusal before git starts prints one ERR pkt-line on stdout, which git shows as remote error: &lt;CODE&gt;: &lt;message&gt;, and the envelope on stderr; with --cgi, a Status: header and the same text. --hook pre-receive and --hook proc-receive are the entries git runs inside a push, from the hook files serve writes; they take no --as.
+
+A store that reaches this one as a so:// remote asks, over ssh, for swarmops serve --stdio '&lt;store&gt;', the store-to-store sync: the key line's serve answers it as it answers git, under the same access.toml, with no git in between. --stdio on serve's own command line is refused (details.reason not\_served): it is what a client asks for, never how serve is started.
 
 A connection whose store has not moved since serve.git's last export takes no lock: git/serve.state names that export. serve --prepare makes serve.git ready for the store --repo names before a client connects, so that the connection finds it current and exports nothing; it needs no --root. With --seed-from &lt;GIT\_DIR&gt;, the repository a git import read, it first fetches the imported commits' objects from it and packs them with a bitmap, so that the first clone after an import writes no object. --prepare-wait zero gives up at once when another refresh holds serve.git's lock, and marks it for that one to run again. It prints {"op": "serve\_prepare", ...} on stdout, and exits 0 when it was skipped or found the lock held. Without the store's memo key, on a store whose main head is no imported commit, it exports nothing and warns: run it as the account the agents and serve run as.
 
@@ -76,7 +78,7 @@ With --hook pack-objects: the pack-objects line git appends.
 
 Syntax: `--stdio`.
 
-Serve the store-to-store sync on stdin and stdout: not served yet.
+What a so:// client asks a key line's serve for; refused on serve's own command line.
 
 ### `--prepare`
 
