@@ -4,7 +4,7 @@
 
 Every command of `swarmops` and `so`, its short form: the same program by a shorter name. This page and the command pages are generated from the command line's own definition, so they say what `swarmops <command> --help` says. `-h` prints the short help and `--help` the long help that the pages give.
 
-Every command but `mcp`, `serve`, `derive --follow` and `auth git-credential` prints one JSON envelope on stdout: `mcp` speaks MCP there, `serve` git's protocol, `derive --follow` prints one envelope a line for each run that derived something, and nothing for a run that derived nothing, and `auth git-credential` answers git as a credential helper. An envelope's `op` names the operation the command runs (`cat` runs `read_file`). [Errors](errors.md) lists every error code an envelope can carry, with its exit code.
+Every command but `mcp`, `serve`, `derive --follow` and `auth git-credential` prints one JSON envelope on stdout, or at a terminal a short text of it (`--json` and `--human` choose): `mcp` speaks MCP there, `serve` git's protocol, `derive --follow` prints one envelope a line for each run that derived something, and nothing for a run that derived nothing, and `auth git-credential` answers git as a credential helper. An envelope's `op` names the operation the command runs (`cat` runs `read_file`). [Errors](errors.md) lists every error code an envelope can carry, with its exit code.
 
 `swarmops --help` lists the commands in groups, with examples; `swarmops <command> --help` gives one command's arguments and long help, and for a command that only groups subcommands (`ws`, `ref`, `op`, `blob`, `git`, `remote`, `auth`) its subcommands, with examples. A line that names no command, `swarmops` alone or such a command alone (but for `remote`, which alone lists the remotes), is a usage error: `E_INVALID_ARG`, exit code 2, in an envelope. At a terminal it prints that help on stdout instead of the envelope, with the same exit code, unless `--json` or `SWARMOPS_FORMAT=json` is given; a pipe or a file always gets the envelope.
 
@@ -18,9 +18,9 @@ Every command takes these, before or after its subcommand.
 | --- | --- | --- | --- |
 | `--repo <STORE>` | no | The store to use (default: $SWARMOPS\_REPO). |  |
 | `--as <AGENT>` | no | The agent to act as, &lt;family&gt;/&lt;instance&gt; (default: $SWARMOPS\_AGENT). |  |
-| `--json` | no | Print the JSON envelope: the default, unless $SWARMOPS\_FORMAT is human. |  |
-| `--human` | no | Print a short text rendering instead of JSON. |  |
-| `--pretty[=<BOOL>]` | no | Pretty-print the JSON (default: when stdout is a terminal). |  |
+| `--json` | no | Print the JSON envelope (default: when stdout is no terminal, or $SWARMOPS\_FORMAT is json). |  |
+| `--human` | no | Print a short text instead (default: at a terminal, or $SWARMOPS\_FORMAT is human). |  |
+| `--pretty[=<BOOL>]` | no | Pretty-print the JSON, and print JSON (default: when stdout is a terminal). |  |
 
 `-h` prints a command's short help and `--help` its long help, as plain text, not an envelope. `swarmops --version` prints the version.
 

@@ -385,10 +385,10 @@ the web server authenticated";
 ///
 /// Every command but mcp, serve, derive --follow, check log --follow and auth git-credential
 /// prints one JSON
-/// envelope on stdout; at a terminal, the program alone or a command group alone prints its
-/// help screen instead of its usage error's envelope, unless --json or SWARMOPS_FORMAT=json
-/// is given. The program's own help screen is laid out by the `help` module, which shows the
-/// first line of this and says the rest under its own headings.
+/// envelope on stdout, or at a terminal its text rendering; at a terminal, the program alone
+/// or a command group alone prints its help screen instead of its usage error, unless --json
+/// or SWARMOPS_FORMAT=json is given. The program's own help screen is laid out by the `help`
+/// module, which shows the first line of this and says the rest under its own headings.
 #[derive(Parser, Debug)]
 #[command(name = "swarmops", version = crate::version::version())]
 pub struct Cli {
@@ -412,13 +412,13 @@ pub struct Global {
         help = "The agent to act as, <family>/<instance> (default: $SWARMOPS_AGENT)"
     )]
     pub agent: Option<String>,
-    /// Print the JSON envelope: the default, unless $SWARMOPS_FORMAT is human.
+    /// Print the JSON envelope (default: when stdout is no terminal, or $SWARMOPS_FORMAT is json).
     #[arg(long, global = true, overrides_with = "human")]
     pub json: bool,
-    /// Print a short text rendering instead of JSON.
+    /// Print a short text instead (default: at a terminal, or $SWARMOPS_FORMAT is human).
     #[arg(long, global = true, overrides_with = "json")]
     pub human: bool,
-    /// Pretty-print the JSON (default: when stdout is a terminal).
+    /// Pretty-print the JSON, and print JSON (default: when stdout is a terminal).
     #[arg(
         long,
         global = true,

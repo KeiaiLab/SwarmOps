@@ -21,7 +21,8 @@ The Markdown comes from the page's source file in the repository, under `docs/`.
 
 ## What a program may rely on
 
-Every command prints one JSON envelope, and every MCP tool returns the same one
+Every command prints one JSON envelope wherever stdout is no terminal (`--json` asks for it
+anywhere), and every MCP tool returns the same one
 ([CLI scripting, The envelope](develop/cli-scripting.md#the-envelope)). A program tests three
 things in a failed envelope:
 

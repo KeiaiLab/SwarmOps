@@ -30,7 +30,8 @@ pub(super) fn render() -> String {
     let _ = writeln!(
         out,
         "Every command but `mcp`, `serve`, `derive --follow` and `auth git-credential` prints \
-         one JSON envelope on stdout: `mcp` speaks MCP there, `serve` git's protocol, \
+         one JSON envelope on stdout, or at a terminal a short text of it (`--json` and \
+         `--human` choose): `mcp` speaks MCP there, `serve` git's protocol, \
          `derive --follow` prints one envelope a line for each run that derived something, and \
          nothing for a run that derived nothing, and `auth git-credential` answers git as a \
          credential helper. An envelope's `op` names the operation the command runs (`cat` runs \

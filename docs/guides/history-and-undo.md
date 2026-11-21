@@ -1205,17 +1205,18 @@ restore.
 
 ## Choose an output format
 
-Every command here prints one JSON envelope on stdout. Three flags, given before or after the
-subcommand, choose how:
+Every command here prints one JSON envelope on stdout, or at a terminal a short text of it.
+Three flags, given before or after the subcommand, choose how:
 
 | Flag | Prints |
 | --- | --- |
-| `--json` | The envelope as JSON: the default. |
-| `--pretty[=BOOL]` | The JSON indented. The default is pretty when stdout is a terminal, compact otherwise. |
-| `--human` | A short text rendering instead of JSON. |
+| `--json` | The envelope as JSON: the default when stdout is no terminal. |
+| `--pretty[=BOOL]` | The JSON indented; alone, it also asks for JSON. The JSON's default is pretty when stdout is a terminal, compact otherwise. |
+| `--human` | A short text rendering instead of JSON: the default at a terminal. |
 
-Without `--json` or `--human`, `SWARMOPS_FORMAT` decides: `json` or `human`. Of `--json` and
-`--human`, the one given last wins. The exit code is the same in every format. When the
+Without `--json` or `--human`, `SWARMOPS_FORMAT` decides: `json` or `human`; without that
+too, stdout does: text at a terminal, JSON in a pipe or a file. Of `--json` and `--human`, the
+one given last wins. The exit code is the same in every format. When the
 command line itself is invalid, a format flag after the bad value can go unread:
 `so log -n many --human` prints JSON.
 

@@ -94,6 +94,13 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Changed
 
+- At a terminal, a command given neither `--json`, `--human` nor `SWARMOPS_FORMAT` prints its
+  short text rendering, as `--human` does, where it printed the JSON envelope pretty. Wherever
+  stdout is no terminal (a pipe, a file, a program that captures it) the default is the JSON
+  envelope as before, so scripts, CI jobs, hooks and agents read what they read; `--json` or
+  `SWARMOPS_FORMAT=json` asks for the envelope at a terminal, and `--pretty` given alone asks for
+  it too, pretty. The exit codes are unchanged. The reason: a person typing a command reads
+  text, as with other command lines, and a program reading a pipe does not.
 - `E_CHECK_FAILED`'s `details.run`, the whole result of a run of `check run`, holds each check's
   findings.
 - `check log`'s `CHECK` is optional: exactly one of it and `--failed` is given.

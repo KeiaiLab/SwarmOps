@@ -9,8 +9,8 @@ The examples below ran one after another, with the binary built from the SwarmOp
 the store that the [quick start](/docs/guides/quick-start) makes; the two git examples make stores of their
 own, the remote one against a local repository served through a stand-in for ssh. In
 the outputs, ids are cut to their first eight hex digits (`4a7bc757…`), a store's path to `…`,
-and a `…` line stands for lines left out. `--human` prints a short text rendering of the
-envelope instead of JSON.
+and a `…` line stands for lines left out. At a terminal a command prints a short text rendering of the
+envelope instead of JSON, as `--human` does anywhere.
 
 ## Many agents commit into one store at once
 
@@ -141,7 +141,8 @@ instead of a git worktree, and MCP has fourteen workspace tools.
 
 ## One JSON envelope per command
 
-Every command prints one JSON envelope on stdout (the few exceptions are under
+Every command prints one JSON envelope on stdout wherever a program reads it, and a short text
+of it at a terminal (the few exceptions are under
 [The envelope](/docs/develop/cli-scripting#the-envelope)): `ok`, `op`, `api`, then `result` or `error`,
 then `meta`. A failure carries a stable `E_*` code, the exit code, whether running it
 again can help (`retryable`), machine-readable `details` and a `hint`, often the next command to

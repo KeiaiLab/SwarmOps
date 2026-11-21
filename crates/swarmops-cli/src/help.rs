@@ -448,11 +448,13 @@ pub(crate) const FAMILIES: [Family; 9] = [
 ];
 
 /// What the program's screen says of its output, the rule of [`bare`] included.
-const OUTPUT: &str = "Every command prints one JSON envelope on stdout, or a short text with \
---human or SWARMOPS_FORMAT=human, and exits 0 or with its error's code. mcp, serve, derive \
---follow, check log --follow and auth git-credential speak their own protocols there. The \
-program alone, or a command group alone (ws, auth, ...), is a usage error, exit 2: at a terminal \
-it prints its help instead of the envelope, unless --json or SWARMOPS_FORMAT=json is given.";
+const OUTPUT: &str = "Every command prints a short text at a terminal and one JSON envelope on \
+stdout anywhere else (a pipe, a file), and exits 0 or with its error's code. --json or \
+SWARMOPS_FORMAT=json asks for the envelope, --human or SWARMOPS_FORMAT=human for the text, \
+wherever stdout goes. mcp, serve, derive --follow, check log --follow and auth git-credential \
+speak their own protocols there. The program alone, or a command group alone (ws, auth, ...), is \
+a usage error, exit 2: at a terminal it prints its help instead, unless --json or \
+SWARMOPS_FORMAT=json is given.";
 
 /// The label of the line that says how to read one command's help: its arguments, its options
 /// and its long text.

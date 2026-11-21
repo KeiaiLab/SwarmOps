@@ -63,7 +63,7 @@ swarmops 0.13.0
 {"ok":true,"op":"read_file","api":1,"result":{"blob":"464418f5a53907c921906843e6f1f4f984f144067b3bf32d69c1ff4c13627464","size":6,"kind":"file","encoding":"utf8","content":"hello\n","truncated":false},"meta":{"repo":"./acme","elapsed_ms":1,"resolved":{"main":"3388293347d2c58a0da5565c71038404ec1dfaa0a2a5dc367bc10943254ba63e"},"auth":"trust"}}
 ```
 
-Each store command prints one JSON envelope. `--advance main` moved `main` to the new changeset in the
+Each store command prints one JSON envelope, or at a terminal a short text of it. `--advance main` moved `main` to the new changeset in the
 commit's own transaction. Reads need no identity; a commit, a land, a ref move and an undo need
 one, from `--as` or `SWARMOPS_AGENT`. The [quick start guide](docs/guides/quick-start.md) goes on
 to a land, a conflict and an undo.

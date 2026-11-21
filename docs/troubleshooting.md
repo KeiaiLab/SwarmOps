@@ -19,8 +19,9 @@ long output. The examples run the long name, `swarmops`; `so` is the same progra
 
 ## Read the error first
 
-Every command prints one JSON envelope on stdout, and every MCP tool result holds the same
-envelope. A failure has `"ok": false` and an `error` object:
+Every command prints one JSON envelope on stdout (at a terminal a short text of it, unless
+`--json` is given), and every MCP tool result holds the same envelope. A failure has
+`"ok": false` and an `error` object:
 
 | Field | What it tells you |
 | --- | --- |

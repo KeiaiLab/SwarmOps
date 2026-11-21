@@ -41,11 +41,12 @@ Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
       --as <AGENT>       The agent to act as, <family>/<instance> (default:
                          $SWARMOPS_AGENT)
-      --json             Print the JSON envelope: the default, unless
-                         $SWARMOPS_FORMAT is human
-      --human            Print a short text rendering instead of JSON
-      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
-                         terminal)
+      --json             Print the JSON envelope (default: when stdout is no
+                         terminal, or $SWARMOPS_FORMAT is json)
+      --human            Print a short text instead (default: at a terminal, or
+                         $SWARMOPS_FORMAT is human)
+      --pretty[=<BOOL>]  Pretty-print the JSON, and print JSON (default: when
+                         stdout is a terminal)
   -h, --help             Print help
 
 $ so blob --help
@@ -71,11 +72,12 @@ Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
       --as <AGENT>       The agent to act as, <family>/<instance> (default:
                          $SWARMOPS_AGENT)
-      --json             Print the JSON envelope: the default, unless
-                         $SWARMOPS_FORMAT is human
-      --human            Print a short text rendering instead of JSON
-      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
-                         terminal)
+      --json             Print the JSON envelope (default: when stdout is no
+                         terminal, or $SWARMOPS_FORMAT is json)
+      --human            Print a short text instead (default: at a terminal, or
+                         $SWARMOPS_FORMAT is human)
+      --pretty[=<BOOL>]  Pretty-print the JSON, and print JSON (default: when
+                         stdout is a terminal)
   -h, --help             Print help
 
 $ so check --help
@@ -106,11 +108,12 @@ Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
       --as <AGENT>       The agent to act as, <family>/<instance> (default:
                          $SWARMOPS_AGENT)
-      --json             Print the JSON envelope: the default, unless
-                         $SWARMOPS_FORMAT is human
-      --human            Print a short text rendering instead of JSON
-      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
-                         terminal)
+      --json             Print the JSON envelope (default: when stdout is no
+                         terminal, or $SWARMOPS_FORMAT is json)
+      --human            Print a short text instead (default: at a terminal, or
+                         $SWARMOPS_FORMAT is human)
+      --pretty[=<BOOL>]  Pretty-print the JSON, and print JSON (default: when
+                         stdout is a terminal)
   -h, --help             Print help
 
 $ so ref --help
@@ -138,11 +141,12 @@ Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
       --as <AGENT>       The agent to act as, <family>/<instance> (default:
                          $SWARMOPS_AGENT)
-      --json             Print the JSON envelope: the default, unless
-                         $SWARMOPS_FORMAT is human
-      --human            Print a short text rendering instead of JSON
-      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
-                         terminal)
+      --json             Print the JSON envelope (default: when stdout is no
+                         terminal, or $SWARMOPS_FORMAT is json)
+      --human            Print a short text instead (default: at a terminal, or
+                         $SWARMOPS_FORMAT is human)
+      --pretty[=<BOOL>]  Pretty-print the JSON, and print JSON (default: when
+                         stdout is a terminal)
   -h, --help             Print help
 
 $ so op --help
@@ -166,11 +170,12 @@ Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
       --as <AGENT>       The agent to act as, <family>/<instance> (default:
                          $SWARMOPS_AGENT)
-      --json             Print the JSON envelope: the default, unless
-                         $SWARMOPS_FORMAT is human
-      --human            Print a short text rendering instead of JSON
-      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
-                         terminal)
+      --json             Print the JSON envelope (default: when stdout is no
+                         terminal, or $SWARMOPS_FORMAT is json)
+      --human            Print a short text instead (default: at a terminal, or
+                         $SWARMOPS_FORMAT is human)
+      --pretty[=<BOOL>]  Pretty-print the JSON, and print JSON (default: when
+                         stdout is a terminal)
   -h, --help             Print help
 
 $ so git --help
@@ -196,11 +201,12 @@ Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
       --as <AGENT>       The agent to act as, <family>/<instance> (default:
                          $SWARMOPS_AGENT)
-      --json             Print the JSON envelope: the default, unless
-                         $SWARMOPS_FORMAT is human
-      --human            Print a short text rendering instead of JSON
-      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
-                         terminal)
+      --json             Print the JSON envelope (default: when stdout is no
+                         terminal, or $SWARMOPS_FORMAT is json)
+      --human            Print a short text instead (default: at a terminal, or
+                         $SWARMOPS_FORMAT is human)
+      --pretty[=<BOOL>]  Pretty-print the JSON, and print JSON (default: when
+                         stdout is a terminal)
   -h, --help             Print help
 
 $ so remote --help
@@ -226,11 +232,12 @@ Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
       --as <AGENT>       The agent to act as, <family>/<instance> (default:
                          $SWARMOPS_AGENT)
-      --json             Print the JSON envelope: the default, unless
-                         $SWARMOPS_FORMAT is human
-      --human            Print a short text rendering instead of JSON
-      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
-                         terminal)
+      --json             Print the JSON envelope (default: when stdout is no
+                         terminal, or $SWARMOPS_FORMAT is json)
+      --human            Print a short text instead (default: at a terminal, or
+                         $SWARMOPS_FORMAT is human)
+      --pretty[=<BOOL>]  Pretty-print the JSON, and print JSON (default: when
+                         stdout is a terminal)
   -h, --help             Print help
 
 $ so auth --help
@@ -258,9 +265,10 @@ Options:
       --repo <STORE>     The store to use (default: $SWARMOPS_REPO)
       --as <AGENT>       The agent to act as, <family>/<instance> (default:
                          $SWARMOPS_AGENT)
-      --json             Print the JSON envelope: the default, unless
-                         $SWARMOPS_FORMAT is human
-      --human            Print a short text rendering instead of JSON
-      --pretty[=<BOOL>]  Pretty-print the JSON (default: when stdout is a
-                         terminal)
+      --json             Print the JSON envelope (default: when stdout is no
+                         terminal, or $SWARMOPS_FORMAT is json)
+      --human            Print a short text instead (default: at a terminal, or
+                         $SWARMOPS_FORMAT is human)
+      --pretty[=<BOOL>]  Pretty-print the JSON, and print JSON (default: when
+                         stdout is a terminal)
   -h, --help             Print help

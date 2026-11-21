@@ -55,7 +55,8 @@ so init "$SWARMOPS_REPO" --name acme
 
 `init` makes the directory if it is missing. A store has no default location: every command finds
 it by `--repo` or `SWARMOPS_REPO`. The identity is `<family>/<instance>`; every change you record
-carries it. `--human` prints a short text rendering instead of JSON:
+carries it. At a terminal a command prints a short text rendering; in a pipe or a file, or with
+`--json`, it prints the JSON envelope this guide shows. `--human` asks for the text anywhere:
 
 ```sh
 so --human whoami
@@ -127,8 +128,8 @@ signatures.
 
 ## 5. What does a command print?
 
-Without `--human`, each command prints one JSON [envelope](../concepts.md#envelope) on stdout:
-pretty on a terminal, compact otherwise. The same `cat`, compact:
+With `--json`, or wherever stdout is no terminal, each command prints one JSON
+[envelope](../concepts.md#envelope) on stdout: pretty on a terminal, compact otherwise. The same `cat`, compact:
 
 ```sh
 so cat main:src/lib.rs

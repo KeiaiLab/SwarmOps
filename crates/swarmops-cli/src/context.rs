@@ -7,8 +7,10 @@
 //! - The identity is `--as <family>/<instance>`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`,
 //!   as `swarmops_ops::identity` resolves it.
 //! - The format is `--json` or `--human`, whichever comes last, else `SWARMOPS_FORMAT`
-//!   (`json` or `human`), else JSON; JSON is pretty with `--pretty`, and by default when
-//!   stdout is a terminal.
+//!   (`json` or `human`), else JSON when `--pretty` is given, else what stdout is for: the
+//!   text rendering at a terminal, where a person reads it, and JSON in a pipe or a file,
+//!   where a program does. JSON is pretty with `--pretty`, and by default when stdout is a
+//!   terminal.
 //!
 //! - The memo key of a store, which the git export and import trust export oid memos under, is
 //!   the file `<repo_id>.key` of `SWARMOPS_MEMO_KEY_DIR`, else of the per-OS state directory's
@@ -302,7 +304,10 @@ pub fn mutator(flag: Option<&str>, env: Env<'_>) -> Result<Identity, OpError> {
     swarmops_ops::identity::require_identity(identity(flag, env)?)
 }
 
-/// The format `global`'s flags and the environment ask for, given what `stdout` is.
+/// The format `global`'s flags and the environment ask for, given what `stdout` is. With
+/// neither a flag nor the variable, a terminal gets the text rendering and anything else JSON,
+/// so that a person reads text and a program reads the envelope without either asking;
+/// `--pretty` alone asks for JSON, since it is JSON it lays out.
 /// `E_INVALID_ARG` for a `SWARMOPS_FORMAT` that is neither `json` nor `human`; the error is
 /// then printed as [`json_format`] gives.
 pub fn format(global: &Global, env: Env<'_>, stdout: Stdout) -> Result<Format, OpError> {
@@ -310,7 +315,8 @@ pub fn format(global: &Global, env: Env<'_>, stdout: Stdout) -> Result<Format, O
         global.human
     } else {
         match var(env, FORMAT_ENV)?.as_deref() {
-            None | Some("json") => false,
+            None => global.pretty.is_none() && stdout == Stdout::Terminal,
+            Some("json") => false,
             Some("human") => true,
             Some(other) => {
                 return Err(said_of(
@@ -450,12 +456,33 @@ mod tests {
             format(&flags(false, false, None), &none, Stdout::Other).unwrap(),
             json
         );
+        let pretty = Format::Json {
+            layout: Layout::Pretty,
+        };
         assert_eq!(
             format(&flags(false, false, None), &none, Stdout::Terminal).unwrap(),
-            Format::Json {
-                layout: Layout::Pretty
-            },
-            "pretty on a terminal"
+            Format::Human,
+            "text at a terminal when nothing names a format"
+        );
+        assert_eq!(
+            format(&flags(true, false, None), &none, Stdout::Terminal).unwrap(),
+            pretty,
+            "--json at a terminal is pretty"
+        );
+        assert_eq!(
+            format(
+                &flags(false, false, None),
+                &env_of(&[(FORMAT_ENV, b"json")]),
+                Stdout::Terminal
+            )
+            .unwrap(),
+            pretty,
+            "the variable forces JSON at a terminal"
+        );
+        assert_eq!(
+            format(&flags(false, false, Some(true)), &none, Stdout::Terminal).unwrap(),
+            pretty,
+            "--pretty alone asks for JSON"
         );
         assert_eq!(
             format(&flags(false, false, Some(false)), &none, Stdout::Terminal).unwrap(),

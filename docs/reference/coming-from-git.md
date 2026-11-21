@@ -8,7 +8,7 @@ A git verb that runs is read as the command it stands for (`so status` is `so ws
 
 ## Text output
 
-Every command prints one JSON envelope unless text is asked for. `--human` prints text, in git's shape for `status`, `log`, `diff` and `commit`, and git's own shape flags ask for it too (`so status -s`, `so log --oneline`, `so diff --stat`). For text from every command:
+Every command prints text at a terminal and one JSON envelope anywhere else. `--human` prints text wherever stdout goes, in git's shape for `status`, `log`, `diff` and `commit`, and git's own shape flags ask for it too (`so status -s`, `so log --oneline`, `so diff --stat`). For text from every command, in a pipe too:
 
 ```sh
 export SWARMOPS_FORMAT=human
