@@ -1486,9 +1486,8 @@ installation past it.
   cluster.*
 - **The image is in no registry, and the chart names no digest.** A release holds the image as
   an OCI archive (`swarmops-server-<version>-oci.tar`); the chart's default repository is not
-  published and its default digest is zeros, and the chart's version is 0.11.0 beside a 0.13.0
-  workspace. An operator copies the archive's index into a registry of their own, under its
-  digest, and sets `image.repository` and `image.digest`. *Unscheduled. Found: the first
+  published and its default digest is zeros. An operator copies the archive's index into a
+  registry of their own, under its digest, and sets `image.repository` and `image.digest`. *Unscheduled. Found: the first
   installation on a cluster.*
 
 ## Performance

@@ -21,7 +21,9 @@ app.kubernetes.io/name: swarmops-server
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+{{- /* A version with build metadata (`0.13.0+<commit>`, as a tool stamps a chart it packs
+     from a commit) holds a `+`, which a label's value cannot. */}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end -}}
 
 {{/* The selector of one component: server, rehearsal or accept. */}}
