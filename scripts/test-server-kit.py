@@ -68,6 +68,9 @@ JOBS = "/usr/lib/swarmops-server/jobs"
 # A job's period line, in systemd's time span units.
 PERIOD = re.compile(r"^# period: ([1-9][0-9]*(?:s|min|h|d|w))$", re.MULTILINE)
 SYSTEMD_UNITS = "/usr/lib/systemd/system/"
+# Programs whose timer the package installs for a machine other than the serving host (the
+# status probe, as its MANIFEST says): no job of the serving host, so not the runner's.
+ELSEWHERE = {"/usr/bin/so-status"}
 # Seconds a started so-kit or a stub it starts gets before the case fails.
 KIT_DEADLINE = 30
 # The roles `so-kit run all` starts beside each other.
@@ -588,7 +591,13 @@ def create_store_writes_access(scratch: Path) -> None:
     assert "version = 1" in access and 'who = ["person/ada"]' in access, access
     assert 'land = ["main"]' in access and "read = true" in access, access
     assert (scratch / "srv" / "acme" / "FORMAT").exists(), "init did not run"
-    for label, name in (("exists", "acme"), ("upper", "Acme"), ("slash", "a/b"),
+    owned = run_kit(scratch, "create-store", "team/inner", "person/ada")
+    assert owned.returncode == 0, f"an owner's segment and the store's: {owned.stderr}"
+    assert (scratch / "srv" / "team" / "inner" / "FORMAT").exists(), "the owned store"
+    assert (scratch / "srv" / "team" / "inner" / "access.toml").exists(), "its access.toml"
+    for label, name in (("exists", "acme"), ("upper", "Acme"), ("three", "a/b/c"),
+                        ("owner is a store", "acme/x"), ("empty owner", "/b"),
+                        ("empty name", "a/"), ("upper owner", "Team/x"),
                         ("dot", ".acme"), ("long", "a" * 64)):
         done = run_kit(scratch, "create-store", name, "person/ada")
         assert done.returncode == 2, f"{label}: {done}"
@@ -655,6 +664,9 @@ def timer_jobs(kit: Path) -> dict[str, str]:
                             fallback=Path(destination).with_suffix(".service").name)
         assert SYSTEMD_UNITS + service in units, f"{name}: no service {service}"
         program = unit(kit / units[SYSTEMD_UNITS + service]).get("Service", "ExecStart")
+        # A leading `-` is systemd's: the program's failure does not fail the unit.
+        if program.split()[0].lstrip("-") in ELSEWHERE:
+            continue
         jobs[program.split()[0]] = timer.get("Timer", "OnUnitActiveSec", fallback="")
     return jobs
 

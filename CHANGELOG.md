@@ -22,6 +22,17 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Added
 
+- A served store's name may have an owner's segment before the store's, `<owner>/<name>`, as a
+  forge writes a repository's address: the store `<root>/acme-co/app` is
+  `ssh://host/acme-co/app.git` and `host:acme-co/app.git` over ssh,
+  `https://host/<prefix>/acme-co/app.git` over smart HTTP, and `so://host/acme-co/app` for a
+  store client. Each segment is a remote's name (`[a-z0-9][a-z0-9._-]{0,62}`); a store of one
+  segment is served as before, and a third segment, an empty one or `..` is `E_INVALID_ARG`
+  `bad_path` (for a `so://` URL, `details.reason: url`). `so-kit create-store <owner>/<name>`
+  makes the owner's directory; the package's nginx site and the chart's `installation.stores`
+  take such a name, and a backup holds the store as `parts/stores/<owner>/<name>.tar`. A web
+  server set up by hand passes one or two segments in `PATH_INFO`
+  ([Serve over HTTP](docs/operate/serve-over-http.md)).
 - A check's findings: a check writes them to its report file, at `SWARMOPS_CHECK_REPORT`, one
   JSON object a line with `level` (`error`, `warning`, `notice`), `title`, and optionally
   `message`, `path` (a repository path), `line` and `end_line`. Once the check has ended (and
@@ -94,6 +105,13 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Changed
 
+- At a terminal, a command given neither `--json`, `--human` nor `SWARMOPS_FORMAT` prints its
+  short text rendering, as `--human` does, where it printed the JSON envelope pretty. Wherever
+  stdout is no terminal (a pipe, a file, a program that captures it) the default is the JSON
+  envelope as before, so scripts, CI jobs, hooks and agents read what they read; `--json` or
+  `SWARMOPS_FORMAT=json` asks for the envelope at a terminal, and `--pretty` given alone asks for
+  it too, pretty. The exit codes are unchanged. The reason: a person typing a command reads
+  text, as with other command lines, and a program reading a pipe does not.
 - `E_CHECK_FAILED`'s `details.run`, the whole result of a run of `check run`, holds each check's
   findings.
 - `check log`'s `CHECK` is optional: exactly one of it and `--failed` is given.
@@ -110,6 +128,22 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Fixed
 
+- The server's Helm chart starts on a new volume and serves with its Secrets as mounted, which
+  its first installation on a cluster did not (2026-11-21):
+  - An init container makes the data volume's two directories as the pod's user. The kubelet
+    made a missing `subPath` directory as root, and `so-kit run setup` ended with `run as the
+    owner of the stores' directory`.
+  - sshd reads a copy of the key lines. The kit's new setting `authorized_keys_from` names where
+    they are kept, the chart sets it to the access Secret's file, and `so-kit run sshd` copies
+    them to `authorized_keys` at start and as they change; sshd's `StrictModes` refused the
+    file inside the Secret's mount, and every key was `Permission denied (publickey)`.
+  - The timers run `so-backup` with `backup.conf` of the backup Secret (`SO_BACKUP_CONF`), not
+    the image's empty one; the alerts Secret is mounted so that the pod may run the program
+    `backup_alert` names (mode 0550, every other Secret 0400); and `so-backup`'s new setting
+    `backup_ca` names a certificate authority file for a bucket inside the cluster.
+  - `so-kit page` makes the root page's directory, and `so-kit run all` writes the page before
+    a role listens; `/` was 404 in a pod, and for the image until the first hourly job.
+- The entrance's nginx site loads again: its rule for one or two path segments is quoted.
 - A native `sync` or `fetch` that lost a race to another host's push no longer ends in
   `E_REV_NOT_FOUND` (`not_a_ref_head`, exit 6, not retryable). The upstream refuses a `wire_list`
   for a head that is no ref's head any more, and a ref that moved between the fetch's `wire_refs`

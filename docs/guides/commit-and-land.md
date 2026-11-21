@@ -56,9 +56,10 @@ changesets: 0
 refs: 0
 ```
 
-Every command prints one JSON envelope on stdout. `--human` prints a short text rendering
-instead; this guide uses it where a script would not read the output. Two shell helpers read the
-JSON and make keys:
+Every command prints one JSON envelope on stdout where a program reads it (a pipe, a file, or
+with `--json`), and a short text rendering at a terminal or with `--human`; this guide uses
+`--human` where a script would not read the output. Two shell helpers read the JSON and make
+keys:
 
 ```sh
 # field: print one field of an envelope, as text, or as JSON for an object or a list.

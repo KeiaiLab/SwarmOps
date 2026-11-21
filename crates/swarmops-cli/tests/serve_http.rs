@@ -717,7 +717,12 @@ fn http_refuses_before_git() {
     ] {
         check(http, path, 404, "E_NOT_A_REPO");
     }
-    for path in ["/../x/info/refs", "/../x.git/info/refs", "/a%2Fb/info/refs"] {
+    for path in [
+        "/../x/info/refs",
+        "/../x.git/info/refs",
+        "/a%2Fb/info/refs",
+        "/acme/inner/deeper.git/info/refs",
+    ] {
         check(http, path, 400, "E_INVALID_ARG");
     }
     check(http, "/nowhere.git/info/refs", 404, "E_NOT_A_REPO");

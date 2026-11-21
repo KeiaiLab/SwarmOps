@@ -64,11 +64,15 @@ secrets:
   tls: swarmops-tls
   # authorized_keys (the key lines) and web.htpasswd (the HTTPS logins).
   access: swarmops-access
+  # backup.conf (so-backup's settings) and the files it names: the credential, the recipients'
+  # certificates, a certificate authority of the bucket's own.
   backup: swarmops-backup
+  # The program `backup_alert` names; mounted so that the pod may run it.
   alerts: swarmops-alerts
   acceptance: swarmops-acceptance
   # Mode rehearsal only; the serving pod never names them.
   rehearsalKey: swarmops-rehearsal-key
+  # backup.conf and the drill's own credential.
   rehearsalBucket: swarmops-rehearsal-bucket
 
 # The `helm test` pod: smoke on every install and upgrade, full in a scratch release.

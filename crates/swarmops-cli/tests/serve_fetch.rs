@@ -657,7 +657,11 @@ fn serve_refuses_readers_before_git() {
     fs::create_dir(site.served.root().join("plain")).unwrap();
     let plain = refused(AGENT, &site.served.ssh_url("plain"));
     assert!(plain.contains("remote error: E_NOT_A_REPO"), "{plain}");
-    let nested = refused(AGENT, "ssh://git@remote.invalid/acme/inner.git");
+    // An owner's segment and a store's is a name, of a store that is not there; a third
+    // segment names none.
+    let owned = refused(AGENT, "ssh://git@remote.invalid/acme/inner.git");
+    assert!(owned.contains("remote error: E_NOT_A_REPO"), "{owned}");
+    let nested = refused(AGENT, "ssh://git@remote.invalid/acme/inner/deeper.git");
     assert!(nested.contains("remote error: E_INVALID_ARG"), "{nested}");
     assert!(nested.contains("bad_path"), "{nested}");
 

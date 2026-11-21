@@ -1442,6 +1442,71 @@ check file with its stages, `check list` and `check run` are built
   back, but the entries it landed stay landed: they are not queued again. *Unscheduled (undo of
   queue records, the M22 core design §8). Found: the M22 core design.*
 
+## The server kit on Kubernetes
+
+What the first installation of the server's Helm chart on a cluster found: chart 0.11.0 with the
+0.12.0 image, one pod on a new block volume, its Secrets synced from a secret store
+(2026-11-21). The chart's own tests render it and start no pod. Each item names what got that
+installation past it.
+
+Five of its findings are fixed since and are not listed: the volume's directories, sshd's key
+lines, the root page at start, the backup's settings and the alert program
+([changelog](../CHANGELOG.md)).
+
+- **A store the kit makes has no `main`.** `so-kit create-store`, and so `so-kit run setup`,
+  runs `init` and writes an `access.toml` that grants the identity `read` and `land` on `main`;
+  the store holds no changeset. A push to `refs/land/main` is `E_REV_NOT_FOUND: main: not
+  found`, a store client's `sync` is `neither main nor main on the remote exists`, and the grant
+  lets no caller make `main`. The operator makes the root commit on the host
+  (`commit --allow-empty --advance main`). A store client's `sync` over the git wire needs
+  `push` on `main` as well, which that grant lacks. *Unscheduled. Found: the first installation
+  on a cluster.*
+- **The chart's Service is ports 22 and 443, and takes no label.** A cluster that shares one
+  load-balancer address between Services, or picks the address pool by a Service's label, cannot
+  give the chart's Service that address: it runs it as `ClusterIP` behind entrances of its own.
+  *Unscheduled. Found: the first installation on a cluster.*
+- **The server image prints a loader line on every connection.** The image is Debian 12, whose
+  glibc is 2.36, and the release binary prints
+  `weak version 'GLIBC_2.39' not found (required by /usr/bin/swarmops)` there
+  ([Platforms](#platforms)): stock git shows it as a `remote:` line on each fetch and push, and
+  it is on `setup`'s log. Nothing fails. *Unscheduled. Found: the first installation on a
+  cluster.*
+- **The chart's egress names addresses, not pods.** `wiring.networkPolicy.egress` takes
+  `(cidr, port)` pairs. A bucket or an alert receiver inside the same cluster is a set of pods,
+  which a network plugin that enforces policy by identity does not match by address; a second
+  NetworkPolicy with pod selectors, made beside the release, opens them. *Unscheduled. Found:
+  the first installation on a cluster.*
+- **Nothing schedules the restore drill beside a served release.** The drill is the chart's
+  second mode, a release of its own with its own key and credential, to which the item above
+  applies again; without it the daily check mails that no rehearsal passed once the last
+  record is older than eight days. The first installation runs `so-backup rehearse` from a
+  CronJob of its own, with the image, the backup's settings and the rehearsal key.
+  *Unscheduled. Found: the first installation on a cluster.*
+- **A drill that cannot write a state directory says only that `verify --deep` failed.**
+  `verify --deep` makes a memo key under the account's state directory; in a pod whose home is
+  on a read-only root that is `E_INVALID_ARG` (`the memo key ... cannot be made`), and
+  `so-backup` drops the message and reports `<store> fails verify --deep`. Got past by giving
+  the drill's pod a `HOME` it can write. *Unscheduled. Found: the first installation on a
+  cluster.*
+- **`so-backup` cannot reach a bucket with the curl of an Enterprise Linux 9 host.** The backup
+  signs its requests with curl's `--aws-sigv4`, and curl 7.76.1 does not sign what it is told;
+  the bucket answers 403 and the backup ends with `cannot ship the backup to the bucket`. This
+  is the acceptance case `backup_wipe_restore` for the `.rpm`, red since 2026-11-18. Two builds
+  that both call themselves 7.76.1 differ: the one in the current `almalinux:9` image signs the
+  host without its port and an upload always as `UNSIGNED-PAYLOAD`, and accepts a request that
+  sends just that; the one the acceptance's host has signs `host;x-amz-date` alone and refused
+  each of three forms of upload tried (the payload declared unsigned, the body as posted data,
+  and that with a content type). curl 7.88.1, as Debian 12 and the image ship it, signs as the
+  bucket expects. No form of request was found that every build signs alike, so `so-backup` is
+  as it was; signing without curl is the way left. Measured 2026-11-21 with a listener that
+  recomputed each signature from the request it received, and with the acceptance run on a
+  second host. *Unscheduled.*
+- **The image is in no registry, and the chart names no digest.** A release holds the image as
+  an OCI archive (`swarmops-server-<version>-oci.tar`); the chart's default repository is not
+  published and its default digest is zeros. An operator copies the archive's index into a
+  registry of their own, under its digest, and sets `image.repository` and `image.digest`. *Unscheduled. Found: the first
+  installation on a cluster.*
+
 ## Performance
 
 - **Part of each lock pass through the binary is unexplained.** In the quiet-window run the lock

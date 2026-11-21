@@ -12,7 +12,10 @@
 //! - A line that names no command (`so`, `so ws`) is such a refused line, and prints that
 //!   envelope wherever stdout is no terminal. At a terminal it prints the help screen on stdout
 //!   instead, with the same exit code 2, unless `--json` or `SWARMOPS_FORMAT=json` forces a
-//!   format: the one case where what a run prints depends on more than the layout of its JSON.
+//!   format.
+//! - With no `--json`, `--human` or `SWARMOPS_FORMAT`, the format follows stdout: the text
+//!   rendering at a terminal, the envelope anywhere else (`context::format`). A program that
+//!   reads stdout through a pipe gets the envelope without asking for it.
 //! - A panic is caught and printed as `E_INTERNAL` (exit 1), its message in `message`, with
 //!   `meta.repo` and `meta.resolved` as far as the command got; the panic's location goes to
 //!   stderr.

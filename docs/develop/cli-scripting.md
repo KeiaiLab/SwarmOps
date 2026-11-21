@@ -11,8 +11,9 @@ wording may change in any release ([versioning policy](../policies/versioning-an
 
 Scripts, CI jobs and agents that do not speak MCP drive SwarmOps through the `swarmops` command
 (or `so`, the same program by a shorter name). Every command prints one JSON envelope on stdout
-and exits with a code that says what kind of failure it was, so a script needs no text parsing:
-read the exit code, then the envelope's fields.
+when stdout is a pipe or a file (a person at a terminal gets a short text instead) and exits
+with a code that says what kind of failure it was, so a script needs no text parsing: read the
+exit code, then the envelope's fields.
 
 This page covers the envelope, the output flags, the exit codes, `jq` recipes for common tasks,
 which errors to retry and how, idempotency keys, and a complete script that commits and lands in a
@@ -127,14 +128,15 @@ flow fails, `E_AUTH` carries `details.reason` (`access_denied`, `expired_token`,
 
 | Flag | Effect |
 | --- | --- |
-| `--json` | The JSON envelope: the default, unless `SWARMOPS_FORMAT` is `human`. |
-| `--human` | A short text rendering instead, for a person. |
-| `--pretty[=BOOL]` | Pretty-print the JSON. The default is pretty on a terminal and compact otherwise, so a pipe gets one line. |
-| `SWARMOPS_FORMAT=json\|human` | The format when neither `--json` nor `--human` is given; any other value is `E_INVALID_ARG`. |
+| `--json` | The JSON envelope: the default when stdout is no terminal, and wherever `SWARMOPS_FORMAT` is `json`. |
+| `--human` | A short text rendering instead, for a person: the default at a terminal, and wherever `SWARMOPS_FORMAT` is `human`. |
+| `--pretty[=BOOL]` | Pretty-print the JSON; given without `--human`, it also asks for JSON. The JSON's default is pretty on a terminal and compact otherwise, so a pipe gets one line. |
+| `SWARMOPS_FORMAT=json\|human` | The format when neither `--json` nor `--human` is given, wherever stdout goes; any other value is `E_INVALID_ARG`. |
 
-`--json` and `--human` may both appear; the last one wins. Scripts should pass `--json`
-explicitly, or leave `SWARMOPS_FORMAT` unset, so that a user's `SWARMOPS_FORMAT=human` cannot
-change what the script parses. The exit code is the same whatever the format.
+`--json` and `--human` may both appear; the last one wins. With neither, and no
+`SWARMOPS_FORMAT`, stdout decides: text at a terminal, the envelope in a pipe or a file. Scripts
+should pass `--json` explicitly, so that neither a user's `SWARMOPS_FORMAT=human` nor a terminal
+the script happens to run under can change what it parses. The exit code is the same whatever the format.
 
 ```sh
 swarmops info --human

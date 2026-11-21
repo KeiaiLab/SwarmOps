@@ -33,6 +33,7 @@ swarmops=/usr/bin/swarmops
 host_keys=/etc/ssh
 web_root=/var/cache/swarmops-server/www
 authorized_keys=/var/lib/swarmops-server/.ssh/authorized_keys
+authorized_keys_from=
 web_user=www-data
 terms=
 privacy=
@@ -49,6 +50,7 @@ stores=
 # certificate, so that a renewed one is served within a minute.
 SO_KIT=/usr/sbin/so-kit
 CERT_CHECK=30
+KEYS_CHECK=60
 TLS=/etc/swarmops-server/tls
 
 conf=${SO_KIT_CONF:-/etc/swarmops-server/kit.conf}
@@ -62,8 +64,8 @@ while IFS= read -r line || [ -n "$line" ]; do
     key=${line%%=*}
     value=${line#*=}
     case $key in
-    root | swarmops | host_keys | web_root | authorized_keys | terms | privacy | acceptable_use | \
-        run_dir | jobs | rehearse | accept)
+    root | swarmops | host_keys | web_root | authorized_keys | authorized_keys_from | terms | \
+        privacy | acceptable_use | run_dir | jobs | rehearse | accept)
         case $value in
         '') ;;
         /*[!A-Za-z0-9._/-]* | [!/]*) fail "settings: $key is no plain absolute path" ;;
@@ -108,15 +110,28 @@ check_identity() {
     esac
 }
 
+# A store's name: one segment, or an owner's and the store's joined by one `/`, as serve reads a
+# path (`<name>` or `<owner>/<name>`).
 check_name() {
     case $1 in
+    */*/* | /* | */) fail "a store name is <name> or <owner>/<name>: $1" ;;
+    */*)
+        check_segment "${1%%/*}"
+        check_segment "${1#*/}"
+        ;;
+    *) check_segment "$1" ;;
+    esac
+}
+
+check_segment() {
+    case $1 in
     [a-z0-9]*) ;;
-    *) fail "a store name starts with [a-z0-9]: $1" ;;
+    *) fail "a store name's segment starts with [a-z0-9]: $1" ;;
     esac
     case $1 in
-    *[!a-z0-9._-]*) fail "a store name is [a-z0-9._-]: $1" ;;
+    *[!a-z0-9._-]*) fail "a store name's segment is [a-z0-9._-]: $1" ;;
     esac
-    [ ${#1} -le 63 ] || fail "a store name has at most 63 characters"
+    [ ${#1} -le 63 ] || fail "a store name's segment has at most 63 characters"
 }
 
 # One public key, without options: sets key_type and key_blob.
@@ -206,7 +221,17 @@ cmd_create_store() {
     [ "$(stat -c %u "$root")" = "$(id -u)" ] || fail "run as the owner of the stores' directory"
     [ ! -e "$root/$name" ] || fail "a store named $name exists"
 
-    "$swarmops" init "$root/$name" --name "$name" >/dev/null || fail "swarmops init failed"
+    # An owner's directory holds stores and nothing else: it is made here, and a directory that
+    # is a store itself owns no other.
+    case $name in
+    */*)
+        owner=$root/${name%%/*}
+        [ ! -e "$owner/FORMAT" ] || fail "${name%%/*} is a store, not an owner"
+        [ -d "$owner" ] || mkdir -m 0700 "$owner" || fail "cannot make the owner's directory"
+        ;;
+    esac
+
+    "$swarmops" init "$root/$name" --name "${name##*/}" >/dev/null || fail "swarmops init failed"
 
     # The creator reads and lands onto main; more grants are the operator's edit.
     temporary="$root/$name/.access.toml.$$"
@@ -246,6 +271,8 @@ cmd_page() {
     version=$(printf '%s\n' "$version" | head -n 1 | html)
     digest=$(sha256sum <"$swarmops" 2>/dev/null) || fail "cannot read the swarmops binary"
     digest=${digest%% *}
+    # A container role's web root lies under its run directory, which starts empty.
+    [ -d "$web_root" ] || mkdir -p "$web_root" || fail "cannot make the root page's directory"
     temporary="$web_root/.index.html.$$"
     {
         printf '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
@@ -384,6 +411,16 @@ $stores
 EOF
 }
 
+# The key lines of `authorized_keys_from`, in the place sshd reads: its directory and the file
+# the serving account's alone, the file renamed into place.
+copy_key_lines() {
+    keys_dir=${authorized_keys%/*}
+    [ -d "$keys_dir" ] || mkdir -p -m 0700 "$keys_dir" || return 1
+    cp "$authorized_keys_from" "$keys_dir/.authorized_keys.$$" &&
+        chmod 0600 "$keys_dir/.authorized_keys.$$" &&
+        mv "$keys_dir/.authorized_keys.$$" "$authorized_keys"
+}
+
 role_sshd() {
     [ $# -eq 0 ] || fail "usage: so-kit run sshd"
     sshd=$(command -v sshd) || fail "no sshd"
@@ -397,7 +434,21 @@ role_sshd() {
     done
     [ -n "$keys" ] || fail "no host key to serve"
 
-    # 2. The serving account alone, on the setting's port, as the package's drop-in sets it.
+    # 2. Key lines kept elsewhere, as a mounted Secret keeps them: sshd's StrictModes refuses a
+    # file in a directory others can write, so sshd reads a copy, brought up to date as the
+    # source changes. A line added to the copy alone does not last.
+    if [ -n "$authorized_keys_from" ]; then
+        [ -r "$authorized_keys_from" ] || fail "cannot read the key lines the settings name"
+        copy_key_lines || fail "cannot copy the key lines"
+        (
+            while sleep "$KEYS_CHECK"; do
+                cmp -s "$authorized_keys_from" "$authorized_keys" || copy_key_lines ||
+                    printf 'so-kit: the key lines were not copied\n' >&2
+            done
+        ) &
+    fi
+
+    # 3. The serving account alone, on the setting's port, as the package's drop-in sets it.
     write_run sshd_config <<EOF
 # Written by so-kit run sshd from the kit's settings.
 Port $ssh_port
@@ -462,7 +513,7 @@ http {
             try_files /index.html =404;
         }
 
-        location ~ "^(/[a-z0-9][a-z0-9._-]{0,62}/(?:info/refs|git-upload-pack|git-receive-pack))\$" {
+        location ~ "^((?:/[a-z0-9][a-z0-9._-]{0,62}){1,2}/(?:info/refs|git-upload-pack|git-receive-pack))\$" {
             auth_basic "SwarmOps";
             auth_basic_user_file /etc/swarmops-server/web.htpasswd;
             client_max_body_size 0;
@@ -556,6 +607,10 @@ EOF
 role_all() {
     [ $# -eq 0 ] || fail "usage: so-kit run all"
     role_setup
+
+    # The root page before anything listens: the timers write it again each hour, and a client
+    # that asks for `/` as soon as the web role answers must not find it missing.
+    (cmd_page) || printf 'so-kit: the root page was not written\n' >&2
 
     # Every serving role beside the others; one ending ends the rest.
     SO_KIT_CONF=$conf

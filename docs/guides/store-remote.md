@@ -130,9 +130,47 @@ so push origin
 `up_to_date` with `old` different from `new`: the remote already held the commit, from a push
 whose answer was lost; the tracking ref moved, nothing was sent. Run once more, `old` is `new`.
 
+## The native form: `so://`
+
+From 0.12.0 a store also reaches a served store with no git in between. A `so://` URL names the
+host and the store, `so://[user@]host[:port]/<store>`, without `.git`, the store `<name>` or
+`<owner>/<name>` as the served root holds it; the client runs
+`swarmops serve --stdio '<store>'` on the host over ssh (`$GIT_SSH_COMMAND`, else `ssh`), and the
+key line that answers git answers it, under the same `access.toml`. There is no HTTPS form.
+
+```sh
+so clone so://so-host/acme --into ~/.local/state/swarmops/repos/acme
+so fetch origin                  # the upstream's changesets, under their own ids
+so sync origin                   # the upstream lands main's changes; main moves to its head
+so push origin feature/x         # a branch or a tag, its ids kept
+```
+
+What differs from the git wire above:
+
+- **The upstream lands.** `so sync` sends what the upstream lacks and has it land each change of
+  `main` in order, keyed by the change's id; then `main` moves to the upstream's head. Every
+  changeset has one id on both stores, where over the git wire each store keeps ids of its own.
+  The key needs `land` on `main`; `push` on `main` alone is `E_POLICY_DENIED` (`details.action`
+  `land`).
+- **`push` does not move `main`.** `so push origin main` is `E_INVALID_ARG` with
+  `details.reason` `land_with_sync`, and its hint names the sync.
+- **A workspace is stale after a sync that landed.** The change it was based on has the
+  upstream's id now, so its next command is `E_WS_STALE`; `so ws rebase --ws NAME` puts it on
+  `main` (`status: absorbed` when the upstream already holds its commits).
+- **A conflict** is `E_CONFLICT` (exit 3) from the upstream's land: the changes before it stay
+  landed, `main` moves to the upstream's head, and the error names the refused change and how to
+  rebase it.
+- **Refusals carry the served store's code.** A key no grant names is `E_AUTH` with
+  `details.reason` `unknown_identity`; a key with `read` alone that syncs or pushes is
+  `E_POLICY_DENIED` with `details.action` `upload`. A server too old for native sync is
+  `E_REMOTE_REJECTED` with `details.reason` `not_native`: use its git form.
+
+A refused or cut clone leaves the store it made (`details.created`); the same command into the
+same directory finishes it.
+
 ## What crosses, and what does not
 
-| | Over the git wire (this page) | Native sync (planned) |
+| | Over the git wire | Native sync as designed (M11); [what `so://` does today](#the-native-form-so) |
 | --- | --- | --- |
 | Who lands | `so sync`: the client lands onto the remote's head, then pushes by compare-and-swap; the remote records a `ref_move` by the caller. A push to `refs/land/<target>` is refused before git | The remote lands every change, keyed |
 | Ids | A commit on the remote's `main` has one git id and one tree in every store that fetched it. A change made in a store keeps its changeset id there; other stores import its commit under ids of their own, and stores are compared by git commit id. A change that loses a race gets a new git commit id and a new changeset id; the old id is dropped locally and only the `SwarmOps-Changeset` trailer names it. No lineage is recorded | New ids upstream, the origin recorded |

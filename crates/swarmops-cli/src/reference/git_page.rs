@@ -135,10 +135,11 @@ fn render() -> String {
     let _ = writeln!(out, "## Text output\n");
     let _ = writeln!(
         out,
-        "Every command prints one JSON envelope unless text is asked for. `--human` prints \
-         text, in git's shape for `status`, `log`, `diff` and `commit`, and git's own shape \
-         flags ask for it too (`{SO} status -s`, `{SO} log --oneline`, `{SO} diff --stat`). For \
-         text from every command:\n"
+        "Every command prints text at a terminal and one JSON envelope anywhere else. \
+         `--human` prints text wherever stdout goes, in git's shape for `status`, `log`, `diff` \
+         and `commit`, and git's own shape flags ask for it too (`{SO} status -s`, \
+         `{SO} log --oneline`, `{SO} diff --stat`). For text from every command, in a pipe \
+         too:\n"
     );
     let _ = writeln!(out, "```sh\nexport SWARMOPS_FORMAT=human\n```\n");
 

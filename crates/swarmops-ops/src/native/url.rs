@@ -3,7 +3,7 @@
 //!
 //! ```text
 //!   so://ada@hub.example:2222/acme
-//!        └user└host       └port └store: one segment, the remote-name grammar
+//!        └user└host       └port └store: <name> or <owner>/<name>, the remote-name grammar
 //! ```
 //!
 //! No password (`user:secret@`), no user or host that starts with `-` (ssh would read it as an
@@ -45,7 +45,7 @@ impl NativeUrl {
             return Err(error::url_refused(UrlRefused::Scheme));
         };
 
-        // 1. The authority and the path: exactly one segment after it.
+        // 1. The authority and the path: the store's name after it.
         let Some((authority, path)) = rest.split_once('/') else {
             return Err(bad("names no store: so://[user@]host[:port]/<store>"));
         };
@@ -73,10 +73,10 @@ impl NativeUrl {
         // 3. The host and the port.
         let (host, port) = host_and_port(host_port)?;
 
-        // 4. The store, one segment as a remote's name is.
-        if swarmops_store::check_remote_segment(path).is_err() {
+        // 4. The store: one segment as a remote's name is, or an owner's and the store's.
+        if !crate::serve::entry::is_store_name(path) {
             return Err(bad(
-                "names no store: [a-z0-9][a-z0-9._-]{0,62}, one segment",
+                "names no store: <name> or <owner>/<name>, each [a-z0-9][a-z0-9._-]{0,62}",
             ));
         }
         Ok(NativeUrl {
@@ -168,6 +168,12 @@ mod tests {
         assert_eq!(read.store, "acme");
         assert_eq!(read.destination(), "ada@hub.example");
 
+        let read = NativeUrl::parse("so://so@hub.example/keiailab/swarmops").unwrap();
+        assert_eq!(
+            read.store, "keiailab/swarmops",
+            "an owner's segment and the store's"
+        );
+
         let read = NativeUrl::parse("so://[::1]/a.b-c").unwrap();
         assert_eq!((read.host.as_str(), read.port), ("::1", None));
         assert_eq!(read.destination(), "::1");
@@ -182,7 +188,10 @@ mod tests {
             ("so://-ada@hub/acme", "url_option"),
             ("so://hub", BAD_URL),
             ("so://hub/", BAD_URL),
-            ("so://hub/a/b", BAD_URL),
+            ("so://hub/a/b/c", BAD_URL),
+            ("so://hub/a//b", BAD_URL),
+            ("so://hub/a/", BAD_URL),
+            ("so://hub/../b", BAD_URL),
             ("so://hub/Acme", BAD_URL),
             ("so://hub/acme?x", BAD_URL),
             ("so://hub:0/acme", BAD_URL),

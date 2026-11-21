@@ -313,8 +313,9 @@ no daemon.
 Over ssh, an authorized_keys line runs it: command=\"swarmops serve --root /srv/so --as \
 person/ada\",restrict ssh-ed25519 .... The client's git-upload-pack '<store>.git' or \
 git-receive-pack '<store>.git' (SSH_ORIGINAL_COMMAND) names a store by its directory under \
---root. With --cgi, a web server runs it for smart HTTP, its PATH_INFO starting with the store's \
-name; TLS and authentication are the web server's.
+--root: <name>, or <owner>/<name> for a store in an owner's directory. With --cgi, a web server \
+runs it for smart HTTP, its PATH_INFO starting with the store's name; TLS and authentication are \
+the web server's.
 
 The caller is named by --as alone, or with --cgi by --user-family <family> as \
 <family>/$REMOTE_USER: the global --as default, $SWARMOPS_AGENT, does not apply to serve, nor \
@@ -333,7 +334,12 @@ and reports a conflict on git's remote: lines.
 A refusal before git starts prints one ERR pkt-line on stdout, which git shows as remote error: \
 <CODE>: <message>, and the envelope on stderr; with --cgi, a Status: header and the same text. \
 --hook pre-receive and --hook proc-receive are the entries git runs inside a push, from the \
-hook files serve writes; they take no --as. --stdio, the store-to-store sync, is not served yet.
+hook files serve writes; they take no --as.
+
+A store that reaches this one as a so:// remote asks, over ssh, for swarmops serve --stdio \
+'<store>', the store-to-store sync: the key line's serve answers it as it answers git, under the \
+same access.toml, with no git in between. --stdio on serve's own command line is refused \
+(details.reason not_served): it is what a client asks for, never how serve is started.
 
 A connection whose store has not moved since serve.git's last export takes no lock: git/serve.state names that export. serve --prepare makes serve.git ready for the store --repo names before a client connects, so that the connection finds it current and exports nothing; it needs no --root. With --seed-from <GIT_DIR>, the repository a git import read, it first fetches the imported commits' objects from it and packs them with a bitmap, so that the first clone after an import writes no object. --prepare-wait zero gives up at once when another refresh holds serve.git's lock, and marks it for that one to run again. It prints {\"op\": \"serve_prepare\", ...} on stdout, and exits 0 when it was skipped or found the lock held. Without the store's memo key, on a store whose main head is no imported commit, it exports nothing and warns: run it as the account the agents and serve run as.";
 
@@ -385,10 +391,10 @@ the web server authenticated";
 ///
 /// Every command but mcp, serve, derive --follow, check log --follow and auth git-credential
 /// prints one JSON
-/// envelope on stdout; at a terminal, the program alone or a command group alone prints its
-/// help screen instead of its usage error's envelope, unless --json or SWARMOPS_FORMAT=json
-/// is given. The program's own help screen is laid out by the `help` module, which shows the
-/// first line of this and says the rest under its own headings.
+/// envelope on stdout, or at a terminal its text rendering; at a terminal, the program alone
+/// or a command group alone prints its help screen instead of its usage error, unless --json
+/// or SWARMOPS_FORMAT=json is given. The program's own help screen is laid out by the `help`
+/// module, which shows the first line of this and says the rest under its own headings.
 #[derive(Parser, Debug)]
 #[command(name = "swarmops", version = crate::version::version())]
 pub struct Cli {
@@ -412,13 +418,13 @@ pub struct Global {
         help = "The agent to act as, <family>/<instance> (default: $SWARMOPS_AGENT)"
     )]
     pub agent: Option<String>,
-    /// Print the JSON envelope: the default, unless $SWARMOPS_FORMAT is human.
+    /// Print the JSON envelope (default: when stdout is no terminal, or $SWARMOPS_FORMAT is json).
     #[arg(long, global = true, overrides_with = "human")]
     pub json: bool,
-    /// Print a short text rendering instead of JSON.
+    /// Print a short text instead (default: at a terminal, or $SWARMOPS_FORMAT is human).
     #[arg(long, global = true, overrides_with = "json")]
     pub human: bool,
-    /// Pretty-print the JSON (default: when stdout is a terminal).
+    /// Pretty-print the JSON, and print JSON (default: when stdout is a terminal).
     #[arg(
         long,
         global = true,
@@ -980,7 +986,7 @@ pub struct ServeArgs {
         allow_hyphen_values = true
     )]
     pub hook_args: Vec<OsString>,
-    /// Serve the store-to-store sync on stdin and stdout: not served yet.
+    /// What a so:// client asks a key line's serve for; refused on serve's own command line.
     #[arg(long)]
     pub stdio: bool,
     /// Make serve.git of the store --repo names ready before a client connects, then exit.

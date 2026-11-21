@@ -16,8 +16,10 @@ which reuses this page's access file and refusals.
 - `swarmops` and git 2.39 or later on the server ([Install and upgrade](install-and-upgrade.md)),
   an OpenSSH server, and any git on the clients.
 - A store under one directory, here `/srv/so`, owned by the account that serves it
-  ([Stores](stores.md#set-the-permissions)). A store's name is its directory's name: one segment of
-  `[a-z0-9][a-z0-9._-]{0,62}`, here `acme`.
+  ([Stores](stores.md#set-the-permissions)). A store's name is its directory's path under it: one
+  segment of `[a-z0-9][a-z0-9._-]{0,62}`, here `acme`, or an owner's segment and the store's,
+  `<owner>/<name>`, as a forge writes a repository's address (`/srv/so/acme-co/app` is
+  `ssh://so-host/acme-co/app.git`). An owner's directory holds stores and no store of its own.
 - A `FORMAT 2` store for branches beyond `main` and `release/<name>`, and for tags
   (`swarmops init --format 2`, or [`swarmops upgrade`](../reference/commands/upgrade.md)).
 - A filesystem that lets the serving account run files: git runs the hooks `serve` writes in the
@@ -280,9 +282,9 @@ check, to another push or a land conflict, is refused alone: `! [remote rejected
 | `E_AUTH: the store has no access.toml: …` | [Write `access.toml`](#write-accesstoml) | Operator |
 | `E_POLICY_DENIED: access.toml … (line N)` | The file is invalid | Operator: fix line N |
 | `E_POLICY_DENIED: person/bob may not push feature/b` | The caller's grants do not cover the action and ref | Push to a ref it covers, or land; or the operator widens the grant |
-| `E_INVALID_ARG: the path names no store` | The URL's path is not one store name | `ssh://<host>/<name>.git` |
+| `E_INVALID_ARG: the path names no store` | The URL's path is no store's name: a third segment, an empty one, or a character outside the grammar | `ssh://<host>/<name>.git` or `ssh://<host>/<owner>/<name>.git` |
 | `E_NOT_A_REPO: no store named nope is served` | No such store under `--root` | Check the name with the operator |
-| `E_INVALID_ARG: serve runs git-upload-pack and git-receive-pack alone` | `ssh so-host <command>`, or `git archive --remote` | Clone, fetch, pull or push with git |
+| `E_INVALID_ARG: serve runs git-upload-pack, git-receive-pack and swarmops serve --stdio alone` | `ssh so-host <command>`, or `git archive --remote` | Clone, fetch, pull or push with git, or reach the store as a `so://` remote |
 | `E_BUSY: …` | Another connection's refresh held `git/serve.lock` for 10 s | Connect again |
 | `remote: {"ok":false,…"E_POLICY_DENIED",…"not_served"…}`, then git's `bad pack header` | A fetch by id of an object no served ref reaches | Fetch a branch or a tag |
 | `non-fast-forward: main moves along first parents; push to refs/land/main` | A push to `main` that is not forward along first parents, such as the merge `git pull --no-rebase` makes | `git pull --rebase`, or push to `refs/land/main` |

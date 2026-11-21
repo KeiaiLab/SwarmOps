@@ -92,10 +92,16 @@ commits. The round trip through a bare clone, with
 
 ### Topology 3 today: local SwarmOps, remote SwarmOps
 
-Works through a git remote, one writing host at a time: the writer exports and pushes with git, the
-others fetch with git and import. Two hosts that both write stop on `E_GIT_EXPORT_DIVERGED` or
-`E_GIT_IMPORT_DIVERGED` rather than merge ([Git round trip](guides/git-round-trip.md#limits-to-know-first)).
-Native sync is M11, planned.
+Two ways work, from v0.12.0, both through the server entry of M14
+([A store as a remote](guides/store-remote.md)). Over the git wire, a store that `swarmops serve`
+serves is a git remote of other stores: `so clone`, `fetch`, `push` and `sync` over ssh or HTTPS,
+several hosts syncing one served store, each client landing onto the served head. Over `so://`,
+with no git in between and over ssh alone, `clone`, `fetch`, `sync` and the `push` of a branch or
+a tag: the upstream lands each change of `main`, and a changeset has one id on both stores.
+Open of M11: its acceptance criteria, which need M9's simulator (partitions, two hosts pushing at
+once, a process killed during a push), and its targets, which are not measured. Without a served
+store, a git remote still carries history between two stores, one writing host at a time
+([Git round trip](guides/git-round-trip.md#limits-to-know-first)).
 
 ### What is missing, in one table
 
@@ -105,7 +111,7 @@ Native sync is M11, planned.
 | Git's fetch and push protocols, as a client | 2 | Built (M13), by running the user's git | M13 (done) |
 | Git's fetch and push protocols, as a server | 1 | Built (M14), by running the host git | M14 (done) |
 | A server entry over ssh | 1, 3 | Built for git clients (M14): `swarmops serve` as a forced command; M11 plans `ssh <host> swarmops serve --stdio` ([architecture](architecture.md#crates-and-layering)) | M14 (done), reused by M11 |
-| Remotes, remote state and `sync` | 2, 3 | Built for git remotes (M13): `remotes.toml`, the mirror's refs, `so sync` | M13 (done), M11 (store remotes) |
+| Remotes, remote state and `sync` | 2, 3 | Built for git remotes (M13): `remotes.toml`, the mirror's refs, `so sync`; built for store remotes over the git wire and over `so://` (v0.12.0), M11's acceptance open | M13 (done), M11 (store remotes) |
 | Ref names beyond `main` and `release/<name>`, and tags | 1, 3 | Built (M6): free-form branches, `tags/<path>` and `remote/<remote>/<path>` in a `FORMAT 2` store; the git side maps them (M14): `git import`, `git export` and `serve` take branches and lightweight tags | M6 (done), M14 (done) |
 | Access control and identities for remote callers | 1, 3 | Built (M14): the store's `access.toml`, the caller named by the key line or the web server, `E_AUTH` and `E_POLICY_DENIED` | M14 (done), M11 |
 | Checks: a description of what runs for a tree | — | `.swarmops/checks.toml` with stages, `check list`, `check run` with findings and JUnit and SARIF reports, `check log`, run lines and `check runs` (M30-1, M30-2, M30-6, M31-1 to M31-5, M31-11 to M31-13); a checked land runs one command, the `check.argv` of `.swarmops/workspaces.json` | M30, M31 |
@@ -178,12 +184,12 @@ v0.11.0; G9's update and commit rows wait for a quiet run, and the commit row st
 change feed exists. The benchmark gate (condition 3) runs in the weekly Scheduled run.
 [Checks and delivery](#checks-and-delivery) (M30 to M40) is planned; of it, the check file and
 `check list` (M30-1 and M30-2, step 1 of the first steps), a check's stages, `check run`, the
-environment a check gets and its log with `check log` (M30-6 and M31-1 to M31-3, step 2), a
-check's findings with its JUnit and SARIF reports (M31-4 and M31-5, step 3), and the run line each
-check of a run leaves, with `check runs` and `check log --failed` (M31-11 to M31-13, step 4) are
-on `stable` and in no release yet, and nothing else is built. Step 2's CI half, the `check` job
-starting the gate with `check run` and a pinned build, waits for the first release that holds
-`check run`. It
+environment a check gets and its log with `check log` (M30-6 and M31-1 to M31-3, step 2) are in
+0.13.0; a check's findings with its JUnit and SARIF reports (M31-4 and M31-5, step 3), and the run
+line each check of a run leaves, with `check runs` and `check log --failed` (M31-11 to M31-13,
+step 4) are on `stable` and in no release yet; nothing else is built. Step 2's CI half, the `check`
+job starting the gate with `check run` and a pinned build, waits for a build of 0.13.0, the first
+release that holds `check run`. It
 is deferred past usable but for the units of M30 and M31 behind steps 1 to 8 of its
 [first steps](#first-steps), which start now: they write nothing to a store, touch no data-safety
 path and freeze nothing in the hash contract.
@@ -209,7 +215,7 @@ Deferred past usable, with what stands in until then:
 | --- | --- | --- |
 | M7, blame and review | No condition needs it, and its annotations need `FORMAT 3` (M20) | Review in GitHub pull requests (topology 2); `so log` and `so diff`; `git blame` on the export |
 | M9's simulator | No condition needs it; only the benchmark gate is pulled forward, into v0.6.0; it needs M20 | M6's literal `SIGKILL` test, power-loss images, crash sweeps and fuzz targets |
-| M11, native sync (topology 3) | No condition needs it, and it needs M14, M9 and M24 first | Sync through a git remote, one writing host at a time ([Topology 3 today](#topology-3-today-local-swarmops-remote-swarmops)) |
+| M11, native sync (topology 3) | No condition needs it, and it needs M14, M9 and M24 first | A served store as a remote, over the git wire or over `so://`, without M11's acceptance ([Topology 3 today](#topology-3-today-local-swarmops-remote-swarmops)) |
 | M12, macOS and Windows | The pilot and CI run on Linux | The Linux releases; M12 is developed separately, and its macOS part builds, passes its tests and is packed by the release workflow, from v0.12.0 on |
 | M20, `FORMAT 3` | One layout decision serves M7's records, the queue, withdrawal, lineage and the manifest that takes compaction out of the write; its design comes first | `FORMAT 2`; compaction inside the write |
 | M21, health, drift and housekeeping | It reads the records M17 adds | `info`'s exit status; the envelope counts of [Monitoring](operate/monitoring.md#summarise-the-envelopes) |
@@ -842,7 +848,7 @@ then the status file `docs/status/<milestone>/<slice-id>.txt`. The eleven tables
 169 units of M30 to M40; the twelve proposed slices of M7, M22, M11 and M26 follow, and are not
 counted among the 169. "Depends on" names milestones, proposed slices and units that must exist
 first. Every unit's state is `planned`, `on stable` once it lands, and the release that first
-holds it once one does.
+holds it once one does (`in X.Y.Z`).
 
 What holds for every unit:
 
@@ -867,12 +873,12 @@ store and freezes nothing in the hash contract. 17 units.
 
 | Slice | Deliverable | Depends on | State |
 | --- | --- | --- | --- |
-| M30-1 | The check file `.swarmops/checks.toml`, `version = 1`: named checks, each one argv with no shell, a directory and a timeout; read from the store at a named changeset, or with `--dir` from a directory, in which case every answer says the caller vouched for the file | M5 | on stable |
-| M30-2 | `check list`: the checks of a changeset's file, or of a directory's, each with the digest of its definition | M30-1 | on stable |
+| M30-1 | The check file `.swarmops/checks.toml`, `version = 1`: named checks, each one argv with no shell, a directory and a timeout; read from the store at a named changeset, or with `--dir` from a directory, in which case every answer says the caller vouched for the file | M5 | in 0.13.0 |
+| M30-2 | `check list`: the checks of a changeset's file, or of a directory's, each with the digest of its definition | M30-1 | in 0.13.0 |
 | M30-3 | Declared inputs: a check's path patterns, in the access file's `*` and `**` grammar, resolve against a tree to the entries they match; no pattern means the whole tree | M30-1 | planned |
 | M30-4 | `check plan`: for a changeset against its target, a workspace's edits, a `land-check` item or, in the directory form, a list of changed paths, each check marked `run` or `not_applicable` with one reason from a closed set; no lock, nothing written | M30-3, M18 | planned |
 | M30-5 | Planning fails closed: unresolvable inputs, an unreadable path, a renamed or deleted definition, or a definition that differs from the one at the target's head widen the check to `run`, with the reason `widened` or `definition_changed`; a check whose definition changed is never `not_applicable` or `reused` for that land; an error never yields an empty plan | M30-4 | planned |
-| M30-6 | Stages: a check names when its answer is needed, `before-land`, `after-land`, `scheduled`, `release`, `manual` or `deploy`; `check plan --stage` | M30-1 | on stable (`check plan --stage` with M30-4) |
+| M30-6 | Stages: a check names when its answer is needed, `before-land`, `after-land`, `scheduled`, `release`, `manual` or `deploy`; `check plan --stage` | M30-1 | in 0.13.0 (`check plan --stage` with M30-4) |
 | M30-7 | Order between checks: `needs` lists the checks that go first; a failed need skips its dependants unless they say `always`; a cycle is refused at parse | M30-1 | planned |
 | M30-8 | Variants: a check expands over declared value lists into named variants, with exclusions, added combinations, a cap on the count and a stop-at-first-failure switch | M30-1 | planned |
 | M30-9 | Runner requirements: a check names the labels its runner must hold and a size hint; `check plan` reports them | M30-1 | planned |
@@ -892,9 +898,9 @@ land --check`. 22 units.
 
 | Slice | Deliverable | Depends on | State |
 | --- | --- | --- | --- |
-| M31-1 | `check run`: runs the checks of a stage (all of them, or a plan's once M30-4 exists) in a workspace or, in the directory form, in a directory, each with no shell and no stdin, in its own process group, under its timeout; one envelope names every check's outcome | M30-1, M30-6, M19 | on stable |
-| M31-2 | The environment a check gets: the check's name, tree, stage and attempt, the paths for its report, outputs, summary and artifacts, a file listing the changed paths of its plan, and the values it declared; nothing else is inherited unless listed; the older `check.argv` form keeps the inherited environment it has today | M31-1 | on stable |
-| M31-3 | The captured log: both streams with a time per line, and sections a check opens with a marker line; `check log --follow` on the same host reads it while it grows; the envelope keeps the existing tails | M31-1 | on stable |
+| M31-1 | `check run`: runs the checks of a stage (all of them, or a plan's once M30-4 exists) in a workspace or, in the directory form, in a directory, each with no shell and no stdin, in its own process group, under its timeout; one envelope names every check's outcome | M30-1, M30-6, M19 | in 0.13.0 |
+| M31-2 | The environment a check gets: the check's name, tree, stage and attempt, the paths for its report, outputs, summary and artifacts, a file listing the changed paths of its plan, and the values it declared; nothing else is inherited unless listed; the older `check.argv` form keeps the inherited environment it has today | M31-1 | in 0.13.0 |
+| M31-3 | The captured log: both streams with a time per line, and sections a check opens with a marker line; `check log --follow` on the same host reads it while it grows; the envelope keeps the existing tails | M31-1 | in 0.13.0 |
 | M31-4 | Findings: a check writes path, line range, level, title and message as JSON lines to its report file; the envelope returns them, bounded, in `details.findings` | M31-2 | on stable |
 | M31-5 | Intake of test and scanner reports: a check declares a JUnit or SARIF file, and its failed cases and results become findings and counts | M31-4 | on stable |
 | M31-6 | Outputs: a check writes key and value pairs to its outputs file; a dependant reads its needs' outputs as environment variables; sizes bounded | M30-7, M31-2 | planned |

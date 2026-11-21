@@ -29,7 +29,7 @@ git (client) ──HTTPS──▶ web server: TLS, authentication (REMOTE_USER)
                           ▼
                         swarmops serve --cgi --root /srv/so --user-family person
                           │ 1 the caller: person/$REMOTE_USER, or --as
-                          │ 2 the store: PATH_INFO's first segment
+                          │ 2 the store: PATH_INFO before git's path
                           │ 3 access.toml: may the caller read?
                           │ 4 git/serve.git refreshed from the store
                           ▼
@@ -69,7 +69,7 @@ Run an fcgiwrap instance as the serving account, listening on its own socket, an
 smart HTTP paths under `/so/` to it:
 
 ```nginx
-location ~ ^/so(/[^/]+/(?:info/refs|git-upload-pack|git-receive-pack))$ {
+location ~ "^/so((?:/[^/]+){1,2}/(?:info/refs|git-upload-pack|git-receive-pack))$" {
     auth_basic "SwarmOps";
     auth_basic_user_file /etc/nginx/swarmops.htpasswd;
     client_max_body_size 0;                 # serve bounds a push at 2 GiB
@@ -105,7 +105,8 @@ Apache passes the request's headers on as well, `Git-Protocol` among them.
 
 ## What a client types
 
-The URL is the web server's prefix and the store's name:
+The URL is the web server's prefix and the store's name, `<name>` or `<owner>/<name>`
+(`https://so-host/so/acme-co/app.git` for the store `/srv/so/acme-co/app`):
 
 ```sh
 git clone https://so-host/so/acme.git
