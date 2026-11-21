@@ -69,7 +69,7 @@ Run an fcgiwrap instance as the serving account, listening on its own socket, an
 smart HTTP paths under `/so/` to it:
 
 ```nginx
-location ~ ^/so((?:/[^/]+){1,2}/(?:info/refs|git-upload-pack|git-receive-pack))$ {
+location ~ "^/so((?:/[^/]+){1,2}/(?:info/refs|git-upload-pack|git-receive-pack))$" {
     auth_basic "SwarmOps";
     auth_basic_user_file /etc/nginx/swarmops.htpasswd;
     client_max_body_size 0;                 # serve bounds a push at 2 GiB

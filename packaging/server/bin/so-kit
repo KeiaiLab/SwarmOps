@@ -269,6 +269,8 @@ cmd_page() {
     version=$(printf '%s\n' "$version" | head -n 1 | html)
     digest=$(sha256sum <"$swarmops" 2>/dev/null) || fail "cannot read the swarmops binary"
     digest=${digest%% *}
+    # A container role's web root lies under its run directory, which starts empty.
+    [ -d "$web_root" ] || mkdir -p "$web_root" || fail "cannot make the root page's directory"
     temporary="$web_root/.index.html.$$"
     {
         printf '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
