@@ -1510,6 +1510,14 @@ installation past it.
   `so-backup` drops the message and reports `<store> fails verify --deep`. Got past by giving
   the drill's pod a `HOME` it can write. *Unscheduled. Found: the first installation on a
   cluster.*
+- **`so-backup` cannot reach a bucket with the curl of an Enterprise Linux 9 host.** The backup
+  signs its requests with curl's `--aws-sigv4`. curl 7.76.1, as AlmaLinux 9 ships it, signs the
+  host without its port, so every request to an endpoint on a port of its own is refused, and
+  it signs an upload in a form the bucket's check does not accept on any port; the bucket
+  answers 403 and the backup ends with `cannot ship the backup to the bucket`. curl 7.88.1, as
+  Debian 12 and the image ship it, signs both as the bucket expects. This is the acceptance
+  case `backup_wipe_restore` for the `.rpm`, red since 2026-11-18. Measured 2026-11-21 with a
+  listener that recomputed each signature from the request it received. *Unscheduled.*
 - **The image is in no registry, and the chart names no digest.** A release holds the image as
   an OCI archive (`swarmops-server-<version>-oci.tar`); the chart's default repository is not
   published and its default digest is zeros. An operator copies the archive's index into a
