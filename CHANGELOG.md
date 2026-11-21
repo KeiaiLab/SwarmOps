@@ -144,6 +144,12 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   - `so-kit page` makes the root page's directory, and `so-kit run all` writes the page before
     a role listens; `/` was 404 in a pod, and for the image until the first hourly job.
 - The entrance's nginx site loads again: its rule for one or two path segments is quoted.
+- `so-backup` reaches its bucket with the curl of an Enterprise Linux 9 host. curl 7.76.1 signs
+  an upload's payload as `UNSIGNED-PAYLOAD` whatever header it is given, and the host without
+  its port, so every upload, and every request to an endpoint on a port of its own, was 403
+  (`cannot ship the backup to the bucket`). With a curl older than 7.88, `so-backup` sends the
+  header that curl signs and the `Host` header without the port; a newer curl signs the body's
+  digest as before.
 - A native `sync` or `fetch` that lost a race to another host's push no longer ends in
   `E_REV_NOT_FOUND` (`not_a_ref_head`, exit 6, not retryable). The upstream refuses a `wire_list`
   for a head that is no ref's head any more, and a ref that moved between the fetch's `wire_refs`
