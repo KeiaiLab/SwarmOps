@@ -29,10 +29,16 @@ spec:
           automountServiceAccountToken: false
           enableServiceLinks: false
           restartPolicy: Never
+          initContainers:
+            {{- include "so.volumeInit" . | nindent 12 }}
           containers:
             - name: rehearse
               image: {{ include "so.image" . }}
               command: ["/usr/sbin/so-kit", "run", "rehearse"]
+              env:
+                # The drill's settings are a file of its bucket Secret, beside the credential.
+                - name: SO_BACKUP_CONF
+                  value: {{ $etc }}/rehearsal-bucket/backup.conf
               {{- include "so.containerSecurity" . | nindent 14 }}
               {{- with .Values.wiring.resources }}
               resources:
@@ -54,7 +60,7 @@ spec:
             {{- include "so.commonVolumes" . | nindent 12 }}
             {{- include "so.secretVolume" (dict "name" "rehearsal-key" "secret" .Values.secrets.rehearsalKey) | nindent 12 }}
             {{- include "so.secretVolume" (dict "name" "rehearsal-bucket" "secret" .Values.secrets.rehearsalBucket) | nindent 12 }}
-            {{- include "so.secretVolume" (dict "name" "alerts" "secret" .Values.secrets.alerts) | nindent 12 }}
+            {{- include "so.secretVolume" (dict "name" "alerts" "secret" .Values.secrets.alerts "mode" "0550") | nindent 12 }}
             - name: data
               ephemeral:
                 volumeClaimTemplate:

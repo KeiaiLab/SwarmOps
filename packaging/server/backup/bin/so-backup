@@ -75,6 +75,8 @@ backup_secrets=
 # A weekly rehearsal and one day's grace.
 backup_rehearsal_period=691200
 backup_alert=
+# Empty: curl's own certificate authorities.
+backup_ca=
 
 kit_conf=${SO_KIT_CONF:-/etc/swarmops-server/kit.conf}
 conf=${SO_BACKUP_CONF:-/etc/swarmops-server/backup.conf}
@@ -100,7 +102,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     value=${line#*=}
     case $key in
     backup_credential | backup_recovery_recipient | backup_rehearsal_recipient | \
-        backup_rehearsal_key | backup_alert)
+        backup_rehearsal_key | backup_alert | backup_ca)
         plain_path "$key" "$value"
         ;;
     backup_secrets)
@@ -190,6 +192,7 @@ s3() {
     else
         set -- -o "$3"
     fi
+    [ -z "$backup_ca" ] || set -- --cacert "$backup_ca" "$@"
     printf 'user = "%s:%s"\n' "$key_id" "$secret" |
         curl -K - -sS --fail --proto =https,http --connect-timeout "$CONNECT_SECONDS" \
             --aws-sigv4 "aws:amz:$backup_region:s3" -H "x-amz-content-sha256: $hash" \

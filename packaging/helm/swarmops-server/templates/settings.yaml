@@ -16,7 +16,8 @@ data:
     swarmops=/usr/bin/swarmops
     host_keys={{ $etc }}/host-keys
     web_root={{ $run }}/www
-    authorized_keys={{ $etc }}/access/authorized_keys
+    authorized_keys=/var/lib/swarmops-server/.ssh/authorized_keys
+    authorized_keys_from={{ $etc }}/access/authorized_keys
     {{- with .Values.installation.texts }}
     terms={{ if .terms }}{{ $etc }}/texts/terms{{ end }}
     privacy={{ if .privacy }}{{ $etc }}/texts/privacy{{ end }}

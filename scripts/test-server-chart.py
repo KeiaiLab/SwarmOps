@@ -50,6 +50,7 @@ KIT_PORTS = {"sshd": "ssh_port", "web": "https_port"}
 SERVICE_PORTS = {22: 2222, 443: 8443}
 DNS_PORT = 53
 SECRET_MODE = 0o400
+PROGRAM_MODE = 0o550
 READ_WRITE_ONCE = ["ReadWriteOnce"]
 DIGEST_IMAGE = re.compile(r"^[a-z0-9.-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$")
 PLANTED_EGRESS = [{"cidr": "192.0.2.0/24", "port": 443}, {"cidr": "198.51.100.7/32", "port": 9000}]
@@ -305,7 +306,9 @@ def secret_mount_problems(objects: list[dict]) -> list[str]:
             for _, source in sources:
                 modes = [source.get("defaultMode")] + [item.get("mode", SECRET_MODE)
                                                        for item in source.get("items", [])]
-                if any(mode != SECRET_MODE for mode in modes):
+                # The alerts Secret holds the program the backup runs: read and execute.
+                wanted = PROGRAM_MODE if volume == "alerts" else SECRET_MODE
+                if any(mode != wanted for mode in modes):
                     problems.append(f"{owner}: volume {volume} has mode {modes}")
         for container in containers(pod):
             where = f"{owner}/{container['name']}"
@@ -504,6 +507,41 @@ def serve_mode_mounts_no_rehearsal_key(run: Run) -> None:
     assert not named & rehearsal, f"serve names {sorted(named & rehearsal)}"
 
 
+def pod_starts_on_a_new_volume_with_its_secrets(run: Run) -> None:
+    """What a first installation needs of the pod: the volume's directories made before a
+    container mounts one by subPath; sshd's key lines outside a Secret's mount, copied from it;
+    the backup's settings named inside the backup Secret's mount."""
+    objects = run.objects(*run.base())
+    pod = next(pod for workload, pod in pod_specs(objects) if workload["kind"] == "StatefulSet")
+    first = pod["initContainers"][0]
+    whole = [mount for mount in first["volumeMounts"] if mount["name"] == "data"]
+    assert first["name"] == "volume" and whole and all("subPath" not in mount for mount in whole), \
+        "the first init container does not mount the volume's root"
+
+    by_name = {container["name"]: container for container in pod["containers"]}
+    volumes = secret_volumes(pod)
+    def secret_paths(container: dict) -> list[str]:
+        return [mount["mountPath"] for mount in container["volumeMounts"]
+                if mount["name"] in volumes]
+
+    settings = next(item["data"]["kit.conf"] for item in objects
+                    if item.get("kind") == "ConfigMap" and "kit.conf" in item.get("data", {}))
+    keys = dict(line.split("=", 1) for line in settings.splitlines()
+                if "=" in line and not line.startswith(("#", "store=")))
+    mounts = secret_paths(by_name["sshd"])
+    assert not any(keys["authorized_keys"].startswith(path + "/") for path in mounts), \
+        "sshd reads its key lines in a Secret's mount"
+    assert any(keys["authorized_keys_from"].startswith(path + "/") for path in mounts), \
+        "the key lines' source is in no Secret's mount"
+
+    named = {variable["name"]: variable.get("value", "")
+             for variable in by_name["timers"].get("env", [])}
+    backup = [mount["mountPath"] for mount in by_name["timers"]["volumeMounts"]
+              if mount["name"] == "backup"]
+    assert backup and named.get("SO_BACKUP_CONF", "").startswith(backup[0] + "/"), \
+        "the timers name no backup settings in the backup Secret's mount"
+
+
 def strict_refuses_empty_wiring(run: Run) -> None:
     run.objects(*run.strict())
     for key in ("storageClassName", "storageSize"):
@@ -615,6 +653,7 @@ CASES: tuple[tuple[str, Callable[[Run], None]], ...] = (
     ("full_level_role_is_own_namespace", full_level_role_is_own_namespace),
     ("rehearsal_mode_mounts_no_serving_secret", rehearsal_mode_mounts_no_serving_secret),
     ("serve_mode_mounts_no_rehearsal_key", serve_mode_mounts_no_rehearsal_key),
+    ("pod_starts_on_a_new_volume_with_its_secrets", pod_starts_on_a_new_volume_with_its_secrets),
     ("strict_refuses_empty_wiring", strict_refuses_empty_wiring),
     ("unknown_key_is_refused", unknown_key_is_refused),
     ("chart_holds_no_host_name", chart_holds_no_host_name),

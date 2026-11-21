@@ -1449,19 +1449,10 @@ What the first installation of the server's Helm chart on a cluster found: chart
 (2026-11-21). The chart's own tests render it and start no pod. Each item names what got that
 installation past it.
 
-- **A new volume stops `setup`.** The chart mounts the data volume by `subPath` (`srv` and
-  `lib`). The kubelet makes a missing subPath directory as root, and `so-kit create-store` runs
-  only as the owner of the stores' directory, so on a new volume the init container ends with
-  `so-kit: run as the owner of the stores' directory` and the pod never starts. Got past with an
-  init container before it that mounts the volume's root and makes the two directories as the
-  pod's user. *Unscheduled. Found: the first installation on a cluster.*
-- **sshd refuses every key.** The chart points sshd's `AuthorizedKeysFile` into the access
-  Secret's mount. A Secret volume's directory is writable by all with the sticky bit, which
-  sshd's `StrictModes` refuses (`bad ownership or modes for directory`), so every key is
-  `Permission denied (publickey)`; HTTPS logins are not affected. Got past by copying the key
-  lines into a directory of the serving account when the container starts and pointing the
-  kit's `authorized_keys` setting at the copy. *Unscheduled. Found: the first installation on a
-  cluster.*
+Five of its findings are fixed since and are not listed: the volume's directories, sshd's key
+lines, the root page at start, the backup's settings and the alert program
+([changelog](../CHANGELOG.md)).
+
 - **A store the kit makes has no `main`.** `so-kit create-store`, and so `so-kit run setup`,
   runs `init` and writes an `access.toml` that grants the identity `read` and `land` on `main`;
   the store holds no changeset. A push to `refs/land/main` is `E_REV_NOT_FOUND: main: not
@@ -1474,24 +1465,11 @@ installation past it.
   load-balancer address between Services, or picks the address pool by a Service's label, cannot
   give the chart's Service that address: it runs it as `ClusterIP` behind entrances of its own.
   *Unscheduled. Found: the first installation on a cluster.*
-- **The root page job fails when the pod starts.** `so-kit run timers` runs the page job before
-  `www` exists under the run directory (`cannot create …/www/.index.html: Directory
-  nonexistent`), and `/` answered 404 for as long as the installation was watched. git's paths
-  are not affected. *Unscheduled. Found: the first installation on a cluster.*
 - **The server image prints a loader line on every connection.** The image is Debian 12, whose
   glibc is 2.36, and the release binary prints
   `weak version 'GLIBC_2.39' not found (required by /usr/bin/swarmops)` there
   ([Platforms](#platforms)): stock git shows it as a `remote:` line on each fetch and push, and
   it is on `setup`'s log. Nothing fails. *Unscheduled. Found: the first installation on a
-  cluster.*
-- **The chart gives the backup no settings.** It mounts the backup Secret as a directory, and
-  `so-backup` reads the image's `/etc/swarmops-server/backup.conf`, whose keys are empty, so
-  every run ends with `the settings name no backup_endpoint`. Got past by keeping a
-  `backup.conf` in that Secret and pointing the timers' `SO_BACKUP_CONF` at it. *Unscheduled.
-  Found: the first installation on a cluster.*
-- **The alert program cannot run from the alerts Secret.** The chart mounts every Secret with
-  mode 0400, and `backup_alert` names a program to run. Got past by copying it to `/tmp` with
-  the execute bit when the timers start. *Unscheduled. Found: the first installation on a
   cluster.*
 - **The chart's egress names addresses, not pods.** `wiring.networkPolicy.egress` takes
   `(cidr, port)` pairs. A bucket or an alert receiver inside the same cluster is a set of pods,
@@ -1499,8 +1477,8 @@ installation past it.
   NetworkPolicy with pod selectors, made beside the release, opens them. *Unscheduled. Found:
   the first installation on a cluster.*
 - **Nothing schedules the restore drill beside a served release.** The drill is the chart's
-  second mode, a release of its own with its own key and credential, to which the three items
-  above apply again; without it the daily check mails that no rehearsal passed once the last
+  second mode, a release of its own with its own key and credential, to which the item above
+  applies again; without it the daily check mails that no rehearsal passed once the last
   record is older than eight days. The first installation runs `so-backup rehearse` from a
   CronJob of its own, with the image, the backup's settings and the rehearsal key.
   *Unscheduled. Found: the first installation on a cluster.*

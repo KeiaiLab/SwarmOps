@@ -128,6 +128,22 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Fixed
 
+- The server's Helm chart starts on a new volume and serves with its Secrets as mounted, which
+  its first installation on a cluster did not (2026-11-21):
+  - An init container makes the data volume's two directories as the pod's user. The kubelet
+    made a missing `subPath` directory as root, and `so-kit run setup` ended with `run as the
+    owner of the stores' directory`.
+  - sshd reads a copy of the key lines. The kit's new setting `authorized_keys_from` names where
+    they are kept, the chart sets it to the access Secret's file, and `so-kit run sshd` copies
+    them to `authorized_keys` at start and as they change; sshd's `StrictModes` refused the
+    file inside the Secret's mount, and every key was `Permission denied (publickey)`.
+  - The timers run `so-backup` with `backup.conf` of the backup Secret (`SO_BACKUP_CONF`), not
+    the image's empty one; the alerts Secret is mounted so that the pod may run the program
+    `backup_alert` names (mode 0550, every other Secret 0400); and `so-backup`'s new setting
+    `backup_ca` names a certificate authority file for a bucket inside the cluster.
+  - `so-kit page` makes the root page's directory, and `so-kit run all` writes the page before
+    a role listens; `/` was 404 in a pod, and for the image until the first hourly job.
+- The entrance's nginx site loads again: its rule for one or two path segments is quoted.
 - A native `sync` or `fetch` that lost a race to another host's push no longer ends in
   `E_REV_NOT_FOUND` (`not_a_ref_head`, exit 6, not retryable). The upstream refuses a `wire_list`
   for a head that is no ref's head any more, and a ref that moved between the fetch's `wire_refs`

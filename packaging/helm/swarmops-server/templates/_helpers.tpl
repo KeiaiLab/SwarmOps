@@ -97,12 +97,12 @@ imagePullSecrets:
 {{- end }}
 {{- end -}}
 
-{{/* A secret volume, read-only to its owner: mode 0400. */}}
+{{/* A secret volume, read-only to its owner: mode 0400, or the mode given (a program's). */}}
 {{- define "so.secretVolume" -}}
 - name: {{ .name }}
   secret:
     secretName: {{ .secret }}
-    defaultMode: 0400
+    defaultMode: {{ .mode | default "0400" }}
     {{- with .items }}
     items:
       {{- range $key, $path := . }}
@@ -145,6 +145,29 @@ imagePullSecrets:
 - name: data
   mountPath: /var/lib/swarmops-server
   subPath: lib
+{{- end -}}
+
+{{/*
+The data volume's two directories, made by the pod's user before a container mounts one: the
+kubelet makes a missing subPath directory as root, and the kit runs as the directories' owner.
+A directory an earlier start left as another's is empty, and is made again.
+*/}}
+{{- define "so.volumeInit" -}}
+- name: volume
+  image: {{ include "so.image" . }}
+  command:
+    - /bin/sh
+    - -euc
+    - |
+      for d in srv lib; do
+        p=/volume/$d
+        if [ -d "$p" ] && [ "$(stat -c %u "$p")" != "$(id -u)" ]; then rmdir "$p"; fi
+        [ -d "$p" ] || mkdir -m 0700 "$p"
+      done
+  {{- include "so.containerSecurity" . | nindent 2 }}
+  volumeMounts:
+    - name: data
+      mountPath: /volume
 {{- end -}}
 
 {{/* The volume claim's spec: one ReadWriteOnce volume. */}}

@@ -33,6 +33,8 @@ spec:
       enableServiceLinks: false
       terminationGracePeriodSeconds: {{ .Values.installation.stopGraceSeconds }}
       initContainers:
+        # 0. The volume's two directories, as the pod's user.
+        {{- include "so.volumeInit" . | nindent 8 }}
         # 1. Apply the settings: missing stores, access files, key lines. Idempotent.
         - name: setup
           image: {{ include "so.image" . }}
@@ -101,6 +103,10 @@ spec:
         - name: timers
           image: {{ include "so.image" . }}
           command: ["/usr/sbin/so-kit", "run", "timers"]
+          env:
+            # The backup's settings are a file of its Secret, beside what they name.
+            - name: SO_BACKUP_CONF
+              value: {{ $etc }}/backup/backup.conf
           readinessProbe:
             exec:
               command: ["/usr/sbin/so-kit", "ready", "timers"]
@@ -123,7 +129,7 @@ spec:
         {{- include "so.secretVolume" (dict "name" "access" "secret" .Values.secrets.access) | nindent 8 }}
         {{- include "so.secretVolume" (dict "name" "tls" "secret" .Values.secrets.tls "items" (dict "tls.crt" "fullchain.pem" "tls.key" "privkey.pem")) | nindent 8 }}
         {{- include "so.secretVolume" (dict "name" "backup" "secret" .Values.secrets.backup) | nindent 8 }}
-        {{- include "so.secretVolume" (dict "name" "alerts" "secret" .Values.secrets.alerts) | nindent 8 }}
+        {{- include "so.secretVolume" (dict "name" "alerts" "secret" .Values.secrets.alerts "mode" "0550") | nindent 8 }}
   volumeClaimTemplates:
     - metadata:
         name: data
