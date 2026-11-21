@@ -180,45 +180,17 @@ read_credential() {
     done
 }
 
-# Whether curl signs as 7.76.1 does (Enterprise Linux 9; measured against 7.88.1, which does
-# not): an upload's payload always as UNSIGNED-PAYLOAD, whatever header it is given, and the host
-# without its port. Asked once.
-curl_signs_as_old=
-old_curl() {
-    if [ -z "$curl_signs_as_old" ]; then
-        curl_signs_as_old=$(curl --version 2>/dev/null | awk '
-            NR == 1 { split($2, v, "."); print (v[1] < 7 || (v[1] == 7 && v[2] < 88)) ? "yes" : "no" }')
-        [ -n "$curl_signs_as_old" ] || curl_signs_as_old=no
-    fi
-    [ "$curl_signs_as_old" = yes ]
-}
-
 # One signed request: s3 PUT /<key> <file> | s3 GET /<key> <file> | s3 GET ?<query> -.
 # The credential reaches curl on its standard input, never in its arguments.
 s3() {
     url="$backup_endpoint/$backup_bucket$2"
     hash=$EMPTY_SHA256
     if [ "$1" = PUT ]; then
-        # The header says what curl signs: the body's digest, or with an older curl that the
-        # payload is not signed (the backup is CMS, checked against its manifest on restore).
-        if old_curl; then
-            hash=UNSIGNED-PAYLOAD
-        else
-            hash=$(sha256sum <"$3")
-            hash=${hash%% *}
-        fi
+        hash=$(sha256sum <"$3")
+        hash=${hash%% *}
         set -- -T "$3"
     else
         set -- -o "$3"
-    fi
-    if old_curl; then
-        # The Host header as that curl signs it: without the endpoint's port.
-        host=${backup_endpoint#*://}
-        host=${host%%/*}
-        case $host in
-        *\]) ;;
-        *:*) set -- -H "Host: ${host%:*}" "$@" ;;
-        esac
     fi
     [ -z "$backup_ca" ] || set -- --cacert "$backup_ca" "$@"
     printf 'user = "%s:%s"\n' "$key_id" "$secret" |
