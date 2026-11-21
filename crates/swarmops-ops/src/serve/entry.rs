@@ -116,9 +116,11 @@ pub fn parse_ssh(command: &str) -> Result<SshRequest, OpError> {
         return Err(refused(
             ErrorCode::InvalidArg,
             "unknown_command",
-            "serve runs git-upload-pack and git-receive-pack alone",
+            "serve runs git-upload-pack, git-receive-pack and swarmops serve --stdio alone",
         )
-        .with_hint("clone, fetch, pull or push with git over ssh"));
+        .with_hint(
+            "clone, fetch, pull or push with git over ssh, or reach the store as a so:// remote",
+        ));
     };
     let path =
         dequote(quoted).ok_or_else(|| bad_path("the path is not quoted as git quotes it"))?;

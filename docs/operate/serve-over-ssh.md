@@ -282,7 +282,7 @@ check, to another push or a land conflict, is refused alone: `! [remote rejected
 | `E_POLICY_DENIED: person/bob may not push feature/b` | The caller's grants do not cover the action and ref | Push to a ref it covers, or land; or the operator widens the grant |
 | `E_INVALID_ARG: the path names no store` | The URL's path is not one store name | `ssh://<host>/<name>.git` |
 | `E_NOT_A_REPO: no store named nope is served` | No such store under `--root` | Check the name with the operator |
-| `E_INVALID_ARG: serve runs git-upload-pack and git-receive-pack alone` | `ssh so-host <command>`, or `git archive --remote` | Clone, fetch, pull or push with git |
+| `E_INVALID_ARG: serve runs git-upload-pack, git-receive-pack and swarmops serve --stdio alone` | `ssh so-host <command>`, or `git archive --remote` | Clone, fetch, pull or push with git, or reach the store as a `so://` remote |
 | `E_BUSY: …` | Another connection's refresh held `git/serve.lock` for 10 s | Connect again |
 | `remote: {"ok":false,…"E_POLICY_DENIED",…"not_served"…}`, then git's `bad pack header` | A fetch by id of an object no served ref reaches | Fetch a branch or a tag |
 | `non-fast-forward: main moves along first parents; push to refs/land/main` | A push to `main` that is not forward along first parents, such as the merge `git pull --no-rebase` makes | `git pull --rebase`, or push to `refs/land/main` |
