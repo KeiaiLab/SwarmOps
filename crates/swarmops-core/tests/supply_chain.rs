@@ -901,9 +901,7 @@ fn release_problems(workflow: &str) -> Vec<String> {
     let filters: Vec<&&str> = (on.iter())
         .filter(|line| line.starts_with("    ") && !line.starts_with("     "))
         .collect();
-    if !on.contains(&RELEASE_PUSH[0])
-        || filters.iter().any(|line| !RELEASE_PUSH.contains(line))
-    {
+    if !on.contains(&RELEASE_PUSH[0]) || filters.iter().any(|line| !RELEASE_PUSH.contains(line)) {
         problems.push(
             "a push starts the workflow for more than `v*` tags and `release/*` branches"
                 .to_string(),
