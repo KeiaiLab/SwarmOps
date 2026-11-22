@@ -9,7 +9,7 @@
     python3 -I scripts/freshness.py selftest
 
     push to stable, workflow_dispatch    -> build
-    push of a v* tag                     -> build stable's head, as branch stable
+    push of a v* tag, or a run on one    -> build stable's head, as branch stable
     push to another branch               -> build when a changed file matches `site_paths`
     pull request                         -> the same, over base...head
     a git command fails, unknown event   -> build (never "nothing to do")
@@ -175,8 +175,10 @@ def decide(push: Push, site_paths: list[str], git: Git) -> Scope:
         return Scope(build, push.sha, branch, reason)
 
     # 1. A release tag: the site names the release, so stable's head is built again. The tag's
-    # own commit may be behind stable, and production never goes back.
-    if push.event == EVENT_PUSH and push.ref.startswith(TAGS):
+    # own commit may be behind stable, and production never goes back. A run started by hand on a
+    # tag is the same run: release.yml starts it so for a tag it made (a release branch's), which
+    # starts no workflow of its own.
+    if push.event in (EVENT_PUSH, EVENT_DISPATCH) and push.ref.startswith(TAGS):
         try:
             head = git(["rev-parse", STABLE_REMOTE])
         except (subprocess.CalledProcessError, OSError) as error:
@@ -376,6 +378,14 @@ def tag_push_builds_stable_head() -> str | None:
     )
 
 
+def tag_dispatch_builds_stable_head() -> str | None:
+    git = FakeGit({f"rev-parse {STABLE_REMOTE}": SHA_STABLE})
+    got = decide(push_of(TAGS + "v0.13.0", before="", event=EVENT_DISPATCH), SITE_PATHS, git)
+    return expect(
+        got, Scope(Build.YES, SHA_STABLE, STABLE, f"tag push: stable's head {SHA_STABLE}")
+    )
+
+
 def tag_push_without_stable_fails() -> str | None:
     try:
         got = decide(push_of(TAGS + "v0.12.0", before=ZERO_SHA), SITE_PATHS, FakeGit({}))
@@ -449,6 +459,7 @@ SELFTESTS: list[Callable[[], str | None]] = [
     pull_request_diffs_base_to_head,
     pull_request_without_base_builds,
     tag_push_builds_stable_head,
+    tag_dispatch_builds_stable_head,
     tag_push_without_stable_fails,
     unknown_event_builds,
     double_star_crosses_directories,

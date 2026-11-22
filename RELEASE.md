@@ -4,22 +4,26 @@ SwarmOps 0.1.0 is the first release. This is the checklist for it and for every 
 What may change between versions is in
 [docs/policies/versioning-and-stability.md](docs/policies/versioning-and-stability.md).
 
-A release is an annotated `vX.Y.Z` tag on a commit of `stable`, unsigned until a signing key is
-registered (step 7). Pushing the tag runs
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which publishes the GitHub
-release `vX.Y.Z` on the [releases page](https://github.com/KeiaiLab/SwarmOps/releases) if every
-check below passes, and nothing otherwise.
+A release is a `vX.Y.Z` tag on a commit of `stable`, unsigned until a signing key is registered
+(step 7). Pushing the tag, or a `release/X.Y.Z` branch from a SwarmOps store, which cannot push
+a tag, runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which publishes the
+GitHub release `vX.Y.Z` on the [releases page](https://github.com/KeiaiLab/SwarmOps/releases) if
+every check below passes, and nothing otherwise. A release branch's run makes the tag as it
+publishes, on the branch's commit: a lightweight tag, where one pushed by hand is annotated.
 
 ## What the release workflow does
 
-On a pushed `v*` tag, with no secret but each job's own token, on the maintainers' own hosts:
+On a pushed `v*` tag or `release/X.Y.Z` branch, with no secret but each job's own token, on the
+maintainers' own hosts:
 every job runs on the self-hosted runners labelled `swarmops-local` that run CI, but the macOS
 build, which runs on the maintainers' Mac, on a self-hosted runner labelled `macos-local`; none
 runs on GitHub's hosted runners. That Mac's runner must be registered and online: until it is,
 the macOS build waits, and nothing is published without it.
 
 1. **Checks the tag** (job `tag, version and notes`): the tag is `v` and the workspace version of
-   `Cargo.toml` (`v0.1.0` for `version = "0.1.0"`); `CHANGELOG.md` has a non-empty
+   `Cargo.toml` (`v0.1.0` for `version = "0.1.0"`), and for a release branch, which stands for
+   that tag, the branch is `release/` and that version and the tag does not exist yet;
+   `CHANGELOG.md` has a non-empty
    `## [X.Y.Z] - YYYY-MM-DD` section, which becomes the release notes (its relative links made
    absolute, to the tag's files, then a line on checking a download against `SHA256SUMS`; at
    most the 125,000 characters a release takes); the section's date is the UTC date the tagged
@@ -89,10 +93,12 @@ the macOS build waits, and nothing is published without it.
    keeps; when Dependabot moves an image, they move with it. The job runs on the runner, which
    starts the containers; they mount the packages read-only.
 5. **Publishes** (job `publish the release`, the only one with a write permission,
-   `contents: write`, and only for a pushed tag): checks each archive and package against the
-   SHA-256 its job wrote, writes `SHA256SUMS`, and creates the release `vX.Y.Z`, titled
-   `SwarmOps X.Y.Z`, with the three archives (two for Linux, one for macOS), the packages,
-   `SHA256SUMS` and the notes. A version with a
+   `contents: write` and `actions: write`, and only for a pushed tag or release branch): checks
+   each archive and package against the SHA-256 its job wrote, writes `SHA256SUMS`, and creates
+   the release `vX.Y.Z`, titled `SwarmOps X.Y.Z`, with the three archives (two for Linux, one for
+   macOS), the packages, `SHA256SUMS` and the notes; for a release branch it makes the tag on the
+   branch's commit, then starts `site.yml` on it (`actions: write`), the run a pushed tag starts
+   by itself. A version with a
    pre-release part, such as `0.2.0-rc.1`, is published as a pre-release; its packages carry the
    version as `0.2.0~rc.1`, which `dpkg` and `rpm` order before `0.2.0`, and their file names keep
    `0.2.0-rc.1`.
@@ -100,12 +106,13 @@ the macOS build waits, and nothing is published without it.
 **A rehearsal** runs the workflow by hand on a branch, `gh workflow run release.yml --ref <branch>
 --repo KeiaiLab/SwarmOps`: it builds, smoke-runs, packs, makes the packages of and installs them for
 the workspace version of the branch's commit, and publishes nothing: `publish` runs for a pushed
-`v*` tag only, and the tag's checks and `just check` (which CI runs on every push) are skipped. The
+`v*` tag or `release/X.Y.Z` branch only, and the tag's checks and `just check` (which CI runs on
+every push) are skipped. The
 run's artifacts hold its archives and packages for 14 days. The macOS build is part of a rehearsal,
 so one shows whether the Mac's runner is there before a tag is pushed. A rehearsal never shares a
 concurrency group with a pushed tag's run, so one started on a tag's ref cannot replace a
 pending release. `just check` fails while a job with a write permission runs for anything but a
-pushed tag.
+pushed tag or release branch, or while a push of anything else starts the workflow.
 
 Like CI, the workflow pins every action by commit, starts from `permissions: {}`, keeps no
 credentials in its checkouts, and CI's zizmor job audits it. The container images it builds and
@@ -303,12 +310,30 @@ installs the same tool versions as `ci.yml`'s: move them together.
    git push origin vX.Y.Z
    ```
 
+   Or, from a SwarmOps store that follows `stable` (`so remote add origin
+   https://github.com/KeiaiLab/SwarmOps.git --branch stable`), push a release branch at it: the
+   workflow takes `release/X.Y.Z` for the tag `vX.Y.Z`, refuses a branch whose name is not the
+   workspace version or whose tag exists already, runs every check a tag's run does, and makes
+   the tag on the branch's commit when it publishes. Then it starts the site's release run on
+   that tag, which a tag made by a job's own token would not start.
+
+   ```sh
+   so fetch origin
+   so ref set release/X.Y.Z main --create
+   so push origin release/X.Y.Z
+   ```
+
+   The branch stays as the record of the release; delete it on GitHub if the run failed and the
+   fix needs the name again.
+
 8. **Watch the release run** (`gh run list --repo KeiaiLab/SwarmOps --workflow release.yml`,
    then `gh run watch <run id> --repo KeiaiLab/SwarmOps`). When it fails, nothing is published:
    - a flaky job: run the failed jobs again
      (`gh run rerun <run id> --failed --repo KeiaiLab/SwarmOps`);
    - a defect: fix it on `stable`, delete the tag (`git push origin :refs/tags/vX.Y.Z`, then
-     `git tag -d vX.Y.Z`), and tag the fixed commit;
+     `git tag -d vX.Y.Z`), and tag the fixed commit; for a release branch, delete the branch
+     (`gh api -X DELETE repos/KeiaiLab/SwarmOps/git/refs/heads/release/X.Y.Z`; no tag was made)
+     and push it again at the fixed commit;
    - `publish the release` itself: delete the draft release it may have left
      (`gh release delete vX.Y.Z --repo KeiaiLab/SwarmOps`), then run the job again.
 9. **Check the release** as a user would: download an archive and `SHA256SUMS` from the

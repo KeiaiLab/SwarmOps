@@ -94,6 +94,13 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Changed
 
+- A release starts from a pushed `release/X.Y.Z` branch as well as from a pushed `vX.Y.Z` tag,
+  so that a SwarmOps store, which pushes branches and no tag, cuts one:
+  `so ref set release/X.Y.Z main --create` and `so push origin release/X.Y.Z`. The release
+  workflow takes the branch for its tag, refuses one whose name is not the workspace version or
+  whose tag exists, runs every check a tag's run does, makes the tag on the branch's commit as it
+  publishes, and starts the site's release run on it, which `scripts/freshness.py` now builds as
+  it builds a pushed tag's ([RELEASE.md](RELEASE.md)).
 - `E_CHECK_FAILED`'s `details.run`, the whole result of a run of `check run`, holds each check's
   findings.
 - `check log`'s `CHECK` is optional: exactly one of it and `--failed` is given.
