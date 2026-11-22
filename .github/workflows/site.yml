@@ -5,6 +5,7 @@
 #
 #   push to stable, workflow_dispatch   build
 #   push of a v* tag                    build stable's head as production: the pages name the release
+#   workflow_dispatch on a v* tag       the same: release.yml starts it for a tag it made itself
 #   push to feat/lq-<n>-<n>             nothing, no runner: the stable push that follows builds that tree
 #   push to another feat/** branch      build when a changed file is a site path; a preview on pages.dev
 #   pull request                        the same; built and checked, never deployed

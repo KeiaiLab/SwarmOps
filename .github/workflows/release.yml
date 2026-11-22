@@ -6,9 +6,15 @@
 # archives, the packages, the image's OCI archive, `SHA256SUMS`, and the version's CHANGELOG.md
 # section as its notes.
 #
+# A pushed `release/X.Y.Z` branch is the same release, for a store that cannot push a tag
+# (`so push origin release/X.Y.Z`): the branch name stands for the tag `vX.Y.Z`, which must not
+# exist yet, every check runs as for a tag, and `publish` makes the tag on the branch's commit as
+# it publishes. A tag GitHub makes for a job's own token starts no workflow, so `publish` then
+# starts site.yml on it, the run a pushed tag would have started.
+#
 # A run started by hand (workflow_dispatch) on a branch rehearses the builds, the packages and
 # their installs for the workspace version, and publishes nothing: `publish` runs for a pushed tag
-# only, and neither the tag checks nor `just check` (CI's) run.
+# or release branch only, and neither the tag checks nor `just check` (CI's) run.
 #
 # Hardened as ci.yml is: every action is pinned to a full commit SHA (its version in the trailing
 # comment; Dependabot updates both), the token has no permissions unless a job asks for one,
@@ -42,6 +48,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    branches: ["release/*"]
   workflow_dispatch:
 
 permissions: {}
@@ -66,6 +73,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -92,16 +100,29 @@ jobs:
               print(f"::error::{message}")
               sys.exit(1)
 
-          tag = os.environ["GITHUB_REF_NAME"]
+          # The tag: the pushed one, or for a pushed `release/X.Y.Z` branch `vX.Y.Z`.
+          ref = os.environ["GITHUB_REF_NAME"]
+          pushed_branch = (os.environ["GITHUB_EVENT_NAME"] == "push"
+                           and os.environ["GITHUB_REF_TYPE"] == "branch")
+          tag = f"v{ref.removeprefix('release/')}" if pushed_branch else ref
           with open("Cargo.toml", "rb") as manifest:
               version = tomllib.load(manifest)["workspace"]["package"]["version"]
           prerelease = "-" in version.split("+")[0]
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"version={version}\nprerelease={str(prerelease).lower()}\n")
+              out.write(f"version={version}\nprerelease={str(prerelease).lower()}\ntag={tag}\n")
           if os.environ["GITHUB_EVENT_NAME"] != "push":
               print(f"::notice::a rehearsal of {tag} at {version}: nothing is checked or published")
               sys.exit(0)
 
+          if pushed_branch:
+              if ref != f"release/{version}":
+                  fail(f"this branch is not release/{version}, the workspace version in"
+                       " Cargo.toml (RELEASE.md)")
+              # The checkout fetched every tag: a release is made once.
+              made = subprocess.run(["git", "rev-parse", "--quiet", "--verify", f"refs/tags/{tag}"],
+                                    capture_output=True, text=True)
+              if made.returncode == 0:
+                  fail(f"the tag {tag} exists already: {version} is released (RELEASE.md)")
           if tag != f"v{version}":
               fail(f"this tag is not v{version}, the workspace version in Cargo.toml (RELEASE.md)")
 
@@ -613,14 +634,15 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # For a pushed tag only: a rehearsal publishes nothing.
+  # For a pushed tag or release branch only: a rehearsal publishes nothing.
   publish:
     name: publish the release
     needs: [version, check, build, build-macos, packages, image]
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    if: github.event_name == 'push' && (github.ref_type == 'tag' || startsWith(github.ref, 'refs/heads/release/'))
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
-      contents: write # `gh release create`: the release, its notes and its assets
+      contents: write # `gh release create`: the release, its notes and its assets, and the tag
+      actions: write # `gh workflow run site.yml` on the tag a release branch's run made
     timeout-minutes: 10
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -643,6 +665,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.version.outputs.version }}
           PRERELEASE: ${{ needs.version.outputs.prerelease }}
+          TAG: ${{ needs.version.outputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           cd dist
           sha256sum --check --strict -- *.sha256
@@ -652,5 +676,19 @@ jobs:
           if [ "$PRERELEASE" = true ]; then
             flags+=(--prerelease)
           fi
-          gh release create "v$VERSION" --verify-tag --title "SwarmOps $VERSION" \
+          # A pushed tag is the release's; a release branch's run makes it on the branch's commit.
+          if [ "$REF_TYPE" = tag ]; then
+            flags+=(--verify-tag)
+          else
+            flags+=(--target "$GITHUB_SHA")
+          fi
+          gh release create "$TAG" --title "SwarmOps $VERSION" \
             --notes-file ../notes/notes.md "${flags[@]}" -- *.tar.gz *.deb *.rpm *-oci.tar SHA256SUMS
+      # The tag the release made started no workflow: the site's run that names the release.
+      - name: Start the site's release run
+        if: github.ref_type == 'branch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: gh workflow run site.yml --ref "$TAG"
