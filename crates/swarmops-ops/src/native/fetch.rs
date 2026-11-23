@@ -24,9 +24,9 @@ use serde_json::Value;
 use swarmops_api::remote::MAX_FETCH_BRANCHES;
 use swarmops_api::wire::{WIRE_GET, WIRE_HELLO, WIRE_LIST, WIRE_REFS};
 use swarmops_api::{
-    BranchUpdate, ErrorCode, FetchResp, Identity, MAX_WIRE_IDS, OpError, RemoteHead, RemoteInfo,
-    WIRE_PROTOCOL, WireBlobWant, WireCursor, WireGetReq, WireHello, WireHelloReq, WireList,
-    WireListReq, WireRefs, WireRefsReq, WireRequest,
+    BranchUpdate, ErrorCode, FetchResp, Identity, MAX_WIRE_IDS, MAX_WIRE_LINE, OpError, RemoteHead,
+    RemoteInfo, WIRE_PROTOCOL, WireBlobWant, WireCursor, WireGetReq, WireHello, WireHelloReq,
+    WireList, WireListReq, WireRefs, WireRefsReq, WireRequest,
 };
 use swarmops_core::{BlobId, Changeset, ChangesetId, DeltaOp, Hashed, ObjectKind};
 use swarmops_git::ExportOid;
@@ -310,7 +310,7 @@ fn transfer(
             }
         }
     }
-    for group in wants.chunks(MAX_WIRE_IDS) {
+    for group in blob_groups(under, &wants)? {
         let mut asked = WireGetReq::new(under);
         asked.blobs = group.to_vec();
         get(link, asked, |chunk| store_blobs(repo, chunk))?;
@@ -378,6 +378,40 @@ pub(super) fn ask<Q: Serialize, R: DeserializeOwned>(
     let asked = request(op, req)?;
     let answer = link.call(&asked, &[])?;
     outcome(answer.line())
+}
+
+/// `wants` in order, in groups whose `wire_get` request line under `under` stays within
+/// [`MAX_WIRE_LINE`] bytes and [`MAX_WIRE_IDS`] blobs. A want is two ids, its changeset's and
+/// its blob's, so a group of `MAX_WIRE_IDS` of them is a line of about 1.5 MB, which the host
+/// refuses (`line_too_long`): a first fetch of a store with more blobs than that in one batch
+/// failed so. Each want's size is measured as JSON writes it, with the comma before it.
+fn blob_groups<'a>(
+    under: &str,
+    wants: &'a [WireBlobWant],
+) -> Result<Vec<&'a [WireBlobWant]>, OpError> {
+    let base = request(WIRE_GET, WireGetReq::new(under))?.len();
+    let mut groups = Vec::new();
+    let (mut start, mut size) = (0, base);
+    for (at, want) in wants.iter().enumerate() {
+        let one = serde_json::to_vec(want)
+            .map_err(|e| {
+                error::error(
+                    ErrorCode::Internal,
+                    format!("a blob want cannot be written: {e}"),
+                )
+            })?
+            .len()
+            + 1;
+        if at > start && (size + one > MAX_WIRE_LINE || at - start == MAX_WIRE_IDS) {
+            groups.push(&wants[start..at]);
+            (start, size) = (at, base);
+        }
+        size += one;
+    }
+    if start < wants.len() {
+        groups.push(&wants[start..]);
+    }
+    Ok(groups)
 }
 
 /// Asks `wire_get` with `req` and hands each chunk's objects to `each`, as they come.
@@ -630,6 +664,45 @@ mod tests {
     use crate::LocalOps;
     use crate::native::chunk;
     use crate::native::link::StreamLink;
+
+    /// A first fetch's blob wants, two ids each, go in groups whose request lines the host
+    /// accepts: every line within `MAX_WIRE_LINE`, every want once and in order. One group of
+    /// `MAX_WIRE_IDS` wants, as they were sent before, is a line past the bound.
+    #[test]
+    fn blob_wants_go_in_lines_the_host_accepts() {
+        let under = format!("feat/{}", "x".repeat(200));
+        let id = |n: usize| format!("{n:064x}");
+        let wants: Vec<WireBlobWant> = (0..25_000)
+            .map(|n| WireBlobWant::new(id(n), id(n + 1_000_000)))
+            .collect();
+        let line = |group: &[WireBlobWant]| {
+            let mut req = WireGetReq::new(under.as_str());
+            req.blobs = group.to_vec();
+            request(WIRE_GET, req).unwrap().len()
+        };
+        assert!(
+            line(&wants[..MAX_WIRE_IDS]) > MAX_WIRE_LINE,
+            "the old grouping stays within the bound: the test proves nothing"
+        );
+
+        let groups = blob_groups(&under, &wants).unwrap();
+        assert!(groups.len() > 2, "{} groups", groups.len());
+        for group in &groups {
+            assert!(!group.is_empty(), "an empty group");
+            assert!(group.len() <= MAX_WIRE_IDS, "a group of {}", group.len());
+            let len = line(group);
+            assert!(len <= MAX_WIRE_LINE, "a line of {len} bytes");
+        }
+        let joined: Vec<&WireBlobWant> = groups.iter().flat_map(|g| g.iter()).collect();
+        assert!(
+            joined.iter().copied().eq(wants.iter()),
+            "the groups drop, add or reorder a want"
+        );
+        assert!(
+            blob_groups(&under, &[]).unwrap().is_empty(),
+            "no want, no group"
+        );
+    }
 
     /// The agent that writes the upstream.
     const AGENT: &str = "agent/worker-1";
