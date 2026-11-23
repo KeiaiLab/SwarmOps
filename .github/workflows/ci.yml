@@ -72,10 +72,36 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
           # The dependencies a failing run built are as good as a passing run's.
           cache-on-failure: true
-      - run: just check
-      # bench/compare, a workspace of its own that `just check` does not build, still compiles
-      # against the store's API.
-      - run: just check-compare
+      # The gate is the before-land stage of .swarmops/checks.toml (`just check`, then
+      # `just check-compare`: bench/compare, a workspace of its own that `just check` does not
+      # build, still compiles against the store's API), started with `check run` by a released
+      # build, never by the build under test (CD-D18): the release, its Linux x86_64 archive's
+      # SHA-256 and the commit its tag names are pinned here, and the archive is refused unless
+      # the tag still names that commit (`swarmops --version` names none). Moving the pin is a
+      # change of this file: all three together.
+      - name: The pinned build that starts the gate
+        env:
+          GATE_RELEASE: "0.13.0"
+          GATE_SHA256: "a81a0fe3624168d3fa75ebc055190ad6d235a4d7a4228c5202909dc1542c7747"
+          GATE_COMMIT: "abc8bc37179e1e2e7ec19f33921a5326b69afe7e"
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          tag="v$GATE_RELEASE"
+          named=$(git ls-remote "$REPO_URL.git" "refs/tags/$tag" "refs/tags/$tag^{}" | awk '{print $1}' | tail -n 1)
+          if [ "$named" != "$GATE_COMMIT" ]; then
+            echo "::error::$tag names ${named:-nothing}, not the pinned $GATE_COMMIT"
+            exit 1
+          fi
+          archive="swarmops-$GATE_RELEASE-x86_64-unknown-linux-gnu"
+          gate="$RUNNER_TEMP/gate"
+          rm -rf "$gate" && mkdir -p "$gate"
+          curl -fsSL --retry 3 -o "$gate/$archive.tar.gz" "$REPO_URL/releases/download/$tag/$archive.tar.gz"
+          echo "$GATE_SHA256  $gate/$archive.tar.gz" | sha256sum --check --strict
+          tar -xzf "$gate/$archive.tar.gz" -C "$gate"
+          "$gate/$archive/swarmops" --version
+          echo "$gate/$archive" >>"$GITHUB_PATH"
+      - name: The gate, through check run
+        run: swarmops --human check run --dir . --stage before-land
       # A self-hosted runner builds into its own CARGO_TARGET_DIR: bring the report to target/.
       - name: Collect the JUnit report
         if: ${{ !cancelled() && runner.environment == 'self-hosted' }}

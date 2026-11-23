@@ -1202,15 +1202,15 @@ branches and moves `stable` after `ci.yml` is green there, so each landed change
 lock. This repository is not developed in a SwarmOps store: the repository on GitHub stays the
 source of truth ([pilot.md](pilot.md)); its `.swarmops/` directory holds step 1's check file
 alone, which names each check's stage since step 2: maintainers and agents start the gate with
-`check run --dir . --stage before-land`, and the `check` job of `ci.yml` still runs `just check`
-until a release holds `check run`, built to CD-D18's text, which awaits the maintainer. Since
-step 3 its `check` check declares the gate's JUnit report, so that `check run`, started with
-nextest's `ci` profile, answers a red gate with the failed tests as findings, while CI's `check`
-job still runs `just check` and uploads the same report. Since step 4 a gate started with
-`check run` leaves a run line for each of its two checks beside that directory's runs, or in the
-directory `SWARMOPS_CHECK_RUN_LINES_DIR` names, which `check runs` and `check log --failed` read;
-CI's `check` job, which still runs `just check`, leaves none until it makes step 2's switch, and
-the runners then set that variable to a directory of the operator's, outside every checkout. No
+`check run --dir . --stage before-land`, and since 0.13.0, the first release that holds
+`check run`, the `check` job of `ci.yml` starts it so too, with that release's build pinned to
+CD-D18's text. Since step 3 its `check` check declares the gate's JUnit report, so that `check
+run`, started with nextest's `ci` profile, answers a red gate with the failed tests as findings;
+CI's `check` job uploads the same report. Since step 4 a gate started with `check run` leaves a
+run line for each of its two checks beside that directory's runs, or in the directory
+`SWARMOPS_CHECK_RUN_LINES_DIR` names, which `check runs` and `check log --failed` read; CI's
+`check` job leaves them on the runner until the runners set that variable to a directory of the
+operator's, outside every checkout. No
 baseline is read from the lines yet: [perf.md](perf.md) holds no figure for them.
 
 **Two tracks.** Track A, steps 1 to 8, runs inside the jobs GitHub starts, with no store: it uses
