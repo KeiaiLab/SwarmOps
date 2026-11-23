@@ -25,9 +25,9 @@ Planned, and built only at its start: SwarmOps takes on a role beside the three 
 describes what must be checked for a tree, decides what a change needs, runs those checks on the
 caller's host or on runners that ask for work, records each result against the tree it is for,
 admits a land only on recorded results, and delivers from a store. Its first two milestones, M30
-and M31, have started: the check file, `check list`, `check run` and `check log` are in 0.13.0,
-and a check's findings and reports, the run lines, `check runs` and `check log --failed` are on
-`stable`. Nothing else of the role is built. Checks run by GitHub on the pushed branch keep
+and M31, have started: the check file, `check list`, `check run`, `check log`, a check's findings
+and reports, the run lines, `check runs` and `check log --failed` are in 0.13.0, and this
+repository's own CI starts its gate through `check run`. Nothing else of the role is built. Checks run by GitHub on the pushed branch keep
 working meanwhile, as they do today.
 
 The eleven milestones:

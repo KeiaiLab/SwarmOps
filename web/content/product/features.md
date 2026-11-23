@@ -10,7 +10,8 @@ the store that the [quick start](/docs/guides/quick-start) makes; the two git ex
 own, the remote one against a local repository served through a stand-in for ssh. In
 the outputs, ids are cut to their first eight hex digits (`4a7bc757…`), a store's path to `…`,
 and a `…` line stands for lines left out. At a terminal a command prints a short text rendering of the
-envelope instead of JSON, as `--human` does anywhere.
+envelope instead of JSON, as `--human` does anywhere. The sections on the landing queue, the check file, your own server and
+releases show the commands without their output, and their host names are examples.
 
 ## Many agents commit into one store at once
 
@@ -138,6 +139,39 @@ Claude Code's `WorktreeCreate` and `WorktreeRemove` hooks (`so ws hook config` p
 settings) give `claude --worktree` sessions and `isolation: worktree` subagents a workspace
 instead of a git worktree, and MCP has fourteen workspace tools.
 [Build and test a change](/docs/operate/build-and-test) is the guide.
+
+## A landing queue: only what passed lands
+
+Many agents finishing at once is when a trunk breaks: each change passed on its own, two of them
+together do not. `so queue enqueue` puts a change in a ref's queue and returns once the entry is
+durable; a runner, started by the command and needing no daemon, checks the waiting changes in
+parallel, each on top of the ones ahead of it, and moves the ref only to a tree that passed. A red
+change is found by bisection and removed with its reason, and the others land in queue order.
+Entries survive a kill and a power loss, and the queue resumes where it stopped.
+
+```sh
+so queue enqueue --head "$CHANGE" main
+so queue status
+so queue wait "$ENTRY"
+```
+
+[Commit and land](/docs/guides/commit-and-land) is the guide, and the
+[CLI reference](/docs/reference/cli) has `withdraw` and `run`.
+
+## One check file for people, agents and CI
+
+A repository names its checks once, in `.swarmops/checks.toml`: each check's command, its
+timeout, the stages it belongs to and the reports it writes. `so check run` runs one stage of them
+in a clean workspace or a directory, the same way on a laptop, for an agent and in CI; a red test
+comes back as a finding with its path and line, read from the check's JUnit or SARIF report, and
+`check log --failed` shows only what failed. This repository's own CI starts its gate this way,
+from a pinned release.
+
+```sh
+so check list --dir .
+so check run --dir . --stage before-land
+so check log --failed --dir .
+```
 
 ## One JSON envelope per command
 
@@ -307,6 +341,36 @@ status: up_to_date
 The second push finds nothing to send and runs no git. [GitHub as a remote](/docs/guides/github-remote)
 is the guide, and the operations guide's [daily loop](/docs/operations#the-daily-loop) runs it
 with review and CI.
+
+## Your own server: git and so, over ssh and HTTPS
+
+`swarmops serve` serves stores to stock git and to SwarmOps on the same host: `git clone`, `fetch`,
+`pull` and `push` over ssh and HTTPS, and a store client over `so://`, which syncs natively. Stores
+are addressed under an owner, as a forge names a repository, and each store's `access.toml` says
+who may read, push and land where. The server kit installs from `.deb` and `.rpm` packages, a
+container image or a Helm chart, writes a root page with its host keys, and backs every store up,
+encrypted to two keys, with a restore drill that proves the backup opens.
+
+```sh
+git clone https://so.example.com/acme/app.git
+git clone so@so.example.com:acme/app.git
+so clone --into app so://so@so.example.com/acme/app
+```
+
+[Serve over ssh](/docs/operate/serve-over-ssh), [Serve over HTTP](/docs/operate/serve-over-http)
+and [Backup and restore](/docs/operate/backup-and-restore) are the operator's guides.
+
+## Releases cut from a store
+
+A store pushes branches and no tag, so this repository's releases start from a branch:
+`release/X.Y.Z`, pushed from a store that follows `stable`. The release workflow takes it for
+the tag `vX.Y.Z`, runs every check a tag's run does, builds and installs the packages, and makes
+the tag as it publishes. SwarmOps 0.13.0 was the first release cut this way.
+
+```sh
+so ref set release/0.14.0 main --create
+so push origin release/0.14.0
+```
 
 ## Crash safety and verify
 

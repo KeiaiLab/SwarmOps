@@ -6,11 +6,13 @@ description: "The problem SwarmOps solves for agent swarms on git, its goal, who
 # SwarmOps
 
 SwarmOps is source control designed for large pools of coding agents: Claude Code or LangGraph
-processes working in one repository at once. It is measured today at 50 agents landing on one
-host: 25.0 lands/s, nothing lost ([perf](/docs/perf/#d2-8-gated-runs--2026-11-09)). It is
-written in Rust and fully embedded: one program, no external database, no daemon. Its main users
-are LLM agents, so every operation is a library function and the command line is a thin shell that
-prints JSON.
+processes working in one repository at once. Agents commit into one store without stepping on
+each other, a landing queue lets in only the changes whose checks passed, and the result reaches
+GitHub or a server you run. It is measured today at 50 agents landing on one host: 25.0 lands/s,
+nothing lost ([perf](/docs/perf/#d2-8-gated-runs--2026-11-09)). It is written in Rust and fully
+embedded: one program, no external database, no daemon. Its main users are LLM agents, so every
+operation is a library function; a program reading the command line gets JSON, and a person at a
+terminal gets text.
 
 ## The problem
 
@@ -37,6 +39,10 @@ and a way back to git so that existing CI and deployments keep running.
 - **Publishing that merges by itself.** `land` merges an agent's change three-way onto `main` and
   publishes it in one transaction, merging again and retrying when `main` moves; a conflict comes
   back as a JSON report, and nothing is recorded.
+- **A gate that lets in only what passed.** `so queue` checks the waiting changes in parallel and
+  lands each one that passed, in queue order; a red one is found by bisection and removed with its
+  reason. The checks are named once, in `.swarmops/checks.toml`, and `check run` runs them the
+  same way for a person, an agent or CI.
 - **One JSON envelope per command.** A stable `E_*` code, a fixed exit code, `retryable`,
   machine-readable `details` and a `hint`; `swarmops schema` describes every type, and
   `swarmops mcp` serves the operations to MCP clients such as Claude Code.
@@ -54,6 +60,9 @@ and a way back to git so that existing CI and deployments keep running.
   JSON in, one JSON envelope out, an exit code per class of failure.
 - **Operators who keep git as the system of record**: the store imports from git and exports to it,
   so review, CI and deployment stay where they are.
+- **Teams that want to run their own source host**: `swarmops serve` serves stores to stock git and
+  to `so` over ssh and HTTPS, from packages, a container image or a Helm chart, with encrypted
+  backups and a restore drill.
 
 ## What it is not
 
@@ -61,11 +70,11 @@ and a way back to git so that existing CI and deployments keep running.
   signing, submodules or LFS.
 - **Not a cluster.** SwarmOps is one program with no daemon and no external database. It does
   not scale horizontally.
-- **Not multi-host yet.** Every agent and command runs on the host that holds the store. Between
-  hosts, git carries the history, one writing host at a time; offline-first sync is M11.
+- **Not a hosted service.** There is no SwarmOps cloud: a store lives on a host you run, and stores
+  on other hosts follow it over `so://` or git through `swarmops serve`.
 - **Not a review tool yet.** SwarmOps does not hold a landing for a person's approval; review stays
-  in git until M7. Checks and delivery from a store are planned
-  ([roadmap](/docs/roadmap#checks-and-delivery)).
+  in git until M7. Checks run through `check run` today; results recorded on a tree and delivery
+  from a store are planned ([roadmap](/docs/roadmap#checks-and-delivery)).
 - **Not on Windows or an Intel Mac.** The releases hold Linux builds and, from 0.12.0 on, a
   macOS build for Apple silicon; Windows is M12.
 - **Not faster than git at raw throughput.** Judged from the design, not measured against git:

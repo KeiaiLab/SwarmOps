@@ -4,7 +4,7 @@
 //
 //   Pre-release · v0.12.0 · 2026-11-18 · Linux x86_64 and aarch64 · macOS aarch64 · MIT
 //   # Version control for swarms of coding agents
-//   Coding agents commit into one store at once ...
+//   Agents commit into one store at once, a queue lands only what passed ...
 //   [ curl ... | bash        (copy) ]   installs swarmops and so
 //   [Quick start ->] What it is  When   into ~/.local/bin ...
 import { CopyLine } from '@/components/copy-line';
@@ -155,8 +155,8 @@ export function Hero() {
         {SITE_TITLE}
       </h1>
       <p className="mt-4 max-w-(--measure) text-lg text-(--text)">
-        Coding agents commit into one store at once, each command answers in JSON, and the work goes back to git.
-        Measured at 50 agents: 25.0 lands/s, none lost (
+        Agents commit into one store at once, a queue lands only what passed its checks, and work reaches GitHub or
+        your own server. 50 agents: 25.0 lands/s, none lost (
         <a className={LINK} href={MEASURED_URL}>
           perf
         </a>
