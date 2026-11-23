@@ -75,8 +75,8 @@ and a way back to git so that existing CI and deployments keep running.
 - **Not a review tool yet.** SwarmOps does not hold a landing for a person's approval; review stays
   in git until M7. Checks run through `check run` today; results recorded on a tree and delivery
   from a store are planned ([roadmap](/docs/roadmap#checks-and-delivery)).
-- **Not on Windows or an Intel Mac.** The releases hold Linux builds and, from 0.12.0 on, a
-  macOS build for Apple silicon; Windows is M12.
+- **Not on Windows or an Intel Mac.** The releases hold Linux builds and a macOS build for Apple
+  silicon; Windows is M12.
 - **Not faster than git at raw throughput.** Judged from the design, not measured against git:
   writers take turns, each commit holding one store-wide lock across two journal syncs
   ([measured rates](/docs/perf)).

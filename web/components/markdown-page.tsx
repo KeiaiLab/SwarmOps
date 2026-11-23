@@ -132,8 +132,8 @@ function AtAGlance({ className }: { className?: string }) {
       term: 'Runs on',
       detail: (
         <>
-          Linux, x86_64 or aarch64, glibc 2.34 or newer (Ubuntu 22.04, Debian 12, RHEL 9); from 0.12.0 on, macOS 11
-          or newer on Apple silicon
+          Linux, x86_64 or aarch64, glibc 2.34 or newer (Ubuntu 22.04, Debian 12, RHEL 9);{' '}
+          <span data-cited-version="0.12.0">from 0.12.0 on, macOS 11 or newer on Apple silicon</span>
         </>
       ),
     },

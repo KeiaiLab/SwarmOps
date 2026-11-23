@@ -2,7 +2,7 @@
 // facts, and the action row; the page's opening, not one of the sections that follow it. At
 // 390 px the order is h1, sentence, install line, primary action; the facts follow.
 //
-//   Pre-release · v0.12.0 · 2026-11-18 · Linux x86_64 and aarch64 · macOS aarch64 · MIT
+//   Pre-release · v0.13.0 · 2026-11-23 · Linux x86_64 and aarch64 · macOS aarch64 · MIT
 //   # Version control for swarms of coding agents
 //   Agents commit into one store at once, a queue lands only what passed ...
 //   [ curl ... | bash        (copy) ]   installs swarmops and so
@@ -21,7 +21,7 @@ const MACOS_SINCE = '0.12.0';
 const NOTES: Record<string, string> = {
   'Linux x86_64': 'tested',
   'Linux aarch64': 'smoke-tested under emulation',
-  'macOS aarch64': `Apple silicon, from ${MACOS_SINCE}`,
+  'macOS aarch64': 'Apple silicon',
 };
 
 // The release a system's first archive is in; a system not named here is in every release.
