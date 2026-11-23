@@ -20,6 +20,15 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Fixed
+
+- A first `clone` or `fetch` over `so://` of a store with many blobs no longer fails with
+  `E_INVALID_ARG: a request line past 1048576 bytes` (`line_too_long`). The client asked for
+  the blobs of a batch 10,000 at a time, and each want is two ids, a line of about 1.5 MB the
+  host refuses; it now groups the wants so that each `wire_get` line stays within the bound, and
+  10,000 at most. Found cloning this repository's own store (2,159 changesets) from a served
+  host; the host is unchanged.
+
 ## [0.13.0] - 2026-11-23
 
 A landing queue on a local store checks changes in parallel and lands each that passed, in
