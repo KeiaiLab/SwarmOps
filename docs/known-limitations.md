@@ -1178,15 +1178,11 @@ check file with its stages, `check list` and `check run` are built
   --run-lines DIR` answers `run_gone` for an older run its lines still name, with the names of
   what failed and no log. Of a run that still runs, `check log --failed` knows no failed check
   until the run's record is written at its end. *Target: M36-1. Found: the M31 plan.*
-- **This repository's CI does not start its gate through `check run` yet.** The `check` job of
-  `ci.yml` runs `just check` and `just check-compare` itself; it moves to
-  `check run --dir . --stage before-land` with a pinned build once a release holds `check run`,
-  since the build under test is not to check itself. The pin is to be by commit id (CD-D18): the
-  job will name the release, the SHA-256 of its Linux archive and the commit id its tag names,
-  and refuse the archive unless the tag still names that commit, since `swarmops --version` names
-  no commit. Before the switch, the job's step times are to be read from recent runs and the
-  gate's timeouts checked against them. So CI's runs leave no run line yet: only a gate started
-  through `check run` does. *Target: M31. Found: the M31 plan; the M31-1 review.*
+- **This repository's CI leaves its run lines on the runner.** The `check` job of `ci.yml` starts
+  the gate with `check run --dir . --stage before-land` from the 0.13.0 release, pinned by its
+  archive's SHA-256 and the commit its tag names (CD-D18); the run lines it writes stay in the
+  checkout's state on the runner until `SWARMOPS_CHECK_RUN_LINES_DIR` names a directory of the
+  operator's there. *Target: M31-11. Found: the switch, 2026-11-23.*
 - **`check list` refuses some `workspaces.json` files that `ws land --check` runs.** It holds
   `check.argv` and `check.timeout_s` to version 1's rules, which the land does not read: a
   `check.timeout_s` of 0 or past 86,400, an empty program, or an argv past 1,024 strings is

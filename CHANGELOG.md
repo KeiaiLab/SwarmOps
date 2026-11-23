@@ -20,6 +20,14 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Changed
+
+- This repository's CI starts its gate with `check run --dir . --stage before-land`, the stage
+  `.swarmops/checks.toml` names (`just check`, then `just check-compare`), from the 0.13.0
+  release's Linux build: `ci.yml` pins the release, its archive's SHA-256 and the commit its tag
+  names, and refuses the archive when the tag names another commit. The gate's definition is one
+  file for maintainers, agents and CI alike.
+
 ## [0.13.0] - 2026-11-23
 
 A landing queue on a local store checks changes in parallel and lands each that passed, in
