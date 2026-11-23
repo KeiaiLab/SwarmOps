@@ -160,7 +160,7 @@ The releases that get there:
 SwarmOps is declared usable at the first release where all seven conditions hold; condition 6
 counts from the last release that shipped a data-safety fix.
 
-**Status (2026-11-18).** v0.13.0 is released (M22's core, the landing queue), after v0.12.0 (M20's slices and M21's first ones, their exit criteria open; `so update`; the first macOS archive), v0.11.0 (M18's and M19's slices, their exit criteria open), v0.10.0 (M17), v0.9.0 (M16) and v0.8.0 (M15); v0.7.0 has M14, which serves topology 1 (condition 7), its criteria 1
+**Status (2026-11-23).** v0.13.0 is released (M22's core, the landing queue), after v0.12.0 (M20's slices and M21's first ones, their exit criteria open; `so update`; the first macOS archive), v0.11.0 (M18's and M19's slices, their exit criteria open), v0.10.0 (M17), v0.9.0 (M16) and v0.8.0 (M15); v0.7.0 has M14, which serves topology 1 (condition 7), its criteria 1
 to 5 pass in `just check` and in the Scheduled run's git matrix, and G16 is met
 ([docs/perf.md](perf.md#v070--2026-10-29): a clone 0.97× and a no-op fetch 1.82× git's own
 server on 12,000 commits). G1 and G2 are met. G4 is met but for its p99 at 50 processes: 25
@@ -901,16 +901,16 @@ land --check`. 22 units.
 | M31-1 | `check run`: runs the checks of a stage (all of them, or a plan's once M30-4 exists) in a workspace or, in the directory form, in a directory, each with no shell and no stdin, in its own process group, under its timeout; one envelope names every check's outcome | M30-1, M30-6, M19 | in 0.13.0 |
 | M31-2 | The environment a check gets: the check's name, tree, stage and attempt, the paths for its report, outputs, summary and artifacts, a file listing the changed paths of its plan, and the values it declared; nothing else is inherited unless listed; the older `check.argv` form keeps the inherited environment it has today | M31-1 | in 0.13.0 |
 | M31-3 | The captured log: both streams with a time per line, and sections a check opens with a marker line; `check log --follow` on the same host reads it while it grows; the envelope keeps the existing tails | M31-1 | in 0.13.0 |
-| M31-4 | Findings: a check writes path, line range, level, title and message as JSON lines to its report file; the envelope returns them, bounded, in `details.findings` | M31-2 | on stable |
-| M31-5 | Intake of test and scanner reports: a check declares a JUnit or SARIF file, and its failed cases and results become findings and counts | M31-4 | on stable |
+| M31-4 | Findings: a check writes path, line range, level, title and message as JSON lines to its report file; the envelope returns them, bounded, in `details.findings` | M31-2 | in 0.13.0 |
+| M31-5 | Intake of test and scanner reports: a check declares a JUnit or SARIF file, and its failed cases and results become findings and counts | M31-4 | in 0.13.0 |
 | M31-6 | Outputs: a check writes key and value pairs to its outputs file; a dependant reads its needs' outputs as environment variables; sizes bounded | M30-7, M31-2 | planned |
 | M31-7 | `check run --jobs N`: independent checks run at once; variants honour their cap and their stop switch | M30-8, M31-1 | planned |
 | M31-8 | Exclusive groups on a host: a check names a group with the scope `host`; one check of a group runs on the host at a time, the others wait up to a bound; the lock's directory is an operator's setting, so that it can span several accounts of one machine | M31-1 | planned |
 | M31-9 | The stop contract: interrupt, then terminate after a grace, then kill the group; an `always` check still runs; the outcome is `cancelled`; a check that left its group is named in the outcome | M31-1 | planned |
 | M31-10 | `ws land --check` runs the `before-land` plan in place of one command; the tree landed is the tree every check ran on; `check.argv` keeps working | M31-1, M30-4, M5 | planned |
-| M31-11 | Run lines: each check run appends one line to a diagnostics file (beside the store, in the workspace's private state, or at a path the caller names): name, tree, stage, wait, duration, outcome, labels, peak memory; diagnostics, as the serve records are: nothing decides from them | M31-1 | on stable |
-| M31-12 | `check runs`: the run lines, and from M33-1 on the run records, which are then the source; filtered by check, tree, outcome and time, paged | M31-11 | on stable |
-| M31-13 | `check log <run>`: one check's log, or with `--failed` only the failed checks', with `--tail N` | M31-3, M31-11 | on stable |
+| M31-11 | Run lines: each check run appends one line to a diagnostics file (beside the store, in the workspace's private state, or at a path the caller names): name, tree, stage, wait, duration, outcome, labels, peak memory; diagnostics, as the serve records are: nothing decides from them | M31-1 | in 0.13.0 |
+| M31-12 | `check runs`: the run lines, and from M33-1 on the run records, which are then the source; filtered by check, tree, outcome and time, paged | M31-11 | in 0.13.0 |
+| M31-13 | `check log <run>`: one check's log, or with `--failed` only the failed checks', with `--tail N` | M31-3, M31-11 | in 0.13.0 |
 | M31-14 | Run again: `check run --again <run>` runs every check of a run again, `--failed` what failed and its dependants, `--check <name>` one; each is the run's next attempt, and earlier attempts stay listed | M31-12 | planned |
 | M31-15 | A check marked `may-fail` reports its failure without failing the plan | M31-1 | planned |
 | M31-16 | Container checks: a check names an image by digest; the host's container runtime runs it with the workspace mounted, unprivileged, with no network unless declared; Linux hosts | M31-1 | planned |

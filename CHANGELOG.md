@@ -20,8 +20,105 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-23
+
+A landing queue on a local store checks changes in parallel and lands each that passed, in
+order. `check run` runs the checks a tree names. At a terminal, commands print text; pipes
+still get JSON. A server serves stores under an owner. A store's first queue entry turns on
+a feature 0.12.x refuses.
+
+No security fixes.
+
+### Changed (breaking)
+
+- At a terminal, a command given neither `--json`, `--human` nor `SWARMOPS_FORMAT` prints its
+  short text rendering, as `--human` does, where it printed the JSON envelope pretty. Wherever
+  stdout is no terminal (a pipe, a file, a program that captures it) the default is the JSON
+  envelope as before, so scripts, CI jobs, hooks and agents read what they read; `--json` or
+  `SWARMOPS_FORMAT=json` asks for the envelope at a terminal, and `--pretty` given alone asks for
+  it too, pretty. The exit codes are unchanged. The reason: a person typing a command reads
+  text, as with other command lines, and a program reading a pipe does not.
+
 ### Added
 
+- The landing queue's request and response types and its `queue_enqueue`, `queue_status` and
+  `queue_withdraw` store operations, which a store without them answers `E_INVALID_ARG` (the
+  M22 core design §6).
+- The error code `E_QUEUE_WAIT_TIMEOUT` (exit 4, retryable), which `queue wait` raises when
+  its timeout passes with the entry still open (the M22 core design §6). Golden envelopes pin
+  56 of the 57 error codes; the queue's own tests pin the new one.
+- The landing queue (M22's core, on a local store): `queue enqueue`, `queue status`,
+  `queue withdraw`, `queue wait` and `queue run`, and the MCP tools `queue_enqueue`,
+  `queue_status`, `queue_withdraw` and `queue_wait`. Entries are checked in parallel in
+  workspaces of their own, a red one is found by bisection and removed with a reason, and the
+  target moves only to a tree that passed its check; a runner the queue's commands start drives
+  it, with no daemon. A store's first entry turns on its `queue` feature, which a 0.12.x build
+  refuses with `E_STORE_TOO_NEW` (the M22 core design).
+- A22's measurement (`queue_perf`, in `just perf` and the weekly run): 50 processes each enqueue
+  and wait on a check of 30 s; every entry lands once and no hold of the store's lock reaches
+  1 s (docs/perf.md, "M22").
+- `check run` and the MCP tool `check_run`: the checks of one stage (`--stage`, `before-land` by
+  default) of a clean workspace, or with `check run --dir DIR` of a directory, one at a time in
+  name order, each with no shell and no stdin, in its own process group, under its `timeout_s`;
+  `NAME…` runs only those checks of the stage. Every check runs whatever an earlier one did, and
+  one envelope names each outcome: `passed`, `failed`, `timed_out` (its group killed),
+  `not_started`, `cancelled` or `not_run`. A run where any check did not pass is
+  `E_CHECK_FAILED`, the whole run in `details.run`. The workspace form reads the check file from
+  the store at the changeset the files stand for, holds the workspace's lock while the checks run
+  and never writes the store; the directory form opens no store and says `vouched: true`.
+  SIGINT, SIGTERM and SIGHUP kill the running check's process group and end the run. The MCP tool
+  has the workspace form only; the same signals to `swarmops mcp` while it runs end the run, and
+  the server exits once it has answered the call. `swarmops mcp` lists 53 tools.
+- The environment a check of `check run` gets: `SWARMOPS_CHECK_NAME`, `SWARMOPS_CHECK_STAGE`,
+  `SWARMOPS_CHECK_TREE`, `SWARMOPS_CHECK_ATTEMPT`, `SWARMOPS_CHECK_RUN`, the paths
+  `SWARMOPS_CHECK_REPORT`, `SWARMOPS_CHECK_OUTPUTS`, `SWARMOPS_CHECK_SUMMARY` and
+  `SWARMOPS_CHECK_ARTIFACTS` (which nothing reads yet), `SWARMOPS_CHECK_CHANGED` (empty until
+  plans exist) and `SWARMOPS_WS` in a workspace; of the caller's variables only `HOME`, `LANG`,
+  `LC_ALL`, `LC_CTYPE`, `LOGNAME`, `PATH`, `TMPDIR`, `TZ` and `USER`, and each `--pass NAME`. The
+  one check `default` of `.swarmops/workspaces.json` keeps the caller's whole environment, as
+  `ws land --check` gives it.
+- A check's log: both streams of its output with a time on every line, the runner's own lines
+  (`start`, `end`, and `section` for each line `swarmops:section <title>` a check writes), within
+  bounds (64 MiB a log, 16 KiB a line, 1,000 sections). A run's directory holds `run.json`, the
+  logs and each check's own directory: in a workspace below `.swarmws/check-runs/`, in the
+  directory form below `SWARMOPS_CHECK_RUNS_DIR`, else the state directory's
+  `swarmops/check-runs`; the newest 20 runs are kept, and a run of a directory removes the runs
+  of directories that are gone. The format is provisional. A log that
+  cannot be written (a full disk) fails its check (`not_started: log` before it starts), and the
+  run goes on.
+- `check log` and the MCP tool `check_log`: one check's log of a run (`--run`, else the newest
+  that ran it), its last `--tail` lines (1,000 by default), each with its time, its stream and its
+  text, and whether the log ended and how (`end` with the outcome, or `runner_gone`).
+  `check log --follow` prints one envelope a line as the log grows and exits 0 with the one that
+  holds its end, as `derive --follow` prints its envelopes; `--human` prints the lines as the log
+  holds them, control characters escaped. The tool has the workspace form only, and no follow.
+- Dependencies: `signal-hook` and `signal-hook-registry` (MIT OR Apache-2.0), for `check run`'s
+  signals.
+- `check list` and the MCP tool `check_list`: the checks a tree names, from the store at a
+  changeset (`main` by default) or, with `check list --dir DIR`, from a directory of this host,
+  which opens no store. Each check comes with its argv, its directory, its timeout, the digest
+  of its definition and its stages, sorted by name; `--stage STAGE` (the request's `stage`) lists
+  only the checks of one stage; the directory form's answer says `vouched: true`, since only
+  the caller stands behind the files. The digest's recipe is provisional and may change in a later
+  release. Nothing runs the checks yet: `ws land --check` still runs `check.argv` of
+  `.swarmops/workspaces.json`.
+- The check file, `.swarmops/checks.toml`, version 1: `version = 1`, then one `[check.<name>]`
+  table a check, with `argv` (one command, run with no shell), `dir`, `timeout_s` and `stages`
+  (when its answer is wanted: one or more of `before-land`, the default, `after-land`,
+  `scheduled`, `release`, `manual` and `deploy`; an unknown stage is refused at its line; the
+  stages are not part of the definition's digest). Any other
+  key is refused at its line, so a build refuses a file whose keys it does not know instead of
+  reading less of it. In a tree without it, `check.argv` of `.swarmops/workspaces.json` reads as
+  the one check `default`.
+- `E_CHECK_FILE` (exit 1, not retryable): a check file that does not read, `.swarmops/checks.toml`
+  or, in a tree without one, `.swarmops/workspaces.json`; `details` name the `file`, the `reason`,
+  whether the caller `vouched` for it, and its `line` and `key` when known. Golden envelopes now
+  pin 57 of the 58 error codes.
+- API types `CheckListReq`, `CheckListResp`, `CheckOut` and `CheckStage`, the request and
+  result of `check list` and a check's stage; `CheckRunReq`, `CheckRunResp`, `CheckRunOut`,
+  `CheckOutcome`, `CheckNotStarted` and `CheckSectionOut`, those of `check run`; `CheckLogReq`,
+  `CheckLogResp`, `CheckLogLineOut`, `CheckLogStream` and `CheckLogEnd`, those of `check log`.
+  `swarmops schema` prints them (231 types).
 - A served store's name may have an owner's segment before the store's, `<owner>/<name>`, as a
   forge writes a repository's address: the store `<root>/acme-co/app` is
   `ssh://host/acme-co/app.git` and `host:acme-co/app.git` over ssh,
@@ -105,6 +202,49 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Changed
 
+- `E_CHECK_FAILED` also stands for a run of `check run` where a check did not pass, or that a
+  signal stopped: its `details.run` is the run's whole result. `ws land --check`'s and the
+  bootstrap's details are unchanged (`details.stage` keeps meaning `check` or `bootstrap`).
+- `ws land --check` and the bootstrap kill what their command left running in its process group
+  once it has exited and its output has ended (or a second after it exits, if a process holds the
+  output), whatever the outcome: a server or helper sent to the background with its output
+  elsewhere no longer outlives the land, nor writes into the workspace once its lock is let go.
+  `check run` does the same for each check.
+- Docs: the roadmap gains a section, "Checks and delivery": a role beside the three topologies in
+  which SwarmOps describes a tree's checks, plans what a change needs, runs the checks on the
+  caller's host or on runners that ask for work, records each result against its tree, gates a
+  land on the records and delivers from a store. It is planned as M30 to M40, in 169 units listed
+  one table per milestone, with twelve slices proposed to the plans of M7, M22, M11 and M26, the
+  first steps in this repository's own checks, and what stays on GitHub meanwhile. Nothing of it
+  is built and no figure of it is measured; the units of M30 and M31 behind the first eight steps
+  start now. Known limitations gain six items on checks, each with its target milestone.
+- Docs: docs/goals.md adds G25 (checks as records), G26 (admission before a runner), G27 (check
+  cost per landed change), G28 (an agent's feedback loop), G29 (untrusted changes) and G30 (the
+  project checks itself). The reason: SwarmOps takes on a role beside its three topologies,
+  checks and delivery, planned as M30 to M40, and each row gives that role a target of its own.
+  Nothing of the role is built and no target is measured: the rows say "Not built" or "Not
+  measured yet", and the targets of G26 to G28 are confirmed or replaced by the first baseline.
+- Docs: the non-goal "A general-purpose git replacement" says that a check is not a hook: it runs
+  outside every store operation and reaches the store only as a recorded result. The reason:
+  without the sentence, "no user hooks" reads as "no checks on a land".
+- Docs: the non-goal "A cluster" says that the store does not scale horizontally, names
+  `swarmops serve` as it is and no longer as planned, and says that checks add no daemon: a runner
+  is a client, the host's own timer starts scheduled work, and the store's records are the only
+  queue. The reason: "it does not scale horizontally" is true of the store and not of runners,
+  and `serve` is released.
+- Docs: the non-goal "A cache or relay tier between hosts" says that a runner's cache of build
+  output is not such a tier. The reason: the planned caches on runners (M39) hold derived files on
+  the runner's host, never store objects, and no store reads them.
+- Docs: a new non-goal, "A workflow language": a check is one command with declared inputs, and
+  GitHub's workflow files are imported once, not run. The reason: it says where the planned role
+  stops.
+- Docs: a new non-goal, "A forge": no issue tracker, registry, site hosting, code scanner or
+  dependency-update bot. The reason: it says where the planned role stops, and that a store
+  refusing content by an operator's own patterns is not a scanner.
+- Docs: "Who it is for" says what is planned for a team that decides to move its CI and
+  deployment: checks described in the tree, lands gated on their recorded results, delivery from
+  the store. The reason: the sentence before it already names that decision, and this one says
+  what the answer will be.
 - A release starts from a pushed `release/X.Y.Z` branch as well as from a pushed `vX.Y.Z` tag,
   so that a SwarmOps store, which pushes branches and no tag, cuts one:
   `so ref set release/X.Y.Z main --create` and `so push origin release/X.Y.Z`. The release
@@ -112,13 +252,6 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   whose tag exists, runs every check a tag's run does, makes the tag on the branch's commit as it
   publishes, and starts the site's release run on it, which `scripts/freshness.py` now builds as
   it builds a pushed tag's ([RELEASE.md](RELEASE.md)).
-- At a terminal, a command given neither `--json`, `--human` nor `SWARMOPS_FORMAT` prints its
-  short text rendering, as `--human` does, where it printed the JSON envelope pretty. Wherever
-  stdout is no terminal (a pipe, a file, a program that captures it) the default is the JSON
-  envelope as before, so scripts, CI jobs, hooks and agents read what they read; `--json` or
-  `SWARMOPS_FORMAT=json` asks for the envelope at a terminal, and `--pretty` given alone asks for
-  it too, pretty. The exit codes are unchanged. The reason: a person typing a command reads
-  text, as with other command lines, and a program reading a pipe does not.
 - `E_CHECK_FAILED`'s `details.run`, the whole result of a run of `check run`, holds each check's
   findings.
 - `check log`'s `CHECK` is optional: exactly one of it and `--failed` is given.
@@ -163,141 +296,6 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   it took for damage. It now measures again (up to 32 rounds, then `SnapshotContended`,
   retryable); runs past the columns measured after their manifest was read are still corrupt. No
   release makes a FORMAT 3 store yet.
-
-## [0.13.0] - 2026-11-18
-
-A landing queue on a local store: `queue enqueue`, `status`, `withdraw`, `wait` and `run` check
-changes in parallel and land each one whose check passed, in queue order. `check list`, `check run` and
-`check log` show, run and log the checks a tree names. A store's first queue entry turns on a feature that 0.12.x builds refuse.
-
-No incompatible changes and no security fixes.
-
-### Added
-
-- The landing queue's request and response types and its `queue_enqueue`, `queue_status` and
-  `queue_withdraw` store operations, which a store without them answers `E_INVALID_ARG` (the
-  M22 core design §6).
-- The error code `E_QUEUE_WAIT_TIMEOUT` (exit 4, retryable), which `queue wait` raises when
-  its timeout passes with the entry still open (the M22 core design §6). Golden envelopes pin
-  56 of the 57 error codes; the queue's own tests pin the new one.
-- The landing queue (M22's core, on a local store): `queue enqueue`, `queue status`,
-  `queue withdraw`, `queue wait` and `queue run`, and the MCP tools `queue_enqueue`,
-  `queue_status`, `queue_withdraw` and `queue_wait`. Entries are checked in parallel in
-  workspaces of their own, a red one is found by bisection and removed with a reason, and the
-  target moves only to a tree that passed its check; a runner the queue's commands start drives
-  it, with no daemon. A store's first entry turns on its `queue` feature, which a 0.12.x build
-  refuses with `E_STORE_TOO_NEW` (the M22 core design).
-- A22's measurement (`queue_perf`, in `just perf` and the weekly run): 50 processes each enqueue
-  and wait on a check of 30 s; every entry lands once and no hold of the store's lock reaches
-  1 s (docs/perf.md, "M22").
-- `check run` and the MCP tool `check_run`: the checks of one stage (`--stage`, `before-land` by
-  default) of a clean workspace, or with `check run --dir DIR` of a directory, one at a time in
-  name order, each with no shell and no stdin, in its own process group, under its `timeout_s`;
-  `NAME…` runs only those checks of the stage. Every check runs whatever an earlier one did, and
-  one envelope names each outcome: `passed`, `failed`, `timed_out` (its group killed),
-  `not_started`, `cancelled` or `not_run`. A run where any check did not pass is
-  `E_CHECK_FAILED`, the whole run in `details.run`. The workspace form reads the check file from
-  the store at the changeset the files stand for, holds the workspace's lock while the checks run
-  and never writes the store; the directory form opens no store and says `vouched: true`.
-  SIGINT, SIGTERM and SIGHUP kill the running check's process group and end the run. The MCP tool
-  has the workspace form only; the same signals to `swarmops mcp` while it runs end the run, and
-  the server exits once it has answered the call. `swarmops mcp` lists 53 tools.
-- The environment a check of `check run` gets: `SWARMOPS_CHECK_NAME`, `SWARMOPS_CHECK_STAGE`,
-  `SWARMOPS_CHECK_TREE`, `SWARMOPS_CHECK_ATTEMPT`, `SWARMOPS_CHECK_RUN`, the paths
-  `SWARMOPS_CHECK_REPORT`, `SWARMOPS_CHECK_OUTPUTS`, `SWARMOPS_CHECK_SUMMARY` and
-  `SWARMOPS_CHECK_ARTIFACTS` (which nothing reads yet), `SWARMOPS_CHECK_CHANGED` (empty until
-  plans exist) and `SWARMOPS_WS` in a workspace; of the caller's variables only `HOME`, `LANG`,
-  `LC_ALL`, `LC_CTYPE`, `LOGNAME`, `PATH`, `TMPDIR`, `TZ` and `USER`, and each `--pass NAME`. The
-  one check `default` of `.swarmops/workspaces.json` keeps the caller's whole environment, as
-  `ws land --check` gives it.
-- A check's log: both streams of its output with a time on every line, the runner's own lines
-  (`start`, `end`, and `section` for each line `swarmops:section <title>` a check writes), within
-  bounds (64 MiB a log, 16 KiB a line, 1,000 sections). A run's directory holds `run.json`, the
-  logs and each check's own directory: in a workspace below `.swarmws/check-runs/`, in the
-  directory form below `SWARMOPS_CHECK_RUNS_DIR`, else the state directory's
-  `swarmops/check-runs`; the newest 20 runs are kept, and a run of a directory removes the runs
-  of directories that are gone. The format is provisional. A log that
-  cannot be written (a full disk) fails its check (`not_started: log` before it starts), and the
-  run goes on.
-- `check log` and the MCP tool `check_log`: one check's log of a run (`--run`, else the newest
-  that ran it), its last `--tail` lines (1,000 by default), each with its time, its stream and its
-  text, and whether the log ended and how (`end` with the outcome, or `runner_gone`).
-  `check log --follow` prints one envelope a line as the log grows and exits 0 with the one that
-  holds its end, as `derive --follow` prints its envelopes; `--human` prints the lines as the log
-  holds them, control characters escaped. The tool has the workspace form only, and no follow.
-- Dependencies: `signal-hook` and `signal-hook-registry` (MIT OR Apache-2.0), for `check run`'s
-  signals.
-- `check list` and the MCP tool `check_list`: the checks a tree names, from the store at a
-  changeset (`main` by default) or, with `check list --dir DIR`, from a directory of this host,
-  which opens no store. Each check comes with its argv, its directory, its timeout, the digest
-  of its definition and its stages, sorted by name; `--stage STAGE` (the request's `stage`) lists
-  only the checks of one stage; the directory form's answer says `vouched: true`, since only
-  the caller stands behind the files. The digest's recipe is provisional and may change in a later
-  release. Nothing runs the checks yet: `ws land --check` still runs `check.argv` of
-  `.swarmops/workspaces.json`.
-- The check file, `.swarmops/checks.toml`, version 1: `version = 1`, then one `[check.<name>]`
-  table a check, with `argv` (one command, run with no shell), `dir`, `timeout_s` and `stages`
-  (when its answer is wanted: one or more of `before-land`, the default, `after-land`,
-  `scheduled`, `release`, `manual` and `deploy`; an unknown stage is refused at its line; the
-  stages are not part of the definition's digest). Any other
-  key is refused at its line, so a build refuses a file whose keys it does not know instead of
-  reading less of it. In a tree without it, `check.argv` of `.swarmops/workspaces.json` reads as
-  the one check `default`.
-- `E_CHECK_FILE` (exit 1, not retryable): a check file that does not read, `.swarmops/checks.toml`
-  or, in a tree without one, `.swarmops/workspaces.json`; `details` name the `file`, the `reason`,
-  whether the caller `vouched` for it, and its `line` and `key` when known. Golden envelopes now
-  pin 57 of the 58 error codes.
-- API types `CheckListReq`, `CheckListResp`, `CheckOut` and `CheckStage`, the request and
-  result of `check list` and a check's stage; `CheckRunReq`, `CheckRunResp`, `CheckRunOut`,
-  `CheckOutcome`, `CheckNotStarted` and `CheckSectionOut`, those of `check run`; `CheckLogReq`,
-  `CheckLogResp`, `CheckLogLineOut`, `CheckLogStream` and `CheckLogEnd`, those of `check log`.
-  `swarmops schema` prints them (231 types).
-
-### Changed
-
-- `E_CHECK_FAILED` also stands for a run of `check run` where a check did not pass, or that a
-  signal stopped: its `details.run` is the run's whole result. `ws land --check`'s and the
-  bootstrap's details are unchanged (`details.stage` keeps meaning `check` or `bootstrap`).
-- `ws land --check` and the bootstrap kill what their command left running in its process group
-  once it has exited and its output has ended (or a second after it exits, if a process holds the
-  output), whatever the outcome: a server or helper sent to the background with its output
-  elsewhere no longer outlives the land, nor writes into the workspace once its lock is let go.
-  `check run` does the same for each check.
-- Docs: the roadmap gains a section, "Checks and delivery": a role beside the three topologies in
-  which SwarmOps describes a tree's checks, plans what a change needs, runs the checks on the
-  caller's host or on runners that ask for work, records each result against its tree, gates a
-  land on the records and delivers from a store. It is planned as M30 to M40, in 169 units listed
-  one table per milestone, with twelve slices proposed to the plans of M7, M22, M11 and M26, the
-  first steps in this repository's own checks, and what stays on GitHub meanwhile. Nothing of it
-  is built and no figure of it is measured; the units of M30 and M31 behind the first eight steps
-  start now. Known limitations gain six items on checks, each with its target milestone.
-- Docs: docs/goals.md adds G25 (checks as records), G26 (admission before a runner), G27 (check
-  cost per landed change), G28 (an agent's feedback loop), G29 (untrusted changes) and G30 (the
-  project checks itself). The reason: SwarmOps takes on a role beside its three topologies,
-  checks and delivery, planned as M30 to M40, and each row gives that role a target of its own.
-  Nothing of the role is built and no target is measured: the rows say "Not built" or "Not
-  measured yet", and the targets of G26 to G28 are confirmed or replaced by the first baseline.
-- Docs: the non-goal "A general-purpose git replacement" says that a check is not a hook: it runs
-  outside every store operation and reaches the store only as a recorded result. The reason:
-  without the sentence, "no user hooks" reads as "no checks on a land".
-- Docs: the non-goal "A cluster" says that the store does not scale horizontally, names
-  `swarmops serve` as it is and no longer as planned, and says that checks add no daemon: a runner
-  is a client, the host's own timer starts scheduled work, and the store's records are the only
-  queue. The reason: "it does not scale horizontally" is true of the store and not of runners,
-  and `serve` is released.
-- Docs: the non-goal "A cache or relay tier between hosts" says that a runner's cache of build
-  output is not such a tier. The reason: the planned caches on runners (M39) hold derived files on
-  the runner's host, never store objects, and no store reads them.
-- Docs: a new non-goal, "A workflow language": a check is one command with declared inputs, and
-  GitHub's workflow files are imported once, not run. The reason: it says where the planned role
-  stops.
-- Docs: a new non-goal, "A forge": no issue tracker, registry, site hosting, code scanner or
-  dependency-update bot. The reason: it says where the planned role stops, and that a store
-  refusing content by an operator's own patterns is not a scanner.
-- Docs: "Who it is for" says what is planned for a team that decides to move its CI and
-  deployment: checks described in the tree, lands gated on their recorded results, delivery from
-  the store. The reason: the sentence before it already names that decision, and this one says
-  what the answer will be.
 
 ## [0.12.0] - 2026-11-18
 
