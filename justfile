@@ -171,6 +171,7 @@ check:
     python3 -I scripts/repo-settings.py selftest
     python3 -I scripts/golden-frozen.py selftest
     python3 -I scripts/release-marks.py selftest
+    sh scripts/gates/devspace_surface.sh devspace.yaml packaging/helm/swarmops-dev/values-dev.yaml
 
 # The release cut (.github/workflows/release.yml) runs this: every golden file of the previous
 # release tag (the hash contract's, FORMAT 3's confirmed ones; not `golden3/provisional/`) is
@@ -528,6 +529,13 @@ fuzz target="codec_roundtrip":
     mkdir -p fuzz/corpus-new/{{target}}
     cd fuzz && cargo +nightly fuzz run {{target}} corpus-new/{{target}} corpus/{{target}} -- \
         -max_total_time=60 -timeout=30
+
+# The dev pod's boundary, as ci.yml's `dev-check` job runs it: the chart guard of
+# packaging/helm/swarmops-dev refuses values-dev.yaml outside swarmops-dev and production values in a
+# -dev namespace, and the devspace.yaml surface gate refuses each broken copy. Needs helm.
+# The dev chart's namespace guard and the devspace.yaml surface, offline.
+dev-check:
+    sh scripts/test-dev-chart.sh
 
 # The website, web/: a Next.js static export (Fumadocs for /docs) that renders docs/**/*.md and
 # CHANGELOG.md, written to web/out/. `npm ci` needs the npm registry, so these recipes stay out of

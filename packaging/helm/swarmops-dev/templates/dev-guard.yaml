@@ -1,0 +1,2 @@
+{{- /* Renders nothing — runs the dev namespace guard on every render (see swarmops.devNamespaceGuard). */ -}}
+{{- include "swarmops.devNamespaceGuard" . -}}
