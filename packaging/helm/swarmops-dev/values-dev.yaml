@@ -3,7 +3,7 @@ dev:
   namespace: swarmops-dev
   # the so-sandbox CI runner image (platform/system images/so-sandbox-runner): rustup, git, python3, build-essential,
   # the Nexus crate proxy config. Pinned by digest; move it with the system image.
-  image: harbor.keiailab.com/keiailab/platform/system/so-sandbox-runner:79de6b54@sha256:2ed97a271c156b44881e61aa1a72a2c565ac11a18a38c6bea449f8ad8feeea3e
+  image: harbor.keiailab.com/keiailab/platform/system/so-sandbox-runner:a4dd169ac1b9@sha256:1bf443cf024d1ee5f3bebf3c52f913aae67983bc7ae96449a8d8b80724ae631c
   # the build node (NVMe, the so-sandbox runners' node)
   node: e122
   # e122 is tainted keiailab.dev/dedicated=restartable (same toleration as so-sandbox).
