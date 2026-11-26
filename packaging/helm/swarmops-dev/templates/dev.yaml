@@ -1,0 +1,195 @@
+{{- /*
+Dev overlay (values-dev.yaml, CONTRIBUTING.md "Building in the cluster") — the only objects this chart renders.
+Never rendered without dev.namespace and never outside it (swarmops.devNamespaceGuard).
+
+  swarmops-dev pod ─ dev   so-sandbox runner image; the tree syncs into /src (devspace), cargo builds here
+    /cache/target  PVC ceph-rbd   CARGO_TARGET_DIR — the build directory, off the Mac
+    /cache/cargo   PVC ceph-rbd   CARGO_HOME + RUSTUP_HOME (crate cache, toolchain, just/nextest/deny/sccache)
+    /archive       PVC nas-nfs    long-term keep: fuzz corpus, measurement logs (never a target directory)
+    sccache        OBC ceph-rgw-keiailab (RUSTC_WRAPPER) — shared with CI by key prefix
+  egress: DNS · Nexus :8081 (crates) · RGW :8080 (sccache) · pkg.keiailab.com :443 (rustup dist through Nexus)
+
+No probes (a sleeping shell has nothing to probe; it is Ready on start, so cluster-healer's not-ready restart does
+not apply and no opt-out label is needed). The PVCs and the bucket carry helm.sh/resource-policy: keep — `devspace
+run down` removes the pod, not the warm cache.
+*/ -}}
+{{- if .Values.dev.namespace }}
+{{- $d := .Values.dev }}
+{{- range $key, $name := dict "target" "swarmops-dev-target" "cargoHome" "swarmops-dev-cargo" }}
+{{- $s := index $d.storage $key }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "swarmops.dev.labels" $ | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ $s.storageClassName }}
+  resources:
+    requests:
+      storage: {{ $s.size }}
+{{- end }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: swarmops-dev-archive
+  labels:
+    {{- include "swarmops.dev.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: {{ $d.storage.archive.storageClassName }}
+  resources:
+    requests:
+      storage: {{ $d.storage.archive.size }}
+---
+apiVersion: objectbucket.io/v1alpha1
+kind: ObjectBucketClaim
+metadata:
+  name: {{ $d.sccache.claimName }}
+  labels:
+    {{- include "swarmops.dev.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  generateBucketName: {{ $d.sccache.claimName }}
+  storageClassName: {{ $d.sccache.storageClassName }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: swarmops-dev
+  labels:
+    {{- include "swarmops.dev.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "swarmops.dev.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "swarmops.dev.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 10
+      nodeSelector:
+        kubernetes.io/hostname: {{ $d.node }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: dev
+          image: {{ $d.image | quote }}
+          imagePullPolicy: IfNotPresent
+          workingDir: /src
+          command: [tini, -g, --, sh, -c, "echo 'swarmops dev pod: the tree syncs into /src (devspace run up)'; exec sleep 2147483647"]
+          env:
+            - {name: HOME, value: /work/home}
+            - {name: TMPDIR, value: /work/tmp}
+            - {name: CARGO_HOME, value: /cache/cargo/home}
+            - {name: RUSTUP_HOME, value: /cache/cargo/rustup}
+            - {name: CARGO_TARGET_DIR, value: /cache/target}
+            - {name: PATH, value: "/cache/cargo/home/bin:/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin"}
+            - {name: RUSTUP_DIST_SERVER, value: {{ $d.rustupDistServer | quote }}}
+            - {name: CARGO_BUILD_JOBS, value: {{ $d.buildJobs | quote }}}
+            - {name: NEXTEST_TEST_THREADS, value: {{ $d.testThreads | quote }}}
+            - {name: SWARMOPS_ARCHIVE, value: /archive}
+            - {name: SO_TOOL_JUST, value: {{ $d.tools.just | quote }}}
+            - {name: SO_TOOL_NEXTEST, value: {{ $d.tools.nextest | quote }}}
+            - {name: SO_TOOL_DENY, value: {{ $d.tools.deny | quote }}}
+            - {name: SO_TOOL_SCCACHE, value: {{ $d.tools.sccache | quote }}}
+            # sccache over the OBC's bucket; scripts/dev-pod.sh sets RUSTC_WRAPPER once sccache is installed
+            - name: BUCKET_HOST
+              valueFrom: {configMapKeyRef: {name: {{ $d.sccache.claimName }}, key: BUCKET_HOST}}
+            - name: BUCKET_PORT
+              valueFrom: {configMapKeyRef: {name: {{ $d.sccache.claimName }}, key: BUCKET_PORT}}
+            - name: SCCACHE_BUCKET
+              valueFrom: {configMapKeyRef: {name: {{ $d.sccache.claimName }}, key: BUCKET_NAME}}
+            - {name: SCCACHE_ENDPOINT, value: "http://$(BUCKET_HOST):$(BUCKET_PORT)"}
+            - {name: SCCACHE_S3_USE_SSL, value: "false"}
+            - {name: SCCACHE_REGION, value: {{ $d.sccache.region | quote }}}
+            - {name: SCCACHE_S3_KEY_PREFIX, value: {{ $d.sccache.keyPrefix | quote }}}
+            - {name: SCCACHE_CACHE_SIZE, value: {{ $d.sccache.cacheSize | quote }}}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: {secretKeyRef: {name: {{ $d.sccache.claimName }}, key: AWS_ACCESS_KEY_ID}}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: {{ $d.sccache.claimName }}, key: AWS_SECRET_ACCESS_KEY}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            {{- toYaml $d.resources | nindent 12 }}
+          volumeMounts:
+            - {name: src, mountPath: /src}
+            - {name: work, mountPath: /work}
+            - {name: tmp, mountPath: /tmp}
+            - {name: target, mountPath: /cache/target}
+            - {name: cargo, mountPath: /cache/cargo}
+            - {name: archive, mountPath: /archive}
+      volumes:
+        - {name: src, emptyDir: {sizeLimit: 4Gi}}
+        - {name: work, emptyDir: {sizeLimit: 20Gi}}
+        - {name: tmp, emptyDir: {sizeLimit: 4Gi}}
+        - {name: target, persistentVolumeClaim: {claimName: swarmops-dev-target}}
+        - {name: cargo, persistentVolumeClaim: {claimName: swarmops-dev-cargo}}
+        - {name: archive, persistentVolumeClaim: {claimName: swarmops-dev-archive}}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: swarmops-dev
+  labels:
+    {{- include "swarmops.dev.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "swarmops.dev.selector" . | nindent 6 }}
+  # devspace sync and enter go through the API server and kubelet exec, not the pod network
+  ingress: []
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - {port: "53", protocol: UDP}
+            - {port: "53", protocol: TCP}
+    # crates: the Nexus cargo proxy (/opt/so-sbx/cargo-config.toml)
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: platform-system
+            app.kubernetes.io/name: nexus
+      toPorts:
+        - ports:
+            - {port: "8081", protocol: TCP}
+    # sccache: the RGW behind rook-ceph-rgw-keiailab-rgw:80
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: rook-ceph
+            app: rook-ceph-rgw
+            rook_object_store: keiailab-rgw
+      toPorts:
+        - ports:
+            - {port: "8080", protocol: TCP}
+    # rustup's dist server through pkg.keiailab.com (the edge gateway's Envoy, hence the ingress entity)
+    - toEntities: [ingress]
+      toPorts:
+        - ports:
+            - {port: "443", protocol: TCP}
+{{- end }}

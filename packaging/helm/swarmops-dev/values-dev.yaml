@@ -1,0 +1,36 @@
+# The dev overlay (devspace.yaml deploys it). swarmops.devNamespaceGuard refuses any other namespace.
+dev:
+  namespace: swarmops-dev
+  # the so-sandbox CI runner image (platform/system images/so-sandbox-runner): rustup, git, python3, build-essential,
+  # the Nexus crate proxy config. Pinned by digest; move it with the system image.
+  image: harbor.keiailab.com/keiailab/platform/system/so-sandbox-runner:79de6b54@sha256:2ed97a271c156b44881e61aa1a72a2c565ac11a18a38c6bea449f8ad8feeea3e
+  # the build node (NVMe, the so-sandbox runners' node)
+  node: e122
+  resources:
+    requests: {cpu: "4", memory: 8Gi, ephemeral-storage: 4Gi}
+    limits: {cpu: "16", memory: 48Gi, ephemeral-storage: 30Gi}
+  buildJobs: "12"
+  testThreads: "12"
+  storage:
+    # cargo target/ — never on the Mac, never on NFS. Kept across `devspace run down` (resource-policy keep).
+    target: {storageClassName: ceph-rbd, size: 200Gi}
+    # CARGO_HOME (registry cache, installed tools) and RUSTUP_HOME
+    cargoHome: {storageClassName: ceph-rbd, size: 40Gi}
+    # long-term keep: fuzz corpus and measurement logs (Synology). Not a build directory.
+    archive: {storageClassName: nas-nfs, size: 200Gi}
+  sccache:
+    # Ceph RGW bucket through an ObjectBucketClaim (its ConfigMap/Secret carry endpoint and keys).
+    # This is a compiler-output cache for cargo, not an image-bake (BuildKit/ship-build) cache: the
+    # "no Ceph PVC / S3 build cache" rule of the image bakes does not cover it, and no bake Job uses it.
+    claimName: swarmops-sccache
+    storageClassName: ceph-rgw-keiailab
+    region: us-east-1
+    keyPrefix: swarmops
+    cacheSize: 50G
+  rustupDistServer: https://pkg.keiailab.com/repository/raw-rust
+  # tool versions installed into CARGO_HOME by scripts/dev-pod.sh (ci.yml pins the same just/nextest/deny)
+  tools:
+    just: 1.58.0
+    nextest: 0.9.146
+    deny: 0.20.2
+    sccache: 0.10.0

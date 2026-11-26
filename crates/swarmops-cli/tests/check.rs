@@ -247,7 +247,7 @@ fn the_legacy_check_is_what_a_checked_land_runs() {
 }
 
 /// This repository's own `.swarmops/checks.toml` lists through the directory form, as `just check`
-/// lists it: the gate's six checks, each a recipe of the justfile run by `just`, with no shell.
+/// lists it: the gate's seven checks, each a recipe of the justfile run by `just`, with no shell.
 #[test]
 fn this_repository_s_checks_are_its_recipes() {
     // 1. The file, listed from the repository's root.
@@ -263,6 +263,7 @@ fn this_repository_s_checks_are_its_recipes() {
         [
             "check",
             "check-compare",
+            "dev-check",
             "lint-workflows",
             "server-acceptance",
             "server-entrances",
@@ -280,6 +281,7 @@ fn this_repository_s_checks_are_its_recipes() {
         [
             ("check", &gate),
             ("check-compare", &gate),
+            ("dev-check", &manual),
             ("lint-workflows", &manual),
             ("server-acceptance", &manual),
             ("server-entrances", &manual),
@@ -289,7 +291,7 @@ fn this_repository_s_checks_are_its_recipes() {
     let text = fs::read_to_string(root.join(".swarmops/checks.toml")).unwrap();
     assert_eq!(
         text.matches("\nstages = ").count(),
-        6,
+        7,
         "every check writes its stages"
     );
 
