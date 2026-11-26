@@ -19,7 +19,7 @@ r() { helm template swarmops-dev "$chart" "$@"; }
 # the dev render: guard passes, and the objects are the ones the overlay owns
 ok r -n swarmops-dev -f "$dev"
 kinds=$(r -n swarmops-dev -f "$dev" | awk '/^kind:/ {print $2}' | sort | tr '\n' ' ')
-[ "$kinds" = "CiliumNetworkPolicy Deployment ObjectBucketClaim PersistentVolumeClaim PersistentVolumeClaim PersistentVolumeClaim " ] ||
+[ "$kinds" = "CiliumNetworkPolicy Deployment ExternalSecret PersistentVolumeClaim PersistentVolumeClaim PersistentVolumeClaim " ] ||
   { echo "FAIL  dev render kinds: $kinds"; fail=1; }
 r -n swarmops-dev -f "$dev" | grep -q 'livenessProbe\|readinessProbe\|startupProbe' && { echo "FAIL  dev pod has a probe"; fail=1; }
 r -n swarmops-dev -f "$dev" | grep -qF 'claimName: swarmops-dev-target' || { echo "FAIL  target PVC not mounted"; fail=1; }

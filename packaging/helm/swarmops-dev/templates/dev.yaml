@@ -6,11 +6,11 @@ Never rendered without dev.namespace and never outside it (swarmops.devNamespace
     /cache/target  PVC ceph-rbd   CARGO_TARGET_DIR — the build directory, off the Mac
     /cache/cargo   PVC ceph-rbd   CARGO_HOME + RUSTUP_HOME (crate cache, toolchain, just/nextest/deny/sccache)
     /archive       PVC nas-nfs    long-term keep: fuzz corpus, measurement logs (never a target directory)
-    sccache        OBC ceph-rgw-keiailab (RUSTC_WRAPPER) — shared with CI by key prefix
+    sccache        CI's RGW bucket rook-ceph/swarmops-sccache via ExternalSecret (RUSTC_WRAPPER)
   egress: DNS · Nexus :8081 (crates) · RGW :8080 (sccache) · pkg.keiailab.com :443 (rustup dist through Nexus)
 
 No probes (a sleeping shell has nothing to probe; it is Ready on start, so cluster-healer's not-ready restart does
-not apply and no opt-out label is needed). The PVCs and the bucket carry helm.sh/resource-policy: keep — `devspace
+not apply and no opt-out label is needed). The PVCs carry helm.sh/resource-policy: keep — `devspace
 run down` removes the pod, not the warm cache.
 */ -}}
 {{- if .Values.dev.namespace }}
@@ -49,17 +49,21 @@ spec:
     requests:
       storage: {{ $d.storage.archive.size }}
 ---
-apiVersion: objectbucket.io/v1alpha1
-kind: ObjectBucketClaim
+# The bucket is the one CI uses: OBC rook-ceph/swarmops-sccache (platform/system rook-ceph chart).
+# Its keys are copied here through the same ClusterSecretStore so-sandbox uses; no second bucket.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
 metadata:
-  name: {{ $d.sccache.claimName }}
+  name: {{ $d.sccache.secretName }}
   labels:
     {{- include "swarmops.dev.labels" . | nindent 4 }}
-  annotations:
-    helm.sh/resource-policy: keep
 spec:
-  generateBucketName: {{ $d.sccache.claimName }}
-  storageClassName: {{ $d.sccache.storageClassName }}
+  refreshInterval: 15m
+  secretStoreRef: {kind: ClusterSecretStore, name: {{ $d.sccache.secretStore }}}
+  target: {name: {{ $d.sccache.secretName }}, creationPolicy: Owner}
+  data:
+    - {secretKey: AWS_ACCESS_KEY_ID, remoteRef: {key: {{ $d.sccache.sourceSecret }}, property: AWS_ACCESS_KEY_ID}}
+    - {secretKey: AWS_SECRET_ACCESS_KEY, remoteRef: {key: {{ $d.sccache.sourceSecret }}, property: AWS_SECRET_ACCESS_KEY}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -84,6 +88,10 @@ spec:
       terminationGracePeriodSeconds: 10
       nodeSelector:
         kubernetes.io/hostname: {{ $d.node }}
+      {{- with $d.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001
@@ -112,22 +120,17 @@ spec:
             - {name: SO_TOOL_NEXTEST, value: {{ $d.tools.nextest | quote }}}
             - {name: SO_TOOL_DENY, value: {{ $d.tools.deny | quote }}}
             - {name: SO_TOOL_SCCACHE, value: {{ $d.tools.sccache | quote }}}
-            # sccache over the OBC's bucket; scripts/dev-pod.sh sets RUSTC_WRAPPER once sccache is installed
-            - name: BUCKET_HOST
-              valueFrom: {configMapKeyRef: {name: {{ $d.sccache.claimName }}, key: BUCKET_HOST}}
-            - name: BUCKET_PORT
-              valueFrom: {configMapKeyRef: {name: {{ $d.sccache.claimName }}, key: BUCKET_PORT}}
-            - name: SCCACHE_BUCKET
-              valueFrom: {configMapKeyRef: {name: {{ $d.sccache.claimName }}, key: BUCKET_NAME}}
-            - {name: SCCACHE_ENDPOINT, value: "http://$(BUCKET_HOST):$(BUCKET_PORT)"}
+            # sccache over CI's RGW bucket; scripts/dev-pod.sh sets RUSTC_WRAPPER once sccache is installed
+            - {name: SCCACHE_BUCKET, value: {{ $d.sccache.bucket | quote }}}
+            - {name: SCCACHE_ENDPOINT, value: {{ $d.sccache.endpoint | quote }}}
             - {name: SCCACHE_S3_USE_SSL, value: "false"}
             - {name: SCCACHE_REGION, value: {{ $d.sccache.region | quote }}}
             - {name: SCCACHE_S3_KEY_PREFIX, value: {{ $d.sccache.keyPrefix | quote }}}
             - {name: SCCACHE_CACHE_SIZE, value: {{ $d.sccache.cacheSize | quote }}}
             - name: AWS_ACCESS_KEY_ID
-              valueFrom: {secretKeyRef: {name: {{ $d.sccache.claimName }}, key: AWS_ACCESS_KEY_ID}}
+              valueFrom: {secretKeyRef: {name: {{ $d.sccache.secretName }}, key: AWS_ACCESS_KEY_ID}}
             - name: AWS_SECRET_ACCESS_KEY
-              valueFrom: {secretKeyRef: {name: {{ $d.sccache.claimName }}, key: AWS_SECRET_ACCESS_KEY}}
+              valueFrom: {secretKeyRef: {name: {{ $d.sccache.secretName }}, key: AWS_SECRET_ACCESS_KEY}}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

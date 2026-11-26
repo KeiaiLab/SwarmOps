@@ -17,13 +17,14 @@ cmp -s /opt/so-sbx/cargo-config.toml "$CARGO_HOME/config.toml" || cp /opt/so-sbx
 # the toolchain rust-toolchain.toml pins, from the Nexus rustup mirror (RUSTUP_DIST_SERVER)
 rustup toolchain install --no-self-update >/dev/null
 
-tool() { # <binary> <crate> <version>
+tool() { # <binary> <crate> <version> [features]
   if ! "$1" --version 2>/dev/null | grep -qF "$3"; then
     echo "[dev-pod] installing $2 $3 into $CARGO_HOME"
-    RUSTC_WRAPPER='' cargo install --locked --quiet "$2@$3"
+    RUSTC_WRAPPER='' cargo install --locked --quiet ${4:+--features "$4"} "$2@$3"
   fi
 }
-tool sccache sccache "$SO_TOOL_SCCACHE"
+# the runner image has no libssl-dev: build OpenSSL from source with the crate
+tool sccache sccache "$SO_TOOL_SCCACHE" vendored-openssl
 tool just just "$SO_TOOL_JUST"
 tool cargo-nextest cargo-nextest "$SO_TOOL_NEXTEST"
 tool cargo-deny cargo-deny "$SO_TOOL_DENY"

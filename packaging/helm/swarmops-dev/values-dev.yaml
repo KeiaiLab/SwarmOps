@@ -6,8 +6,11 @@ dev:
   image: harbor.keiailab.com/keiailab/platform/system/so-sandbox-runner:79de6b54@sha256:2ed97a271c156b44881e61aa1a72a2c565ac11a18a38c6bea449f8ad8feeea3e
   # the build node (NVMe, the so-sandbox runners' node)
   node: e122
+  # e122 is tainted keiailab.dev/dedicated=restartable (same toleration as so-sandbox).
+  tolerations:
+    - {key: keiailab.dev/dedicated, operator: Equal, value: restartable, effect: NoSchedule}
   resources:
-    requests: {cpu: "4", memory: 8Gi, ephemeral-storage: 4Gi}
+    requests: {cpu: "1", memory: 8Gi, ephemeral-storage: 4Gi}
     limits: {cpu: "16", memory: 48Gi, ephemeral-storage: 30Gi}
   buildJobs: "12"
   testThreads: "12"
@@ -19,13 +22,16 @@ dev:
     # long-term keep: fuzz corpus and measurement logs (Synology). Not a build directory.
     archive: {storageClassName: nas-nfs, size: 200Gi}
   sccache:
-    # Ceph RGW bucket through an ObjectBucketClaim (its ConfigMap/Secret carry endpoint and keys).
+    # CI's bucket (OBC rook-ceph/swarmops-sccache, ceph-rgw-keiailab), keys copied by ExternalSecret.
     # This is a compiler-output cache for cargo, not an image-bake (BuildKit/ship-build) cache: the
     # "no Ceph PVC / S3 build cache" rule of the image bakes does not cover it, and no bake Job uses it.
-    claimName: swarmops-sccache
-    storageClassName: ceph-rgw-keiailab
+    bucket: swarmops-sccache
+    endpoint: http://rook-ceph-rgw-keiailab-rgw.rook-ceph.svc:80
+    secretStore: cluster-internal-k8s-rook-ceph
+    sourceSecret: swarmops-sccache
+    secretName: swarmops-sccache
     region: us-east-1
-    keyPrefix: swarmops
+    keyPrefix: swarmops/
     cacheSize: 50G
   rustupDistServer: https://pkg.keiailab.com/repository/raw-rust
   # tool versions installed into CARGO_HOME by scripts/dev-pod.sh (ci.yml pins the same just/nextest/deny)
@@ -33,4 +39,4 @@ dev:
     just: 1.58.0
     nextest: 0.9.146
     deny: 0.20.2
-    sccache: 0.10.0
+    sccache: 0.20.1
