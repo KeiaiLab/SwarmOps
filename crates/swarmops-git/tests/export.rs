@@ -1462,25 +1462,7 @@ fn an_export_records_the_entry_a_sealed_commit_lacks() {
 
     // 1. A signed land on `main`'s head: sealed, recorded with the fields the seal gives it,
     // and `main` moved to it. Nothing has written an entry for its commit.
-    let mut req = request(&[base], vec![put("b.txt", b"two\n")], "Add b.txt\n");
-    req.metadata = vec![("lander".to_owned(), b"test/lander".to_vec())];
-    let unsigned = repo.commit(req).unwrap().id;
-    let unsigned = repo.changeset(unsigned).unwrap().unwrap().changeset;
-    let mut sealer = Sealer::new(repo, None);
-    let payload = sealer.payload(&unsigned).unwrap();
-    let armor = b"-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQ==\n-----END SSH SIGNATURE-----\n";
-    let (seal, oid) = sealer.seal(&unsigned, &payload, armor).unwrap();
-    let land = seal.apply(&unsigned).unwrap();
-    let raw = RawChangeset::new(
-        land.parents.clone(),
-        land.root,
-        land.author.clone(),
-        land.committer.clone(),
-        land.message.clone(),
-        land.extra_headers.clone(),
-        land.metadata.clone(),
-    );
-    let land = repo.commit_raw(raw).unwrap().outcomes[0].id;
+    let (land, oid) = signed_land(repo, base, vec![put("b.txt", b"two\n")], "Add b.txt\n");
     let moved = repo.cas_ref("main", Some(base), Some(land), ACTOR).unwrap();
     assert!(matches!(moved.result, CasResult::Applied { .. }));
     assert_eq!(repo.external_id(SYSTEM_GIT, &oid.0).unwrap(), None);
@@ -1503,6 +1485,115 @@ fn an_export_records_the_entry_a_sealed_commit_lacks() {
     assert_eq!((report.head, report.head_oid), (land, oid));
     let entry = other.repo.external_id(SYSTEM_GIT, &oid.0).unwrap();
     assert_eq!(entry, Some(ExternalEntry::new(base, true)));
+}
+
+/// Two changesets of one commit in one export, neither with an entry: a signed land (M42) and
+/// the import of its commit, which a store holds side by side once it took both from another
+/// store over `so://`, where no entry travels. Both export to the one commit, so step 8 puts two
+/// entries under one key: one is written, the other conflicts with it, and the conflict is
+/// passed over, no bug and no warning. Which of the two the index names is the put's to decide;
+/// either is true.
+#[test]
+fn an_export_passes_over_the_second_changeset_of_one_commit() {
+    let store = store();
+    let repo = &store.repo;
+    let base = commit_on_main(repo, vec![put("a.txt", b"one\n")], "Add a.txt\n");
+
+    // 1. The land, and the changeset an import of its commit makes where the index does not
+    // name the land: the land's fields with `git.oid` alone. Work on that one, merged with the
+    // land, is `main`'s head, so the head reaches both.
+    let (land, oid) = signed_land(repo, base, vec![put("b.txt", b"two\n")], "Add b.txt\n");
+    let twin = import_of(repo, land, oid);
+    assert_ne!(twin, land);
+    assert_eq!(export_oid(repo, twin), oid, "both export to the one commit");
+    let above = request(&[twin], vec![put("c.txt", b"three\n")], "Add c.txt\n");
+    let above = repo.commit(above).unwrap().id;
+    let merge = request(&[land, above], vec![put("c.txt", b"three\n")], "Merge\n");
+    let merge = repo.commit(merge).unwrap().id;
+    let moved = repo
+        .cas_ref("main", Some(base), Some(merge), ACTOR)
+        .unwrap();
+    assert!(matches!(moved.result, CasResult::Applied { .. }));
+    assert_eq!(repo.external_id(SYSTEM_GIT, &oid.0).unwrap(), None);
+
+    // 2. The export writes the one commit, both lines of the history on it, and says nothing:
+    // the second entry for the commit is no bug, and nothing to warn of.
+    let destination = git::empty_repository();
+    let report = exported(repo, &mut gix(&destination.dir), &main_branch());
+    assert_eq!(report.head, merge);
+    assert_eq!(report.rewritten, 0, "each exports to its own commit");
+    assert_eq!(report.warnings, Vec::<String>::new());
+    let above_oid = export_oid(repo, above);
+    let parents = |commit: GitOid| commit_at(&destination.dir, commit).parents;
+    assert_eq!(parents(report.head_oid), [oid, above_oid]);
+    assert_eq!(parents(above_oid), [oid]);
+
+    // 3. The index names one of the two for the commit, and the native commits as ever.
+    let entry = repo.external_id(SYSTEM_GIT, &oid.0).unwrap();
+    let either = [land, twin].map(|id| Some(ExternalEntry::new(id, true)));
+    assert!(either.contains(&entry), "{entry:?}");
+    for native in [base, above, merge] {
+        let entry = repo.external_id(SYSTEM_GIT, &export_oid(repo, native).0);
+        assert_eq!(entry.unwrap(), Some(ExternalEntry::new(native, true)));
+    }
+
+    // 4. Run again, the export is up to date and the entry is the same one.
+    let again = exported(repo, &mut gix(&destination.dir), &main_branch());
+    assert!(!again.branch_moved, "{again:?}");
+    assert_eq!(again.warnings, Vec::<String>::new());
+    assert_eq!(repo.external_id(SYSTEM_GIT, &oid.0).unwrap(), entry);
+}
+
+/// A signed land of `changes` onto `parent` in `repo` (M42): the changeset a land would write,
+/// sealed with a fixed armor, which nothing here verifies, and recorded with the fields the seal
+/// gives it. Its id, and the commit that was signed. No ref moves, and nothing writes an entry
+/// for the commit.
+fn signed_land(
+    repo: &LocalRepo,
+    parent: ChangesetId,
+    changes: Vec<Change>,
+    message: &str,
+) -> (ChangesetId, GitOid) {
+    let mut req = request(&[parent], changes, message);
+    req.metadata = vec![("lander".to_owned(), b"test/lander".to_vec())];
+    let unsigned = repo.commit(req).unwrap().id;
+    let unsigned = repo.changeset(unsigned).unwrap().unwrap().changeset;
+    let mut sealer = Sealer::new(repo, None);
+    let payload = sealer.payload(&unsigned).unwrap();
+    let armor = b"-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQ==\n-----END SSH SIGNATURE-----\n";
+    let (seal, oid) = sealer.seal(&unsigned, &payload, armor).unwrap();
+    let land = seal.apply(&unsigned).unwrap();
+    let raw = RawChangeset::new(
+        land.parents.clone(),
+        land.root,
+        land.author.clone(),
+        land.committer.clone(),
+        land.message.clone(),
+        land.extra_headers.clone(),
+        land.metadata.clone(),
+    );
+    (repo.commit_raw(raw).unwrap().outcomes[0].id, oid)
+}
+
+/// Records in `repo` the changeset an import of `land`'s commit `oid` makes in a store whose
+/// index does not name the land for it: the land's parents, root, signatures, message and
+/// headers, with the commit's id as its only metadata. Its id.
+fn import_of(repo: &LocalRepo, land: ChangesetId, oid: GitOid) -> ChangesetId {
+    let land = repo.changeset(land).unwrap().unwrap().changeset;
+    let metadata = vec![(
+        swarmops_git::GIT_OID.to_owned(),
+        oid.to_string().into_bytes(),
+    )];
+    let raw = RawChangeset::new(
+        land.parents,
+        land.root,
+        land.author,
+        land.committer,
+        land.message,
+        land.extra_headers,
+        metadata,
+    );
+    repo.commit_raw(raw).unwrap().outcomes[0].id
 }
 
 /// The changeset objects of `ids` in `repo`, in their order, and the blobs their deltas put.
