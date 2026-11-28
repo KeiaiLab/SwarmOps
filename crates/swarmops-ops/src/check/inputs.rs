@@ -24,10 +24,10 @@
 //! lists only the directories a pattern can match below.
 
 use std::collections::BTreeSet;
-use std::io::ErrorKind;
-use std::os::unix::fs::PermissionsExt as _;
 
 use camino::Utf8PathBuf;
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+use rustix::io::Errno;
 use swarmops_api::{EntryKindOut, ErrorCode, OpError, ReadTreeReq, StoreOps};
 use swarmops_core::RepoPath;
 
@@ -39,8 +39,18 @@ use crate::pattern::{DEEP, ONE, Pattern, segments_match};
 /// The entries a [`StoreTree`] asks a store for at a time.
 const STORE_PAGE: usize = 1_000;
 
-/// The permission bits that make a host's file an executable.
-const EXEC_BITS: u32 = 0o111;
+/// The permission bits that make a host's file an executable: any of the three.
+const EXEC_BITS: Mode = Mode::XUSR.union(Mode::XGRP).union(Mode::XOTH);
+
+/// How the directory a [`HostTree`] is of is opened: as its path names it, links followed, since
+/// the caller named it.
+const ROOT_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::CLOEXEC);
+
+/// How a directory below it is opened, by its name in the handle of the one above: never
+/// through a link, never blocking.
+const BELOW_FLAGS: OFlags = ROOT_FLAGS.union(OFlags::NOFOLLOW).union(OFlags::NONBLOCK);
 
 /// The directory at a workspace's root that holds its own state, no part of its tree.
 const WORKSPACE_DIR: &str = ".swarmws";
@@ -224,13 +234,18 @@ impl Tree for StoreTree<'_> {
     }
 }
 
-/// The files below a directory of the caller's host, no link followed. Every entry there is
-/// one of the tree's but `.swarmws` at the root, every `.git` directory, a name that is not
-/// UTF-8 and an entry that is neither a file, a link nor a directory. No ignore file is read:
-/// what `.gitignore` and `.swarmignore` keep out of a workspace's tree, build output for one,
-/// is listed here, so a directory that holds such files resolves to more than the store's tree
-/// of the same checkout. An entry has no id. Only the caller stands behind what the directory
-/// holds.
+/// The files below a directory of the caller's host. Every entry there is one of the tree's
+/// but `.swarmws` at the root, every `.git` directory, a name that is not UTF-8 and an entry
+/// that is neither a file, a link nor a directory. No ignore file is read: what `.gitignore`
+/// and `.swarmignore` keep out of a workspace's tree, build output for one, is listed here, so
+/// a directory that holds such files resolves to more than the store's tree of the same
+/// checkout.
+///
+/// No link is followed below the directory. Each directory is opened by its name in the handle
+/// of the one above it, never through a link, and listed through its own handle, so a link put
+/// in a directory's place while the tree is read is not read through. The directory itself is
+/// opened as its path names it. An entry has no id. Only the caller stands behind what the
+/// directory holds.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HostTree {
@@ -248,12 +263,12 @@ impl HostTree {
 impl Tree for HostTree {
     fn list(&self, dir: Option<&str>) -> Result<Vec<Entry>, OpError> {
         let shown = dir.unwrap_or(".");
-        let gone =
-            |e: &std::io::Error| matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory);
 
-        // 1. The directory, each part of its path a directory itself, never a link, and none
-        //    of them left out of the tree.
-        let mut at = self.root.clone();
+        // 1. The directory, by a handle: the root, then each part of the path by its name in
+        //    the handle of the one above. A part left out of the tree, or one that is no
+        //    directory (nothing, a file, a link), is no entry.
+        let mut at = rustix::fs::open(self.root.as_std_path(), ROOT_FLAGS, Mode::empty())
+            .map_err(|e| failed(".", e))?;
         if let Some(dir) = dir {
             if RepoPath::new(dir).is_err() {
                 return Ok(Vec::new());
@@ -262,57 +277,66 @@ impl Tree for HostTree {
                 if left_out(depth == 0, part, true) {
                     return Ok(Vec::new());
                 }
-                at.push(part);
-                match std::fs::symlink_metadata(&at) {
-                    Ok(meta) if meta.is_dir() => {}
-                    Ok(_) => return Ok(Vec::new()),
-                    Err(e) if gone(&e) => return Ok(Vec::new()),
-                    Err(e) => return Err(host_failed(shown, &e)),
-                }
+                at = match rustix::fs::openat(&at, part, BELOW_FLAGS, Mode::empty()) {
+                    Ok(below) => below,
+                    Err(e) if no_directory(e) => return Ok(Vec::new()),
+                    Err(e) => return Err(failed(shown, e)),
+                };
             }
         }
 
-        // 2. Its entries, each by what it is itself: a link is a link, whatever it points at.
-        let listing = match std::fs::read_dir(&at) {
-            Ok(listing) => listing,
-            Err(e) if dir.is_some() && gone(&e) => return Ok(Vec::new()),
-            Err(e) => return Err(host_failed(shown, &e)),
-        };
+        // 2. Its entries, read through the handle, each by what it is itself: a link is a
+        //    link, whatever it points at. One removed since it was read is no entry.
+        let listing = Dir::read_from(&at).map_err(|e| failed(shown, e))?;
         let mut entries = Vec::new();
         for entry in listing {
-            let entry = entry.map_err(|e| host_failed(shown, &e))?;
-            let Ok(name) = entry.file_name().into_string() else {
+            let entry = entry.map_err(|e| failed(shown, e))?;
+            let Ok(name) = entry.file_name().to_str() else {
                 continue;
             };
-            let meta = match entry.metadata() {
-                Ok(meta) => meta,
-                Err(e) if gone(&e) => continue,
-                Err(e) => return Err(host_failed(shown, &e)),
+            if name == "." || name == ".." {
+                continue;
+            }
+            let stat = match rustix::fs::statat(&at, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(Errno::NOENT) => continue,
+                Err(e) => return Err(failed(shown, e)),
             };
-            let kind = if meta.file_type().is_symlink() {
-                EntryKindOut::Symlink
-            } else if meta.is_dir() {
-                EntryKindOut::Dir
-            } else if meta.is_file() {
-                if meta.permissions().mode() & EXEC_BITS == 0 {
-                    EntryKindOut::File
-                } else {
-                    EntryKindOut::Exec
+            let kind = match FileType::from_raw_mode(stat.st_mode) {
+                FileType::Symlink => EntryKindOut::Symlink,
+                FileType::Directory => EntryKindOut::Dir,
+                FileType::RegularFile => {
+                    if Mode::from_raw_mode(stat.st_mode).intersects(EXEC_BITS) {
+                        EntryKindOut::Exec
+                    } else {
+                        EntryKindOut::File
+                    }
                 }
-            } else {
-                continue;
+                _ => continue,
             };
-            if left_out(dir.is_none(), &name, kind == EntryKindOut::Dir) {
+            if left_out(dir.is_none(), name, kind == EntryKindOut::Dir) {
                 continue;
             }
             let path = match dir {
                 Some(dir) => format!("{dir}/{name}"),
-                None => name,
+                None => name.to_owned(),
             };
             entries.push(Entry::new(path, kind));
         }
         Ok(entries)
     }
+}
+
+/// `E_IO` for `name` below a host's directory, which the host would not let be read.
+fn failed(name: &str, e: Errno) -> OpError {
+    host_failed(name, &std::io::Error::from(e))
+}
+
+/// Whether opening a directory of a host by its name failed because none is there: nothing, a
+/// file, or a link, which `O_NOFOLLOW` refuses (`ELOOP`, `EMLINK` on FreeBSD, and `ENOTDIR`
+/// where the directory flag is judged first).
+fn no_directory(e: Errno) -> bool {
+    e == Errno::NOENT || e == Errno::NOTDIR || e == Errno::LOOP || e == Errno::MLINK
 }
 
 /// Whether a host's entry `name` is no part of the tree: `.swarmws` at the root, or a

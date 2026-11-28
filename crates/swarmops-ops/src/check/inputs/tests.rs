@@ -269,6 +269,7 @@ fn a_link_is_matched_and_not_followed() {
             assert_eq!(one, (Vec::new(), false), "pattern {at}");
         }
         assert_eq!(tree.list(Some("link")).unwrap(), []);
+        assert_eq!(tree.list(Some("link/api")).unwrap(), []);
         assert_eq!(tree.list(Some("docs/latest")).unwrap(), []);
         assert_eq!(tree.list(Some("docs/a.md")).unwrap(), []);
         assert_eq!(tree.list(Some("missing/dir")).unwrap(), []);
@@ -413,6 +414,19 @@ fn a_tree_that_cannot_be_read_is_an_error() {
     let (_dir, ops, _) = store_with(&FILES);
     let gone = StoreTree::new(&ops, "0".repeat(64));
     assert!(resolve(&gone, &wanted, 1).is_err(), "no such changeset");
+
+    // A directory of the host that is not there is the host's error, not an empty tree: at the
+    // root, and below it, where a walk of one pattern starts.
+    let (_dir, root) = dir_with(&FILES);
+    let nowhere = HostTree::new(root.join("nowhere"));
+    for dir in [None, Some("docs")] {
+        let error = nowhere.list(dir).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Io.as_str(), "{dir:?}");
+        assert_eq!(error.details["path"], ".", "{dir:?}");
+        assert_eq!(error.details["vouched"], true, "{dir:?}");
+    }
+    let error = resolve_one(&nowhere, &wanted, 0, 1).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Io.as_str());
 }
 
 /// A tree held in memory: its files by path, each with what it is.

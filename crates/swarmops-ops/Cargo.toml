@@ -58,7 +58,8 @@ libc.workspace = true
 quick-xml.workspace = true
 # `check run` (M31-5): a check's declared reports opened below its directory without following a
 # link at any component (`openat` with `O_NOFOLLOW`); already in the tree through the store and
-# the workspaces, with `fs`.
+# the workspaces, with `fs`. A check's inputs (M30-3) open and list a host's directories the same
+# way.
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
