@@ -1,0 +1,102 @@
+# DevSpace v6 inner loop — the Mac edits, the cluster builds (CONTRIBUTING.md "Building in the cluster"). No image
+# builds (no `images:`): the dev pod runs the so-sandbox CI runner image by digest and the working tree is synced in.
+# cargo's target directory lives on a PVC in swarmops-dev, never on the Mac.
+#
+# Boundary — deploy and attach go to ${DEV_NAMESPACE} (swarmops-dev) only; production ${NAMESPACE} (swarmops) is
+# never deployed to or attached to. Three layers hold it:
+#   · the chart guard (swarmops.devNamespaceGuard, packaging/helm/swarmops-dev) fails any render of values-dev.yaml
+#     outside swarmops-dev, and any render of production values into a -dev namespace
+#   · scripts/gates/devspace_surface.sh pins this file's shape (`just check`, ci.yml job dev-check)
+#   · the dev and purge pipelines refuse any cluster but ${TARGET_CONTEXT}
+#
+# Use: `devspace run up` (deploy + sync + shell; keep it running), then in another terminal
+#      `devspace run build` · `test` · `check` · `fuzz-smoke`; results come back with `devspace run copy-back`;
+#      clean up with `devspace run down` (the target and cargo PVCs and the sccache bucket are kept).
+version: v2beta1
+name: swarmops
+
+vars:
+  NAMESPACE: swarmops          # production — named here only so the gate can prove it is never used below
+  DEV_NAMESPACE: swarmops-dev  # every deployment and attach target goes here
+  # keiailab-mesh when this kubeconfig has it, otherwise keiailab (same cluster, older context name)
+  TARGET_CONTEXT:
+    command: sh
+    args: ["-c", "kubectl config get-contexts -o name | grep -qx keiailab-mesh && echo keiailab-mesh || echo keiailab"]
+
+pipelines:
+  dev: |-
+    if [ "${DEVSPACE_CONTEXT}" != "${TARGET_CONTEXT}" ] || [ "${DEVSPACE_NAMESPACE}" != "${DEV_NAMESPACE}" ]; then
+      echo ""
+      echo "[devspace] target is context '${DEVSPACE_CONTEXT}' namespace '${DEVSPACE_NAMESPACE}' —"
+      echo "           swarmops dev runs only in context '${TARGET_CONTEXT}' namespace '${DEV_NAMESPACE}'."
+      echo "  use:  devspace run up      (passes both flags; kubeconfig is left alone)"
+      echo ""
+      exit 1
+    fi
+    echo "[devspace] context=${TARGET_CONTEXT} namespace=${DEV_NAMESPACE} (production namespace untouched)"
+    create_deployments --all
+    start_dev app
+  purge: |-
+    if [ "${DEVSPACE_CONTEXT}" != "${TARGET_CONTEXT}" ] || [ "${DEVSPACE_NAMESPACE}" != "${DEV_NAMESPACE}" ]; then
+      echo "[devspace] purge runs only in context '${TARGET_CONTEXT}' namespace '${DEV_NAMESPACE}' — use: devspace run down"
+      exit 1
+    fi
+    stop_dev --all
+    purge_deployments --all
+
+deployments:
+  swarmops-dev:
+    namespace: ${DEV_NAMESPACE}
+    helm:
+      releaseName: swarmops-dev
+      chart: {path: ./packaging/helm/swarmops-dev}
+      valuesFiles: [./packaging/helm/swarmops-dev/values-dev.yaml]
+
+dev:
+  app:
+    namespace: ${DEV_NAMESPACE}
+    labelSelector:
+      app.kubernetes.io/name: swarmops
+      app.kubernetes.io/component: dev
+    container: dev
+    sync:
+      - path: ./:/src
+        disableDownload: true
+        excludePaths:
+          - .git
+          - target/
+          - fuzz/target
+          # fuzz/corpus is tracked and seeds `fuzz-smoke`; what a run finds goes to /archive (nas-nfs)
+          - fuzz/corpus-new
+          - "**/node_modules"
+          - web/node_modules
+          - web/dist
+          - web/out
+          - .devspace
+          - .claude
+    terminal:
+      command: /bin/bash
+      disableReplace: true
+
+commands:
+  up:
+    command: "devspace dev --kube-context ${TARGET_CONTEXT} --namespace ${DEV_NAMESPACE}"
+  down:
+    command: "devspace purge --kube-context ${TARGET_CONTEXT} --namespace ${DEV_NAMESPACE}"
+  build:
+    appendArgs: false  # args reach the pod through $@
+    command: "devspace enter --kube-context ${TARGET_CONTEXT} -n ${DEV_NAMESPACE} -l app.kubernetes.io/component=dev -c dev -- sh scripts/dev-pod.sh build $@"
+  # nextest over the workspace with the test hooks on (the test part of `just check`); args go to nextest
+  test:
+    appendArgs: false
+    command: "devspace enter --kube-context ${TARGET_CONTEXT} -n ${DEV_NAMESPACE} -l app.kubernetes.io/component=dev -c dev -- sh scripts/dev-pod.sh test $@"
+  # the full `just check`, the gate's definition of done
+  check:
+    command: "devspace enter --kube-context ${TARGET_CONTEXT} -n ${DEV_NAMESPACE} -l app.kubernetes.io/component=dev -c dev -- sh scripts/dev-pod.sh check"
+  fuzz-smoke:
+    appendArgs: false
+    command: "devspace enter --kube-context ${TARGET_CONTEXT} -n ${DEV_NAMESPACE} -l app.kubernetes.io/component=dev -c dev -- sh scripts/dev-pod.sh fuzz-smoke $@"
+  # /archive/<dir> (fuzz corpus, measurement logs on nas-nfs) into the git-ignored .devspace/out/
+  copy-back:
+    appendArgs: false
+    command: "sh scripts/dev-copy-back.sh ${TARGET_CONTEXT} ${DEV_NAMESPACE} $@"

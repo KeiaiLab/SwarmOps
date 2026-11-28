@@ -1,0 +1,4 @@
+# Production defaults: an empty dev.namespace renders nothing but the guard (templates/dev-guard.yaml).
+# This chart exists for the dev overlay alone; values-dev.yaml is the only file that gives it objects.
+dev:
+  namespace: ""

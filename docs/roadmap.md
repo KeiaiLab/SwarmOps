@@ -84,8 +84,8 @@ or a rebase on GitHub, `so sync` recognises the changes GitHub holds and drops t
 merge that `git import` met with `E_GIT_IMPORT_DIVERGED` is now a state sync resolves; commits made
 in the store can carry an address GitHub links to an account (`authors.toml`). What is missing:
 pull requests opened from SwarmOps, and three of the four performance targets
-([Topology 2](#topology-2-local-swarmops-remote-github)). Signing is a
-[non-goal](goals.md#non-goals), so a branch that requires signed commits refuses the store's
+([Topology 2](#topology-2-local-swarmops-remote-github)). Signed commits are planned and not built
+([M42](#m42-signed-commits)), so a branch that requires signed commits refuses the store's
 commits. The round trip through a bare clone, with
 `git import`, `git export` and a hand-run `git push`, still works
 ([Git round trip](guides/git-round-trip.md)).
@@ -122,6 +122,10 @@ store, a git remote still carries history between two stores, one writing host a
 | Checks: logs and artifacts | — | Not built | M36 |
 | Checks: rules beyond who may land | — | Not built | M37 |
 | Delivery: deployments | — | Not built | M38 |
+| A forge other than GitHub behind the bridge | 2 | Not built: any git host works as a remote (M13), and the planned bridge names GitHub alone (M32) | M41 |
+| Signed commits | — | Not built: an imported commit's `gpgsig` header is kept verbatim, and a commit the store makes carries none | M42 |
+| A process that stays | 1, 3 | Not built: `serve` runs once per connection | M43 |
+| A store on a cluster | — | Built around the program: the server kit's Helm chart, one pod with one volume and `serve` per connection ([known limitations](known-limitations.md#the-server-kit-on-kubernetes)); no service, and no runner as a job | M44 |
 | A server that refuses `{"file": "<path>"}` content and never passes on a host path | 1, 3 | Built for `serve` (M14), but git's own side-band lines ([known limitations](known-limitations.md#serving-requests)); M11's server reuses its guard | M14 (done), M11 |
 
 ## To usable
@@ -226,6 +230,7 @@ Deferred past usable, with what stands in until then:
 | M25, moving onto a store without a pause | It needs M17's serve path | Follow a git remote, then switch (M13) |
 | M26, an identity per agent from a short-lived credential | After 1.0, only when a pilot asks | ssh keys and web logins, one per identity |
 | M30 to M40, checks and delivery | No condition needs it, and M32 onward need M7's check record. One exception: the units of M30 and M31 behind steps 1 to 8 of the [first steps](#first-steps) start now, because they write nothing to a store, touch no data-safety path and freeze nothing in the hash contract | Checks run by GitHub on the pushed branch (topology 2); `ws land --check` in each process |
+| M41 to M44, a forge, signed commits, a service and a cluster | No condition needs them; M41's bridge needs M32 and M22-R, and M43's listener needs M17's serve path | A git remote, and `so push` after a local queue land; whoever pushes the export signs it; the server kit's chart, one pod with `serve` per connection |
 
 ## What the three share
 
@@ -707,7 +712,8 @@ goal numbers G25 to G30; the check file's place and version, `.swarmops/checks.t
 that no daemon is added; what the open-source program holds and what a hosted service holds
 ([The hosted service](#the-hosted-service)); and that M30 and M31 start now, with steps 1 to 8 of
 the [first steps](#first-steps). The rest of the design below is what each milestone's plan
-confirms or replaces before its first unit is built. Three questions are open, and one point waits
+confirms or replaces before its first unit is built. Two questions are open, one was answered on
+2026-11-28, and one point waits
 for the maintainers ([Risks and open questions](#risks-and-open-questions-3)).
 
 ### What people and agents type
@@ -778,7 +784,9 @@ result, over the native wire that `serve --stdio` answers, from the store's host
 that reaches `serve`. The store never calls out, and the process that answers a connection runs no
 command a repository defines. No daemon is added. A runner and `check tick --follow` are
 long-running clients an operator starts, as `derive --follow` is; schedules come from the host's
-own timer; the store's records are the only queue; no SwarmOps process listens on a socket. What a
+own timer; the store's records are the only queue; no SwarmOps process listens on a socket. The
+role needs none: [M43](#m43-a-resident-service) plans an optional service that may start these
+clients' passes, and a store without it runs them as said here. What a
 stopped client looks like is part of the contract: the roll-up names the last pass's frame and age
 and each waiting run's age, `check wait` ends `stalled`, and an alert rule fires. An ask that
 finds nothing takes no writer lock. A check's use of the host is bounded: its time, with a maximum
@@ -1125,23 +1133,24 @@ It builds on M21's windows, rules and metrics output, and adds figures, not a se
 
 Work this role needs from milestones that already exist. Each row is a proposal to the owning
 milestone's plan, which may accept it, change it or refuse it; until that plan answers, every unit
-that names the slice waits. The `C` in an id keeps it apart from the ids those plans use.
+that names the slice waits. The `C` in an id keeps it apart from the ids those plans use. Four
+rows are accepted and read `planned` (2026-11-28): M7-C1, M7-C2, M22-C1 and M22-C3.
 
 **Proposed to M7, blame and review.**
 
 | Slice | Deliverable | Depends on | State |
 | --- | --- | --- | --- |
-| M7-C1 | The `check` feature is released ahead of change requests and blame: a Check record carries the check's name, the check key, the root tree it is for, a state, a one-line summary and a report blob | M20 | proposed |
-| M7-C2 | The landing gate reads recorded results: a land onto a target with required checks (M32-15) is refused unless each has a counting result for the tree the land produces; the refusal names what is missing, under a code M7's plan names; the land's result names the results that admitted it | M7-C1, M32-15, M32-8 | proposed |
+| M7-C1 | The `check` feature is released ahead of change requests and blame: a Check record carries the check's name, the check key, the root tree it is for, a state, a one-line summary and a report blob | M20 | planned |
+| M7-C2 | The landing gate reads recorded results: a land onto a target with required checks (M32-15) is refused unless each has a counting result for the tree the land produces; the refusal names what is missing, under a code M7's plan names; the land's result names the results that admitted it | M7-C1, M32-15, M32-8 | planned |
 | M7-C3 | Trigger: a change request's new revision starts the `before-land` stage on its tree; drafts by option | M7, M33-3 | proposed |
 
 **Proposed to M22, the landing queue.**
 
 | Slice | Deliverable | Depends on | State |
 | --- | --- | --- | --- |
-| M22-C1 | An attempt prepares the land: a queue attempt writes the changeset the land would produce and an attempt record, and moves no ref, so that the tree can be written out, exported and checked before anything lands | M22, M18 | proposed |
+| M22-C1 | An attempt prepares the land: a queue attempt writes the changeset the land would produce and an attempt record, and moves no ref, so that the tree can be written out, exported and checked before anything lands | M22, M18 | planned |
 | M22-C2 | An attempt asks for its checks: the attempt and the wanted runs of its tree's `before-land` plan are one operation, so a land in the queue waits on no trigger pass; a push to `refs/land/` on a queued target enters the queue | M22-C1, M33-1, M30-4 | proposed |
-| M22-C3 | Land when the results are final: an entry lands by itself once every required result for its attempt's tree counts, and leaves the queue with a reason when one fails; whoever enqueued it need not wait | M22-C1, M7-C2 | proposed |
+| M22-C3 | Land when the results are final: an entry lands by itself once every required result for its attempt's tree counts, and leaves the queue with a reason when one fails; whoever enqueued it need not wait | M22-C1, M7-C2 | planned |
 | M22-C4 | Stacked attempts: the queue prepares each entry on the target plus the entries ahead of it; a failed entry leaves, and those behind are prepared again | M22-C1 | proposed |
 | M22-C5 | Queue bounds: how many attempts are checked at once, the smallest and largest batch that lands as one `land-group`, how long to wait for a batch and for results | M22-C4 | proposed |
 | M22-C6 | The batch verdict: every entry must pass, or only the batch's head; a failed batch is split until the failing entry is found | M22-C5 | proposed |
@@ -1163,8 +1172,10 @@ that names the slice waits. The `C` in an id keeps it apart from the ids those p
 
 A hosted service is built around the program and uses only its public surfaces: the wire, the
 commands and the records. The open-source program holds everything a team needs to run checks on
-its own hosts; the service holds what needs machines, money or an always-on process. Its fourteen
-pieces belong to the service's own plan and are not units of the program:
+its own hosts; the service holds what needs machines, money or an always-on process run for
+others. A process that stays on a team's own host is the program's, and planned
+([M43](#m43-a-resident-service)). The service's fourteen pieces belong to its own plan and are not
+units of the program:
 
 | Piece | What it is |
 | --- | --- |
@@ -1233,9 +1244,9 @@ existing milestone or a unit of an earlier step.
 | 7 | A | M31-20 | The gate runs with `--shadow`: every check still runs, and each run records what the plan would have skipped. This is the evidence asked for before anything is skipped | Nothing; starts now |
 | 8 | A | M31-8 | The `bench-gate` and `perf-cases` jobs of `scheduled.yml` take the host's heavy lock as an exclusive group, in place of the lock taken in the workflow file | Nothing; starts now. Before it, how many machines the maintainers' runners are is settled: it decides where the lock's directory lives |
 | 9 | B | none | Not a unit, and no trunk moves: the maintainers' host keeps a store that follows `stable` and the candidate branches with `so sync` and `so fetch` (M13, as it is today). Agents read from it and plan against it; nothing lands in it. The rule on `stable`, `ci.yml` and the hand-made queue are unchanged | Nothing in this plan; an operator's step |
-| 10 | B | M32-11, M7-C1, M32-1, M32-2, M32-8 | A timer on the store's host runs `check fetch` for each commit the store follows: GitHub's green or red `tests-pass` becomes a recorded result on that commit's tree, written by an identity that runs no repository code. The store holds a verdict per tree. The check key's kind is frozen here | **Open:** whether M7's check record ships ahead of the rest of M7 |
-| 11 | B | M32-5, M32-3, M32-6 | A tree that passed is not checked again: the `check` job of `ci.yml` first asks `check status` for the changeset its commit names, a read of the store that needs no key, and ends green from the recorded result when it counts. The second gate run of every landed change stops, and the `feat/lq-*` skip in `site.yml` and `freshness.py` is deleted. Before it, how a job on a git checkout names the changeset of its commit is settled against the code | **Open:** the same question, through step 10 |
-| 12 | B | M22-C3, M22-C1, M7-C2, M32-15, M32-12, M32-4 | The trunk moves into the store, and the hand-made queue retires in the same step, so the store never holds a land its gate could not refuse. A land is a queue entry (M22's own `enqueue`); its attempt is offered to GitHub as a candidate branch under `feat/`; GitHub's runners check the tree the land will produce; `check fetch` records the verdict; the entry lands by itself, and `so sync` moves `stable` forward to the commit that was checked. An agent waits with `check wait` | **Open:** whether this repository's trunk moves into a store; whether M7's first slices ship early; the facts of the hand-made queue |
+| 10 | B | M32-11, M7-C1, M32-1, M32-2, M32-8 | A timer on the store's host runs `check fetch` for each commit the store follows: GitHub's green or red `tests-pass` becomes a recorded result on that commit's tree, written by an identity that runs no repository code. The store holds a verdict per tree. The check key's kind is frozen here | M7's check record ships ahead of the rest of M7 (decided 2026-11-28) |
+| 11 | B | M32-5, M32-3, M32-6 | A tree that passed is not checked again: the `check` job of `ci.yml` first asks `check status` for the changeset its commit names, a read of the store that needs no key, and ends green from the recorded result when it counts. The second gate run of every landed change stops, and the `feat/lq-*` skip in `site.yml` and `freshness.py` is deleted. Before it, how a job on a git checkout names the changeset of its commit is settled against the code | Step 10 |
+| 12 | B | M22-C3, M22-C1, M7-C2, M32-15, M32-12, M32-4 | The trunk moves into the store, and the hand-made queue retires in the same step, so the store never holds a land its gate could not refuse. A land is a queue entry (M22's own `enqueue`); its attempt is offered to GitHub as a candidate branch under `feat/`; GitHub's runners check the tree the land will produce; `check fetch` records the verdict; the entry lands by itself, and `so sync` moves `stable` forward to the commit that was checked. An agent waits with `check wait` | **Open:** whether this repository's trunk moves into a store; the facts of the hand-made queue |
 
 After step 8 the first half is in use with no format change and no store. After step 11 a landed
 change is gated once, not twice. After step 12 the trunk, the queue and the verdicts are SwarmOps',
@@ -1335,7 +1346,8 @@ measured again with run records and polling runners.
 
 ### Risks and open questions
 
-Three questions are open, and the page presents what depends on them as open:
+Two questions are open, and the page presents what depends on them as open; a third was answered
+on 2026-11-28:
 
 - **Whether this repository's trunk moves into a store.** Step 12 and step 16 wait on it. If the
   answer is no, steps 1 to 11 still stand: SwarmOps then starts, plans, reports and measures this
@@ -1344,9 +1356,9 @@ Three questions are open, and the page presents what depends on them as open:
   [To usable](#to-usable) holds on this repository, or that the maintainers name this repository
   the pilot. The way back: `stable` on GitHub stays a complete mirror through `so sync`, so
   stopping the sync and landing by merge returns to today's flow.
-- **Whether M7 ships its check record and gate (M7-C1, M7-C2), and M22 its proposed slices
+- **Answered on 2026-11-28: M7 ships its check record and gate (M7-C1, M7-C2), and M22 its slices
   M22-C1 and M22-C3 on its built core, ahead of the rest of M7, M9 and M23.** Steps 10 to 16
-  wait on it; steps 1 to 8 do not. If the answer is no, they wait for all of M7 and M22. Of the 181 rows of the tables above, 68
+  no longer wait on it. Of the 181 rows of the tables above, 68
   depend on one of those four slices, directly or through other rows.
 - **The facts of the hand-made landing queue this repository uses today**: what its candidate
   branch names encode, whether it batches, how long the gate takes, how many machines the runners
@@ -1407,8 +1419,8 @@ In this role SwarmOps will not be or have:
 - **A forge.** No issue tracker, package or container registry, site hosting, code scanner or
   dependency-update bot. A check may run such a tool and a deployment may publish to such a host;
   intake rules match an operator's own patterns and are not a scanning product.
-- **Signing.** No signed commits and no signed build records in the program, and no separate
-  record kind for a bill of materials.
+- **Signed build records.** None in the program, and no separate record kind for a bill of
+  materials. Signed commits are not part of this role; [M42](#m42-signed-commits) plans them.
 - **A web interface in the program.** No hosted machines, web pages, HTTPS API or managed secrets:
   those are the hosted service's. `check report` writes files; nothing serves them. No second API
   beside the JSON envelope, the schema and the MCP tools, and no action buttons on a finished
@@ -1425,7 +1437,8 @@ Also not in the role:
 - a trigger on the text of a comment, which would be a path for injecting instructions into
   agents, or a trigger that runs a stranger's change with a trusted run's access;
 - a scaler (an operator's own may read the event feed, M40-8) or an operator for a container
-  cluster;
+  cluster; [M44](#m44-a-store-on-a-cluster)'s launcher makes one job per wanted run and is part of
+  the chart, not of the program;
 - a Windows runner before M12 delivers Windows, or an `isolated` label on macOS;
 - an environment that comes into being because a check names it: an environment exists only in
   the rules file, which a change cannot edit;
@@ -1434,11 +1447,181 @@ Also not in the role:
 - the agent's or the repository's own work: repairing a failed change so that it lands, cleaning
   up tests, choosing tools, trimming a platform's set-up, proposing dependency updates.
 
+## Running on a cluster
+
+**Planned: nothing in this section is built except what "What is built" names.** SwarmOps takes
+on a second role beside its three topologies, and like [checks and delivery](#checks-and-delivery)
+it is not a fourth one. A store runs on a cluster as a service, lands what its queue checked onto
+a forge's protected branch, and signs what it lands. Until then a store reaches a forge as a plain
+git remote (topology 2), the queue lands on a local store and a hand-run `so push` publishes it,
+no commit that SwarmOps makes is signed, and no SwarmOps process stays between two commands.
+
+**What is built.** The server kit and its Helm chart (`packaging/server`,
+`packaging/helm/swarmops-server`) install a store's server as one pod with one volume: the pod's
+sshd and web server start `swarmops serve` once per connection, and timers run the backup. The kit
+is built around the program and adds no command to it. Its first installation on a cluster was on
+2026-11-21 ([known limitations](known-limitations.md#the-server-kit-on-kubernetes)).
+
+**What is settled.** The maintainers decided on 2026-11-28: the milestone ids M41 to M44; that
+three non-goals are narrowed, as the table below says; and that every piece is optional, so a
+store that uses none of them works as it does today. The rest of the design below is what each
+milestone's plan confirms or replaces before its first unit is built. No goal number is set yet:
+each milestone's plan proposes its goals, and they join [docs/goals.md](goals.md) the way that
+page says goals are added.
+
+| Until now | From this plan on |
+| --- | --- |
+| Signing is a non-goal: no signed commits | Signed commits are planned (M42). Signed build records stay out of the program |
+| No daemon: an always-on server is a follow-up after v1, not a milestone | An optional process that stays is planned (M43). The program still needs none |
+| Not a cluster | A store may run on a cluster (M44). The store still does not scale horizontally: one volume, one writer, one pod |
+
+What does not change:
+
+- The store stays on one host. A cluster gives it a place to run and gives it runners in number;
+  it does not give it a second writer or a replica.
+- The program runs with no daemon. Every command opens a store, does its work and closes it, as
+  today; the service is one more way to reach a store.
+- The process that answers a connection runs no command a repository defines. Checks run on
+  runners, which are clients.
+- A private key or a token never enters a record, a log line or an envelope.
+- A land that must be signed moves no ref unless its signature is recorded with it.
+
+### M41: A forge as the remote
+
+Topology 2 names GitHub, but its transport is git, so any git host already works as a remote
+(M13). What is planned for GitHub alone is the bridge: the three commands of M32 that exchange
+candidates and verdicts. M41 gives a remote a forge kind, gives each bridge command an
+implementation for Forgejo and Gitea, and takes the queue's publish (M22-R) through a forge's
+branch protection. 9 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M41-1 | The forge kind: a remote in `remotes.toml` names its forge (`github`, `forgejo` or `gitea`) and the base address of its API; a remote that names none stays a plain git remote, and every bridge command refuses it with `E_INVALID_ARG` | M13 | planned |
+| M41-2 | A forge credential by reference: the remote names a file or an environment variable that holds the token; the token is read at each call, sent only to the remote's own API base, and never written to a record, a log line or an envelope | M41-1 | planned |
+| M41-3 | `check publish` to Forgejo and Gitea: a tree's roll-up as a commit status on the exported commit | M32-10, M41-2 | planned |
+| M41-4 | `check fetch` from Forgejo and Gitea: the exported commit's statuses and its Actions runs, recorded as results under a name of their own | M32-11, M41-2 | planned |
+| M41-5 | `check offer` to Forgejo and Gitea: the candidate branch, removed when the attempt ends | M32-12, M41-2 | planned |
+| M41-6 | The queue publishes to a protected branch: a queued land reaches the forge as a fast-forward push by the identity the branch's rule allows; a push the forge refuses ends the entry with the forge's answer as its reason, and a remote head that moved is fetched and the entry prepared again | M22-R, M41-1 | planned |
+| M41-7 | `remote request`: opens or updates the forge's pull request for a pushed branch and answers its address and number; merging and closing stay the forge's | M41-2 | planned |
+| M41-8 | The bridge's tests: each forge command has an offline half against recorded answers in `just check`, and a live half that runs weekly against a Forgejo instance, as the GitHub half does against GitHub | M41-3, M41-4, M41-5 | planned |
+| M41-9 | Guide "A store and Forgejo" | M41-6 | planned |
+
+### M42: Signed commits
+
+A commit that a store makes carries no signature, so a branch that requires signed commits
+refuses it, and a deployment that verifies signatures refuses what a queue landed. Signing is done
+by the user's own tool, as transport is done by the user's git: SwarmOps runs `ssh-keygen -Y sign`
+or `gpg` and holds no private key. A signature is over the exported commit's bytes, and an export
+must give the same commit id on every run, so a signature is made once, recorded, and written out
+again. 8 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M42-1 | The signing file, beside the access file, `version = 1`: per identity, the format (`ssh` or `openpgp`) and the key's public half; per target pattern, whether a land must be signed and by whom, the lander or the store's own identity; an invalid file refuses every land onto a target it names | M14 | planned |
+| M42-2 | The signature record: a `FORMAT 3` fact that holds, for one changeset, the signature over its exported commit's bytes and the signer; the export writes it as the commit's `gpgsig` header, so the same changeset exports to the same commit id on every host and in every run; an older build refuses a store that holds one with `E_STORE_TOO_NEW` | M20, M8 | planned |
+| M42-3 | A land is signed before its ref moves: on a target the signing file names, `land` and the queue prepare the commit, have the signer's tool sign it outside the writer lock, and write the changeset, the record and the ref move in one journal transaction; a target that moved meanwhile makes the land prepare and sign again; a tool that fails or a key the file does not name refuses the land, and nothing moves | M42-1, M42-2, M22 | planned |
+| M42-4 | Signatures and rewriting: `rebase`, `revert` and `op undo` make new changesets, which are signed when they land; a changeset already exported is never given a signature, since its commit id would change | M42-3 | planned |
+| M42-5 | Reading signatures: `show` and `log` give each commit's signer and one of `good`, `bad`, `unknown_key` or `none`, checked with the user's tool against the signing file's public keys; a commit imported from git, whose `gpgsig` header the store already keeps verbatim, reads the same way | M42-1 | planned |
+| M42-6 | Intake by signature: a push through `serve`, or a fetch from a remote, onto a target the signing file marks is refused with `E_POLICY_DENIED` unless every new commit on its first-parent chain is `good` for a listed signer | M42-5, M14, M13 | planned |
+| M42-7 | The store signs as itself: where the signing file says so, the service signs a land with the store's key and names the lander in a trailer, so an agent needs no key of its own | M42-3, M43-1 | planned |
+| M42-8 | Guide "Sign what lands"; every crash, power-loss and kill sweep also runs with signature records | M42-3 | planned |
+
+### M43: A resident service
+
+`swarmops serve` runs once per connection (M14). That keeps the program without a daemon, and it
+leaves three things to others: something must start the queue's runner, something must start the
+trigger pass, and a forge has nowhere to send an event. M43 adds one optional process for an
+installation that listens and serves what the per-connection entry serves. A long-lived process
+also meets a limit a short one never does: a lock wait that gives up parks a thread
+([known limitations](known-limitations.md#concurrency-and-the-lock)). 10 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M43-1 | `serve --listen <address>`: one process answers the native wire and git's smart HTTP on a socket for the stores under `--root`, with the access file, the refusals and the request records of the per-connection entry; transport security is the proxy's in front of it, and it listens on loopback only unless a flag says a proxy stands in front | M14, M17 | planned |
+| M43-2 | Callers of the listener: an identity comes from the proxy's header, taken only from the addresses a setting lists, or from a token whose digest the access file holds; a request with neither is `E_AUTH` | M43-1 | planned |
+| M43-3 | One service per store: the service holds a lease in the store while it serves; a second service on the same store refuses to start, and commands on the store's host keep working through the writer lock | M43-1 | planned |
+| M43-4 | A lock wait that gives up leaves no thread behind, so a process that lives for weeks gathers none | M17 | planned |
+| M43-5 | Live, ready and drain: two addresses answer whether the process runs and whether its stores open; on a signal it finishes open requests within a bound, answers new ones with a retryable code, and exits | M43-1 | planned |
+| M43-6 | The service runs the queue: it starts the runner of every target that holds an open entry, so an entry enqueued over the wire lands with no client waiting | M43-1, M22 | planned |
+| M43-7 | The service runs the trigger pass and the schedules, in place of the host's timer where it is on | M43-1, M33-3 | planned |
+| M43-8 | A forge's events: an address takes Forgejo's, Gitea's and GitHub's push and status events, checks each body's signature against a shared secret and its size against a bound, and starts a fetch or a `check fetch`; an event starts work and carries no verdict, and its reader gets a fuzz target | M43-1, M41-4 | planned |
+| M43-9 | Figures over HTTP: the health records' counts and latencies, in the text format that monitoring systems scrape | M43-1, M21 | planned |
+| M43-10 | Guide "Run a store as a service", with a unit file for systemd | M43-5 | planned |
+
+### M44: A store on a cluster
+
+The server kit's chart serves a store from one pod today, per connection. M44 moves the chart onto
+the service and adds what a cluster has and a host has not: jobs for runners, Secrets for keys and
+tokens, and volume snapshots. 9 units.
+
+| Slice | Deliverable | Depends on | State |
+| --- | --- | --- | --- |
+| M44-1 | The chart runs the service: the pod's `serve --listen` takes the place of the web server's CGI entry, the probes read the service's live and ready addresses, and the stop grace period is its drain bound; sshd stays for git over ssh | M43-5 | planned |
+| M44-2 | One pod is a rule: the chart has no replica count, a second pod on the same volume refuses to serve, and an update replaces the pod while clients meet a retryable refusal | M44-1, M43-3 | planned |
+| M44-3 | The volume: the acceptance runs the crash and kill sweeps in a pod on a block volume, and a store on a network file system is refused in a pod as it is on a host | M44-1, M6 | planned |
+| M44-4 | A runner as a job: a job template runs `runner run --once` with a work volume of its own, the `run` grant's key from a Secret, and no access to the store's volume | M34-2, M34-6 | planned |
+| M44-5 | A launcher in the chart: it reads the wanted runs over the wire, makes one job for each run its labels match, up to a cap, and removes finished ones; it holds no claim and decides nothing that a store decides | M44-4, M43-1 | planned |
+| M44-6 | Keys and tokens from Secrets: the signing key, the forge tokens and the event secret are mounted files that the chart never creates; a render with one missing fails and names it | M44-1, M42-1, M41-2 | planned |
+| M44-7 | Backup on a cluster: the restore drill runs on a schedule beside a served release, from a volume snapshot taken while the service serves, and `verify --deep` passes on what it restored | M44-1 | planned |
+| M44-8 | The cluster's tests: the chart's render and its values schema in `just check`, offline; weekly, an installation on a throwaway cluster that lands through the queue, runs a check as a job and publishes to a forge | M44-5, M41-6 | planned |
+| M44-9 | Guide "Run a store on a cluster" | M44-5 | planned |
+
+### Order and acceptance
+
+M41, M42 and M43 do not wait for each other as wholes: a unit lands when what it depends on is in.
+M41's bridge units wait for M32's, and its publish for M22-R. M42's first six units need only the
+access file and `FORMAT 3`. M43's listener needs M17's serve path, whose targets are not all met
+yet ([To usable](#to-usable)). M44 comes last, since it packages the other three.
+
+What holds for every unit, as for [checks and delivery](#deliverables-3): its acceptance is a test
+in `just check`, offline, and no acceptance states a speed or a duration. The units that talk to a
+forge or need a cluster (M41-8, M44-8) have an offline half and a weekly live half. Every reader
+of input a stranger may write (a forge's event, a forge's answer, the signing file) gets a fuzz
+target. The role is done when a change that an agent enqueues on a store in a cluster lands
+without a client waiting, reaches a Forgejo branch that requires signed commits as the tree its
+checks ran on, and verifies there.
+
+### Risks and open questions
+
+- **Whether the service runs checks.** As planned it does not: it starts the queue's runner, and
+  checks run on runners. The queue's runner today runs each check in a workspace on the store's
+  host, so M43-6 on a cluster either keeps that or waits for M34's runners. M43's plan decides.
+- **A key in a pod.** M42-7's store key is a mounted file that the signer's tool reads. Whether a
+  key held outside the pod, behind an agent's socket or a signing service, is in scope is open.
+- **OpenPGP or ssh first.** Both formats are named. A forge verifies either; which one M42's
+  first unit builds is its plan's choice.
+- **Signing and the commit's time.** A signature covers the commit's bytes, the committer's time
+  among them. A land prepared again after its target moved is signed again; how often that
+  happens under G4's load is not measured.
+- **The listener's wire.** Smart HTTP and the native wire are named. Whether the listener also
+  answers ssh, in place of the pod's sshd, is open.
+- **Releases on a forge.** M38's release is published to GitHub alone (M38-13). Publishing one
+  to Forgejo is not a unit of M41 yet.
+- **Who answers for a hosted service's pieces.** Web pages, an HTTPS API beside the envelope and
+  managed secrets stay the [hosted service's](#the-hosted-service). M43-9 serves figures and
+  M43-8 takes events; neither is a second API.
+
+### Non-goals
+
+In this role SwarmOps will not be or have:
+
+- **A store on several pods.** No replica, no leader election, no shared-nothing shard. Stores on
+  several hosts sync as topology 3 says.
+- **An operator.** No custom resource and no controller that reconciles one. The chart is
+  templates, and the launcher makes jobs and nothing else.
+- **A forge.** A pull request, its review and its merge button stay the forge's.
+- **Transport security in the program.** A proxy in front of the listener ends TLS.
+- **A key store.** SwarmOps runs the signer's tool and reads a file a Secret mounts; it makes,
+  rotates and revokes no key.
+- **Signed build records.** They stay out of the program, as
+  [checks and delivery](#non-goals-1) says.
+
 ## Milestones
 
 Milestone ids are never renumbered. M13 (topology 2) and M14 (topology 1) were added for the
-GitHub goal, M15 to M26 by the plan of 2026-11-05, and M30 to M40 on 2026-11-18 for
-[checks and delivery](#checks-and-delivery); M11 (topology 3) takes `so clone`, `so remote` and
+GitHub goal, M15 to M26 by the plan of 2026-11-05, M30 to M40 on 2026-11-18 for
+[checks and delivery](#checks-and-delivery), and M41 to M44 on 2026-11-28 for
+[running on a cluster](#running-on-a-cluster); M11 (topology 3) takes `so clone`, `so remote` and
 `so sync`.
 
 **Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0, M5 in v0.3.0, M6 in
@@ -1486,14 +1669,25 @@ needs   M30  ← M5, M18
                runners, workspaces, run lines
         M40  ← M21, M30, M32, M33
                health, run records, results
+
+order   running on a cluster, as planned:
+        M41 ∥ M42 ∥ M43 → M44; a unit lands when what it depends on is in
+needs   M41  ← M13, M22-R, M32
+               the git remote, the queue's publish, the bridge commands
+        M42  ← M8, M13, M14, M20, M22, M43
+               the export, the access file, FORMAT 3's facts, the queue, the service (M42-7 alone)
+        M43  ← M14, M17, M21, M22, M33, M41
+               the serve path, health, the queue's runner, the trigger pass, the forge kind (M43-8 alone)
+        M44  ← M6, M34, M41, M42, M43
+               the file system check, runners, tokens, the signing file, the service
 ```
 
 The units of M30 to M40 follow their own dependencies, not whole milestones: a unit lands when
 what it depends on is in, and a milestone's row turns to done when its last unit has landed. Each
 `needs` line of M30 to M40 is generated from the [unit tables](#deliverables-3): it is the union
-of what the milestone's units depend on outside it. Where M7's first slices and M22's proposed ones stand in
-that order is not decided ([Risks and open questions](#risks-and-open-questions-3)); M30 and M31
-do not depend on it and start now.
+of what the milestone's units depend on outside it. M7's first slices (M7-C1, M7-C2) and M22-C1
+and M22-C3 stand where the order above puts them, ahead of the rest of M7 and M22 (decided
+2026-11-28); M30 and M31 do not depend on them and start now.
 
 | Milestone | Topology | Deliverable | Depends on | Exit criteria |
 | --- | --- | --- | --- | --- |
@@ -1511,7 +1705,7 @@ do not depend on it and start now.
 | 📋 M20 | — | `FORMAT 3`: the sorted views under a manifest, the new record kinds, `upgrade` | its design | G18 at 1,000,000 records. Built, in v0.12.0: FORMAT 3 the default of `init`, its journal frames with a nonce (byte-identical operations get distinct ids), the fact records and their index behind named features, the sorted views as runs built after the lock is released, `upgrade` 2 → 3 keeping every op id, verify and repair on it, every crash, power-loss and kill sweep on all three formats, `E_STORE_TOO_NEW`, the release cut's golden check. Not measured yet: G18 at 1,000,000 records, A5's 1,000,000 commits, A1's commit cost and the 200,000-changeset upgrade ran only as a 20,000-changeset trial under load ([perf.md](perf.md#m20--format-3-at-1000000-records--2026-11-12-not-measured)) |
 | 📋 M21 | — | Health, drift and housekeeping | M17 | G24: a land p99 that climbs from 50 to 120 ms is marked as drift, and a steady run is not; G24 joins [docs/goals.md](goals.md) with its first measurement |
 | ✅ M22 | — | The landing queue | M20 (`FORMAT 3`) | On a local store: entries survive kill and power loss and the queue resumes (C8); candidates checked in parallel, ref moves in queue order, a red isolated by bisection (C2, C4); removal with a machine-readable reason (C3); CLI and MCP control (C9); 50 processes each with a 30 s check measured against A21's numbers, no lock spanning a check (A22). Built, in v0.13.0: `queue enqueue|status|withdraw|wait|run` and the four `queue_*` MCP tools, the kill, power-loss and SIGKILL sweeps of the runner. A22 measured: 50 of 50 landed once in 92.5 s, retries 0 %, the longest hold of the lock 72.4 ms ([perf.md](perf.md#m22--the-landing-queue-under-50-processes--2026-11-18)). Further slices proposed to its plan, not accepted yet: an attempt that prepares the land, landing when the results are final, stacked attempts and queue bounds (M22-C1 to M22-C7) |
-| 📋 M7 | — | Blame and review. Proposed to its plan, not accepted yet: its check record and the gate that reads recorded results come first (M7-C1, M7-C2), a change request's new revision becomes a trigger (M7-C3), and its remaining work (change requests, approvals, blame) follows M32 | M20 (`FORMAT 3`) | G11: blame, change requests, their classification, approvals and a landing gate ([docs/goals.md](goals.md)) |
+| 📋 M7 | — | Blame and review. Its check record and the gate that reads recorded results come first (M7-C1, M7-C2, accepted 2026-11-28); proposed to its plan, not accepted yet: a change request's new revision becomes a trigger (M7-C3); its remaining work (change requests, approvals, blame) follows M32 | M20 (`FORMAT 3`) | G11: blame, change requests, their classification, approvals and a landing gate ([docs/goals.md](goals.md)) |
 | 📋 M23 | — | Withdrawal and erasure | M20 | Every id kept |
 | 📋 M22-R | 2 | The queue's remote publish (Forgejo or git remote), postland, the land-direct cutover | M22, M13 | A queued land reaches the remote's branch as the checked tree |
 | 📋 M9 | — | Simulation and a benchmark gate | M20 | As the README states it |
@@ -1529,6 +1723,10 @@ do not depend on it and start now.
 | 📋 M38 | — | Delivery: environments, deployment records, approvals and waits, releases with assets, publishing a release to GitHub | M36, M35, M33, M32, M20, M13, M6, M7 (its gate) | A secret is released only after its environment's rules pass; a release's assets match their digests |
 | 📋 M39 | — | Caches and set-up time: kept directories and their scopes, kept workspaces, keyed caches, groups fitted to recorded timings, size advice | M34, M31, M30, M19 | A candidate cannot change what a trunk run restores |
 | 📋 M40 | — | Figures, cost and events: check figures in health, runs per landed change, the runner-seconds ledger, budgets, event delivery | M33, M32, M30, M21 | G27 measured |
+| 📋 M41 | 2 | A forge as the remote: the forge kind and its credential, the bridge commands against Forgejo and Gitea, the queue's publish to a protected branch, `remote request` | M13, M22-R, M32 | A queued land reaches a Forgejo branch that only a named identity may push, as the tree its checks ran on; every bridge command passes offline and in the weekly live run |
+| 📋 M42 | — | Signed commits: the signing file, the signature record, lands signed before their ref moves, signatures read and required at intake, the store signing as itself | M20, M14, M13, M8, M22, M43 | A signed land exports to the same commit id in every run, and the forge and `git verify-commit` accept it; a land that cannot be signed moves no ref |
+| 📋 M43 | 1, 3 | A resident service: `serve --listen`, its callers, one service per store, drain, the queue and the trigger pass run by the service, a forge's events, figures over HTTP | M14, M17, M21, M22, M33, M41 | An entry enqueued over the wire lands with no client waiting; every kill sweep passes against the service; a store no service serves works as before |
+| 📋 M44 | — | A store on a cluster: the chart on the service, one pod as a rule, runners as jobs and their launcher, keys and tokens from Secrets, backup from a snapshot | M43, M42, M41, M34, M6 | On a throwaway cluster, weekly: a change lands through the queue, its check runs as a job, and the signed land reaches a forge |
 
 Why this order: data safety and G4 come first (conditions 5 and 2). Serving under load follows,
 because topology 1's reads queue behind lands today and its first clone is the largest measured
@@ -1539,9 +1737,12 @@ stays after M9. The pilot may move any of these.
 Checks and delivery (M30 to M40) stands beside that order. What it needs from M7, M22 and M11 is
 proposed to those milestones' plans as slices
 ([Proposed slices of existing milestones](#proposed-slices-of-existing-milestones)), and their
-rows above say so. M22's core is built. Whether M7's check record and gate and M22-C1 and M22-C3
-ship ahead of the rest of M7 and M22 is not decided; if they do not, M32 onward wait for all of M7
-and M22.
+rows above say so. M22's core is built. M7's check record and gate and M22-C1 and M22-C3 ship
+ahead of the rest of M7 and M22 (decided 2026-11-28), so M32 onward wait for those four slices
+and not for all of M7 and M22.
+
+Running on a cluster (M41 to M44) stands beside both. It proposes no slice to another milestone:
+its units name the units they need, and wait for them.
 
 ## Open items of the delivered and planned milestones
 
@@ -1611,8 +1812,10 @@ under sustained commits; derived values crafted to agree with each other are rea
 up to about 15 times its text in memory before an operation refuses it; `verify --deep` derives the
 export oids of native changesets twice.
 
-**Not planned** ([non-goals](goals.md#non-goals)): signed commits, so a GitHub branch that requires
-signatures refuses the store's commits; a workflow language; a forge; signed build records in the
+**Planned, not built:** signed commits ([M42](#m42-signed-commits)); until then a branch that
+requires signatures refuses the store's commits.
+
+**Not planned** ([non-goals](goals.md#non-goals)): a workflow language; a forge; signed build records in the
 program ([Non-goals](#non-goals-1) of checks and delivery).
 
 ## How progress is reported

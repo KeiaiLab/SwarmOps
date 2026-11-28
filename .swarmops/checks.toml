@@ -32,6 +32,13 @@ argv = ["just", "check-compare"]
 timeout_s = 300
 stages = ["before-land"]
 
+# ci.yml, job `dev-check`: the dev pod's chart guard and devspace.yaml surface (helm, which the
+# job downloads pinned). Manual: the check job's runners carry no helm.
+[check.dev-check]
+argv = ["just", "dev-check"]
+timeout_s = 300
+stages = ["manual"]
+
 # ci.yml, job `zizmor`: actionlint over every workflow, and tests-pass needing every other job.
 # The zizmor audit itself stays a step of that job. Manual: it downloads a Linux x86_64 actionlint,
 # and the check job would run it twice.

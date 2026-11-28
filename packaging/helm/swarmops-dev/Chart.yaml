@@ -1,0 +1,6 @@
+apiVersion: v2
+name: swarmops-dev
+description: SwarmOps development pod (devspace.yaml, CONTRIBUTING.md "Building in the cluster") — renders only into swarmops-dev
+type: application
+version: 0.1.0
+appVersion: "dev"

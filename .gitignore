@@ -93,3 +93,4 @@ node_modules/
 /web/out/
 /web/next-env.d.ts
 /web/*.tsbuildinfo
+/.devspace

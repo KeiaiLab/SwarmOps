@@ -61,14 +61,28 @@ The first steps happen in this repository's own checks:
 7. The gate runs in shadow mode and records what a plan would have skipped.
 8. The weekly heavy jobs take their host lock as an exclusive group.
 9. A store on the maintainers' host follows `stable`; nothing lands in it.
-10. GitHub's verdicts are recorded by tree. Waits on an open question: whether the check record of
-    M7 ships ahead of the rest of M7.
-11. A tree that passed is not checked again. Waits on the same question.
-12. The trunk moves into the store and its queue. Waits on three open questions: whether this
-    repository's trunk moves into a store, whether the first slices of M7 ship early, and
-    the facts of the queue this repository uses today.
+10. GitHub's verdicts are recorded by tree. The check record of M7 ships ahead of the rest of M7.
+11. A tree that passed is not checked again.
+12. The trunk moves into the store and its queue. Waits on two open questions: whether this
+    repository's trunk moves into a store, and the facts of the queue this repository uses today.
 
 Steps 1 to 8 use no store and write to none. No figure for this role is measured.
+
+## Running on a cluster
+
+A second role beside the topologies, planned on 2026-11-28 and not built: a store runs on a
+cluster as a service, lands what its queue checked onto a forge's protected branch, and signs what
+it lands. Every piece is optional, and the store stays on one volume with one writer. Today the
+server kit's Helm chart serves a store from one pod, per connection.
+
+- **M41, a forge as the remote.** Forgejo and Gitea beside GitHub behind the bridge commands, and
+  the queue's publish to a protected branch.
+- **M42, signed commits.** A land is signed by the user's own tool before its ref moves, and the
+  same changeset exports to the same commit id in every run.
+- **M43, a resident service.** One optional process that listens, runs the queue and the trigger
+  pass, and takes a forge's events.
+- **M44, a store on a cluster.** The chart on the service, runners as jobs, keys and tokens from
+  Secrets.
 
 ## Where to read on
 
@@ -77,5 +91,6 @@ Steps 1 to 8 use no store and write to none. No figure for this role is measured
 - [Milestones](/docs/roadmap#milestones): each step, its deliverables and its target.
 - [Checks and delivery](/docs/roadmap#checks-and-delivery): the role, its 169 units in one table
   per milestone, and the first steps in full.
+- [Running on a cluster](/docs/roadmap#running-on-a-cluster): the role and its 36 units.
 - [Goals](/docs/goals): each goal's metric, target and what has been measured so far.
 - [Changelog](/docs/changelog): what has changed, release by release.
