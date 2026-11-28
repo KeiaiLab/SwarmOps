@@ -22,6 +22,21 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Changed
 
+- Docs: the roadmap plans a second role, running on a cluster, in four milestones of 36 units:
+  M41, a forge as the remote (Forgejo and Gitea beside GitHub behind the bridge commands, and the
+  queue's publish to a protected branch); M42, signed commits; M43, a resident service
+  (`serve --listen`, which also runs the queue and the trigger pass); and M44, a store on a
+  cluster (the server kit's chart on the service, runners as jobs). Nothing of them is built, and
+  no goal number is set yet. The reason: a land that a queue checked must reach a forge's
+  protected branch, and a deployment that verifies signatures must accept it, with no client
+  waiting and no hand-run push.
+- Docs: three non-goals are narrowed (the maintainers' decision of 2026-11-28). Signed commits
+  leave the non-goals and are planned (M42); signed build records stay out of the program. "A
+  cluster" is now "A store on several hosts at once": the store still does not scale
+  horizontally, and it may run on a cluster as one pod (M44). An always-on server is no longer
+  "a follow-up after v1, not a milestone": an optional service is planned (M43), and the
+  program still needs no daemon. The reason: each of the three kept a store that a queue lands
+  into from serving a forge whose branch requires signed commits.
 - This repository's CI starts its gate with `check run --dir . --stage before-land`, the stage
   `.swarmops/checks.toml` names (`just check`, then `just check-compare`), from the 0.13.0
   release's Linux build: `ci.yml` pins the release, its archive's SHA-256 and the commit its tag

@@ -117,7 +117,8 @@ Code's worktree hooks a workspace ([Build and test a change](docs/operate/build-
 
 - You need Windows or an Intel Mac: the releases hold Linux builds and, from 0.12.0 on, a macOS
   build for Apple silicon (Windows is planned).
-- You need git parity: hooks, signing, submodules and LFS are a non-goal.
+- You need git parity: hooks, submodules and LFS are a non-goal, and signed commits are
+  planned, not built.
 - Your hosts must not change under you: an installer's install updates itself unless it is
   pinned (`--version`) or told not to (`--no-auto-update`, `so update --auto off`).
 - Several hosts must write into one store at once: today one host writes and the others sync
