@@ -91,7 +91,11 @@ pub struct Converted {
     pub lossy: LossySet,
     /// The changeset's metadata, keys ascending: [`GIT_LOSSY`] when anything was lost, then
     /// [`GIT_OID`]. Nothing else, no `agent` among them: the same git commit is the same
-    /// changeset in every store (the M3 plan's decision 15).
+    /// changeset the import makes in every store (the M3 plan's decision 15). A changeset the
+    /// import did not make may hold the same commit beside it: a signed land holds its commit's
+    /// id as [`GIT_OID`] with the land's own metadata ([`crate::sign`]), and a store that takes
+    /// that commit through git, never having held the land, makes this one. Both export to the
+    /// one commit.
     pub metadata: Vec<(String, Vec<u8>)>,
 }
 

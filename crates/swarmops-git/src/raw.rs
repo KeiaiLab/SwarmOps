@@ -476,7 +476,7 @@ impl RawTag {
 }
 
 /// The signature kind whose marker `line` starts with.
-fn marked(line: &[u8]) -> Option<SignatureKind> {
+pub(crate) fn marked(line: &[u8]) -> Option<SignatureKind> {
     SIGNATURE_MARKERS
         .iter()
         .find(|(marker, _)| line.starts_with(marker))

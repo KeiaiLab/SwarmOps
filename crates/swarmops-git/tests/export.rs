@@ -19,8 +19,10 @@ use std::time::Duration;
 
 use camino::Utf8PathBuf;
 use swarmops_core::{
-    ChangesetId, EntryTarget, LeafKind, ObjectKind, RepoPath, Tree, TreeEntry, TreeId,
+    Changeset, ChangesetId, DeltaOp, EntryTarget, Hashed, LeafKind, ObjectKind, RepoPath, Tree,
+    TreeEntry, TreeId,
 };
+use swarmops_git::sign::Sealer;
 use swarmops_git::{
     BranchUpdate, DivergedReason, ExportError, ExportOid, ExportReport, ExportRequest, GitOid,
     GitSink, GitSource, GixSink, GixSource, ImportReport, ImportRequest, LossyClass, ObjectFormat,
@@ -1447,6 +1449,99 @@ fn exported_native_commits_are_recorded_as_external_ids() {
         assert_eq!(entry, Some(expected), "{native}");
     }
     assert_eq!(after, before, "the import's entries, and no other");
+}
+
+/// The export also records a commit that its changeset holds as its `git.oid` and exports to,
+/// where the index has no entry for it: a signed land (M42), which no import made, so that a
+/// fetch of the commit finds the land. An entry there already is left as it is.
+#[test]
+fn an_export_records_the_entry_a_sealed_commit_lacks() {
+    let store = store();
+    let repo = &store.repo;
+    let base = commit_on_main(repo, vec![put("a.txt", b"one\n")], "Add a.txt\n");
+
+    // 1. A signed land on `main`'s head: sealed, recorded with the fields the seal gives it,
+    // and `main` moved to it. Nothing has written an entry for its commit.
+    let mut req = request(&[base], vec![put("b.txt", b"two\n")], "Add b.txt\n");
+    req.metadata = vec![("lander".to_owned(), b"test/lander".to_vec())];
+    let unsigned = repo.commit(req).unwrap().id;
+    let unsigned = repo.changeset(unsigned).unwrap().unwrap().changeset;
+    let mut sealer = Sealer::new(repo, None);
+    let payload = sealer.payload(&unsigned).unwrap();
+    let armor = b"-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQ==\n-----END SSH SIGNATURE-----\n";
+    let (seal, oid) = sealer.seal(&unsigned, &payload, armor).unwrap();
+    let land = seal.apply(&unsigned).unwrap();
+    let raw = RawChangeset::new(
+        land.parents.clone(),
+        land.root,
+        land.author.clone(),
+        land.committer.clone(),
+        land.message.clone(),
+        land.extra_headers.clone(),
+        land.metadata.clone(),
+    );
+    let land = repo.commit_raw(raw).unwrap().outcomes[0].id;
+    let moved = repo.cas_ref("main", Some(base), Some(land), ACTOR).unwrap();
+    assert!(matches!(moved.result, CasResult::Applied { .. }));
+    assert_eq!(repo.external_id(SYSTEM_GIT, &oid.0).unwrap(), None);
+
+    // 2. The export writes the commit that was signed, and records it as the land's.
+    let destination = git::empty_repository();
+    let report = exported(repo, &mut gix(&destination.dir), &main_branch());
+    assert_eq!((report.head, report.head_oid), (land, oid));
+    assert_eq!(report.rewritten, 0, "the land exports to its own commit");
+    let entry = repo.external_id(SYSTEM_GIT, &oid.0).unwrap();
+    assert_eq!(entry, Some(ExternalEntry::new(land, true)));
+    let base_entry = repo.external_id(SYSTEM_GIT, &export_oid(repo, base).0);
+    assert_eq!(base_entry.unwrap(), Some(ExternalEntry::new(base, true)));
+
+    // 3. An entry that names another changeset for the commit is left as it is, and the export
+    // goes on: two changesets may hold one commit.
+    let other = store_with_entry(&land_objects(repo, &[base, land]), oid, base);
+    let destination = git::empty_repository();
+    let report = exported(&other.repo, &mut gix(&destination.dir), &main_branch());
+    assert_eq!((report.head, report.head_oid), (land, oid));
+    let entry = other.repo.external_id(SYSTEM_GIT, &oid.0).unwrap();
+    assert_eq!(entry, Some(ExternalEntry::new(base, true)));
+}
+
+/// The changeset objects of `ids` in `repo`, in their order, and the blobs their deltas put.
+fn land_objects(repo: &LocalRepo, ids: &[ChangesetId]) -> (Vec<Hashed>, Vec<Hashed>) {
+    let mut changesets = Vec::new();
+    let mut blobs = Vec::new();
+    for &id in ids {
+        let (kind, payload) = repo.object(id.0).unwrap().expect("the store holds it");
+        for entry in &Changeset::decode(&payload).unwrap().delta {
+            if let DeltaOp::Put { id: blob, .. } = entry.op {
+                let (kind, payload) = repo.object(blob.0).unwrap().expect("its blob");
+                blobs.push(Hashed::new(kind, payload));
+            }
+        }
+        changesets.push(Hashed::new(kind, payload));
+    }
+    (changesets, blobs)
+}
+
+/// A fresh store that holds `objects` (their changesets, parents first, and their blobs), its
+/// `main` at the last changeset, and whose index names `changeset` for commit `commit`.
+fn store_with_entry(
+    (changesets, blobs): &(Vec<Hashed>, Vec<Hashed>),
+    commit: GitOid,
+    changeset: ChangesetId,
+) -> Store {
+    let store = store();
+    store.repo.put_blobs(blobs.clone()).unwrap();
+    let adopted = store.repo.adopt(changesets.clone()).unwrap().adopted;
+    let head = *adopted.last().expect("a changeset");
+    let moved = store.repo.cas_ref("main", None, Some(head), ACTOR).unwrap();
+    assert!(matches!(moved.result, CasResult::Applied { .. }));
+    let entry = (commit.0.to_vec(), ExternalEntry::new(changeset, true));
+    let put = store
+        .repo
+        .record_external_ids(SYSTEM_GIT, &[entry])
+        .unwrap();
+    assert_eq!(put.written, 1);
+    store
 }
 
 /// design-L107's test 5: a writer held between its frame's write and its sync, which then fails

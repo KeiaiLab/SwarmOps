@@ -12,6 +12,13 @@
 //! export), whose rendering is its own commit again exactly when its parent's export is the
 //! commit git built it on ([`ExportedOid::kept`]).
 //!
+//! A signed land (M42, [`crate::sign`]) is one of those changesets, by how it is made, and no
+//! case of its own: it holds the id of the commit that was signed as its [`GIT_OID`], the
+//! signature as its `gpgsig` header and the commit's message, no [`GIT_LOSSY`], on the parent
+//! the commit was rendered on. On a native parent it is rendered, to that commit again; on a
+//! signed land or another unchanged import its [`GIT_OID`] is taken. Either way its export oid
+//! is the commit that was signed, in this build and in one that knows nothing of signing.
+//!
 //! A tree's oid is the hash of [`tree_bytes`] over its entries' oids, and a blob's the hash of its
 //! bytes. Each is memoized in the derived store, the object's id as subject and the oid's 20 bytes
 //! as value (`meta/derived/git_tree_oid/1/`, `meta/derived/git_blob_oid/1/`), so that a tree or a
@@ -796,7 +803,12 @@ fn memo_put(memo: &DerivedStore, slot: &DerivedSlot<'_>, value: &[u8]) -> Result
 /// [`RepoError::Derived`] when git's collision detection flags the bytes as a SHA-1 collision
 /// attack: git refuses to read such an object, so it has no oid to memoize or render into a
 /// tree or a commit.
-fn hashed(kind: RawKind, bytes: &[u8], name: &str, subject: ObjectId) -> Result<GitOid, RepoError> {
+pub(crate) fn hashed(
+    kind: RawKind,
+    bytes: &[u8],
+    name: &str,
+    subject: ObjectId,
+) -> Result<GitOid, RepoError> {
     oid::checked_hash(kind, bytes).ok_or_else(|| RepoError::Derived {
         name: name.to_owned(),
         why: format!(
@@ -1262,6 +1274,14 @@ impl ExportOids {
         Ok(self.known(snapshot, objects, cache, id)?.value)
     }
 
+    /// Takes `oid` as the export oid of changeset `id`, one [`crate::sign`] sealed in this run:
+    /// it holds `oid` as its [`GIT_OID`] and renders to that commit over its parents' values in
+    /// this run, which the sealing checked, so it is what [`ExportOids::of`] would derive. The
+    /// store may not hold the changeset yet; a changeset sealed on it finds its parent here.
+    pub(crate) fn sealed(&mut self, id: ChangesetId, oid: GitOid) {
+        self.known.insert(id, kept_import(oid));
+    }
+
     /// [`ExportOids::of`], with whether the changeset was imported.
     fn known<O: ObjectStore>(
         &mut self,
@@ -1381,6 +1401,37 @@ impl ExportOids {
             None => Err(mac_refused(EXPORT_MAC_MEMO, id, id.0, bytes.len())),
         }
     }
+}
+
+/// What is known of a changeset that holds `oid` as its [`GIT_OID`] and exports to it: its own
+/// commit, kept, imported.
+fn kept_import(oid: GitOid) -> Known {
+    Known {
+        value: ExportedOid {
+            oid: oid.0,
+            kept: true,
+        },
+        imported: true,
+    }
+}
+
+/// Leaves in `memo` the memos of changeset `id`, which [`crate::sign`] sealed as the commit
+/// `oid` and whose frame is durable, as a derivation of it leaves them: its `git_oid` memo,
+/// checked against `oid` where there is one already ([`check_export_memo`]:
+/// [`RepoError::DerivedCorrupt`] for one that names another commit), and with `key` its memo
+/// under the key, so that a later run's walk stops at it. A put that fails is dropped.
+pub(crate) fn remember_sealed(
+    memo: &DerivedStore,
+    key: Option<&MemoKey>,
+    id: ChangesetId,
+    oid: GitOid,
+) -> Result<(), RepoError> {
+    let known = kept_import(oid);
+    check_export_memo(memo, id, known.value)?;
+    if let Some(key) = key {
+        memoize_mac(memo, EXPORT_MAC_MEMO, key, id.0, &export_mac_value(known));
+    }
+    Ok(())
 }
 
 /// A changeset's value as its `git_oid_mac` memo holds it before the MAC: the oid's 20 bytes,

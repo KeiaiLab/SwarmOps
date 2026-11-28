@@ -20,8 +20,27 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Added
+
+- The signed changeset (M42-2), in the libraries alone: no command signs a land yet.
+  `swarmops-git` gains `sign::Sealer`, which gives the bytes a land's commit is signed as and
+  seals the land's changeset with the signature. The sealed changeset carries the signature as
+  its `gpgsig` header, the commit's trailers in its message (with no `SwarmOps-Changeset` line,
+  since its id hashes the signature) and the commit's id as `git.oid`, so `git_oid` version 1
+  exports it byte for byte as the commit that was signed, on every host, in every run, and in a
+  build that knows nothing of signing. `swarmops-repo` gains the seal a land takes for it
+  (`land::Seal`, `land::SealFn`) and `RepoError::SealRefused`. No record kind, no feature and no
+  derived name is added: the changeset's layout and the hash contract are as they were.
+
 ### Changed
 
+- `git export`, and so `push` and `sync`, also records in the external id index a commit that
+  its changeset holds as its `git.oid` and exports to, where the index has no entry for it: a
+  signed land's, or that of a changeset another store sent over `so://`. Before, it recorded the
+  native commits alone. An entry the index holds for such a commit already is left as it is,
+  whatever it names. The reason: a fetch of a signed commit must find the land that made it, and
+  a store that took the commit through git holds a second changeset of it, which exports to the
+  same commit.
 - Docs: the roadmap's four slices M7-C1, M7-C2, M22-C1 and M22-C3 read `planned`, no longer
   `proposed`: M7's check record and gate, and the queue's prepared attempt and its land on final
   results, ship ahead of the rest of M7 and M22 (the maintainers' decision of 2026-11-28). The

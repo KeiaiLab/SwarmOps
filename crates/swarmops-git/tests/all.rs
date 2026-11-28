@@ -19,6 +19,7 @@ mod serve_land_key;
 mod serve_pkt;
 mod serve_refmap;
 mod serve_repo;
+mod sign;
 mod sink;
 mod source;
 mod support;

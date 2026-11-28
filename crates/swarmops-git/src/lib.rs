@@ -16,13 +16,18 @@
 //!   and sets of them ([`LossySet`]).
 //! - [`render`]: the git objects a changeset renders to, [`tree_bytes`] and [`commit_bytes`].
 //! - [`native`]: the commit a native changeset exports to: its own signatures, and its message
-//!   followed by SwarmOps' trailers ([`TRAILERS`], [`export_message`], [`render_commit`]), and
-//!   the bytes of a tag SwarmOps makes ([`render_tag`]).
+//!   followed by SwarmOps' trailers ([`TRAILERS`], [`export_message`], [`render_commit`]), the
+//!   message a signed land's commit is signed with ([`sealed_message`]), and the bytes of a tag
+//!   SwarmOps makes ([`render_tag`]).
 //! - [`export_oid`]: [`ExportOid`], the derivation of the git commit each changeset exports to
 //!   ([`ExportedOid`]), and the git oids of its trees and blobs, memoized per object
 //!   ([`tree_oid`], [`blob_oid`]).
 //! - [`memo_key`]: [`MemoKey`], the key, kept outside the store, that authenticates the export
 //!   oid memos the export and the import trust.
+//! - [`sign`]: the signed changeset (M42): [`sign::Sealer`], which gives the bytes a land's
+//!   commit is signed as and seals the land's changeset with the signature, so that the
+//!   changeset exports to the commit that was signed, and which gives a stored changeset's
+//!   signed bytes and signature back for a check ([`sign::SignedCommit`]).
 //! - [`convert`]: [`Converter`], which converts git's commits, trees and blobs into a changeset's
 //!   fields ([`Converted`]), trees and blobs, refusing what the classes it allows do not cover
 //!   ([`ConvertError`]); a commit is converted without loss only if it renders back to its own
@@ -36,7 +41,8 @@
 //! - [`gix_sink`]: [`GixSink`], the [`GitSink`] of a repository on disk.
 //! - [`export`](mod@export): [`export()`], which writes the history behind a store ref into a
 //!   branch of a git repository, every commit the branch's last export does not reach, parents
-//!   first, makes it durable and records its native commits' oids, then moves the branch by
+//!   first, makes it durable and records its commits' oids (the native ones, and a signed
+//!   land's where the index lacks it), then moves the branch by
 //!   compare-and-swap ([`ExportRequest`], [`ExportReport`]); run again, it writes only what is
 //!   new, and it refuses a branch that diverged ([`ExportError`], [`DivergedReason`]).
 //! - [`tags`](mod@tags): the tag intake, [`take_tag`] and [`take_tags`], which takes git tags into
@@ -75,6 +81,7 @@ mod phase;
 pub mod raw;
 pub mod render;
 pub mod serve;
+pub mod sign;
 pub mod sink;
 pub mod source;
 pub mod sync;
@@ -96,7 +103,7 @@ pub use import::{
 };
 pub use lossy::{LossyClass, LossySet};
 pub use memo_key::{MEMO_KEY_LEN, MemoKey};
-pub use native::{TRAILERS, export_message, render_commit, render_tag};
+pub use native::{TRAILERS, export_message, render_commit, render_tag, sealed_message};
 pub use oid::{GitOid, ObjectFormat, ParseGitOidError, RawKind, git_hash};
 /// The phase log's git totals written (the test hooks only, the M18 design §2.2).
 #[cfg(feature = "test-hooks")]

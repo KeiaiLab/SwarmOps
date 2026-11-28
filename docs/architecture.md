@@ -669,7 +669,9 @@ protocol.
    back, and written again if it is damaged.
 5. Objects, then sync, then entries, then the branch: every object written or read back is
    fsynced with its fan-out directory; then the native commits' oids go into the external id
-   index (W8: their changesets are committed); then the branch moves by compare-and-swap through
+   index (W8: their changesets are committed), and with them the oid of a commit that its
+   changeset holds as its `git.oid` and exports to, where the index has no entry for it (a signed
+   land's, M42); then the branch moves by compare-and-swap through
    `refs/heads/<branch>.lock`, synced before its rename and its directory after, with no reflog
    entry. A branch another writer moved meanwhile stops it there (`moved_during_export`), which
    leaves the objects, loose and unreached, and the entries, which are true.

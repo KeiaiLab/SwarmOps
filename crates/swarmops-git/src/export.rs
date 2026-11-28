@@ -44,7 +44,12 @@
 //! 7. Every object written or read back loose is made durable ([`GitSink::sync`]).
 //! 8. The native commits' oids are recorded in the external id index, each naming its changeset
 //!    (W8 holds: the snapshot's changesets are committed); an imported changeset keeps its
-//!    import's entry, and one rendered anew under a lossy lineage gets none.
+//!    import's entry, and one rendered anew under a lossy lineage gets none. An imported
+//!    changeset that exports to its own commit and has no entry gets one too: a signed land
+//!    ([`crate::sign`]), which no import made, or a changeset that came from another store
+//!    without its entry. An entry the index holds for such a commit already is left as it is,
+//!    whatever it names: two changesets may hold one commit (the land, and the commit's import
+//!    in a store that fetched it through git), and both export to it.
 //! 9. The branch moves from what step 2 read to the head's export, by compare-and-swap
 //!    ([`GitSink::cas_branch`]): one that another export moved there meanwhile is up to date
 //!    too, and any other move is [`DivergedReason::MovedDuringExport`], which leaves the
@@ -1564,15 +1569,19 @@ impl<'a, 'r> Run<'a, 'r> {
 
     /// Step 8: the oid of each native commit of `commits` recorded in the external id index,
     /// faithful, naming its changeset. An entry there already for the same commit naming another
-    /// changeset is [`ExportError::Bug`].
+    /// changeset is [`ExportError::Bug`]. An imported changeset's commit is recorded the same way
+    /// when the changeset exports to it and the index has no entry for it ([`Run::lacks_entry`]);
+    /// an entry another writer placed for it meanwhile is passed over, whatever it names.
     fn record(&mut self, commits: &[Commit]) -> Result<(), ExportError> {
-        let entries: Vec<(Vec<u8>, ExternalEntry)> = (commits.iter())
-            .filter(|commit| !self.nodes[&commit.id].imported)
-            .map(|commit| {
-                let entry = ExternalEntry::new(commit.id, true);
-                (commit.exported.oid.to_vec(), entry)
-            })
-            .collect();
+        let mut entries: Vec<(Vec<u8>, ExternalEntry)> = Vec::new();
+        for commit in commits {
+            let key = commit.exported.oid.to_vec();
+            let imported = self.nodes[&commit.id].imported;
+            if imported && !(commit.exported.kept && self.lacks_entry(&key)?) {
+                continue;
+            }
+            entries.push((key, ExternalEntry::new(commit.id, true)));
+        }
         if entries.is_empty() {
             return Ok(());
         }
@@ -1581,6 +1590,11 @@ impl<'a, 'r> Run<'a, 'r> {
             let Some((_, ours)) = entries.iter().find(|(ours, _)| *ours == key) else {
                 continue;
             };
+            // Two changesets may hold one commit: an entry for an imported changeset's commit
+            // that names the other one is no bug, and stays.
+            if self.nodes[&ours.changeset].imported {
+                continue;
+            }
             let commit = <[u8; 20]>::try_from(key.as_slice()).map_or(GitOid::NULL, GitOid);
             match self.repo.external_id(SYSTEM_GIT, &key) {
                 Ok(Some(there)) if there.changeset != ours.changeset => {
@@ -1603,6 +1617,16 @@ impl<'a, 'r> Run<'a, 'r> {
             }
         }
         Ok(())
+    }
+
+    /// Whether the external id index has no entry for the commit `key`. One it holds, naming any
+    /// changeset, or damaged, is an entry: step 8 leaves it as it is.
+    fn lacks_entry(&self, key: &[u8]) -> Result<bool, ExportError> {
+        match self.repo.external_id(SYSTEM_GIT, key) {
+            Ok(entry) => Ok(entry.is_none()),
+            Err(RepoError::Store(StoreError::ExternalIdCorrupt { .. })) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 

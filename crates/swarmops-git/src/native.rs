@@ -11,6 +11,13 @@
 //! The rendering is fixed as the hash contract is: a change to it (the trailers, their order, how
 //! they join the message) is a new version of `git_oid`, which every branch exported before it
 //! meets as divergence.
+//!
+//! A signed land (M42) takes no rule of its own here. Its changeset is made as the import of the
+//! commit that was signed ([`crate::sign`]): it holds [`GIT_OID`], the signature as its `gpgsig`
+//! header and the commit's message, so it is rendered as an imported changeset is, byte for
+//! byte. [`sealed_message`] gives the message that commit is signed with: the land's trailers
+//! without `SwarmOps-Changeset`, which a commit whose changeset's id hashes its signature cannot
+//! name.
 
 use swarmops_core::{Changeset, ChangesetId};
 
@@ -62,6 +69,59 @@ pub fn export_message(id: ChangesetId, cs: &Changeset) -> Vec<u8> {
             trailer(&mut message, token, value);
         }
     }
+    message
+}
+
+/// The message of the commit a signed land is signed with (M42): `cs` is the changeset the land
+/// makes before it is sealed, a native one, and the sealed changeset holds this message
+/// verbatim. It is `cs`'s message followed by a trailer block as [`export_message`] writes one,
+/// joined to the message the same way, but for two things.
+///
+/// - The block has no `SwarmOps-Changeset` line: the sealed changeset's id hashes the signature,
+///   and the signature covers the message. It holds `<token>: <value>` for each key of
+///   [`TRAILERS`] the metadata holds, in that order, then each trailer of `extra` (its token and
+///   its value) in the order given. With none of them the message is `cs`'s, as it is.
+/// - A trailer of one of those tokens (all three of [`TRAILERS`], and those of `extra`) that the
+///   message's last paragraph holds already is removed first, with its value's continuation
+///   lines, and the paragraph with its blank line when nothing of it is left. A land's message
+///   is its head's unless the request gives one, so the message of a signed land that lands
+///   again (onto another target, by a relocation, as a queue's candidate) ends in an older
+///   block, of another key and chain: the commit carries one block, the new one. The paragraph
+///   counts when it is not the message's first, starts with a line `<token>: <value>` and holds
+///   only such lines and continuation lines (a line that starts with a space).
+pub fn sealed_message(cs: &Changeset, extra: &[(&str, &[u8])]) -> Vec<u8> {
+    // 1. The block: the metadata's trailers, then the extra ones.
+    let mut block = Vec::new();
+    for (key, token) in TRAILERS {
+        if let Some(value) = metadata(cs, key) {
+            trailer(&mut block, token, value);
+        }
+    }
+    for &(token, value) in extra {
+        trailer(&mut block, token, value);
+    }
+
+    // 2. The message, without the lines an older block of these tokens left.
+    let own = |token: &[u8]| {
+        let written = TRAILERS.iter().map(|&(_, written)| written);
+        let given = extra.iter().map(|&(given, _)| given);
+        written.chain(given).any(|ours| ours.as_bytes() == token)
+    };
+    let mut message = without_trailers(&cs.message, own);
+    if block.is_empty() {
+        return message;
+    }
+
+    // 3. Joined as `export_message` joins its block.
+    if !message.is_empty() {
+        if !message.ends_with(b"\n") {
+            message.push(b'\n');
+        }
+        if !ends_in_trailers(&message) {
+            message.push(b'\n');
+        }
+    }
+    message.extend_from_slice(&block);
     message
 }
 
@@ -153,4 +213,209 @@ fn is_trailer(line: &[u8]) -> bool {
             .iter()
             .all(|&byte| byte.is_ascii_alphanumeric() || byte == b'-')
         && rest.starts_with(b": ")
+}
+
+/// `message` without the trailers of its last paragraph whose token `own` takes, each with the
+/// continuation lines of its value, as [`sealed_message`] says: the message as it is when its
+/// last paragraph is no trailer block or holds no such trailer; otherwise the lines left, each
+/// ended by a line break, the paragraph's blank line gone with it when no line of it is left.
+fn without_trailers(message: &[u8], own: impl Fn(&[u8]) -> bool) -> Vec<u8> {
+    let body = message.strip_suffix(b"\n").unwrap_or(message);
+    let lines: Vec<&[u8]> = body.split(|&byte| byte == b'\n').collect();
+    let Some(blank) = lines.iter().rposition(|line| line.is_empty()) else {
+        // One paragraph: the title, which is never a trailer block.
+        return message.to_vec();
+    };
+
+    // 1. The last paragraph must be a trailer block, continuation lines among its lines.
+    let paragraph = &lines[blank + 1..];
+    let continues = |line: &[u8]| line.starts_with(b" ");
+    let block = paragraph.first().is_some_and(|line| is_trailer(line))
+        && (paragraph.iter()).all(|&line| is_trailer(line) || continues(line));
+    if !block {
+        return message.to_vec();
+    }
+
+    // 2. Its lines but those trailers: a continuation line goes or stays with the trailer whose
+    // value it continues.
+    let mut kept: Vec<&[u8]> = Vec::with_capacity(paragraph.len());
+    let mut dropped = false;
+    for &line in paragraph {
+        if !continues(line) {
+            let colon = line.iter().position(|&byte| byte == b':');
+            dropped = own(&line[..colon.unwrap_or(line.len())]);
+        }
+        if !dropped {
+            kept.push(line);
+        }
+    }
+    if kept.len() == paragraph.len() {
+        return message.to_vec();
+    }
+
+    // 3. What is before the paragraph, with its blank line while a line of it is left.
+    let before = if kept.is_empty() {
+        &lines[..blank]
+    } else {
+        &lines[..=blank]
+    };
+    let mut out = Vec::with_capacity(message.len());
+    for line in before.iter().chain(&kept) {
+        out.extend_from_slice(line);
+        out.push(b'\n');
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use swarmops_core::{Signature, Tree};
+
+    use super::*;
+
+    /// The head a land squashes, as its `squashed_from` names it.
+    const HEAD: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+    /// A changeset no store holds, with `message` and `metadata` (its keys ascending).
+    fn unstored(message: &str, metadata: &[(&str, &str)]) -> Changeset {
+        let signature = Signature::new(b"a".to_vec(), b"a@b".to_vec(), 1_700_000_000, 0, false);
+        let signature = signature.expect("a zero offset is a valid signature");
+        Changeset::new(
+            Vec::new(),
+            Tree::empty_root().id(),
+            Vec::new(),
+            signature.clone(),
+            signature,
+            message.as_bytes().to_vec(),
+            Vec::new(),
+            (metadata.iter())
+                .map(|&(key, value)| (key.to_owned(), value.as_bytes().to_vec()))
+                .collect(),
+        )
+        .expect("a canonical changeset")
+    }
+
+    /// [`sealed_message`] of a changeset with `message` and `metadata`, as text.
+    fn sealed(message: &str, metadata: &[(&str, &str)]) -> String {
+        let cs = unstored(message, metadata);
+        String::from_utf8(sealed_message(&cs, &[])).expect("the messages here are UTF-8")
+    }
+
+    #[test]
+    fn a_sealed_message_has_the_land_s_trailers_and_no_changeset_line() {
+        // 1. A land's metadata: the three keys of `TRAILERS` in their order, and no other key.
+        let land = [
+            ("agent", "agent/worker-17"),
+            ("cr", "cr-7"),
+            ("land_key", "k-1"),
+            ("lander", "swarmops/lander"),
+            ("squashed_from", HEAD),
+        ];
+        let block =
+            format!("SwarmOps-Land-Key: k-1\nSwarmOps-CR: cr-7\nSwarmOps-Squashed-From: {HEAD}\n");
+        assert_eq!(sealed("Add a\n", &land), format!("Add a\n\n{block}"));
+        assert!(!sealed("Add a\n", &land).contains(CHANGESET), "its own id");
+
+        // 2. The block joins the message as the export joins a native changeset's: after one
+        // blank line, a message without a final line break gaining one; an empty message is the
+        // block alone.
+        assert_eq!(sealed("Add a", &land), format!("Add a\n\n{block}"));
+        let why = "Add a\n\nWhy.\n";
+        assert_eq!(sealed(why, &land), format!("{why}\n{block}"));
+        assert_eq!(sealed("", &land), block);
+
+        // 3. The same bytes as the export's message for these keys, less its first trailer.
+        let cs = unstored(why, &land);
+        let id = cs.id().expect("a canonical changeset");
+        let exported = String::from_utf8(export_message(id, &cs)).expect("UTF-8");
+        let own = format!("{CHANGESET}: {id}\n");
+        assert_eq!(exported.replacen(&own, "", 1), sealed(why, &land));
+
+        // 4. A line break in a value continues on the next line after one space.
+        let broken = [("land_key", "k\n1")];
+        let expected = "Add a\n\nSwarmOps-Land-Key: k\n 1\n";
+        assert_eq!(sealed("Add a\n", &broken), expected);
+
+        // 5. Metadata with none of the keys gives no block, and the message stays as it is.
+        let none = [("agent", "agent/worker-17"), ("lander", "swarmops/lander")];
+        assert_eq!(sealed("Add a", &none), "Add a");
+        assert_eq!(sealed("Add a\n", &none), "Add a\n");
+
+        // 6. Extra trailers follow the three, in the order given.
+        let cs = unstored("Add a\n", &[("land_key", "k-1")]);
+        let extra: [(&str, &[u8]); 2] = [("SwarmOps-Lander", b"claude/1"), ("X-Note", b"n")];
+        let expected = "Add a\n\nSwarmOps-Land-Key: k-1\nSwarmOps-Lander: claude/1\nX-Note: n\n";
+        assert_eq!(sealed_message(&cs, &extra), expected.as_bytes());
+    }
+
+    #[test]
+    fn a_land_of_a_signed_land_carries_one_block() {
+        let land = [("land_key", "k-2"), ("squashed_from", HEAD)];
+        let block = format!("SwarmOps-Land-Key: k-2\nSwarmOps-Squashed-From: {HEAD}\n");
+
+        // 1. The head's message is a signed land's: it ends in the block of another key and
+        // another chain. The new land's block replaces it.
+        let old = "c".repeat(64);
+        let head = format!("Add a\n\nSwarmOps-Land-Key: k-1\nSwarmOps-Squashed-From: {old}\n");
+        let message = sealed(&head, &land);
+        assert_eq!(message, format!("Add a\n\n{block}"));
+        assert_eq!(message.matches("SwarmOps-Land-Key").count(), 1);
+        assert_eq!(message.matches("SwarmOps-Squashed-From").count(), 1);
+
+        // 2. Sealed again with the same metadata, it is the same message.
+        assert_eq!(sealed(&message, &land), message);
+
+        // 3. A line this land does not write again is removed all the same (an unkeyed land of
+        // a keyed one), with its value's continuation lines.
+        let head = "Add a\n\nSwarmOps-Land-Key: k\n 1\nSwarmOps-CR: cr-7\n";
+        let unkeyed = format!("Add a\n\nSwarmOps-Squashed-From: {HEAD}\n");
+        assert_eq!(sealed(head, &[("squashed_from", HEAD)]), unkeyed);
+
+        // 4. A token of the extra trailers is removed too, and written once.
+        let cs = unstored("Add a\n\nSwarmOps-Lander: claude/1\n", &[]);
+        let extra: [(&str, &[u8]); 1] = [("SwarmOps-Lander", b"claude/2")];
+        let expected = "Add a\n\nSwarmOps-Lander: claude/2\n";
+        assert_eq!(sealed_message(&cs, &extra), expected.as_bytes());
+
+        // 5. Only the last paragraph is read as a block: a line of the same shape above it, in
+        // a last paragraph that holds other text, or as the title, stays.
+        let above = "Add a\n\nSwarmOps-Land-Key: quoted\n\nWhy.\n";
+        assert_eq!(sealed(above, &land), format!("{above}\n{block}"));
+        let prose = "Add a\n\nSwarmOps-Land-Key: quoted\nand more\n";
+        assert_eq!(sealed(prose, &land), format!("{prose}\n{block}"));
+        let title = "SwarmOps-Land-Key: a title\n";
+        assert_eq!(sealed(title, &land), format!("{title}\n{block}"));
+
+        // 6. An imported commit's `SwarmOps-Changeset` line names another changeset, and stays.
+        let named = format!("Add a\n\nSwarmOps-Changeset: {old}\n");
+        let imported = format!("{named}SwarmOps-Land-Key: k-1\n");
+        assert_eq!(sealed(&imported, &land), format!("{named}{block}"));
+    }
+
+    #[test]
+    fn a_co_authored_by_line_is_kept_in_the_block() {
+        let land = [("land_key", "k-2"), ("squashed_from", HEAD)];
+        let block = format!("SwarmOps-Land-Key: k-2\nSwarmOps-Squashed-From: {HEAD}\n");
+
+        // 1. A person's trailer and the land's are one block, as the export joins them.
+        let message = "Add a\n\nCo-Authored-By: X <x@y>\n";
+        assert_eq!(sealed(message, &land), format!("{message}{block}"));
+        let unbroken = "Add a\n\nCo-Authored-By: X <x@y>";
+        assert_eq!(sealed(unbroken, &land), format!("{message}{block}"));
+
+        // 2. Beside an older land's lines it stays, in its place, and they go.
+        let old = "c".repeat(64);
+        let head = format!(
+            "Add a\n\nSigned-off-by: A <a@b>\nSwarmOps-Land-Key: k-1\nCo-Authored-By: X <x@y>\n\
+             SwarmOps-Squashed-From: {old}\n"
+        );
+        let kept = "Add a\n\nSigned-off-by: A <a@b>\nCo-Authored-By: X <x@y>\n";
+        assert_eq!(sealed(&head, &land), format!("{kept}{block}"));
+
+        // 3. Its own continuation line stays with it; the paragraph is then no block as the
+        // export reads one, so the land's block follows a blank line.
+        let wrapped = "Add a\n\nCo-Authored-By: X\n <x@y>\nSwarmOps-Land-Key: k-1\n";
+        let kept = "Add a\n\nCo-Authored-By: X\n <x@y>\n";
+        assert_eq!(sealed(wrapped, &land), format!("{kept}\n{block}"));
+    }
 }
