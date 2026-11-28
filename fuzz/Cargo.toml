@@ -31,7 +31,8 @@ swarmops-git = { path = "../crates/swarmops-git", version = "0.13.0" }
 # serve parsers' wrappers (`serve_entry`, `serve_hook_input`); the check file's reader
 # (`check_file`); a check's log, its writer and its reader (`check_log`); a check's report file
 # of findings (`check_findings`); the JUnit and SARIF reports a check declares (`check_junit`,
-# `check_sarif`); the run lines' reader, its page and its cursor (`check_runs`).
+# `check_sarif`); the run lines' reader, its page and its cursor (`check_runs`); the patterns of
+# a check's inputs and their matcher (`check_inputs`).
 swarmops-ops = { path = "../crates/swarmops-ops", version = "0.13.0", features = ["fuzzing"] }
 swarmops-store = { path = "../crates/swarmops-store", version = "0.13.0" }
 # The filesystem doubles only (`NoSyncFs`): without its default features, which hold the CLI
@@ -183,6 +184,14 @@ bench = false
 [[bin]]
 name = "check_runs"
 path = "fuzz_targets/check_runs.rs"
+test = false
+doc = false
+bench = false
+
+# The path patterns a check declares as its inputs (M30-3): text a tree's author writes.
+[[bin]]
+name = "check_inputs"
+path = "fuzz_targets/check_inputs.rs"
 test = false
 doc = false
 bench = false
