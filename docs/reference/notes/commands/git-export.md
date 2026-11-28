@@ -24,7 +24,10 @@ MCP tool for it. A run goes in this order, each step done before anything of the
    holds in a pack is trusted; a loose one is read back, and written again if it is damaged.
 7. **Make it durable.** Every object written or read back is fsynced.
 8. **Record.** The ids of the commits made in the store go into the store's external id index,
-   each naming its changeset.
+   each naming its changeset. So does the id of a commit that its changeset holds already (a
+   changeset that came from git, or a signed land) and exports to byte for byte, where the index
+   has no entry for it, as after the changeset arrived from another store over `so://`. An entry
+   the index holds already is left as it is.
 9. **Move the branch.** The branch moves to the head's export by compare-and-swap, through git's
    own lock file `refs/heads/<branch>.lock`, or is created.
 
