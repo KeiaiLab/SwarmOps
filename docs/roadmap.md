@@ -689,7 +689,8 @@ Several upstreams merging with each other, partial replicas and a caching tier.
 
 ## Checks and delivery
 
-**Planned: nothing in this section is built.** SwarmOps takes on a role beside its three
+**Planned: nothing in this section is built but the units whose state in the tables below is
+`on stable` or a release.** SwarmOps takes on a role beside its three
 topologies; the role is not a fourth one. SwarmOps describes what must be checked for a tree,
 decides what a given change needs, runs those checks on the caller's host or on runners that ask
 for work, records each result against the tree it is for, admits a land only on recorded results,
@@ -746,8 +747,9 @@ with the environment it has today. SwarmOps does not run GitHub's workflow files
 reads them once, as a public file format, writes a check file for the part that maps, and lists
 the rest.
 
-**Plans and inputs.** A check declares the paths it depends on; one that declares nothing takes
-the whole tree. For a change, `check plan` answers which checks must run and which are not
+**Plans and inputs.** A check declares the paths it depends on, as patterns in the access file's
+grammar (`*` is one whole path segment, a last `**` every depth below); one that declares nothing
+takes the whole tree. For a change, `check plan` answers which checks must run and which are not
 applicable, with one reason each, from the store alone and before anything starts. A plan fails
 closed: inputs it cannot resolve, or a definition the candidate changed, turn the check to `run`.
 No second mechanism filters triggers by path. Selection may skip a required check only after
