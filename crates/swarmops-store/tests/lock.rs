@@ -141,10 +141,10 @@ fn abandoned_waiter_releases_the_lock_it_acquires_late() {
 }
 
 /// Ten writers that give up, one after the other, while the lock is held queue one waiter in the
-/// kernel between them: every wait of a process for one lock file shares the one helper thread,
-/// and a wait that gives up adds none. The helper may not have entered `flock` yet when the last
-/// writer gives up, so the first count is waited for; the second is read once it is there, and a
-/// second waiter would show in either.
+/// kernel between them: the process has a single helper thread for the lock file, which all ten
+/// waits use and none of them adds to. That helper can still be on its way into `flock` when the
+/// last writer gives up, so the first count is waited for; the second is read once it is there,
+/// and a second waiter would show in either.
 #[cfg(target_os = "linux")]
 #[test]
 fn ten_abandoned_waits_queue_one_waiter() {

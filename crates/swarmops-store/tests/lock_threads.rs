@@ -30,8 +30,8 @@ fn threads() -> usize {
         .count()
 }
 
-/// Waits up to 10 s until [`threads`] is `want`, and returns what it was last: a thread that
-/// was joined may still be listed for a moment.
+/// Waits up to 10 s until [`threads`] is `want`, and returns what it was last: the kernel can
+/// go on listing a thread for an instant after its join has returned.
 #[cfg(target_os = "linux")]
 fn wait_for_threads(want: usize) -> usize {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -80,7 +80,7 @@ fn a_hundred_waits_that_give_up_leave_one_helper_then_none() {
     assert_eq!(helpers_since(&before), (1, 1), "the helper ended");
     assert_eq!(flock_wait::waiting(&key), None);
     MetaLock::acquire(&layout, Duration::ZERO).expect("the lock is free again");
-    // The end state, not the proof: the counts above are.
+    // The counts above are the proof; this only looks at where the process ended up.
     #[cfg(target_os = "linux")]
     assert_eq!(
         wait_for_threads(threads_before),

@@ -886,11 +886,12 @@ power-loss images a model of the disk rather than a real device
 - **Objects** need no lock: they are immutable, named by their hash and linked into place
   without replacing anything.
 - **Metadata writers** take `meta/lock`, an `flock` (storage §3). The kernel releases it when a
-  process dies, so a crash leaves no stale lock. A waiting writer queues in the kernel through
-  the one helper thread its process keeps for that lock and gives up after `lock_timeout` (10 s),
-  with the retryable `E_BUSY`. The queue is not strictly first-in, first-out, but the wait is
-  bounded: with 32 processes making 1,000 commits each through the binary, none got `E_BUSY` and
-  the slowest commit took 918 ms ([perf.md](perf.md), before batching).
+  process dies, so a crash leaves no stale lock. A waiting writer queues in the kernel through a
+  helper thread, a single one for all the waits of its process on that lock, and gives up after
+  `lock_timeout` (10 s), with the retryable `E_BUSY`. The queue is not strictly first-in,
+  first-out, but the wait is bounded: with 32 processes making 1,000 commits each through the
+  binary, none got `E_BUSY` and the slowest commit took 918 ms ([perf.md](perf.md), before
+  batching).
 - **Lands and commits waiting on the lock** wait in the write queue too (above, "Batched
   writers"): the lock's holder commits them in its batch and answers each, and the waiter reads
   its answer without the lock. A batch plans its waiting requests in submission order; the

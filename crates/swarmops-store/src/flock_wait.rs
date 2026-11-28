@@ -16,13 +16,15 @@
 //!
 //! What follows from it:
 //!
-//! - A wait that gives up takes only itself away: it leaves the queue and owns no thread.
-//! - A process has at most one helper for each lock file it waits on, and only while that lock
-//!   is held by another handle or claimed. A holder that never lets go (a hung process) keeps
-//!   that one helper blocked, whatever the number of waits that gave up meanwhile.
-//! - The waits of one process for one file are served oldest first, and the process has one
-//!   waiter in the kernel's queue for that file. Between processes the kernel's queue decides,
-//!   as it did.
+//! - Giving up costs nothing but the claim: dropping a [`Claim`] removes its place in the
+//!   queue, and the thread was never its own to leave behind.
+//! - The helpers of a process number no more than the lock files it is waiting for, and a file
+//!   has one only from its first claim until the lock is free with no claim left. A holder that
+//!   never lets go (a hung process) keeps that one helper blocked, whatever the number of
+//!   waits that gave up meanwhile.
+//! - Inside a process the claims on a file get the lock in the order they were made, and the
+//!   kernel sees a single waiter from that process, the helper. Between processes the kernel's
+//!   queue decides, as it did.
 //! - A lock the helper gets when nobody claims it any more is let go at once.
 //!
 //! The process's [`Counters`] count the helpers started and ended (`flock_helpers_started`,
@@ -174,7 +176,7 @@ struct Shared {
     counters: Option<&'static Counters>,
 }
 
-/// The waits, by lock file. No thread blocks on a lock file while it holds this table's mutex.
+/// The waits, by lock file. Its mutex is never held across a blocking lock call.
 #[derive(Debug, Default)]
 struct Table {
     waits: BTreeMap<LockKey, Entry>,
@@ -263,7 +265,8 @@ impl Waits {
             // 1. In the kernel's queue until the lock is this file's. The mutex is not held.
             let locked = lock_blocking(&file).map(|()| Locked(Some(file)));
 
-            // 2. To the oldest claim that still listens. A lock nobody takes is let go here.
+            // 2. To the first claim in the queue whose receiver is still there. A lock nobody
+            //    takes is let go here.
             let mut table = self.table();
             let Some(entry) = table.waits.get_mut(&key) else {
                 // Not reached: only this helper removes its entry.

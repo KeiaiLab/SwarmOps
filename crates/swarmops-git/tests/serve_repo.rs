@@ -28,7 +28,7 @@ const SHORT: Duration = Duration::from_millis(300);
 /// A wait no test reaches when the lock is let go.
 const LONG: Duration = Duration::from_secs(60);
 
-/// A wait that only a lock the test itself holds outlasts: it can end one way alone.
+/// A wait for a lock that the test holds itself: so short a wait can end one way alone.
 const BRIEF: Duration = Duration::from_millis(1);
 
 /// Set only in the child that holds the lock for [`the_lock_waits_then_is_busy`]: the lock file.

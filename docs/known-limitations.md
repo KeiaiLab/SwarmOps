@@ -176,13 +176,14 @@ left).
   a loaded host. Streaming them in steps is the next step if a store takes longer. *Unscheduled.
   Found: the M6 plan, risk R-1.*
 - **A lock wait keeps one helper thread a lock file.** A wait with a timeout blocks a helper
-  thread in the kernel's queue, since a blocked `flock` cannot be called off. A process keeps at
-  most one such thread for each lock file it waits on, two a store (`meta/lock` and the serving
-  repository's `serve.lock`), and only while that lock is held by another or claimed: a wait that
-  gives up adds none, and the thread ends once the lock is free and nobody claims it. A holder
-  that never lets go (a hung process) keeps one blocked thread a lock file in each waiting
-  process, however long that process lives; before, it kept one for every wait that gave up. The
-  process's counters give the number: `flock_helpers_started` less `flock_helpers_ended`.
+  thread in the kernel's queue, since a blocked `flock` cannot be called off. All the waits of a
+  process for a lock file use the same thread, so the process has one for each lock file it is
+  waiting for and no more: two for a store, whose locks are `meta/lock` and the serving
+  repository's `serve.lock`. A wait that times out starts no thread and takes none away; the
+  thread returns when it gets the lock and finds no wait left to give it to. A holder that never
+  lets go (a hung process) keeps one blocked thread a lock file in each waiting process, however
+  long that process lives; before, it kept one for every wait that gave up. The process's
+  counters give the number: `flock_helpers_started` less `flock_helpers_ended`.
   *Documented. Found: M1 Task 7c; final review, question 10; narrowed by M43-4.*
 - **A read can give up under sustained commits.** A snapshot reads the refs and the frames again
   until they hold still, in at most 32 rounds; when a commit lands during every round, it fails
