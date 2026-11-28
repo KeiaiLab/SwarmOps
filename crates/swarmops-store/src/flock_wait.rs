@@ -146,9 +146,11 @@ pub fn waiting(key: &LockKey) -> Option<usize> {
     PROCESS.waiting(key)
 }
 
-/// Blocks until the process has no helper for the lock file `key` names, and joins the helpers
-/// that have ended: at once if there is none, and without end while the lock stays held or
-/// claimed. For a test, and for a process that wants its threads gone before it goes on.
+/// Blocks until the process has no helper for the lock file `key` names and every helper that
+/// has ended is joined, by this thread or by another that took its handle first: at once if
+/// there is none, and without end while the lock stays held or claimed. A join in progress for
+/// another lock file's helper is waited for too; it lasts only as long as a thread takes to
+/// return. For a test, and for a process that wants its threads gone before it goes on.
 pub fn settled(key: &LockKey) {
     PROCESS.settled(key);
 }
@@ -166,7 +168,7 @@ struct Waits(Arc<Shared>);
 #[derive(Debug)]
 struct Shared {
     table: Mutex<Table>,
-    /// Notified when a helper has left the table.
+    /// Notified when a helper has left the table, and when one that left has been joined.
     left: Condvar,
     /// Where a helper's start and end are counted too, if anywhere.
     counters: Option<&'static Counters>,
@@ -176,8 +178,11 @@ struct Shared {
 #[derive(Debug, Default)]
 struct Table {
     waits: BTreeMap<LockKey, Entry>,
-    /// The helpers that have left the table and are not joined yet.
+    /// The helpers that have left the table and that no thread has begun to join yet.
     ended: Vec<JoinHandle<()>>,
+    /// The helpers taken out of `ended` whose join is not over: each is in exactly one of
+    /// `ended`, this count and `joined` from the moment it leaves the table.
+    joining: usize,
     /// The next claim's id.
     next_id: u64,
     /// Helpers started.
@@ -308,22 +313,37 @@ impl Waits {
 
     /// [`settled`], on this table.
     fn settled(&self, key: &LockKey) {
-        let mut table = self.table();
-        while table.waits.contains_key(key) {
-            table = (self.0.left.wait(table)).unwrap_or_else(PoisonError::into_inner);
+        loop {
+            // Until the helper has left the table and no thread is inside a join: a handle
+            // another thread took is that thread's to join, and its helper may still be
+            // returning.
+            let mut table = self.table();
+            while table.waits.contains_key(key) || table.joining > 0 {
+                table = (self.0.left.wait(table)).unwrap_or_else(PoisonError::into_inner);
+            }
+            if table.ended.is_empty() {
+                return;
+            }
+            // The mutex was let go for these joins, so the table is read again after them.
+            self.join_ended(table);
         }
-        self.join_ended(table);
     }
 
     /// Joins the helpers that have ended, after letting `table` go: each has left the table and
-    /// is returning, so no join waits on a lock.
+    /// is returning, so no join waits on a lock. They are counted in [`Table::joining`] until
+    /// their join is over, and [`Shared::left`] is notified after each.
     fn join_ended(&self, mut table: MutexGuard<'_, Table>) {
         let ended = std::mem::take(&mut table.ended);
+        table.joining += ended.len();
         drop(table);
         for thread in ended {
             // A helper that panicked has ended too.
             let _ = thread.join();
-            self.table().joined += 1;
+            let mut table = self.table();
+            table.joining -= 1;
+            table.joined += 1;
+            drop(table);
+            self.0.left.notify_all();
         }
     }
 
@@ -350,6 +370,8 @@ fn lock_blocking(file: &File) -> io::Result<()> {
 mod tests {
     use std::fs::{File, TryLockError};
     use std::path::{Path, PathBuf};
+    use std::sync::mpsc;
+    use std::thread;
     use std::time::Duration;
 
     use super::{Claim, LockKey, Locked, Waits};
@@ -532,5 +554,53 @@ mod tests {
         drop(handed(&b));
         waits.settled(&two.key);
         assert_eq!(waits.counts(), (2, 2), "both ended");
+    }
+
+    /// A helper that has left the table is joined by whichever thread takes its handle first,
+    /// and `settled` on another thread returns only once that join is over. The helper here is
+    /// a stand-in that ends when the test says, so its join lasts as long as the test wants.
+    #[test]
+    fn settled_waits_for_a_join_another_thread_began() {
+        let one = Fixture::new();
+        let two = Fixture::in_table(one.waits.clone());
+        let (end, told_to_end) = mpsc::channel::<()>();
+        let helper = thread::spawn(move || {
+            let _ = told_to_end.recv();
+        });
+        one.waits.table().ended.push(helper);
+
+        // A thread that settles the other file takes the handle and blocks in its join.
+        let joiner = {
+            let (waits, key) = (two.waits.clone(), two.key);
+            thread::spawn(move || waits.settled(&key))
+        };
+        while !one.waits.table().ended.is_empty() {
+            thread::yield_now();
+        }
+
+        let (start, started) = mpsc::channel();
+        let (finish, finished) = mpsc::channel();
+        let waiter = {
+            let (waits, key) = (one.waits.clone(), one.key);
+            thread::spawn(move || {
+                start.send(()).unwrap();
+                waits.settled(&key);
+                finish.send(waits.counts()).unwrap();
+            })
+        };
+        started.recv().unwrap();
+        assert!(
+            finished.recv_timeout(SHORT).is_err(),
+            "settled while the helper was still being joined"
+        );
+
+        end.send(()).unwrap();
+        assert_eq!(
+            finished.recv_timeout(LONG).unwrap(),
+            (0, 1),
+            "settled once the helper was joined"
+        );
+        joiner.join().unwrap();
+        waiter.join().unwrap();
     }
 }
