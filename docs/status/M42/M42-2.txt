@@ -1,0 +1,1 @@
+A land's changeset can be sealed with a signature so that git_oid version 1 exports it byte for byte as the commit that was signed; no command signs a land yet.

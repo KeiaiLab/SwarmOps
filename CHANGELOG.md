@@ -41,6 +41,10 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   whatever it names. The reason: a fetch of a signed commit must find the land that made it, and
   a store that took the commit through git holds a second changeset of it, which exports to the
   same commit.
+- Docs: the roadmap's M42-2 is the signed changeset, no longer a signature record in a
+  `FORMAT 3` fact, and M42 no longer depends on M20. The reason: an export oid is a function of
+  a changeset's object and its parents' values, so a record beside the changeset cannot decide
+  it, and a store that received the changeset without the record would export another commit.
 - Docs: the roadmap's four slices M7-C1, M7-C2, M22-C1 and M22-C3 read `planned`, no longer
   `proposed`: M7's check record and gate, and the queue's prepared attempt and its land on final
   results, ship ahead of the rest of M7 and M22 (the maintainers' decision of 2026-11-28). The

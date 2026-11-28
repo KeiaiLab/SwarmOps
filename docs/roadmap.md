@@ -1484,7 +1484,7 @@ What does not change:
 - The process that answers a connection runs no command a repository defines. Checks run on
   runners, which are clients.
 - A private key or a token never enters a record, a log line or an envelope.
-- A land that must be signed moves no ref unless its signature is recorded with it.
+- A land that must be signed moves a ref only to a changeset that carries its signature.
 
 ### M41: A forge as the remote
 
@@ -1512,13 +1512,13 @@ A commit that a store makes carries no signature, so a branch that requires sign
 refuses it, and a deployment that verifies signatures refuses what a queue landed. Signing is done
 by the user's own tool, as transport is done by the user's git: SwarmOps runs `ssh-keygen -Y sign`
 or `gpg` and holds no private key. A signature is over the exported commit's bytes, and an export
-must give the same commit id on every run, so a signature is made once, recorded, and written out
-again. 8 units.
+must give the same commit id on every run, so a signature is made once, when the land makes its
+changeset, kept in that changeset, and written out again. 8 units.
 
 | Slice | Deliverable | Depends on | State |
 | --- | --- | --- | --- |
 | M42-1 | The signing file, beside the access file, `version = 1`: per identity, the format (`ssh` or `openpgp`) and the key's public half; per target pattern, whether a land must be signed and by whom, the lander or the store's own identity; an invalid file refuses every land onto a target it names | M14 | planned |
-| M42-2 | The signature record: a `FORMAT 3` fact that holds, for one changeset, the signature over its exported commit's bytes and the signer; the export writes it as the commit's `gpgsig` header, so the same changeset exports to the same commit id on every host and in every run; an older build refuses a store that holds one with `E_STORE_TOO_NEW` | M20, M8 | planned |
+| M42-2 | The signed changeset: a signed land writes one changeset that carries the signature as its `gpgsig` header, the commit's trailers in its message and the commit's id as `git.oid`, which `git_oid` version 1 already exports byte for byte as the commit that was signed, so the same changeset exports to the same commit id on every host and in every run; no record kind and no feature, so an older build reads and exports the store unchanged, and does not know the signing file | M8 | planned |
 | M42-3 | A land is signed before its ref moves: on a target the signing file names, `land` and the queue prepare the commit, have the signer's tool sign it outside the writer lock, and write the changeset, the record and the ref move in one journal transaction; a target that moved meanwhile makes the land prepare and sign again; a tool that fails or a key the file does not name refuses the land, and nothing moves | M42-1, M42-2, M22 | planned |
 | M42-4 | Signatures and rewriting: `rebase`, `revert` and `op undo` make new changesets, which are signed when they land; a changeset already exported is never given a signature, since its commit id would change | M42-3 | planned |
 | M42-5 | Reading signatures: `show` and `log` give each commit's signer and one of `good`, `bad`, `unknown_key` or `none`, checked with the user's tool against the signing file's public keys; a commit imported from git, whose `gpgsig` header the store already keeps verbatim, reads the same way | M42-1 | planned |
@@ -1570,8 +1570,8 @@ tokens, and volume snapshots. 9 units.
 
 M41, M42 and M43 do not wait for each other as wholes: a unit lands when what it depends on is in.
 M41's bridge units wait for M32's, and its publish for M22-R. M42's first six units need only the
-access file and `FORMAT 3`. M43's listener needs M17's serve path, whose targets are not all met
-yet ([To usable](#to-usable)). M44 comes last, since it packages the other three.
+git export; the queue's signing needs M22. M43's listener needs M17's serve path, whose targets
+are not all met yet ([To usable](#to-usable)). M44 comes last, since it packages the other three.
 
 What holds for every unit, as for [checks and delivery](#deliverables-3): its acceptance is a test
 in `just check`, offline, and no acceptance states a speed or a duration. The units that talk to a
@@ -1674,8 +1674,8 @@ order   running on a cluster, as planned:
         M41 ∥ M42 ∥ M43 → M44; a unit lands when what it depends on is in
 needs   M41  ← M13, M22-R, M32
                the git remote, the queue's publish, the bridge commands
-        M42  ← M8, M13, M14, M20, M22, M43
-               the export, the access file, FORMAT 3's facts, the queue, the service (M42-7 alone)
+        M42  ← M8, M13, M14, M22, M43
+               the export, the access file, the queue, the service (M42-7 alone)
         M43  ← M14, M17, M21, M22, M33, M41
                the serve path, health, the queue's runner, the trigger pass, the forge kind (M43-8 alone)
         M44  ← M6, M34, M41, M42, M43
@@ -1724,7 +1724,7 @@ and M22-C3 stand where the order above puts them, ahead of the rest of M7 and M2
 | 📋 M39 | — | Caches and set-up time: kept directories and their scopes, kept workspaces, keyed caches, groups fitted to recorded timings, size advice | M34, M31, M30, M19 | A candidate cannot change what a trunk run restores |
 | 📋 M40 | — | Figures, cost and events: check figures in health, runs per landed change, the runner-seconds ledger, budgets, event delivery | M33, M32, M30, M21 | G27 measured |
 | 📋 M41 | 2 | A forge as the remote: the forge kind and its credential, the bridge commands against Forgejo and Gitea, the queue's publish to a protected branch, `remote request` | M13, M22-R, M32 | A queued land reaches a Forgejo branch that only a named identity may push, as the tree its checks ran on; every bridge command passes offline and in the weekly live run |
-| 📋 M42 | — | Signed commits: the signing file, the signature record, lands signed before their ref moves, signatures read and required at intake, the store signing as itself | M20, M14, M13, M8, M22, M43 | A signed land exports to the same commit id in every run, and the forge and `git verify-commit` accept it; a land that cannot be signed moves no ref |
+| 📋 M42 | — | Signed commits: the signing file, the signed changeset, lands signed before their ref moves, signatures read and required at intake, the store signing as itself | M14, M13, M8, M22, M43 | A signed land exports to the same commit id in every run, and the forge and `git verify-commit` accept it; a land that cannot be signed moves no ref |
 | 📋 M43 | 1, 3 | A resident service: `serve --listen`, its callers, one service per store, drain, the queue and the trigger pass run by the service, a forge's events, figures over HTTP | M14, M17, M21, M22, M33, M41 | An entry enqueued over the wire lands with no client waiting; every kill sweep passes against the service; a store no service serves works as before |
 | 📋 M44 | — | A store on a cluster: the chart on the service, one pod as a rule, runners as jobs and their launcher, keys and tokens from Secrets, backup from a snapshot | M43, M42, M41, M34, M6 | On a throwaway cluster, weekly: a change lands through the queue, its check runs as a job, and the signed land reaches a forge |
 
