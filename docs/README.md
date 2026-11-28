@@ -39,7 +39,7 @@ is still open.
 ## What SwarmOps does not do
 
 [Goals, Non-goals](goals.md#non-goals) lists what SwarmOps does not set out to be: among them a
-general-purpose replacement of git, a cluster, and writes without a lock.
+general-purpose replacement of git, a store on several hosts at once, and writes without a lock.
 [Known limitations](known-limitations.md) lists what is still open, and which milestone takes each
 item.
 

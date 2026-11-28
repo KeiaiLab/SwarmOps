@@ -67,9 +67,9 @@ and a way back to git so that existing CI and deployments keep running.
 ## What it is not
 
 - **Not a general-purpose git replacement.** Parity with git is not a v1 goal: no user hooks,
-  signing, submodules or LFS.
-- **Not a cluster.** SwarmOps is one program with no daemon and no external database. It does
-  not scale horizontally.
+  submodules or LFS, and signed commits are planned, not built.
+- **Not a store on several hosts at once.** SwarmOps is one program with no daemon and no
+  external database. It does not scale horizontally: one volume, one writer.
 - **Not a hosted service.** There is no SwarmOps cloud: a store lives on a host you run, and stores
   on other hosts follow it over `so://` or git through `swarmops serve`.
 - **Not a review tool yet.** SwarmOps does not hold a landing for a person's approval; review stays

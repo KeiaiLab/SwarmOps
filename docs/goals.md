@@ -64,15 +64,18 @@ milestone delivers it. [docs/perf.md](perf.md) holds every measurement,
 ## Non-goals
 
 - **A general-purpose git replacement.** Parity with git is not a v1 goal: no user hooks,
-  signing, submodules or LFS. A check is not a hook: it runs outside every store operation, on
+  submodules or LFS. Signed commits are planned, not built
+  ([docs/roadmap.md](roadmap.md#m42-signed-commits)); signed build records are not. A check is not a hook: it runs outside every store operation, on
   the caller's host or a runner's, and reaches the store only as a recorded result that the
   landing gate reads.
-- **A cluster.** SwarmOps is one program with no daemon and no external database. The store does
-  not scale horizontally, and an always-on RPC server is a follow-up after v1, not a milestone.
+- **A store on several hosts at once.** SwarmOps is one program with no daemon and no external
+  database, and the store does not scale horizontally: one volume, one writer. A store may run on
+  a cluster as one pod, and an optional service that stays is planned
+  ([docs/roadmap.md](roadmap.md#running-on-a-cluster)); the program needs neither.
   `swarmops serve` (M14, M11) runs per connection, under ssh or as a CGI program, so it adds no
   daemon. Checks add none either: a runner is a client that asks a store for work, the host's own
-  timer starts scheduled work, and the store's records are the only queue. A service that keeps
-  runners and timers running for its users is built around the program, not into it.
+  timer starts scheduled work, and the store's records are the only queue. A hosted service that
+  keeps machines and runners running for its users is built around the program, not into it.
 - **Writes without a lock.** Object writes take no lock; metadata writes take one, which orders
   every commit and ref move.
 - **Speed bought with durability.** No fast mode exists unless a measurement in
