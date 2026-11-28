@@ -100,6 +100,11 @@
 //! The exact publish ([`Repo::publish_exact`], the M22 core design §5 step 8) is a landing
 //! queue's green prefix, a chain already inserted: the target's move from the chain's head to
 //! its tip, whose tree passed its check, and each entry's Landed fact, one frame or nothing.
+//!
+//! The seal ([`Seal`], [`SealFn`]) is what a land's caller gives the changeset a land makes when
+//! the land must carry a signature: the message, the extra headers and the metadata of the commit
+//! that was signed, which the repository cannot render itself. A refusal is
+//! [`RepoError::SealRefused`], the caller's own error inside it.
 
 mod batch;
 mod detached;
@@ -110,6 +115,7 @@ mod landing;
 mod plan;
 mod publish;
 mod resolve;
+mod seal;
 
 pub use detached::{DetachedLand, DetachedOutcome};
 pub use exact::{ExactPublish, ExactPublished};
@@ -128,6 +134,7 @@ pub use plan::{
 };
 pub use publish::{Publication, Published, Relocate};
 pub use resolve::{Resolution, Resolutions, Side};
+pub use seal::{Seal, SealFn, SealRefused};
 
 use swarmops_store::ObjectStore;
 

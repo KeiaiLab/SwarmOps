@@ -6,7 +6,7 @@ use swarmops_core::{BlobId, ChangesetId, CodecError, ObjectId, ObjectKind, RepoP
 use swarmops_store::{IoFailure, Recovered, StoreError};
 use thiserror::Error;
 
-use crate::land::{MergeConflicts, NothingToLandReason};
+use crate::land::{MergeConflicts, NothingToLandReason, SealRefused};
 use crate::oplog::{OpId, OpNotFoundReason};
 use crate::queue::EntryId;
 
@@ -350,6 +350,11 @@ pub enum RepoError {
         /// The most changesets a revert takes.
         max: usize,
     },
+    /// The function that seals a land's changeset gave no seal ([`crate::land::SealFn`]): the
+    /// signer's tool failed, or the lander may not sign. Carries the caller's own error, which
+    /// the repository does not read. Nothing was recorded.
+    #[error("the seal of a land's changeset was refused: {0}")]
+    SealRefused(#[from] SealRefused),
     /// [`crate::Repo::derive_eager`] was given an `after` past the journal's last frame: no
     /// call of it read that frame, so it is no frame to go on after.
     #[error("frame {after} is past the journal's end")]

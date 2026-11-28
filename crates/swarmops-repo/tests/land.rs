@@ -23,9 +23,10 @@ use std::thread;
 use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use swarmops_core::{ChangesetId, ObjectId, RepoPath, Signature};
+use swarmops_core::{Changeset, ChangesetId, CodecError, ObjectId, RepoPath, Signature, Tree};
 use swarmops_repo::land::{
-    Gated, LandOutcome, LandRequest, LandStatus, NothingToLandReason, backoff,
+    Gated, LandOutcome, LandRequest, LandStatus, NothingToLandReason, Seal, SealFn, SealRefused,
+    backoff,
 };
 use swarmops_repo::merge::tree_diff::{PathFilter, delta_of};
 use swarmops_repo::{Advance, Change, CommitRequest, Depth, LocalRepo, OpId, RepoError};
@@ -2038,6 +2039,134 @@ fn the_backoff_follows_ops_spec_step_7() {
         backoff(32, b"x") < Duration::from_secs(3),
         "at most 2 s, times the factor"
     );
+}
+
+/// A changeset as a land makes it before a seal: one parent, the lander its committer, no extra
+/// header, and a land's metadata. No store holds it.
+fn unsealed() -> Changeset {
+    let metadata = [
+        ("agent", ACTOR),
+        ("land_key", "k-1"),
+        ("lander", LANDER),
+        ("squashed_from", "aa bb"),
+    ];
+    Changeset::new(
+        vec![ChangesetId::new(ObjectId::new([1; 32]))],
+        Tree::empty_root().id(),
+        Vec::new(),
+        swarmops_testkit::repo::signature(),
+        lander(),
+        b"Land it\n".to_vec(),
+        Vec::new(),
+        (metadata.into_iter())
+            .map(|(key, value)| (key.to_owned(), value.as_bytes().to_vec()))
+            .collect(),
+    )
+    .unwrap()
+}
+
+/// A seal gives a land's changeset its message, its extra headers and more metadata: the sealed
+/// changeset keeps everything else, and its metadata is the two lists merged by key, so that it
+/// is canonical whatever order the seal gives its own in.
+#[test]
+fn a_seal_s_metadata_is_merged_in_order() {
+    let unsigned = unsealed();
+    let armor = b"-----BEGIN-----\nabc\n-----END-----".to_vec();
+    let headers = vec![(b"gpgsig".to_vec(), armor)];
+    let commit: &[u8] = b"0123456789abcdef0123456789abcdef01234567";
+    let seal = Seal::new(
+        b"Land it\n\nSwarmOps-Land-Key: k-1\n".to_vec(),
+        headers.clone(),
+        vec![
+            ("zeta".to_owned(), b"last".to_vec()),
+            ("git.oid".to_owned(), commit.to_vec()),
+            ("a".to_owned(), b"first".to_vec()),
+        ],
+    );
+    let sealed = seal.apply(&unsigned).unwrap();
+
+    // 1. The seal's message and headers, the unsigned changeset's parents, root, delta and
+    // signatures.
+    assert_eq!(sealed.message, b"Land it\n\nSwarmOps-Land-Key: k-1\n");
+    assert_eq!(sealed.extra_headers, headers);
+    assert_eq!(
+        (&sealed.parents, sealed.root, &sealed.delta),
+        (&unsigned.parents, unsigned.root, &unsigned.delta)
+    );
+    assert_eq!(
+        (&sealed.author, &sealed.committer),
+        (&unsigned.author, &unsigned.committer)
+    );
+
+    // 2. Both lists' entries, keys ascending, each with its own value.
+    let metadata: Vec<(&str, &[u8])> = (sealed.metadata.iter())
+        .map(|(key, value)| (key.as_str(), value.as_slice()))
+        .collect();
+    let expected: [(&str, &[u8]); 7] = [
+        ("a", b"first"),
+        ("agent", ACTOR.as_bytes()),
+        ("git.oid", commit),
+        ("land_key", b"k-1"),
+        ("lander", LANDER.as_bytes()),
+        ("squashed_from", b"aa bb"),
+        ("zeta", b"last"),
+    ];
+    assert_eq!(metadata, expected);
+
+    // 3. So it is a canonical changeset, of another id than the unsigned one.
+    let bytes = sealed.encode().unwrap();
+    assert_eq!(Changeset::decode(&bytes).unwrap(), sealed);
+    assert_ne!(sealed.id().unwrap(), unsigned.id().unwrap());
+
+    // 4. A seal that adds no metadata leaves the unsigned changeset's.
+    let plain = Seal::new(b"m".to_vec(), Vec::new(), Vec::new());
+    assert_eq!(plain.apply(&unsigned).unwrap().metadata, unsigned.metadata);
+}
+
+/// A seal cannot replace a metadata value: a key the unsigned changeset holds already, or one
+/// the seal gives twice, makes no changeset.
+#[test]
+fn a_seal_that_repeats_a_key_is_a_codec_error() {
+    let unsigned = unsealed();
+    let seal = |metadata: &[(&str, &[u8])]| {
+        let metadata = (metadata.iter())
+            .map(|&(key, value)| (key.to_owned(), value.to_vec()))
+            .collect();
+        Seal::new(b"Land it\n".to_vec(), Vec::new(), metadata)
+    };
+
+    let held = seal(&[("lander", b"another/lander")]);
+    assert_eq!(held.apply(&unsigned), Err(CodecError::UnsortedMetadata));
+    let twice = seal(&[("git.oid", b"aa"), ("git.oid", b"bb")]);
+    assert_eq!(twice.apply(&unsigned), Err(CodecError::UnsortedMetadata));
+    let fresh = seal(&[("git.oid", b"aa")]);
+    assert!(fresh.apply(&unsigned).is_ok());
+}
+
+/// A seal function is called with the unsigned changeset, and what it refuses with comes back
+/// to its caller as it gave it, inside the repository's error.
+#[test]
+fn a_refused_seal_keeps_the_error_it_was_given() {
+    let unsigned = unsealed();
+    let mut seen = Vec::new();
+    let mut refuse = |cs: &Changeset| -> Result<Seal, SealRefused> {
+        seen.push(cs.message.clone());
+        Err(SealRefused::new(io::Error::other("the signer has no key")))
+    };
+    let sealed = |seal: &mut SealFn<'_>| -> Result<Changeset, RepoError> {
+        Ok(seal(&unsigned)?.apply(&unsigned)?)
+    };
+    let error = sealed(&mut refuse).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the seal of a land's changeset was refused: the signer has no key"
+    );
+    let RepoError::SealRefused(refused) = error else {
+        panic!("expected a refused seal, got {error}");
+    };
+    let given = refused.0.downcast::<io::Error>().expect("the error given");
+    assert_eq!(given.to_string(), "the signer has no key");
+    assert_eq!(seen, [b"Land it\n".to_vec()]);
 }
 
 /// `Repo::merge` and `Repo::merge_trees` merge with the three-way text merge: edits apart in one
