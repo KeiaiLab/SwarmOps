@@ -2,22 +2,25 @@
 //! tree they match.
 //!
 //! ```text
-//!   inputs = ["docs/**", "README.md"] ─ parse ─▶ Inputs: sorted, none twice
-//!                                                  │
+//!   inputs = ["crates/app/**", "Cargo.toml"] ─ parse ─▶ Inputs: sorted, none twice
+//!                                                         │
 //!       a path ─ Inputs::matches ─▶ whether one of the patterns matches it
 //!       a tree ─ resolve ────────▶ Entries: (path, kind, blob id), each once, by path bytes
 //!                resolve_one ────▶ the same for one pattern, walking below its names only
 //!   no inputs ─ resolve ─────────▶ Whole: the tree itself is the input
 //! ```
 //!
-//! The grammar is `access.toml`'s, read by the one matcher both share: `/`-separated segments,
-//! each a name or `*` (one whole segment), the last one possibly `**` (every depth below, at
-//! least one segment). A name must be one a repository path may hold. `docs/*` matches
-//! `docs/a.md`, not `docs/a/b.md`; `docs/**` matches both, not `docs`.
+//! A pattern is written as `access.toml` writes the names of its refs, and the one matcher
+//! reads both. It is segments between `/`: a segment is a name, which must be one a repository
+//! path may hold, or `*`, which stands for any one segment; the last may be `**`, which stands
+//! for one segment or more. So `crates/*/Cargo.toml` matches `crates/app/Cargo.toml` and not
+//! `crates/app/sub/Cargo.toml`, and `crates/app/**` matches every path below `crates/app` and
+//! not `crates/app` itself.
 //!
-//! A pattern matches files, executables and symbolic links, a link by its own path and never
-//! by what it points at. It matches no directory: `web` names an entry `web`, and matches
-//! nothing in a tree where `web` is a directory.
+//! A pattern is matched against a path from the tree's root, whatever directory its check runs
+//! in. It matches files, executables and symbolic links, a link by its own path and never by
+//! what it points at. It matches no directory: `web` names an entry `web`, and matches nothing
+//! in a tree where `web` is a directory.
 //!
 //! A tree is read through [`Tree`], one directory at a time: [`StoreTree`] reads a changeset's
 //! tree from a store, [`HostTree`] the files below a directory of the caller's host. A walk

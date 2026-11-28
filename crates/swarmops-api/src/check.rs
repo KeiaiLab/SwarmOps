@@ -170,10 +170,10 @@ pub struct CheckOut {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reports: Vec<CheckReportOut>,
     /// The paths it reads, as the patterns its `inputs` declares, sorted bytewise whatever order
-    /// the file wrote them in: `/`-separated segments, each a name or `*` (one whole segment),
-    /// the last one possibly `**` (every depth below). A pattern matches files, executables and
-    /// symbolic links, a link by its own path. Omitted when it declares none: it reads the whole
-    /// tree.
+    /// the file wrote them in. A pattern is matched against a path from the tree's root, whatever
+    /// the check's `dir`: segments between `/`, each a name or `*` (any one segment), the last
+    /// possibly `**` (one segment or more). It matches files, executables and symbolic links, a
+    /// link by its own path. Omitted when it declares none: it reads the whole tree.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<String>,
     /// The line of `.swarmops/checks.toml` that starts its table. Omitted for the check

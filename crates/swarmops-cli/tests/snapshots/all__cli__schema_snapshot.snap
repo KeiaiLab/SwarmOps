@@ -1496,7 +1496,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "inputs": {
-              "description": "The paths it reads, as the patterns its `inputs` declares, sorted bytewise whatever order\nthe file wrote them in: `/`-separated segments, each a name or `*` (one whole segment),\nthe last one possibly `**` (every depth below). A pattern matches files, executables and\nsymbolic links, a link by its own path. Omitted when it declares none: it reads the whole\ntree.",
+              "description": "The paths it reads, as the patterns its `inputs` declares, sorted bytewise whatever order\nthe file wrote them in. A pattern is matched against a path from the tree's root, whatever\nthe check's `dir`: segments between `/`, each a name or `*` (any one segment), the last\npossibly `**` (one segment or more). It matches files, executables and symbolic links, a\nlink by its own path. Omitted when it declares none: it reads the whole tree.",
               "items": {
                 "type": "string"
               },
@@ -2452,7 +2452,7 @@ expression: s.redact(&all)
           "type": "string"
         },
         "inputs": {
-          "description": "The paths it reads, as the patterns its `inputs` declares, sorted bytewise whatever order\nthe file wrote them in: `/`-separated segments, each a name or `*` (one whole segment),\nthe last one possibly `**` (every depth below). A pattern matches files, executables and\nsymbolic links, a link by its own path. Omitted when it declares none: it reads the whole\ntree.",
+          "description": "The paths it reads, as the patterns its `inputs` declares, sorted bytewise whatever order\nthe file wrote them in. A pattern is matched against a path from the tree's root, whatever\nthe check's `dir`: segments between `/`, each a name or `*` (any one segment), the last\npossibly `**` (one segment or more). It matches files, executables and symbolic links, a\nlink by its own path. Omitted when it declares none: it reads the whole tree.",
           "items": {
             "type": "string"
           },
