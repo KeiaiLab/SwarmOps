@@ -670,7 +670,7 @@ fn two_changesets_of_one_signed_commit_do_not_diverge() {
         assert_eq!(entry, Some(ExternalEntry::new(twin, true)), "{key:?}");
 
         // 5. A commit made in git on it imports, on the changeset the index names.
-        commit_in_git(&remote.dir, oid, "c");
+        let made = commit_in_git(&remote.dir, oid, "c");
         let (imported, child) = fetch_main(&second, &remote.dir);
         assert_eq!(imported, 1, "{key:?}");
         assert_eq!(changeset(&second, child).parents, [twin], "{key:?}");
@@ -694,9 +694,15 @@ fn two_changesets_of_one_signed_commit_do_not_diverge() {
         );
 
         // 7. In the store that made the land, the index names it, and no second changeset is
-        // made: the commit made in git comes back on the land itself.
-        let (imported, child) = fetch_main(&first, &remote.dir);
+        // made: the commit made in git comes back on the land itself. So the import of that
+        // commit is another changeset there than in the second store, as its parent is, and so
+        // on up the history; each exports to the commit git made, as it is.
+        let (imported, above) = fetch_main(&first, &remote.dir);
         assert_eq!(imported, 1, "{key:?}");
-        assert_eq!(changeset(&first, child).parents, [land], "{key:?}");
+        assert_eq!(changeset(&first, above).parents, [land], "{key:?}");
+        assert_ne!(above, child, "{key:?}");
+        let kept = ExportedOid::new(made.0, true);
+        assert_eq!(derived(&first, above), kept, "{key:?}");
+        assert_eq!(derived(&second, child), kept, "{key:?}");
     }
 }

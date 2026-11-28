@@ -90,12 +90,15 @@ pub struct Converted {
     /// The classes of what it lost: empty exactly when it renders back to its own id.
     pub lossy: LossySet,
     /// The changeset's metadata, keys ascending: [`GIT_LOSSY`] when anything was lost, then
-    /// [`GIT_OID`]. Nothing else, no `agent` among them: the same git commit is the same
-    /// changeset the import makes in every store (the M3 plan's decision 15). A changeset the
-    /// import did not make may hold the same commit beside it: a signed land holds its commit's
-    /// id as [`GIT_OID`] with the land's own metadata ([`crate::sign`]), and a store that takes
-    /// that commit through git, never having held the land, makes this one. Both export to the
-    /// one commit.
+    /// [`GIT_OID`]. Nothing else, no `agent` among them, so nothing of the importing store goes
+    /// into the changeset: the same git commit is the same changeset the import makes in every
+    /// store that holds the same changesets of its parents (the M3 plan's decision 15). A
+    /// changeset the import did not make may hold the same commit beside it: a signed land holds
+    /// its commit's id as [`GIT_OID`] with the land's own metadata ([`crate::sign`]), and a
+    /// store that takes that commit through git, never having held the land, makes this one.
+    /// Both export to the one commit. The commits above it then import as other changesets in
+    /// that store than in the land's, each on the changeset its store's index names for its
+    /// parent, and export to the same commits all the same.
     pub metadata: Vec<(String, Vec<u8>)>,
 }
 

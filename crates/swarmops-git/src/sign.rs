@@ -32,7 +32,10 @@
 //! - `L` keeps the land's metadata beside [`GIT_OID`] (`lander`, `agent`, `land_key`,
 //!   `squashed_from`), which the land's replay and the readers of a land need. A store that takes
 //!   the commit through git without ever holding `L` imports another changeset of it, with
-//!   [`GIT_OID`] alone. Both export to the one commit, so the histories do not diverge.
+//!   [`GIT_OID`] alone, and the commits made in git above it onto that one: their changesets
+//!   differ from those of the store that holds `L`, as their parents do, all the way up. Each
+//!   exports to its own commit in both stores, so the git histories do not diverge; the
+//!   changeset ids above a signed land do.
 //! - A changeset that exists is never given a signature: its id, and so its commit, would change.
 //!
 //! [`Sealer`] is the git side of a land's seal ([`swarmops_repo::land::SealFn`]): the operations
