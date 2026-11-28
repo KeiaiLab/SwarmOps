@@ -22,6 +22,11 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Changed
 
+- Docs: the roadmap's four slices M7-C1, M7-C2, M22-C1 and M22-C3 read `planned`, no longer
+  `proposed`: M7's check record and gate, and the queue's prepared attempt and its land on final
+  results, ship ahead of the rest of M7 and M22 (the maintainers' decision of 2026-11-28). The
+  reason: 68 of the 181 unit rows depend on one of the four, and M32 onward would otherwise wait
+  for all of blame and review.
 - Docs: the roadmap plans a second role, running on a cluster, in four milestones of 36 units:
   M41, a forge as the remote (Forgejo and Gitea beside GitHub behind the bridge commands, and the
   queue's publish to a protected branch); M42, signed commits; M43, a resident service

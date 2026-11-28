@@ -712,7 +712,8 @@ goal numbers G25 to G30; the check file's place and version, `.swarmops/checks.t
 that no daemon is added; what the open-source program holds and what a hosted service holds
 ([The hosted service](#the-hosted-service)); and that M30 and M31 start now, with steps 1 to 8 of
 the [first steps](#first-steps). The rest of the design below is what each milestone's plan
-confirms or replaces before its first unit is built. Three questions are open, and one point waits
+confirms or replaces before its first unit is built. Two questions are open, one was answered on
+2026-11-28, and one point waits
 for the maintainers ([Risks and open questions](#risks-and-open-questions-3)).
 
 ### What people and agents type
@@ -1132,23 +1133,24 @@ It builds on M21's windows, rules and metrics output, and adds figures, not a se
 
 Work this role needs from milestones that already exist. Each row is a proposal to the owning
 milestone's plan, which may accept it, change it or refuse it; until that plan answers, every unit
-that names the slice waits. The `C` in an id keeps it apart from the ids those plans use.
+that names the slice waits. The `C` in an id keeps it apart from the ids those plans use. Four
+rows are accepted and read `planned` (2026-11-28): M7-C1, M7-C2, M22-C1 and M22-C3.
 
 **Proposed to M7, blame and review.**
 
 | Slice | Deliverable | Depends on | State |
 | --- | --- | --- | --- |
-| M7-C1 | The `check` feature is released ahead of change requests and blame: a Check record carries the check's name, the check key, the root tree it is for, a state, a one-line summary and a report blob | M20 | proposed |
-| M7-C2 | The landing gate reads recorded results: a land onto a target with required checks (M32-15) is refused unless each has a counting result for the tree the land produces; the refusal names what is missing, under a code M7's plan names; the land's result names the results that admitted it | M7-C1, M32-15, M32-8 | proposed |
+| M7-C1 | The `check` feature is released ahead of change requests and blame: a Check record carries the check's name, the check key, the root tree it is for, a state, a one-line summary and a report blob | M20 | planned |
+| M7-C2 | The landing gate reads recorded results: a land onto a target with required checks (M32-15) is refused unless each has a counting result for the tree the land produces; the refusal names what is missing, under a code M7's plan names; the land's result names the results that admitted it | M7-C1, M32-15, M32-8 | planned |
 | M7-C3 | Trigger: a change request's new revision starts the `before-land` stage on its tree; drafts by option | M7, M33-3 | proposed |
 
 **Proposed to M22, the landing queue.**
 
 | Slice | Deliverable | Depends on | State |
 | --- | --- | --- | --- |
-| M22-C1 | An attempt prepares the land: a queue attempt writes the changeset the land would produce and an attempt record, and moves no ref, so that the tree can be written out, exported and checked before anything lands | M22, M18 | proposed |
+| M22-C1 | An attempt prepares the land: a queue attempt writes the changeset the land would produce and an attempt record, and moves no ref, so that the tree can be written out, exported and checked before anything lands | M22, M18 | planned |
 | M22-C2 | An attempt asks for its checks: the attempt and the wanted runs of its tree's `before-land` plan are one operation, so a land in the queue waits on no trigger pass; a push to `refs/land/` on a queued target enters the queue | M22-C1, M33-1, M30-4 | proposed |
-| M22-C3 | Land when the results are final: an entry lands by itself once every required result for its attempt's tree counts, and leaves the queue with a reason when one fails; whoever enqueued it need not wait | M22-C1, M7-C2 | proposed |
+| M22-C3 | Land when the results are final: an entry lands by itself once every required result for its attempt's tree counts, and leaves the queue with a reason when one fails; whoever enqueued it need not wait | M22-C1, M7-C2 | planned |
 | M22-C4 | Stacked attempts: the queue prepares each entry on the target plus the entries ahead of it; a failed entry leaves, and those behind are prepared again | M22-C1 | proposed |
 | M22-C5 | Queue bounds: how many attempts are checked at once, the smallest and largest batch that lands as one `land-group`, how long to wait for a batch and for results | M22-C4 | proposed |
 | M22-C6 | The batch verdict: every entry must pass, or only the batch's head; a failed batch is split until the failing entry is found | M22-C5 | proposed |
@@ -1242,9 +1244,9 @@ existing milestone or a unit of an earlier step.
 | 7 | A | M31-20 | The gate runs with `--shadow`: every check still runs, and each run records what the plan would have skipped. This is the evidence asked for before anything is skipped | Nothing; starts now |
 | 8 | A | M31-8 | The `bench-gate` and `perf-cases` jobs of `scheduled.yml` take the host's heavy lock as an exclusive group, in place of the lock taken in the workflow file | Nothing; starts now. Before it, how many machines the maintainers' runners are is settled: it decides where the lock's directory lives |
 | 9 | B | none | Not a unit, and no trunk moves: the maintainers' host keeps a store that follows `stable` and the candidate branches with `so sync` and `so fetch` (M13, as it is today). Agents read from it and plan against it; nothing lands in it. The rule on `stable`, `ci.yml` and the hand-made queue are unchanged | Nothing in this plan; an operator's step |
-| 10 | B | M32-11, M7-C1, M32-1, M32-2, M32-8 | A timer on the store's host runs `check fetch` for each commit the store follows: GitHub's green or red `tests-pass` becomes a recorded result on that commit's tree, written by an identity that runs no repository code. The store holds a verdict per tree. The check key's kind is frozen here | **Open:** whether M7's check record ships ahead of the rest of M7 |
-| 11 | B | M32-5, M32-3, M32-6 | A tree that passed is not checked again: the `check` job of `ci.yml` first asks `check status` for the changeset its commit names, a read of the store that needs no key, and ends green from the recorded result when it counts. The second gate run of every landed change stops, and the `feat/lq-*` skip in `site.yml` and `freshness.py` is deleted. Before it, how a job on a git checkout names the changeset of its commit is settled against the code | **Open:** the same question, through step 10 |
-| 12 | B | M22-C3, M22-C1, M7-C2, M32-15, M32-12, M32-4 | The trunk moves into the store, and the hand-made queue retires in the same step, so the store never holds a land its gate could not refuse. A land is a queue entry (M22's own `enqueue`); its attempt is offered to GitHub as a candidate branch under `feat/`; GitHub's runners check the tree the land will produce; `check fetch` records the verdict; the entry lands by itself, and `so sync` moves `stable` forward to the commit that was checked. An agent waits with `check wait` | **Open:** whether this repository's trunk moves into a store; whether M7's first slices ship early; the facts of the hand-made queue |
+| 10 | B | M32-11, M7-C1, M32-1, M32-2, M32-8 | A timer on the store's host runs `check fetch` for each commit the store follows: GitHub's green or red `tests-pass` becomes a recorded result on that commit's tree, written by an identity that runs no repository code. The store holds a verdict per tree. The check key's kind is frozen here | M7's check record ships ahead of the rest of M7 (decided 2026-11-28) |
+| 11 | B | M32-5, M32-3, M32-6 | A tree that passed is not checked again: the `check` job of `ci.yml` first asks `check status` for the changeset its commit names, a read of the store that needs no key, and ends green from the recorded result when it counts. The second gate run of every landed change stops, and the `feat/lq-*` skip in `site.yml` and `freshness.py` is deleted. Before it, how a job on a git checkout names the changeset of its commit is settled against the code | Step 10 |
+| 12 | B | M22-C3, M22-C1, M7-C2, M32-15, M32-12, M32-4 | The trunk moves into the store, and the hand-made queue retires in the same step, so the store never holds a land its gate could not refuse. A land is a queue entry (M22's own `enqueue`); its attempt is offered to GitHub as a candidate branch under `feat/`; GitHub's runners check the tree the land will produce; `check fetch` records the verdict; the entry lands by itself, and `so sync` moves `stable` forward to the commit that was checked. An agent waits with `check wait` | **Open:** whether this repository's trunk moves into a store; the facts of the hand-made queue |
 
 After step 8 the first half is in use with no format change and no store. After step 11 a landed
 change is gated once, not twice. After step 12 the trunk, the queue and the verdicts are SwarmOps',
@@ -1344,7 +1346,8 @@ measured again with run records and polling runners.
 
 ### Risks and open questions
 
-Three questions are open, and the page presents what depends on them as open:
+Two questions are open, and the page presents what depends on them as open; a third was answered
+on 2026-11-28:
 
 - **Whether this repository's trunk moves into a store.** Step 12 and step 16 wait on it. If the
   answer is no, steps 1 to 11 still stand: SwarmOps then starts, plans, reports and measures this
@@ -1353,9 +1356,9 @@ Three questions are open, and the page presents what depends on them as open:
   [To usable](#to-usable) holds on this repository, or that the maintainers name this repository
   the pilot. The way back: `stable` on GitHub stays a complete mirror through `so sync`, so
   stopping the sync and landing by merge returns to today's flow.
-- **Whether M7 ships its check record and gate (M7-C1, M7-C2), and M22 its proposed slices
+- **Answered on 2026-11-28: M7 ships its check record and gate (M7-C1, M7-C2), and M22 its slices
   M22-C1 and M22-C3 on its built core, ahead of the rest of M7, M9 and M23.** Steps 10 to 16
-  wait on it; steps 1 to 8 do not. If the answer is no, they wait for all of M7 and M22. Of the 181 rows of the tables above, 68
+  no longer wait on it. Of the 181 rows of the tables above, 68
   depend on one of those four slices, directly or through other rows.
 - **The facts of the hand-made landing queue this repository uses today**: what its candidate
   branch names encode, whether it batches, how long the gate takes, how many machines the runners
@@ -1682,9 +1685,9 @@ needs   M41  ← M13, M22-R, M32
 The units of M30 to M40 follow their own dependencies, not whole milestones: a unit lands when
 what it depends on is in, and a milestone's row turns to done when its last unit has landed. Each
 `needs` line of M30 to M40 is generated from the [unit tables](#deliverables-3): it is the union
-of what the milestone's units depend on outside it. Where M7's first slices and M22's proposed ones stand in
-that order is not decided ([Risks and open questions](#risks-and-open-questions-3)); M30 and M31
-do not depend on it and start now.
+of what the milestone's units depend on outside it. M7's first slices (M7-C1, M7-C2) and M22-C1
+and M22-C3 stand where the order above puts them, ahead of the rest of M7 and M22 (decided
+2026-11-28); M30 and M31 do not depend on them and start now.
 
 | Milestone | Topology | Deliverable | Depends on | Exit criteria |
 | --- | --- | --- | --- | --- |
@@ -1702,7 +1705,7 @@ do not depend on it and start now.
 | 📋 M20 | — | `FORMAT 3`: the sorted views under a manifest, the new record kinds, `upgrade` | its design | G18 at 1,000,000 records. Built, in v0.12.0: FORMAT 3 the default of `init`, its journal frames with a nonce (byte-identical operations get distinct ids), the fact records and their index behind named features, the sorted views as runs built after the lock is released, `upgrade` 2 → 3 keeping every op id, verify and repair on it, every crash, power-loss and kill sweep on all three formats, `E_STORE_TOO_NEW`, the release cut's golden check. Not measured yet: G18 at 1,000,000 records, A5's 1,000,000 commits, A1's commit cost and the 200,000-changeset upgrade ran only as a 20,000-changeset trial under load ([perf.md](perf.md#m20--format-3-at-1000000-records--2026-11-12-not-measured)) |
 | 📋 M21 | — | Health, drift and housekeeping | M17 | G24: a land p99 that climbs from 50 to 120 ms is marked as drift, and a steady run is not; G24 joins [docs/goals.md](goals.md) with its first measurement |
 | ✅ M22 | — | The landing queue | M20 (`FORMAT 3`) | On a local store: entries survive kill and power loss and the queue resumes (C8); candidates checked in parallel, ref moves in queue order, a red isolated by bisection (C2, C4); removal with a machine-readable reason (C3); CLI and MCP control (C9); 50 processes each with a 30 s check measured against A21's numbers, no lock spanning a check (A22). Built, in v0.13.0: `queue enqueue|status|withdraw|wait|run` and the four `queue_*` MCP tools, the kill, power-loss and SIGKILL sweeps of the runner. A22 measured: 50 of 50 landed once in 92.5 s, retries 0 %, the longest hold of the lock 72.4 ms ([perf.md](perf.md#m22--the-landing-queue-under-50-processes--2026-11-18)). Further slices proposed to its plan, not accepted yet: an attempt that prepares the land, landing when the results are final, stacked attempts and queue bounds (M22-C1 to M22-C7) |
-| 📋 M7 | — | Blame and review. Proposed to its plan, not accepted yet: its check record and the gate that reads recorded results come first (M7-C1, M7-C2), a change request's new revision becomes a trigger (M7-C3), and its remaining work (change requests, approvals, blame) follows M32 | M20 (`FORMAT 3`) | G11: blame, change requests, their classification, approvals and a landing gate ([docs/goals.md](goals.md)) |
+| 📋 M7 | — | Blame and review. Its check record and the gate that reads recorded results come first (M7-C1, M7-C2, accepted 2026-11-28); proposed to its plan, not accepted yet: a change request's new revision becomes a trigger (M7-C3); its remaining work (change requests, approvals, blame) follows M32 | M20 (`FORMAT 3`) | G11: blame, change requests, their classification, approvals and a landing gate ([docs/goals.md](goals.md)) |
 | 📋 M23 | — | Withdrawal and erasure | M20 | Every id kept |
 | 📋 M22-R | 2 | The queue's remote publish (Forgejo or git remote), postland, the land-direct cutover | M22, M13 | A queued land reaches the remote's branch as the checked tree |
 | 📋 M9 | — | Simulation and a benchmark gate | M20 | As the README states it |
@@ -1734,9 +1737,9 @@ stays after M9. The pilot may move any of these.
 Checks and delivery (M30 to M40) stands beside that order. What it needs from M7, M22 and M11 is
 proposed to those milestones' plans as slices
 ([Proposed slices of existing milestones](#proposed-slices-of-existing-milestones)), and their
-rows above say so. M22's core is built. Whether M7's check record and gate and M22-C1 and M22-C3
-ship ahead of the rest of M7 and M22 is not decided; if they do not, M32 onward wait for all of M7
-and M22.
+rows above say so. M22's core is built. M7's check record and gate and M22-C1 and M22-C3 ship
+ahead of the rest of M7 and M22 (decided 2026-11-28), so M32 onward wait for those four slices
+and not for all of M7 and M22.
 
 Running on a cluster (M41 to M44) stands beside both. It proposes no slice to another milestone:
 its units name the units they need, and wait for them.

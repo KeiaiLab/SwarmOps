@@ -61,12 +61,10 @@ The first steps happen in this repository's own checks:
 7. The gate runs in shadow mode and records what a plan would have skipped.
 8. The weekly heavy jobs take their host lock as an exclusive group.
 9. A store on the maintainers' host follows `stable`; nothing lands in it.
-10. GitHub's verdicts are recorded by tree. Waits on an open question: whether the check record of
-    M7 ships ahead of the rest of M7.
-11. A tree that passed is not checked again. Waits on the same question.
-12. The trunk moves into the store and its queue. Waits on three open questions: whether this
-    repository's trunk moves into a store, whether the first slices of M7 ship early, and
-    the facts of the queue this repository uses today.
+10. GitHub's verdicts are recorded by tree. The check record of M7 ships ahead of the rest of M7.
+11. A tree that passed is not checked again.
+12. The trunk moves into the store and its queue. Waits on two open questions: whether this
+    repository's trunk moves into a store, and the facts of the queue this repository uses today.
 
 Steps 1 to 8 use no store and write to none. No figure for this role is measured.
 
