@@ -36,7 +36,7 @@ use super::{MAX_CHECK_INPUTS, MAX_INPUT_PATTERN_BYTES, host_failed};
 use crate::error;
 use crate::pattern::{DEEP, ONE, Pattern, segments_match};
 
-/// The entries [`StoreTree`] asks a store for at a time.
+/// The entries a [`StoreTree`] asks a store for at a time.
 const STORE_PAGE: usize = 1_000;
 
 /// The permission bits that make a host's file an executable.
@@ -167,6 +167,9 @@ pub struct StoreTree<'s> {
     store: &'s dyn StoreOps,
     /// The changeset, by its full id, so that every page reads one tree.
     id: String,
+    /// The entries asked of the store at a time: [`STORE_PAGE`], but in a test that lists a
+    /// small directory over several pages.
+    page: usize,
 }
 
 impl<'s> StoreTree<'s> {
@@ -175,6 +178,7 @@ impl<'s> StoreTree<'s> {
         StoreTree {
             store,
             id: id.into(),
+            page: STORE_PAGE,
         }
     }
 }
@@ -189,7 +193,7 @@ impl Tree for StoreTree<'_> {
             let mut req = ReadTreeReq::new(self.id.as_str());
             req.path = dir.map(str::to_owned);
             req.depth = 1;
-            req.limit = STORE_PAGE;
+            req.limit = self.page;
             req.cursor = cursor.take();
             let page = match self.store.read_tree(req) {
                 Ok(page) => page,

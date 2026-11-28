@@ -8,7 +8,7 @@ use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use swarmops_api::{
     ChangeInput, ChangeOp, CommitReq, ContentInput, EntryKindOut, ErrorCode, Identity, ModeInput,
-    OpError, ResolveRevReq, StoreOps,
+    OpError, ReadTreeReq, ResolveRevReq, StoreOps,
 };
 
 use super::{Entry, HostTree, Inputs, Resolved, StoreTree, Tree, parse, resolve, resolve_one};
@@ -156,6 +156,64 @@ fn patterns_resolve_to_the_entries_they_match() {
     assert_eq!(none, (Vec::new(), true));
     let nothing = found(resolve(&tree, &inputs(&["web"]), 0).unwrap());
     assert_eq!(nothing, (Vec::new(), false));
+}
+
+/// A directory the store gives over several pages is listed whole: each entry once, in the
+/// store's order, whether a page holds one entry, a few, or the whole directory.
+#[test]
+fn a_directory_of_more_than_a_page_is_listed_whole() {
+    let (_dir, ops, id) = store_with(&FILES);
+
+    // 1. The store cuts the root's seven entries at a page of two, and hands back a cursor.
+    let mut req = ReadTreeReq::new(id.as_str());
+    req.limit = 2;
+    let cut = ops.read_tree(req).unwrap();
+    assert_eq!(cut.entries.len(), 2);
+    assert!(cut.truncated, "a page of two does not hold the root");
+    assert!(
+        cut.cursor.is_some(),
+        "a cut page names where the next begins"
+    );
+
+    // 2. Page by page, the root and the directories below it list as they do in one page.
+    let whole = StoreTree::new(&ops, id.as_str());
+    let root = [
+        "README.md",
+        "docs",
+        "docs-old",
+        "link",
+        "scripts",
+        "src",
+        "web",
+    ];
+    for page in [1, 2, 3, 6, 7, 8] {
+        let paged = StoreTree {
+            store: &ops,
+            id: id.clone(),
+            page,
+        };
+        let listed = paged.list(None).unwrap();
+        let names: Vec<&str> = listed.iter().map(|entry| entry.path.as_str()).collect();
+        assert_eq!(names, root, "a page of {page}");
+        assert_eq!(listed, whole.list(None).unwrap(), "a page of {page}");
+        for dir in ["docs", "docs/api", "missing"] {
+            let below = paged.list(Some(dir)).unwrap();
+            assert_eq!(below, whole.list(Some(dir)).unwrap(), "{dir} by {page}");
+        }
+        let below: Vec<String> = (paged.list(Some("docs")).unwrap().into_iter())
+            .map(|entry| entry.path)
+            .collect();
+        assert_eq!(below, ["docs/a.md", "docs/api", "docs/latest"], "by {page}");
+
+        // 3. So a resolve over pages finds what one over a single page finds.
+        let every = inputs(&["**"]);
+        assert_eq!(
+            resolve(&paged, &every, usize::MAX).unwrap(),
+            resolve(&whole, &every, usize::MAX).unwrap(),
+            "a page of {page}"
+        );
+        assert_eq!(paths(&paged, &["**"]).len(), FILES.len());
+    }
 }
 
 /// A tree that fails the test when it is listed.
