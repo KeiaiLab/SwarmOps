@@ -11,7 +11,13 @@
 //!                                          u8(format: 1 junit, 2 sarif) ‖ u64le(len) ‖ path
 //!   tag 5  inputs     unless none:         u64le(count) ‖ for each, sorted bytewise:
 //!                                          u64le(len) ‖ pattern
+//!   tag 6  needs      unless none:         u64le(count) ‖ for each, sorted bytewise:
+//!                                          u64le(len) ‖ name
+//!   tag 7  always     unless false:        u8(1)
 //! ```
+//!
+//! Tags 6 and 7 are kept for two keys the check file does not take yet, `needs` and `always`:
+//! nothing writes them, and no other field may take their numbers.
 //!
 //! The name is not hashed: a check renamed keeps its digest. A field at its default is left out,
 //! so a key added to the file later, while left out, changes no digest. `v0` says the recipe is
