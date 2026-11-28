@@ -224,10 +224,13 @@ impl Tree for StoreTree<'_> {
     }
 }
 
-/// The files below a directory of the caller's host, read as the tree a workspace there would
-/// hold: no link followed, `.swarmws` at the root and every `.git` directory left out, and so
-/// are a name that is not UTF-8 and an entry that is neither a file, a link nor a directory. An
-/// entry has no id. Only the caller stands behind what the directory holds.
+/// The files below a directory of the caller's host, no link followed. Every entry there is
+/// one of the tree's but `.swarmws` at the root, every `.git` directory, a name that is not
+/// UTF-8 and an entry that is neither a file, a link nor a directory. No ignore file is read:
+/// what `.gitignore` and `.swarmignore` keep out of a workspace's tree, build output for one,
+/// is listed here, so a directory that holds such files resolves to more than the store's tree
+/// of the same checkout. An entry has no id. Only the caller stands behind what the directory
+/// holds.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HostTree {
