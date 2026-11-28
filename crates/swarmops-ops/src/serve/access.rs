@@ -14,6 +14,7 @@ use toml::Spanned;
 use super::{IdentitySource, refused};
 use crate::LocalOps;
 use crate::error::{self, line_of};
+use crate::pattern::Pattern;
 
 /// The most bytes `access.toml` may hold: a longer one is invalid, `E_POLICY_DENIED`.
 pub const MAX_ACCESS_BYTES: u64 = 1 << 20;
@@ -26,12 +27,6 @@ const VERSION: i64 = 1;
 
 /// The ref a `force` pattern may never cover: a non-fast-forward on `main` is never allowed.
 const MAIN: &str = "main";
-
-/// A pattern's segment that matches any one segment.
-const ONE: &str = "*";
-
-/// A pattern's last segment that matches every depth below.
-const DEEP: &str = "**";
 
 /// What the hint of a connection that names no caller says to do.
 const NO_IDENTITY_HINT: &str = "name the caller with --as <family>/<instance> on serve's command \
@@ -98,54 +93,6 @@ impl Grant {
     fn reads(&self) -> bool {
         self.read || !self.push.is_empty() || !self.force.is_empty() || !self.land.is_empty()
     }
-}
-
-/// A name pattern: `/`-separated segments, each exact or `*`, the last one possibly `**`.
-///
-/// `feature/*` matches `feature/a`, not `feature/a/b`; `feature/**` matches both, not `feature`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Pattern {
-    /// The pattern's segments.
-    segments: Vec<String>,
-}
-
-impl Pattern {
-    /// The pattern `text`, or `None` if a segment is empty, holds a `*` beside other bytes, or
-    /// is a `**` that is not the last one.
-    fn parse(text: &str) -> Option<Pattern> {
-        let segments: Vec<String> = text.split('/').map(str::to_owned).collect();
-        let last = segments.len() - 1;
-        for (i, segment) in segments.iter().enumerate() {
-            let wild = segment == ONE || (segment == DEEP && i == last);
-            if segment.is_empty() || (segment.contains('*') && !wild) {
-                return None;
-            }
-        }
-        Some(Pattern { segments })
-    }
-
-    /// Whether `name` matches.
-    fn matches(&self, name: &str) -> bool {
-        let names: Vec<&str> = name.split('/').collect();
-
-        // 1. A trailing `**`: the segments before it, then at least one below.
-        if let Some((last, head)) = self.segments.split_last()
-            && last == DEEP
-        {
-            return names.len() > head.len() && segments_match(head, &names[..head.len()]);
-        }
-
-        // 2. Otherwise segment for segment.
-        names.len() == self.segments.len() && segments_match(&self.segments, &names)
-    }
-}
-
-/// Whether each name segment matches its pattern segment, exactly or by `*`.
-fn segments_match(patterns: &[String], names: &[&str]) -> bool {
-    patterns
-        .iter()
-        .zip(names)
-        .all(|(pattern, name)| pattern == ONE || pattern == name)
 }
 
 /// `access.toml` as written.

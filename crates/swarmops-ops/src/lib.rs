@@ -55,6 +55,7 @@ pub mod health;
 pub mod identity;
 mod local;
 pub mod native;
+mod pattern;
 mod phase;
 mod push;
 mod queue;
