@@ -55,7 +55,8 @@ use crate::{
     raw, render,
 };
 
-/// The key of the header that holds a commit's signature.
+/// The key of the header that holds a commit's signature, and what the key of every signature
+/// header starts with (`gpgsig-sha256`).
 const GPGSIG: &[u8] = b"gpgsig";
 
 /// The git side of a land's seal, and the reader of a stored changeset's signature: see [the
@@ -76,8 +77,8 @@ pub struct Sealer<'r> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SignedCommit {
-    /// The bytes the changeset exports to, without git's `commit <len>\0` header and without its
-    /// `gpgsig` header: what a signature of it covers.
+    /// The bytes the changeset exports to, without git's `commit <len>\0` header and without any
+    /// header whose key starts with `gpgsig`: what its `gpgsig` signature covers.
     pub payload: Vec<u8>,
     /// The `gpgsig` header's value with a line break after it, as the signer's tool printed it.
     pub signature: Vec<u8>,
@@ -215,11 +216,15 @@ impl<'r> Sealer<'r> {
     }
 
     /// What a check of changeset `id`'s signature reads: the bytes it exports to without their
-    /// `gpgsig` header, and that header's value with a line break after it; `None` for a
-    /// changeset with no `gpgsig` header. One function for a signed land and for a commit
-    /// imported from git, whose headers the store keeps verbatim. Every `gpgsig` header is left
-    /// out of the payload and their values joined, each with its line break, as git reads a
-    /// commit's signature; any other header (`gpgsig-sha256` too) stays in the payload.
+    /// signature headers, and the `gpgsig` header's value with a line break after it; `None`
+    /// for a changeset with no `gpgsig` header. One function for a signed land and for a commit
+    /// imported from git, whose headers the store keeps verbatim.
+    ///
+    /// Every header whose key starts with `gpgsig` is left out of the payload: git verifies a
+    /// commit's `gpgsig` signature over the commit without them. Those of the key `gpgsig`
+    /// itself give the signature, their values joined, each with its line break. Any other is
+    /// no part of either: `gpgsig-sha256`, the signature over the commit's SHA-256 form, which
+    /// a commit may hold beside its `gpgsig`. Every other header stays in the payload.
     ///
     /// The bytes are the changeset's rendering, so the signature of an import that exports to a
     /// new commit (one imported with a loss, or above such a one) does not cover them.
@@ -229,8 +234,15 @@ impl<'r> Sealer<'r> {
         let cs = stored
             .ok_or_else(|| RepoError::NotFound(id.to_string()))?
             .changeset;
-        let (signatures, rest): (Vec<_>, Vec<_>) =
-            (cs.extra_headers.iter().cloned()).partition(|(key, _)| key.as_slice() == GPGSIG);
+        let mut signatures = Vec::new();
+        let mut rest = Vec::with_capacity(cs.extra_headers.len());
+        for (key, value) in &cs.extra_headers {
+            if key.as_slice() == GPGSIG {
+                signatures.push(value);
+            } else if !key.starts_with(GPGSIG) {
+                rest.push((key.clone(), value.clone()));
+            }
+        }
         if signatures.is_empty() {
             return Ok(None);
         }
@@ -239,7 +251,7 @@ impl<'r> Sealer<'r> {
         let (author, committer) = (&cs.author, &cs.committer);
         let payload = render::commit_bytes(tree, &parents, author, committer, &rest, &message);
         let mut signature = Vec::new();
-        for (_, value) in &signatures {
+        for value in signatures {
             signature.extend_from_slice(value);
             signature.push(b'\n');
         }

@@ -278,6 +278,35 @@ fn commit_in_git(dir: &Path, parent: GitOid, file: &str) -> GitOid {
     commit
 }
 
+/// The message of the commits [`signed_in_git`] makes.
+const IN_GIT: &[u8] = b"Signed in git\n";
+
+/// Records in `repo` the changeset an import makes of a root commit signed in git, which holds
+/// `base`'s tree: the lander its author and committer, `headers` its extra headers, [`IN_GIT`]
+/// its message, and the commit's id its [`GIT_OID`]. The changeset's id.
+fn signed_in_git(
+    repo: &LocalRepo,
+    base: ChangesetId,
+    headers: &[(Vec<u8>, Vec<u8>)],
+) -> ChangesetId {
+    let base = changeset(repo, base);
+    let (tree, person) = (tree_of(repo, &base), lander());
+    let commit = commit_bytes(tree, &[], &person, &person, headers, IN_GIT);
+    let made = git_hash(RawKind::Commit, &commit).to_string().into_bytes();
+    let imported = Changeset::new(
+        Vec::new(),
+        base.root,
+        base.delta,
+        person.clone(),
+        person,
+        IN_GIT.to_vec(),
+        headers.to_vec(),
+        vec![(GIT_OID.to_owned(), made)],
+    )
+    .unwrap();
+    record(repo, &imported)
+}
+
 #[test]
 fn a_sealed_changeset_exports_to_the_commit_that_was_signed() {
     let (_dir, repo) = store();
@@ -471,44 +500,40 @@ fn a_signed_commit_is_its_payload_and_its_signature() {
     // 3. A signed commit imported from git reads the same way: its bytes without the header,
     // every other header kept, and the header's value with its line break.
     let armor = b"-----BEGIN PGP SIGNATURE-----\n\nabc\n-----END PGP SIGNATURE-----";
-    let headers = [
-        (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
-        (b"gpgsig".to_vec(), armor.to_vec()),
-    ];
-    let root = changeset(&repo, base).root;
-    let tree = tree_of(&repo, &changeset(&repo, base));
-    let person = lander();
-    let commit = commit_bytes(tree, &[], &person, &person, &headers, b"Signed in git\n");
-    let made = git_hash(RawKind::Commit, &commit).to_string().into_bytes();
-    let imported = Changeset::new(
-        Vec::new(),
-        root,
-        changeset(&repo, base).delta,
-        person.clone(),
-        person.clone(),
-        b"Signed in git\n".to_vec(),
-        headers.to_vec(),
-        vec![(GIT_OID.to_owned(), made)],
-    )
-    .unwrap();
-    let imported = record(&repo, &imported);
-    let signed = reader
-        .signed_commit(imported)
-        .unwrap()
-        .expect("a signature");
-    let unsigned = commit_bytes(
-        tree,
-        &[],
-        &person,
-        &person,
-        &headers[..1],
-        b"Signed in git\n",
-    );
+    let encoding = (b"encoding".to_vec(), b"ISO-8859-1".to_vec());
+    let signature = (b"gpgsig".to_vec(), armor.to_vec());
+    let headers = [encoding.clone(), signature.clone()];
+    let imported = signed_in_git(&repo, base, &headers);
+    let signed = reader.signed_commit(imported).unwrap();
+    let signed = signed.expect("a signature");
+    let (tree, person) = (tree_of(&repo, &changeset(&repo, base)), lander());
+    let unsigned = commit_bytes(tree, &[], &person, &person, &headers[..1], IN_GIT);
     assert_eq!(signed.payload, unsigned);
     assert_eq!(signed.signature, [&armor[..], b"\n"].concat());
     assert_eq!(signed.kind, Some(SignatureKind::Pgp));
 
-    // 4. A changeset the store does not hold is not found.
+    // 4. A commit that holds a second signature header beside it, `gpgsig-sha256` (the
+    // signature over the commit's SHA-256 form): git verifies a `gpgsig` signature over the
+    // commit without either header, so neither is in the payload, and the second one's value
+    // is no part of the signature.
+    let other = b"-----BEGIN SSH SIGNATURE-----\nxyz\n-----END SSH SIGNATURE-----";
+    let second = (b"gpgsig-sha256".to_vec(), other.to_vec());
+    let headers = [encoding.clone(), signature, second.clone()];
+    let imported = signed_in_git(&repo, base, &headers);
+    let signed = reader.signed_commit(imported).unwrap();
+    let expected = SignedCommit::new(
+        unsigned,
+        [&armor[..], b"\n"].concat(),
+        Some(SignatureKind::Pgp),
+    );
+    assert_eq!(signed, Some(expected));
+
+    // 5. A commit with that second header alone has no signature: none over the bytes the
+    // changeset exports to.
+    let imported = signed_in_git(&repo, base, &[encoding, second]);
+    assert_eq!(reader.signed_commit(imported).unwrap(), None);
+
+    // 6. A changeset the store does not hold is not found.
     let missing = ChangesetId::new(swarmops_core::ObjectId::new([9; 32]));
     let error = reader.signed_commit(missing).unwrap_err();
     assert!(matches!(error, RepoError::NotFound(_)), "{error}");
