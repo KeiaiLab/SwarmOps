@@ -55,6 +55,11 @@ impl Pattern {
         // 2. Otherwise segment for segment.
         names.len() == self.segments.len() && segments_match(&self.segments, &names)
     }
+
+    /// The pattern's segments, in order: at least one, none empty.
+    pub(crate) fn segments(&self) -> &[String] {
+        &self.segments
+    }
 }
 
 /// Whether each name segment matches its pattern segment, exactly or by `*`.

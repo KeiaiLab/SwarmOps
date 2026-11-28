@@ -2883,4 +2883,42 @@ mod check {
         assert_eq!(older.stages, [CheckStage::BeforeLand]);
         assert_eq!(older.reports, []);
     }
+
+    /// A check as 0.13.0 wrote it, before `inputs`, reads with no input and is written back
+    /// byte for byte; one that declares inputs lists them after its reports and reads back.
+    #[test]
+    fn a_check_out_of_0_13_reads_and_writes_unchanged() {
+        let written = [
+            r#"{"name":"unit","argv":["cargo","test"],"dir":"crates/app","timeout_s":600,"#,
+            r#""definition_digest":"ab","stages":["before-land","manual"],"#,
+            r#""reports":[{"format":"junit","path":"out/junit.xml"}],"line":4}"#,
+        ]
+        .concat();
+        let mut check: CheckOut = serde_json::from_str(&written).unwrap();
+        assert_eq!(check.inputs, Vec::<String>::new());
+        assert_eq!(serde_json::to_string(&check).unwrap(), written);
+
+        check.inputs = vec!["README.md".to_owned(), "docs/**".to_owned()];
+        let text = serde_json::to_string(&check).unwrap();
+        assert_eq!(
+            text,
+            written.replace(
+                r#","line":4}"#,
+                r#","inputs":["README.md","docs/**"],"line":4}"#
+            )
+        );
+        assert_eq!(serde_json::from_str::<CheckOut>(&text).unwrap(), check);
+
+        // The key is optional in the schema, an array of strings.
+        let all = schema_for_all();
+        assert_eq!(
+            all["CheckOut"]["required"],
+            json!(["name", "argv", "dir", "timeout_s", "definition_digest"])
+        );
+        let inputs = &all["CheckOut"]["properties"]["inputs"];
+        assert_eq!(
+            (&inputs["type"], &inputs["items"]["type"]),
+            (&json!("array"), &json!("string"))
+        );
+    }
 }

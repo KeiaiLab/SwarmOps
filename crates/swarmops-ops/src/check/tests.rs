@@ -71,6 +71,7 @@ fn check(name: &str, argv: &[&str], dir: &str, timeout_s: u64) -> Check {
         timeout_s,
         stages: vec![CheckStage::BeforeLand],
         reports: Vec::new(),
+        inputs: Vec::new(),
         line: None,
     }
 }
@@ -306,14 +307,7 @@ fn the_refused_fixture_names_its_key_and_line() {
 /// unknown, so that a build that does not read them never lists a file without them.
 #[test]
 fn a_key_version_1_does_not_take_is_refused() {
-    for key in [
-        "stage",
-        "needs",
-        "inputs",
-        "variants",
-        "labels",
-        "parameters",
-    ] {
+    for key in ["stage", "needs", "variants", "labels", "parameters"] {
         let text = one("a", &format!("argv = [\"x\"]\n{key} = []"));
         let path = format!("check.a.{key}");
         refuses(&text, Reason::UnknownKey, Some(4), Some(&path));
@@ -325,10 +319,10 @@ fn a_key_version_1_does_not_take_is_refused() {
         Some("include"),
     );
     refuses(
-        "version = 1\n[check.a.inputs]\npaths = []\n",
+        "version = 1\n[check.a.variants]\nos = []\n",
         Reason::UnknownKey,
         Some(2),
-        Some("check.a.inputs"),
+        Some("check.a.variants"),
     );
     refuses(
         "version = 1\n\"a.b\" = 1\n",
@@ -772,7 +766,7 @@ fn two_definition_digests_are_pinned() {
 }
 
 /// The recipe is the one the digest module documents, byte for byte: its domain, then argv,
-/// dir and timeout_s, each a tag, a length and the value; a default left out.
+/// dir, timeout_s and inputs, each a tag, a length and the value; a default left out.
 #[test]
 fn a_definition_digest_hashes_the_documented_bytes() {
     let le = |n: u64| n.to_le_bytes().to_vec();
@@ -785,12 +779,170 @@ fn a_definition_digest_hashes_the_documented_bytes() {
         check("a", &["cargo", "test"], "crates/app", 600).definition_digest(),
         blake3::hash(&bytes).to_hex().to_string()
     );
+
+    // Tag 5 after them: the count, then each pattern with its length, sorted bytewise.
+    let patterns = [
+        le(2),
+        le(9),
+        b"README.md".to_vec(),
+        le(7),
+        b"docs/**".to_vec(),
+    ]
+    .concat();
+    bytes.extend([vec![5], le(40), patterns].concat());
+    let mut with_inputs = check("a", &["cargo", "test"], "crates/app", 600);
+    with_inputs.inputs = vec!["docs/**".to_owned(), "README.md".to_owned()];
+    assert_eq!(
+        with_inputs.definition_digest(),
+        blake3::hash(&bytes).to_hex().to_string()
+    );
     let root = [b"swarmops:check-definition:v0\0".to_vec(), vec![1], le(20)].concat();
     let argv = [le(1), le(4), b"make".to_vec()].concat();
     assert_eq!(
         check("b", &["make"], ".", 900).definition_digest(),
         blake3::hash(&[root, argv].concat()).to_hex().to_string()
     );
+}
+
+// Inputs (M30-3).
+
+/// The inputs of the check `a` whose table holds `body` after its argv.
+fn inputs_of(body: &str) -> Vec<String> {
+    checks(&one("a", &format!("argv = [\"x\"]\n{body}")))[0]
+        .inputs
+        .clone()
+}
+
+/// A check's inputs come sorted bytewise, whatever order the file wrote them in, and `check
+/// list` gives them so; a check that declares none has none, as the legacy check has.
+#[test]
+fn inputs_read_sorted_whatever_the_file_s_order() {
+    assert_eq!(inputs_of(""), Vec::<String>::new());
+    let sorted = ["*/x", "README", "docs/*", "docs/**", "src/a.rs"];
+    let written = "inputs = [\"docs/**\", \"src/a.rs\", \"README\", \"docs/*\", \"*/x\"]";
+    assert_eq!(inputs_of(written), sorted);
+    let lines = ["src/a.rs", "*/x", "docs/*", "README", "docs/**"].map(|p| format!("  {p:?},"));
+    let other = format!("inputs = [\n{}\n]", lines.join("\n"));
+    assert_eq!(inputs_of(&other), sorted);
+    let read = checks(&one("a", &format!("argv = [\"x\"]\n{written}")));
+    assert_eq!(read[0].out().inputs, sorted);
+
+    // `**` alone, a name with a dot or a space, a pattern of 4,096 bytes and 256 patterns are
+    // taken.
+    assert_eq!(inputs_of("inputs = [\"**\"]"), ["**"]);
+    let named = inputs_of("inputs = [\".github/*\", \"my docs/a b.md\"]");
+    assert_eq!(named, [".github/*", "my docs/a b.md"]);
+    let long = "n".repeat(MAX_INPUT_PATTERN_BYTES);
+    assert_eq!(inputs_of(&format!("inputs = [\"{long}\"]")), [long]);
+    let most: Vec<String> = (0..MAX_CHECK_INPUTS).map(|i| format!("p{i:03}")).collect();
+    let items: Vec<String> = most.iter().map(|p| format!("{p:?}")).collect();
+    assert_eq!(inputs_of(&format!("inputs = [{}]", items.join(", "))), most);
+
+    // The legacy check declares none, and lists none.
+    let legacy = parse_legacy(br#"{"check": {"argv": ["make"]}}"#)
+        .unwrap()
+        .unwrap();
+    assert_eq!(legacy.inputs, Vec::<String>::new());
+    let listed = serde_json::to_value(legacy.out()).unwrap();
+    assert_eq!(listed.get("inputs"), None, "{listed}");
+}
+
+/// Each fault of `inputs` is `value`, naming the key and the line of what is at fault: the
+/// value, the item, or the second of a pattern given twice.
+#[test]
+fn inputs_refuse_each_fault_at_its_line() {
+    let key = Some("check.a.inputs");
+    let at = |body: &str| one("a", &format!("argv = [\"x\"]\n{body}"));
+    let third = |item: &str| at(&format!("inputs = [\n  \"docs/**\",\n  {item},\n]"));
+
+    // 1. Not an array, an empty one, an item that is not a string.
+    refuses(&at("inputs = \"docs/**\""), Reason::Value, Some(4), key);
+    refuses(&at("inputs = { paths = [] }"), Reason::Value, Some(4), key);
+    refuses(&at("inputs = []"), Reason::Value, Some(4), key);
+    refuses(&third("1"), Reason::Value, Some(6), key);
+
+    // 2. Outside the grammar: a `**` before the end, a `*` beside other bytes, an empty
+    //    segment; and a name no repository path holds.
+    for pattern in [
+        "a/**/b", "**/b", "fe*", "*.rs", "a//b", "/a", "a/", "", "../x", "a/./b",
+    ] {
+        let text = third(&format!("\"{pattern}\""));
+        refuses(&text, Reason::Value, Some(6), key);
+    }
+    refuses(&third("\"a\\u0000b\""), Reason::Value, Some(6), key);
+
+    // 3. One twice, at the second; the 257th; one of 4,097 bytes.
+    refuses(&third("\"docs/**\""), Reason::Value, Some(6), key);
+    let items: Vec<String> = (0..=MAX_CHECK_INPUTS)
+        .map(|i| format!("  \"p{i}\","))
+        .collect();
+    refuses(
+        &at(&format!("inputs = [\n{}\n]", items.join("\n"))),
+        Reason::Value,
+        Some(4 + 257),
+        key,
+    );
+    let long = "n".repeat(MAX_INPUT_PATTERN_BYTES + 1);
+    refuses(&third(&format!("\"{long}\"")), Reason::Value, Some(6), key);
+
+    // 4. A pattern at fault is named before a later item that is no string.
+    let both = at("inputs = [\n  \"fe*\",\n  1,\n]");
+    refuses(&both, Reason::Value, Some(5), key);
+
+    // 5. The message names the pattern, quoted and cut, and what a pattern is; the hint names
+    //    the key.
+    let error = refused(third("\"scripts/server-*\"").as_bytes()).into_error(false);
+    assert_eq!(
+        error.message,
+        ".swarmops/checks.toml has check.a.inputs holds \"scripts/server-*\", not a path \
+         pattern: segments between /, each a name or *, the last one possibly ** (line 6)"
+    );
+    assert_eq!(
+        Value::Object(error.details),
+        json!({"file": ".swarmops/checks.toml", "reason": "value", "vouched": false,
+               "line": 6, "key": "check.a.inputs"})
+    );
+    assert!(error.hint.unwrap().contains("inputs"));
+    let refusal = refused(third(&format!("\"{long}\"")).as_bytes());
+    assert!(refusal.what.len() < 200, "{refusal:?}");
+    let refusal = refused(third(&format!("\"{}*\"", "n".repeat(500))).as_bytes());
+    assert!(refusal.what.len() < 200, "{refusal:?}");
+    assert!(refusal.what.contains('…'), "{refusal:?}");
+}
+
+/// The digest: unchanged by no `inputs`; changed by a pattern and by another one; the same
+/// whatever order the patterns are written in.
+#[test]
+fn inputs_are_part_of_the_definition_digest() {
+    let digest = |inputs: &str| {
+        checks(&one("a", &format!("argv = [\"make\"]\n{inputs}")))[0].definition_digest()
+    };
+    let none = digest("");
+    assert_eq!(
+        none,
+        "25fb129d52047b2d4fdc6f5c464153fd633dd6a40d8abee361f8a845211f3019"
+    );
+    let digests = [
+        none,
+        digest("inputs = [\"docs/**\"]"),
+        digest("inputs = [\"docs/*\"]"),
+        digest("inputs = [\"**\"]"),
+        digest("inputs = [\"docs/**\", \"README.md\"]"),
+        digest("inputs = [\"docs\", \"**\", \"README.md\"]"),
+        digest("inputs = [\"docs/README.md\"]"),
+    ];
+    let unique: std::collections::BTreeSet<&String> = digests.iter().collect();
+    assert_eq!(unique.len(), digests.len(), "{digests:#?}");
+    assert_eq!(
+        digest("inputs = [\"README.md\", \"docs/**\"]"),
+        digests[4],
+        "the order written in is no part of the definition"
+    );
+
+    // A check built with its patterns out of order hashes as the sorted one does.
+    let mut unsorted = check("a", &["make"], ".", 900);
+    unsorted.inputs = vec!["docs/**".to_owned(), "README.md".to_owned()];
+    assert_eq!(unsorted.definition_digest(), digests[4]);
 }
 
 // Reports (M31-5).
@@ -1263,8 +1415,11 @@ fn the_directory_form_refuses_a_file_over_the_limit() {
 
 // The round trip.
 
-/// A check's definition that version 1 takes.
-fn definition() -> impl Strategy<Value = (Vec<String>, String, u64)> {
+/// What [`definition`] gives: an argv, a dir, a timeout, and the patterns of the inputs.
+type Written = (Vec<String>, String, u64, std::collections::BTreeSet<String>);
+
+/// A check's definition that version 1 takes, with up to three inputs or none.
+fn definition() -> impl Strategy<Value = Written> {
     let arg = "[ -~]{0,12}";
     let argv = ("[a-z./][ -~]{0,8}", proptest::collection::vec(arg, 0..4)).prop_map(
         |(program, mut rest)| {
@@ -1273,12 +1428,14 @@ fn definition() -> impl Strategy<Value = (Vec<String>, String, u64)> {
         },
     );
     let dir = prop_oneof![Just(".".to_owned()), "[a-z]{1,4}(/[a-z0-9_]{1,4}){0,2}",];
-    (argv, dir, 1..=MAX_CHECK_TIMEOUT_S)
+    let pattern = "[a-z]{1,3}(/([a-z]{1,3}|\\*)){0,2}(/\\*\\*)?";
+    let inputs = proptest::collection::btree_set(pattern, 0..4);
+    (argv, dir, 1..=MAX_CHECK_TIMEOUT_S, inputs)
 }
 
 proptest! {
     /// Definitions written with `toml`'s own writer read back as the same checks, sorted, with
-    /// the same digests.
+    /// the same digests; their inputs, written last first, read back sorted.
     #[test]
     fn written_checks_read_back(
         defs in proptest::collection::btree_map("[a-z0-9][a-z0-9_-]{0,10}", definition(), 0..6)
@@ -1286,7 +1443,7 @@ proptest! {
         let mut table = toml::Table::new();
         table.insert("version".to_owned(), toml::Value::Integer(1));
         let mut all = toml::Table::new();
-        for (name, (argv, dir, timeout_s)) in &defs {
+        for (name, (argv, dir, timeout_s, inputs)) in &defs {
             let mut one = toml::Table::new();
             let argv = argv.iter().cloned().map(toml::Value::String).collect();
             one.insert("argv".to_owned(), toml::Value::Array(argv));
@@ -1295,6 +1452,10 @@ proptest! {
                 "timeout_s".to_owned(),
                 toml::Value::Integer(i64::try_from(*timeout_s).unwrap()),
             );
+            if !inputs.is_empty() {
+                let patterns = inputs.iter().rev().cloned().map(toml::Value::String).collect();
+                one.insert("inputs".to_owned(), toml::Value::Array(patterns));
+            }
             all.insert(name.clone(), toml::Value::Table(one));
         }
         table.insert("check".to_owned(), toml::Value::Table(all));
@@ -1302,12 +1463,20 @@ proptest! {
 
         let read = checks(&text);
         prop_assert_eq!(read.len(), defs.len());
-        for (check, (name, (argv, dir, timeout_s))) in read.iter().zip(&defs) {
+        for (check, (name, (argv, dir, timeout_s, inputs))) in read.iter().zip(&defs) {
             prop_assert_eq!(&check.name, name);
             prop_assert_eq!(&check.argv, argv);
             prop_assert_eq!(&check.dir, dir);
             prop_assert_eq!(check.timeout_s, *timeout_s);
-            let fresh = digest::definition(argv, dir, *timeout_s, &[]);
+            let sorted: Vec<String> = inputs.iter().cloned().collect();
+            prop_assert_eq!(&check.inputs, &sorted);
+            let fresh = digest::definition(&digest::Definition {
+                argv,
+                dir,
+                timeout_s: *timeout_s,
+                reports: &[],
+                inputs: &sorted,
+            });
             prop_assert_eq!(check.definition_digest(), fresh);
         }
     }

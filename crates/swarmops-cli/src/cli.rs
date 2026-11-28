@@ -1691,15 +1691,17 @@ pub enum CheckCommand {
     ///
     /// A tree names its checks in .swarmops/checks.toml (version 1): one [check.NAME] table a
     /// check, each one command (argv) run with no shell, with a directory (dir), a timeout
-    /// (timeout_s) and the stages its answer is wanted at (stages, default before-land); any
-    /// other key is refused at its line. This reads .swarmops/checks.toml at REV (default main),
-    /// resolved once; a tree without it lists check.argv of .swarmops/workspaces.json as the one
-    /// check default, and a tree with neither lists no check. Each check comes with its argv,
-    /// its directory, its timeout, the digest of its definition and its stages, sorted by name;
-    /// --stage lists only the checks of one stage. --dir DIR reads the files below DIR on this
-    /// host instead, and opens no store: the answer says vouched, since only the caller stands
-    /// behind them. A file that does not read is E_CHECK_FILE, naming its line and key. Reads
-    /// only: no identity, no lock.
+    /// (timeout_s), the stages its answer is wanted at (stages, default before-land) and the
+    /// paths it reads (inputs, default the whole tree: path patterns in which * is one whole
+    /// segment and a last ** every depth below); any other key is refused at its line. This
+    /// reads .swarmops/checks.toml at REV (default main), resolved once; a tree without it lists
+    /// check.argv of .swarmops/workspaces.json as the one check default, and a tree with neither
+    /// lists no check. Each check comes with its argv, its directory, its timeout, the digest of
+    /// its definition, its stages and the inputs it declares, sorted by name; --stage lists only
+    /// the checks of one stage. --dir DIR reads the files below DIR on this host instead, and
+    /// opens no store: the answer says vouched, since only the caller stands behind them. A file
+    /// that does not read is E_CHECK_FILE, naming its line and key. Reads only: no identity, no
+    /// lock.
     List {
         /// The changeset whose tree's checks to list.
         #[arg(value_name = "REV")]

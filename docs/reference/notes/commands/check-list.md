@@ -31,6 +31,7 @@ argv = ["cargo", "clippy", "--", "-D", "warnings"]
 dir = "crates/app"
 timeout_s = 600
 stages = ["before-land", "after-land"]
+inputs = ["crates/app/**", "Cargo.toml", "Cargo.lock"]
 
 [check.test]
 argv = ["cargo", "nextest", "run", "--profile", "ci"]
@@ -46,13 +47,15 @@ reports = [{ format = "junit", path = "target/nextest/ci/junit.xml" }]
 | `timeout_s` | no | `900` | The most seconds it may run, 1 to 86,400. |
 | `stages` | no | `["before-land"]` | When its answer is wanted: 1 to 6 of `before-land`, `after-land`, `scheduled`, `release`, `manual` and `deploy`, none twice. An unknown stage, an empty array, an item that is not a string, or a stage given twice is refused as `value`, at the line of the item (or the array) at fault. The key is `stages`, plural: `stage` is refused as an unknown key. |
 | `reports` | no | none | The JUnit and SARIF reports the check leaves in its tree, which `check run` reads into findings once it has ended ([check run](../../commands/check-run.md)): 1 to 16 tables, each of `format` (`junit` or `sarif`) and `path` (a repository path relative to the check's `dir`, no path twice in one check), as an inline table or a `[[check.<name>.reports]]` table. Not an array, an empty one, a 17th report or an item that is not a table is refused as `value` with `details.key` `check.<name>.reports`; a format or path outside its rule, or a table without one of them, as `value` with `details.key` `check.<name>.reports.format` or `.path`; any other key in a table as `unknown_key`. Each at the line at fault. |
+| `inputs` | no | the whole tree | The paths the check reads: 1 to 256 path patterns of at most 4,096 bytes each, none twice, in the grammar `access.toml` names refs in. A pattern is `/`-separated segments, each a name or `*` (one whole segment), the last one possibly `**` (every depth below, at least one segment): `docs/*` matches `docs/a.md`, not `docs/a/b.md`; `docs/**` matches both, not `docs`; `**` matches every path. A `*` beside other bytes (`*.rs`, `server-*`), a `**` before the last segment and a name no repository path holds (an empty one, `.`, `..`) are refused. A pattern matches files, executables and symbolic links, a link by its own path and never by what it points at; it matches no directory, so `web` matches nothing in a tree where `web` is a directory. Whether a pattern matches any path of the tree is not checked. Not an array, an empty one (leave the key out for the whole tree), an item that is not a string, a pattern outside these rules, one given twice or a 257th is refused as `value` with `details.key` `check.<name>.inputs`, at the line of the item (or the array) at fault. |
 
-The file holds at most 1 MiB and 1,000 checks, and a check at most 16 reports. Any TOML table syntax
-reads alike: a header, dotted keys (`check.unit.argv = [...]`) or an inline table. The
+The file holds at most 1 MiB and 1,000 checks, and a check at most 16 reports and 256 input
+patterns. Any TOML table syntax reads alike: a header, dotted keys (`check.unit.argv = [...]`) or
+an inline table. The
 [limits](../../limits.md) page lists each bound with its constant.
 
 **Any other key is refused**, at its line, as `unknown_key`. Later releases add keys to version 1
-(what a check reads, when it runs, what it needs first); a build that does not know a key refuses
+(what a check needs first, what it is run with); a build that does not know a key refuses
 the file instead of listing, or one day running, a check without it. A change to what an
 existing key means is a new version.
 
@@ -60,11 +63,13 @@ existing key means is a new version.
 
 The checks come sorted by name, so moving a table in the file changes nothing but their `line`. Each
 has its `argv`, its `dir`, its `timeout_s` and its `stages` with the defaults filled in, the `line`
-its table starts on, its `reports` in declared order when it declares any, and `definition_digest`,
-a digest of `argv`, `dir`, `timeout_s` and `reports` (not of the name, nor of the stages, which say
+its table starts on, its `reports` in declared order and its `inputs` sorted bytewise when it
+declares any, and `definition_digest`, a digest of `argv`, `dir`, `timeout_s`, `reports` and
+`inputs` (not of the name, nor of the stages, which say
 when an answer is wanted, not what the command computes): two checks that differ only in name or
 stages, or a check renamed, share a digest, and a default written out gives the same digest as one
-left out; a check that declares no report has the digest it had before the key existed. `stages`
+left out; a check that declares no report and no input has the digest it had before those keys
+existed, and the order `inputs` are written in changes none. `stages`
 come in the stages' own order (`before-land`, `after-land`, `scheduled`, `release`, `manual`,
 `deploy`), whatever order the file wrote them in. The same tree gives the same `result` byte for
 byte, whichever changeset names it.

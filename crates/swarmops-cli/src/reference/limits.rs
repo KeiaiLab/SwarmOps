@@ -199,7 +199,7 @@ const fn internal_value(
 // ---- The tables ----
 
 /// The limits a request is refused past, with the error it gets.
-static CONTRACT: [Limit; 29] = [
+static CONTRACT: [Limit; 31] = [
     Limit {
         name: "Request text",
         constant: code(
@@ -592,6 +592,34 @@ static CONTRACT: [Limit; 29] = [
         errors: &[ErrorCode::CheckFile],
         what: "The reports one check's `reports` declares, from 1: more are refused with \
                    `details.reason` `value` at the line of the first past it.",
+    },
+    Limit {
+        name: "Check inputs",
+        constant: code(
+            "swarmops_ops::check::MAX_CHECK_INPUTS",
+            CHECK,
+            "pub const MAX_CHECK_INPUTS: usize = 256;",
+            || bytes::to_u64(swarmops_ops::check::MAX_CHECK_INPUTS),
+        ),
+        unit: Unit::Count("patterns"),
+        commands: &["check list", "check run"],
+        errors: &[ErrorCode::CheckFile],
+        what: "The path patterns one check's `inputs` declares, from 1: more are refused with \
+                   `details.reason` `value` at the line of the first past it.",
+    },
+    Limit {
+        name: "Check input pattern",
+        constant: code(
+            "swarmops_ops::check::MAX_INPUT_PATTERN_BYTES",
+            CHECK,
+            "pub const MAX_INPUT_PATTERN_BYTES: usize = 4 * 1024;",
+            || bytes::to_u64(swarmops_ops::check::MAX_INPUT_PATTERN_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["check list", "check run"],
+        errors: &[ErrorCode::CheckFile],
+        what: "One pattern of a check's `inputs`: a longer one is refused with \
+                   `details.reason` `value`, at its line.",
     },
     Limit {
         name: "Variables passed",

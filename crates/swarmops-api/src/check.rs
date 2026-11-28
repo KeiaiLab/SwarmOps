@@ -6,7 +6,7 @@
 //!   CheckListReq {rev, stage?} ──▶ the tree rev names ──▶ .swarmops/checks.toml (version 1)
 //!                                                         or workspaces.json's check.argv
 //!   CheckListResp {vouched, tree, file, version, stage, checks: [CheckOut sorted by name]}
-//!   CheckOut {name, argv, dir, timeout_s, definition_digest, stages, reports, line}
+//!   CheckOut {name, argv, dir, timeout_s, definition_digest, stages, reports, inputs, line}
 //! ```
 //!
 //! `check run` runs one stage's checks, one at a time, and answers one [`CheckRunResp`]: an
@@ -154,10 +154,10 @@ pub struct CheckOut {
     /// `.swarmops/workspaces.json`, this is what a later runner will use: `ws land --check` does
     /// not read it, and takes its own `--check-timeout`.
     pub timeout_s: u64,
-    /// The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled
-    /// in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.
-    /// Provisional: the recipe may change in a later release, so compare digests of one release
-    /// only.
+    /// The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, `inputs`, the defaults
+    /// filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in
+    /// name share it. Provisional: the recipe may change in a later release, so compare digests
+    /// of one release only.
     pub definition_digest: String,
     /// When its answer is wanted: one to six stages, in the stages' own order (`before-land`,
     /// `after-land`, `scheduled`, `release`, `manual`, `deploy`), whatever order the file wrote
@@ -169,6 +169,13 @@ pub struct CheckOut {
     /// once it has ended, in the order the file declares them. Omitted when it declares none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reports: Vec<CheckReportOut>,
+    /// The paths it reads, as the patterns its `inputs` declares, sorted bytewise whatever order
+    /// the file wrote them in: `/`-separated segments, each a name or `*` (one whole segment),
+    /// the last one possibly `**` (every depth below). A pattern matches files, executables and
+    /// symbolic links, a link by its own path. Omitted when it declares none: it reads the whole
+    /// tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<String>,
     /// The line of `.swarmops/checks.toml` that starts its table. Omitted for the check
     /// `default` read from `.swarmops/workspaces.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -176,7 +183,8 @@ pub struct CheckOut {
 }
 
 impl CheckOut {
-    /// Takes the required fields; `stages` is `before-land` alone, no report, `line` none.
+    /// Takes the required fields; `stages` is `before-land` alone, no report, no input, `line`
+    /// none.
     pub fn new(
         name: impl Into<String>,
         argv: Vec<String>,
@@ -192,6 +200,7 @@ impl CheckOut {
             definition_digest: definition_digest.into(),
             stages: default_stages(),
             reports: Vec::new(),
+            inputs: Vec::new(),
             line: None,
         }
     }

@@ -1488,12 +1488,19 @@ expression: s.redact(&all)
               "type": "array"
             },
             "definition_digest": {
-              "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled\nin; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
+              "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, `inputs`, the defaults\nfilled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in\nname share it. Provisional: the recipe may change in a later release, so compare digests\nof one release only.",
               "type": "string"
             },
             "dir": {
               "description": "The directory of the tree it runs in, as a repository path; `.` is the root.",
               "type": "string"
+            },
+            "inputs": {
+              "description": "The paths it reads, as the patterns its `inputs` declares, sorted bytewise whatever order\nthe file wrote them in: `/`-separated segments, each a name or `*` (one whole segment),\nthe last one possibly `**` (every depth below). A pattern matches files, executables and\nsymbolic links, a link by its own path. Omitted when it declares none: it reads the whole\ntree.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "line": {
               "description": "The line of `.swarmops/checks.toml` that starts its table. Omitted for the check\n`default` read from `.swarmops/workspaces.json`.",
@@ -2437,12 +2444,19 @@ expression: s.redact(&all)
           "type": "array"
         },
         "definition_digest": {
-          "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled\nin; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it.\nProvisional: the recipe may change in a later release, so compare digests of one release\nonly.",
+          "description": "The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, `inputs`, the defaults\nfilled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in\nname share it. Provisional: the recipe may change in a later release, so compare digests\nof one release only.",
           "type": "string"
         },
         "dir": {
           "description": "The directory of the tree it runs in, as a repository path; `.` is the root.",
           "type": "string"
+        },
+        "inputs": {
+          "description": "The paths it reads, as the patterns its `inputs` declares, sorted bytewise whatever order\nthe file wrote them in: `/`-separated segments, each a name or `*` (one whole segment),\nthe last one possibly `**` (every depth below). A pattern matches files, executables and\nsymbolic links, a link by its own path. Omitted when it declares none: it reads the whole\ntree.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "line": {
           "description": "The line of `.swarmops/checks.toml` that starts its table. Omitted for the check\n`default` read from `.swarmops/workspaces.json`.",

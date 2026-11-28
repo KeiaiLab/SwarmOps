@@ -78,7 +78,8 @@ to the weakest:
    means less to an older build. A key whose meaning changes makes a new `version`. The
    `definition_digest` that `check list` gives is not part of this surface yet: its recipe is
    provisional, and a later release may replace it before it is fixed. A check's `stages` came
-   with M31: an older build refuses a file that names them, as above.
+   with M31: an older build refuses a file that names them, as above. Its `inputs` came after
+   0.13.0 (M30-3), and a build up to 0.13.0 refuses a file that names them the same way.
 8. **The environment a check gets.** The variables `check run` sets for each check
    (`SWARMOPS_CHECK_NAME`, `_STAGE`, `_TREE`, `_ATTEMPT`, `_RUN`, `_REPORT`, `_OUTPUTS`,
    `_SUMMARY`, `_ARTIFACTS`, `_CHANGED`, and `SWARMOPS_WS` in a workspace), and the rule that a

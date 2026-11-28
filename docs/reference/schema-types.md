@@ -709,8 +709,9 @@ Kind: object. `swarmops schema CheckOut` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `argv` | array of `string` | yes | The program and its arguments, run with no shell: at least the program. |
-| `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, the defaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
+| `definition_digest` | `string` | yes | The digest of its definition (`argv`, `dir`, `timeout_s`, `reports`, `inputs`, the defaults filled in; not its name, nor its stages): 64 hex digits. Two checks that differ only in name share it. Provisional: the recipe may change in a later release, so compare digests of one release only. |
 | `dir` | `string` | yes | The directory of the tree it runs in, as a repository path; `.` is the root. |
+| `inputs` | array of `string` | no | The paths it reads, as the patterns its `inputs` declares, sorted bytewise whatever order the file wrote them in: `/`-separated segments, each a name or `*` (one whole segment), the last one possibly `**` (every depth below). A pattern matches files, executables and symbolic links, a link by its own path. Omitted when it declares none: it reads the whole tree. |
 | `line` | `integer` (uint64) or `null` | no | The line of `.swarmops/checks.toml` that starts its table. Omitted for the check `default` read from `.swarmops/workspaces.json`. |
 | `name` | `string` | yes | Its name: 1 to 64 bytes of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit. |
 | `reports` | array of [`CheckReportOut`](#checkreportout) | no | The JUnit and SARIF reports it leaves in its tree, which `check run` reads into findings once it has ended, in the order the file declares them. Omitted when it declares none. |

@@ -1,0 +1,1 @@
+A check declares the paths it reads as inputs, patterns in the access file's grammar that check list shows sorted and that resolve against a tree to the entries they match, the whole tree when it declares none.

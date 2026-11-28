@@ -33,6 +33,8 @@ The limits of the SwarmOps contract: what a request may hold, with the error a r
 | [Check argv size](#check-argv-size) | 65,536 bytes (64 KiB) | `swarmops_ops::check::MAX_ARGV_BYTES` | [`E_CHECK_FILE`](errors.md#e_check_file) |
 | [Check timeout](#check-timeout) | 86,400 s | `swarmops_ops::check::MAX_CHECK_TIMEOUT_S` | [`E_CHECK_FILE`](errors.md#e_check_file) |
 | [Check reports](#check-reports) | 16 reports | `swarmops_ops::check::MAX_CHECK_REPORTS` | [`E_CHECK_FILE`](errors.md#e_check_file) |
+| [Check inputs](#check-inputs) | 256 patterns | `swarmops_ops::check::MAX_CHECK_INPUTS` | [`E_CHECK_FILE`](errors.md#e_check_file) |
+| [Check input pattern](#check-input-pattern) | 4,096 bytes (4 KiB) | `swarmops_ops::check::MAX_INPUT_PATTERN_BYTES` | [`E_CHECK_FILE`](errors.md#e_check_file) |
 | [Variables passed](#variables-passed) | 64 names | `swarmops_ops::check::env::MAX_PASS` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
 | [Variable name passed](#variable-name-passed) | 128 bytes | `swarmops_ops::check::env::MAX_PASS_NAME_BYTES` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
 | [Check log tail](#check-log-tail) | 100,000 lines | `swarmops_api::MAX_CHECK_LOG_TAIL` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
@@ -259,6 +261,24 @@ The reports one check's `reports` declares, from 1: more are refused with `detai
 
 - Value: 16 reports.
 - Constant: `swarmops_ops::check::MAX_CHECK_REPORTS`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
+- Error: [`E_CHECK_FILE`](errors.md#e_check_file).
+
+### Check inputs
+
+The path patterns one check's `inputs` declares, from 1: more are refused with `details.reason` `value` at the line of the first past it.
+
+- Value: 256 patterns.
+- Constant: `swarmops_ops::check::MAX_CHECK_INPUTS`, in `crates/swarmops-ops/src/check.rs`.
+- Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
+- Error: [`E_CHECK_FILE`](errors.md#e_check_file).
+
+### Check input pattern
+
+One pattern of a check's `inputs`: a longer one is refused with `details.reason` `value`, at its line.
+
+- Value: 4,096 bytes (4 KiB).
+- Constant: `swarmops_ops::check::MAX_INPUT_PATTERN_BYTES`, in `crates/swarmops-ops/src/check.rs`.
 - Commands: [`check list`](commands/check-list.md), [`check run`](commands/check-run.md).
 - Error: [`E_CHECK_FILE`](errors.md#e_check_file).
 

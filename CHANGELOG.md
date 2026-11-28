@@ -20,6 +20,17 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Added
+
+- A check's `inputs` in `.swarmops/checks.toml` (M30-3): the paths it reads, as 1 to 256 path
+  patterns in the grammar `access.toml` names refs in (`*` is one whole path segment, a last `**`
+  every depth below), which `check list` gives sorted; a check without the key reads the whole
+  tree. An empty array, a pattern outside the grammar or one given twice is `E_CHECK_FILE`
+  (`value`) at its line. The patterns are part of `definition_digest`, and the digest of a check
+  that declares none is unchanged. A build up to 0.13.0 refuses a file that names the key
+  (`unknown_key`). Nothing selects checks by their inputs yet: `check run` still runs every
+  check of its stage.
+
 ### Changed
 
 - Docs: the roadmap's four slices M7-C1, M7-C2, M22-C1 and M22-C3 read `planned`, no longer
