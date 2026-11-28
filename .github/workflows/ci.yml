@@ -120,6 +120,34 @@ jobs:
           overwrite: true
           retention-days: 14
 
+  dev-check:
+    name: dev pod boundary
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "swarmops-local"]') || 'ubuntu-24.04' }} # zizmor: ignore[self-hosted-runner]
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The dev chart's namespace guard (packaging/helm/swarmops-dev) and the devspace.yaml surface
+      # gate, as `just dev-check` runs them. helm's release archive, checked against the SHA-256
+      # get.helm.sh lists for it; bump both together.
+      - name: helm
+        env:
+          HELM_VERSION: 3.16.4
+          HELM_SHA256: fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179
+        run: |
+          dir="$RUNNER_TEMP/helm"
+          mkdir -p "$dir"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/helm.tar.gz" \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "$HELM_SHA256  $dir/helm.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/helm.tar.gz" -C "$dir" --strip-components=1 linux-amd64/helm
+          echo "$dir" >>"$GITHUB_PATH"
+      - name: The dev chart guard and the devspace surface
+        run: sh scripts/test-dev-chart.sh
+
   zizmor:
     name: zizmor
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "swarmops-local"]') || 'ubuntu-24.04' }} # zizmor: ignore[self-hosted-runner]
@@ -172,7 +200,7 @@ jobs:
   tests-pass:
     name: tests-pass
     if: always()
-    needs: [check, zizmor]
+    needs: [check, dev-check, zizmor]
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "swarmops-local"]') || 'ubuntu-24.04' }} # zizmor: ignore[self-hosted-runner]
     permissions: {}
     timeout-minutes: 5

@@ -76,6 +76,35 @@ cargo install --locked cargo-fuzz      # only for fuzzing, which also needs a ni
 sources, so it needs a C++ compiler (`c++`). Its last step runs a Python script, with Python 3.11
 or newer as `python3`.
 
+### Building in the cluster
+
+A full build of this workspace keeps tens of gigabytes in `target/`, one per worktree. The
+maintainers' cluster runs it instead: `devspace.yaml` deploys the chart
+`packaging/helm/swarmops-dev` into the namespace `swarmops-dev` and nowhere else (the chart
+refuses any other namespace, and `just dev-check` proves it), syncs the tree into the pod's `/src`
+(not `.git`, `target/`, `fuzz/target`, `fuzz/corpus-new` or `node_modules`) and builds there:
+
+```sh
+devspace run up            # deploy, sync and a shell; keep it running
+devspace run build         # cargo build --workspace in the pod
+devspace run test          # cargo nextest over the workspace, the test part of `just check`
+devspace run check         # the whole `just check`
+devspace run fuzz-smoke    # each fuzz target for 60 s; new inputs and the log kept in /archive
+devspace run copy-back -- logs   # /archive/logs into .devspace/out/
+devspace run down          # remove the pod; the caches stay
+```
+
+`CARGO_TARGET_DIR` and `CARGO_HOME` there are volumes that survive the pod, sccache keeps compiled
+crates in an object-store bucket shared with CI, and `/archive` is long-term storage for fuzz
+corpora and measurement logs, never a build directory.
+
+### One target directory on a Mac
+
+When you do build locally, point every worktree at one target directory, so that worktrees share
+it instead of each growing its own: `export CARGO_TARGET_DIR="$HOME/.cache/cargo-target"` (fish:
+`set -gx CARGO_TARGET_DIR $HOME/.cache/cargo-target`). `just check` and `so check run --pass
+CARGO_TARGET_DIR` use it. Remove a worktree once its branch has landed (`git worktree remove`).
+
 ## Branches and landing
 
 - `stable` is the trunk and the default branch. Work happens on branches; `stable` receives

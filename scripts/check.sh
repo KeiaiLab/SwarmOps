@@ -69,3 +69,5 @@ python3 -I scripts/golden-frozen.py selftest
 # `just release-marks` still gives each release the marks its rules say, and runs gh as it
 # should: against a stand-in for gh, with no network.
 python3 -I scripts/release-marks.py selftest
+# devspace.yaml stays inside swarmops-dev (the surface gate; the chart guard is `just dev-check`).
+sh scripts/gates/devspace_surface.sh devspace.yaml packaging/helm/swarmops-dev/values-dev.yaml
