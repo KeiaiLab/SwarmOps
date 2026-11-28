@@ -1532,15 +1532,15 @@ again. 8 units.
 leaves three things to others: something must start the queue's runner, something must start the
 trigger pass, and a forge has nowhere to send an event. M43 adds one optional process for an
 installation that listens and serves what the per-connection entry serves. A long-lived process
-also meets a limit a short one never does: a lock wait that gives up parks a thread
-([known limitations](known-limitations.md#concurrency-and-the-lock)). 10 units.
+also meets a limit a short one never does: a lock wait that gave up used to park a thread each
+(M43-4) ([known limitations](known-limitations.md#concurrency-and-the-lock)). 10 units.
 
 | Slice | Deliverable | Depends on | State |
 | --- | --- | --- | --- |
 | M43-1 | `serve --listen <address>`: one process answers the native wire and git's smart HTTP on a socket for the stores under `--root`, with the access file, the refusals and the request records of the per-connection entry; transport security is the proxy's in front of it, and it listens on loopback only unless a flag says a proxy stands in front | M14, M17 | planned |
 | M43-2 | Callers of the listener: an identity comes from the proxy's header, taken only from the addresses a setting lists, or from a token whose digest the access file holds; a request with neither is `E_AUTH` | M43-1 | planned |
 | M43-3 | One service per store: the service holds a lease in the store while it serves; a second service on the same store refuses to start, and commands on the store's host keep working through the writer lock | M43-1 | planned |
-| M43-4 | A lock wait that gives up leaves no thread behind, so a process that lives for weeks gathers none | M17 | planned |
+| M43-4 | A lock wait that gives up adds no thread: a process keeps at most one helper thread for each lock file it waits on (two a store), only while that lock is held or claimed, and its counters give the number, so a process that lives for weeks gathers none | M17 | planned |
 | M43-5 | Live, ready and drain: two addresses answer whether the process runs and whether its stores open; on a signal it finishes open requests within a bound, answers new ones with a retryable code, and exits | M43-1 | planned |
 | M43-6 | The service runs the queue: it starts the runner of every target that holds an open entry, so an entry enqueued over the wire lands with no client waiting | M43-1, M22 | planned |
 | M43-7 | The service runs the trigger pass and the schedules, in place of the host's timer where it is on | M43-1, M33-3 | planned |

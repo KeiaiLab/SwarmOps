@@ -1,12 +1,13 @@
-//! `meta/lock` under contention: a writer that gives up leaves no lock behind, and 32 writers
-//! in one process take turns through the kernel's flock queue without meeting `Busy`. And a
-//! lock file that is not a regular file, which no writer opens.
+//! `meta/lock` under contention: a writer that gives up leaves no lock behind, the writers of
+//! one process that give up queue one waiter between them, and 32 writers in one process take
+//! turns through the kernel's flock queue without meeting `Busy`. And a lock file that is not a
+//! regular file, which no writer opens.
 //!
 //! The basic acquire, timeout and release tests are in `journal.rs`. Every test here owns a
 //! fresh store root (`tempfile::tempdir()`), so tests are independent and may run in any order
-//! or in parallel. The abandoned-waiter test watches the kernel's own lock table,
+//! or in parallel. The two abandoned-waiter tests watch the kernel's own lock table,
 //! `/proc/locks`, which lists the holder of each `flock` lock and every waiter blocked on it;
-//! it and its helpers are Linux-only.
+//! they and their helpers are Linux-only.
 
 use std::fs;
 #[cfg(target_os = "linux")]
@@ -137,6 +138,41 @@ fn abandoned_waiter_releases_the_lock_it_acquires_late() {
     );
     let again = MetaLock::acquire(&layout, Duration::ZERO);
     assert!(again.is_ok(), "the lock is free again: {again:?}");
+}
+
+/// Ten writers that give up, one after the other, while the lock is held queue one waiter in the
+/// kernel between them: every wait of a process for one lock file shares the one helper thread,
+/// and a wait that gives up adds none. The helper may not have entered `flock` yet when the last
+/// writer gives up, so the first count is waited for; the second is read once it is there, and a
+/// second waiter would show in either.
+#[cfg(target_os = "linux")]
+#[test]
+fn ten_abandoned_waits_queue_one_waiter() {
+    let (_root, layout) = new_meta();
+    let lock_file = layout.meta_lock().into_std_path_buf();
+    let held = MetaLock::acquire(&layout, Duration::ZERO).unwrap();
+    for wait in 0..10 {
+        let got = MetaLock::acquire(&layout, Duration::from_millis(1));
+        assert!(matches!(got, Err(StoreError::Busy)), "wait {wait}: {got:?}");
+    }
+    assert_eq!(
+        wait_for_flocks(&lock_file, (1, 1)),
+        (1, 1),
+        "one holder, and one waiter for the ten waits"
+    );
+    assert_eq!(
+        flocks_on(&lock_file),
+        (1, 1),
+        "a second waiter joined the queue"
+    );
+
+    // The holder lets go: the one waiter takes the lock nobody claims and lets it go at once.
+    drop(held);
+    assert_eq!(
+        wait_for_flocks(&lock_file, (0, 0)),
+        (0, 0),
+        "the waiter kept the lock it got"
+    );
 }
 
 /// What [`MetaLock::acquire`] returned within `deadline`, run on a thread of its own so that an

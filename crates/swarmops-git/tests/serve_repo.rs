@@ -17,6 +17,7 @@ use swarmops_git::serve::repo::{
     SERVE_MARKER, ServeError, ServeRepo,
 };
 use swarmops_git::{BranchUpdate, GitSink, GixSink, GixSource, RawKind, Stored};
+use swarmops_store::flock_wait::{self, LockKey};
 use swarmops_testkit::child::this_test;
 use swarmops_testkit::test_name;
 use tempfile::TempDir;
@@ -26,6 +27,9 @@ const SHORT: Duration = Duration::from_millis(300);
 
 /// A wait no test reaches when the lock is let go.
 const LONG: Duration = Duration::from_secs(60);
+
+/// A wait that only a lock the test itself holds outlasts: it can end one way alone.
+const BRIEF: Duration = Duration::from_millis(1);
 
 /// Set only in the child that holds the lock for [`the_lock_waits_then_is_busy`]: the lock file.
 const HOLDER_LOCK: &str = "SWARMOPS_TEST_SERVE_LOCK_HOLDER";
@@ -251,6 +255,31 @@ fn the_lock_waits_then_is_busy() {
     assert!(ended.success(), "{ended}");
     drop(output);
     repo.lock(LONG).expect("taken once the other process ended");
+}
+
+/// Twenty waits for the held lock, each given up, share the one helper thread the process keeps
+/// for `serve.lock`, and leave it no claim; once the lock is let go the helper ends, and the lock
+/// is free.
+#[test]
+fn waits_that_give_up_share_one_helper() {
+    let root = Root::new();
+    let repo = root.open();
+    let held = repo.lock(Duration::ZERO).expect("the lock is free");
+    let lock_file = fs::File::open(root.git().join("serve.lock")).expect("open the lock file");
+    let key = LockKey::of(&lock_file).expect("the lock file's key");
+    assert_eq!(flock_wait::waiting(&key), None, "no wait yet: no helper");
+
+    for wait in 0..20 {
+        let gave_up = repo.lock(BRIEF).unwrap_err();
+        assert_eq!(gave_up, ServeError::Busy, "wait {wait}");
+        let waiting = flock_wait::waiting(&key);
+        assert_eq!(waiting, Some(0), "wait {wait}: one helper, no claim");
+    }
+
+    drop(held);
+    flock_wait::settled(&key);
+    assert_eq!(flock_wait::waiting(&key), None, "the helper ended");
+    repo.lock(Duration::ZERO).expect("the lock is free again");
 }
 
 /// `set_ref` moves a ref by compare-and-swap: made from absent, a mismatch moves nothing and

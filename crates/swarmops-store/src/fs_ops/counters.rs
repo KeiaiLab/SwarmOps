@@ -1,6 +1,7 @@
 //! The process's counters at the store's file boundary (the M21 design §2.1): how many object
 //! reads and writes, journal writes and syncs, and waits for and holds of `meta/lock` this
-//! process made, and how long its syncs, waits and holds took.
+//! process made, how long its syncs, waits and holds took, and how many helper threads its lock
+//! waits started and ended.
 //!
 //! ```text
 //!   StoreFs::read          objects/<2>/<62>        ─▶ object_reads
@@ -9,6 +10,7 @@
 //!   StoreFs::sync_data, truncate  the same files    ─▶ journal_syncs, journal_sync_us
 //!   MetaLock::start ─▶ lock_waits; until granted or the wait dropped ─▶ lock_wait_us
 //!   MetaLock dropped ─▶ lock_hold_us;  MetaLock::acquire's Busy ─▶ lock_timeouts
+//!   flock_wait's helper spawned ─▶ flock_helpers_started;  ended ─▶ flock_helpers_ended
 //! ```
 //!
 //! Each count is one relaxed atomic addition; a clock is read only around a sync and the lock.
@@ -19,8 +21,12 @@
 //! writer: one alone, a queue's lead and a queue's member, whose wait ends when it reads its
 //! answer. A member answered while the lead still holds the lock holds none; one that gets the
 //! lock first leads, finds its answer, and its hold counts. A helper's lock that no caller took
-//! (an abandoned wait's) is no hold. A queue's own timeout is no `lock_timeouts`: its caller
+//! (every wait for it gave up) is no hold. A queue's own timeout is no `lock_timeouts`: its caller
 //! reads it as `E_BUSY`.
+//!
+//! The helper threads are those of [`crate::flock_wait`], one for each lock file the process waits
+//! on, `meta/lock` or another (the serving repository's `serve.lock`): both counts only grow, and
+//! the helpers alive now are `flock_helpers_started - flock_helpers_ended`.
 //!
 //! The scope is the process: the CLI runs one operation per process, the MCP server one request
 //! at a time and `serve` a process per connection.
@@ -41,6 +47,8 @@ pub struct Counters {
     lock_wait_us: AtomicU64,
     lock_hold_us: AtomicU64,
     lock_timeouts: AtomicU64,
+    flock_helpers_started: AtomicU64,
+    flock_helpers_ended: AtomicU64,
 }
 
 /// The one set of counters of this process.
@@ -54,6 +62,8 @@ static PROCESS: Counters = Counters {
     lock_wait_us: AtomicU64::new(0),
     lock_hold_us: AtomicU64::new(0),
     lock_timeouts: AtomicU64::new(0),
+    flock_helpers_started: AtomicU64::new(0),
+    flock_helpers_ended: AtomicU64::new(0),
 };
 
 /// What the counters held at one moment; [`Counts::since`] is what moved between two.
@@ -78,6 +88,10 @@ pub struct Counts {
     pub lock_hold_us: u64,
     /// Acquires that gave up with `Busy`.
     pub lock_timeouts: u64,
+    /// Helper threads started for a lock wait, one for each lock file waited on at a time.
+    pub flock_helpers_started: u64,
+    /// Those that ended: their lock was free and nobody claimed it any more.
+    pub flock_helpers_ended: u64,
 }
 
 impl Counters {
@@ -99,6 +113,8 @@ impl Counters {
             lock_wait_us: read(&self.lock_wait_us),
             lock_hold_us: read(&self.lock_hold_us),
             lock_timeouts: read(&self.lock_timeouts),
+            flock_helpers_started: read(&self.flock_helpers_started),
+            flock_helpers_ended: read(&self.flock_helpers_ended),
         }
     }
 
@@ -145,6 +161,16 @@ impl Counters {
     pub(crate) fn lock_timeout(&self) {
         self.lock_timeouts.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// One helper thread started for a lock wait.
+    pub(crate) fn flock_helper_started(&self) {
+        self.flock_helpers_started.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One helper thread of a lock wait ended.
+    pub(crate) fn flock_helper_ended(&self) {
+        self.flock_helpers_ended.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl Counts {
@@ -162,6 +188,10 @@ impl Counts {
             lock_wait_us: self.lock_wait_us.saturating_sub(earlier.lock_wait_us),
             lock_hold_us: self.lock_hold_us.saturating_sub(earlier.lock_hold_us),
             lock_timeouts: self.lock_timeouts.saturating_sub(earlier.lock_timeouts),
+            flock_helpers_started: (self.flock_helpers_started)
+                .saturating_sub(earlier.flock_helpers_started),
+            flock_helpers_ended: (self.flock_helpers_ended)
+                .saturating_sub(earlier.flock_helpers_ended),
         }
     }
 }

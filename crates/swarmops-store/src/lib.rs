@@ -16,10 +16,12 @@
 //!
 //! A store has a format ([`StoreFormat`], its `FORMAT` file), which [`Layout`] carries: it names
 //! the journal and ref files. [`gc`], [`meta::fsck`], [`meta::upgrade`] and [`MaintLease`] are
-//! the maintenance a gc, a repair and an upgrade do.
+//! the maintenance a gc, a repair and an upgrade do. [`flock_wait`] is the bounded wait for a file
+//! lock, which [`MetaLock`] and the serving repository's lock wait through.
 
 pub mod error;
 pub mod external_ids;
+pub mod flock_wait;
 pub mod format;
 pub mod fs_kind;
 pub mod fs_objects;

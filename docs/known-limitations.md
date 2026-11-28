@@ -175,12 +175,15 @@ left).
   10 s `lock_timeout` gets the retryable `E_BUSY`; an upgrade of 200,000 changesets took 2.79 s on
   a loaded host. Streaming them in steps is the next step if a store takes longer. *Unscheduled.
   Found: the M6 plan, risk R-1.*
-- **An abandoned lock wait parks a thread.** A wait that times out leaves its helper thread in
-  the kernel's queue until the holder lets go, and a hung holder leaves one parked thread per
-  abandoned wait. That costs nothing in a short-lived CLI process; a long-lived one (the stdio
-  MCP server is one, a network server after v1 would be another) needs a way out. *Unscheduled
-  (it was M10's; an RPC server is a follow-up after v1, umbrella spec §17). Found: M1 Task 7c;
-  final review, question 10.*
+- **A lock wait keeps one helper thread a lock file.** A wait with a timeout blocks a helper
+  thread in the kernel's queue, since a blocked `flock` cannot be called off. A process keeps at
+  most one such thread for each lock file it waits on, two a store (`meta/lock` and the serving
+  repository's `serve.lock`), and only while that lock is held by another or claimed: a wait that
+  gives up adds none, and the thread ends once the lock is free and nobody claims it. A holder
+  that never lets go (a hung process) keeps one blocked thread a lock file in each waiting
+  process, however long that process lives; before, it kept one for every wait that gave up. The
+  process's counters give the number: `flock_helpers_started` less `flock_helpers_ended`.
+  *Documented. Found: M1 Task 7c; final review, question 10; narrowed by M43-4.*
 - **A read can give up under sustained commits.** A snapshot reads the refs and the frames again
   until they hold still, in at most 32 rounds; when a commit lands during every round, it fails
   with the retryable `E_BUSY` rather than wait. The bound does not help such a reader make
@@ -1657,7 +1660,7 @@ each ruling is tracked above:
 | 7 | Crafted `journal.off` entries | a per-entry checksum in the next `FORMAT` | closed in M6 for FORMAT 2; FORMAT 1, "Crafted FORMAT 1 `journal.off` entries" |
 | 8 | `objects/tmp` leftovers | `gc` | closed in M6: `swarmops gc` |
 | 9 | Wide directories in `ls` | size and depth | Unscheduled, "`ls` of a wide directory" (size and depth: M2) |
-| 10 | Parked helper threads | the daemon | Unscheduled, "An abandoned lock wait" |
+| 10 | Parked helper threads | the daemon | narrowed by M43-4 to one a lock file, "A lock wait keeps one helper thread a lock file" |
 | 11 | `abort()` standing in for `SIGKILL` | a literal `SIGKILL` test | closed in M6: a literal `SIGKILL` test on a real disk; "The power-loss model is a model" |
 | 12 | Second root commits | `commit_raw` | closed in M3: `Repo::commit_raw`, the git import's writer, makes a root changeset whatever refs exist |
 | 13 | `--expect` with a ref name | documented | "`--expect` with a ref name" |

@@ -7,7 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-# The integration tests are one test binary, `tests/all.rs` (see `[[test]]`).
+# The integration tests are two test binaries, `tests/all.rs` and the thread count's proof
+# `tests/lock_threads.rs` (see `[[test]]`).
 autotests = false
 
 [lints]
@@ -45,10 +46,15 @@ criterion.workspace = true
 proptest.workspace = true
 
 # One integration-test binary, one link: each file of `tests/` is a module of `tests/all.rs`,
-# its tests named `<file>::<test>`. Cargo builds no other test target from `tests/`
-# (`autotests = false`), so a new test file is a `mod` line there.
+# its tests named `<file>::<test>`. Cargo builds no other test target from `tests/` but the one
+# below (`autotests = false`), so a new test file is a `mod` line there.
 [[test]]
 name = "all"
+
+# The proof that lock waits which give up gather no thread, a binary of its own: its one test
+# counts the threads of its process, which must run nothing else.
+[[test]]
+name = "lock_threads"
 
 [[bench]]
 name = "fsync_latency"

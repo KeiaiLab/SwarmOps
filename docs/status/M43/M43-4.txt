@@ -1,0 +1,1 @@
+A lock wait that gives up adds no thread: every wait of a process for one lock file shares one helper thread, which ends once the lock is free and unclaimed, and the process's counters give the helpers started and ended.

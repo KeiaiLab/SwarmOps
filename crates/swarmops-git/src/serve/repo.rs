@@ -24,11 +24,10 @@ use std::fs::{self, File, OpenOptions, Permissions, TryLockError};
 use std::io::{self, Write as _};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::mpsc::{self, RecvTimeoutError, SendError};
-use std::thread;
 use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use swarmops_store::flock_wait::{self, LockKey};
 
 use crate::gix_sink::{self, GixSink};
 use crate::mirror::{STALE_LOCK_AGE, aside_name, exists, holds_marker, make_dir, sync_dir};
@@ -241,8 +240,10 @@ impl ServeRepo {
     }
 
     /// Takes its lock, waiting at most `wait`, then [`ServeError::Busy`]; a zero `wait` gives up
-    /// at once. The wait is the kernel's (`flock`), on a helper thread, as the store's writer
-    /// lock waits: a wait given up leaves the helper to take the lock and let it go at once.
+    /// at once. The wait is the kernel's (`flock`), as the store's writer lock waits: a claim on
+    /// the one helper thread the process keeps for this lock file
+    /// ([`swarmops_store::flock_wait`]). A wait given up takes only its claim away, and the helper
+    /// lets a lock nobody claims go at once.
     pub fn lock(&self, wait: Duration) -> Result<ServeLock, ServeError> {
         let path = self.git().join(LOCK_FILE);
         let failed = io_failed(LOCK_FILE);
@@ -256,23 +257,16 @@ impl ServeRepo {
             return Err(ServeError::Busy);
         }
 
-        // The blocking wait on a helper thread, handed back over a channel.
-        let (handoff, waiting) = mpsc::sync_channel(1);
-        let helper = thread::Builder::new().name("serve-lock-wait".to_owned());
-        let spawned = helper.spawn(move || {
-            let locked = file.lock().map(|()| ServeLock { _file: file });
-            if let Err(SendError(abandoned)) = handoff.send(locked) {
-                // The caller gave up: dropping the lock lets it go.
-                drop(abandoned);
-            }
-        });
-        spawned.map_err(&failed)?;
-        match waiting.recv_timeout(wait) {
-            Ok(locked) => locked.map_err(&failed),
-            Err(RecvTimeoutError::Timeout) => Err(ServeError::Busy),
-            Err(RecvTimeoutError::Disconnected) => Err(failed(io::Error::other(
-                "the thread waiting for it ended without it",
-            ))),
+        // The blocking wait is the lock file's helper's: this wait is a claim on it.
+        let claim = LockKey::of(&file)
+            .and_then(|key| flock_wait::claim(key, file))
+            .map_err(&failed)?;
+        match claim.wait(wait) {
+            Some(Ok(locked)) => Ok(ServeLock {
+                _file: locked.into_file(),
+            }),
+            Some(Err(error)) => Err(failed(error)),
+            None => Err(ServeError::Busy),
         }
     }
 

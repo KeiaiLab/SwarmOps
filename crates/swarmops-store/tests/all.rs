@@ -1,7 +1,7 @@
 //! The store's integration tests, in one test binary (one link): each file of `tests/` is a
 //! module here, and its tests are named after it (`journal::<test>`). Cargo builds no other test
-//! target from `tests/` (`autotests = false` in `Cargo.toml`): a new test file is a `mod` line
-//! here.
+//! target from `tests/` (`autotests = false` in `Cargo.toml`) but `lock_threads.rs`, which counts
+//! its process's threads and so is a binary of its own: a new test file is a `mod` line here.
 
 mod batch;
 mod check;

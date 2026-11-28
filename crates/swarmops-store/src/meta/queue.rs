@@ -825,8 +825,8 @@ impl MetaStore {
     }
 
     /// A turn that serves no queue: waits for the lock until `deadline`, on `wait` if it has
-    /// one (a declined rerun's first wait: a new one would leave its helper parked), then leads
-    /// alone.
+    /// one (a declined rerun's first wait, which keeps its place among the process's claims: a
+    /// new one would join behind them), then leads alone.
     fn own_only(
         &self,
         own: RequestId,
@@ -1654,6 +1654,7 @@ mod tests {
     use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 
     use super::*;
+    use crate::flock_wait::{self, LockKey};
     use crate::fs_ops::{FsOps, LinkOutcome, RealFs};
     use crate::layout::Layout;
     use crate::meta::index::ChangesetMeta;
@@ -3197,10 +3198,10 @@ mod tests {
         });
     }
 
-    /// A declined waiter runs again on its first wait: the wait's helper, parked in `flock`, may
-    /// take the lock the moment its holder lets go, and hands it to the rerun. Three rounds,
-    /// each let go once the answer is read; a helper the round before left parked would fail
-    /// the next round's zero-timeout hold.
+    /// A declined waiter runs again on its first wait: the lock file's helper, blocked in
+    /// `flock`, may take the lock the moment its holder lets go, and hands it to the rerun's
+    /// claim. Three rounds, each let go once the answer is read; a lock the round before left
+    /// with a helper would fail the next round's zero-timeout hold.
     #[test]
     fn a_declined_rerun_waits_on_its_first_wait() {
         let (_dir, root) = new_store();
@@ -3235,34 +3236,21 @@ mod tests {
         }
     }
 
-    /// How many lock-wait helper threads (`meta-lock-wait`) this process runs, by the names
-    /// `/proc/self/task` lists: a directory only Linux has.
-    #[cfg(target_os = "linux")]
-    fn helpers() -> usize {
-        fs::read_dir("/proc/self/task")
-            .unwrap()
-            .filter(|task| {
-                let comm = task.as_ref().unwrap().path().join("comm");
-                fs::read_to_string(comm).is_ok_and(|name| name.trim() == "meta-lock-wait")
-            })
-            .count()
-    }
-
-    /// A declined rerun waits on its first wait's helper and starts no second one: a second
-    /// would leave the first parked in `flock`, to take the lock for an instant after the call
-    /// returned. Checked for 100 ms after the answer is read, while the holder keeps the lock.
-    /// The count of helpers is the whole of this test, and only Linux lists a process's threads
-    /// by name, so it runs on Linux alone; `a_declined_rerun_waits_on_its_first_wait` runs the
-    /// same rerun everywhere.
-    #[cfg(target_os = "linux")]
+    /// A declined rerun waits on its first wait's claim and makes no second one: a rerun that
+    /// started a wait of its own would show as a second claim on the lock file's helper, and
+    /// would wait behind its first. Checked for 100 ms after the answer is read, while the
+    /// holder keeps the lock; `a_declined_rerun_waits_on_its_first_wait` runs the same rerun to
+    /// its end.
     #[test]
-    fn a_declined_rerun_starts_no_second_helper() {
+    fn a_declined_rerun_makes_no_second_claim() {
         let (_dir, root) = new_store();
         let holder = open(&root);
         let lock = hold(&holder);
+        let lock_file = File::open(Layout::new(root.clone()).meta_lock()).unwrap();
+        let key = LockKey::of(&lock_file).unwrap();
         thread::scope(|s| {
             let waiter = s.spawn(|| {
-                let store = open(&root).with_lock_timeout(Duration::from_secs(5));
+                let store = open(&root).with_lock_timeout(Duration::from_secs(60));
                 turn(&store, Ask::Frame(1))
             });
             let rid = wait_files(&root, Kind::Req, 1).remove(0);
@@ -3270,7 +3258,7 @@ mod tests {
             fs::rename(Kind::Req.path(&dir, &rid), Kind::Com.path(&dir, &rid)).unwrap();
             seed_answer(&root, &rid, &Answer::new(Outcome::Declined, Vec::new()));
 
-            // 1. The answer read, the rerun waits: one helper the whole time.
+            // 1. The answer read, the rerun waits: one claim at most, the whole time.
             let deadline = Instant::now() + PATIENCE;
             while exists(&Kind::Ans.path(&dir, &rid)) {
                 assert!(Instant::now() < deadline, "the answer is read");
@@ -3278,7 +3266,8 @@ mod tests {
             }
             let watched = Instant::now() + Duration::from_millis(100);
             while Instant::now() < watched {
-                assert!(helpers() <= 1, "a second helper");
+                let claims = flock_wait::waiting(&key);
+                assert!(claims <= Some(1), "a second claim: {claims:?}");
                 thread::sleep(Duration::from_millis(1));
             }
 

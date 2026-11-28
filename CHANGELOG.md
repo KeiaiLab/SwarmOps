@@ -50,6 +50,15 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Fixed
 
+- A wait for a store's writer lock or for the serving repository's lock that gives up no longer
+  leaves a thread of its own blocked until the holder lets go. Every wait of a process for one
+  lock file now shares one helper thread, which ends once the lock is free and nobody claims it,
+  so a process keeps at most one such thread for each lock file it waits on (two a store) where
+  it kept one for every wait that gave up while a holder hung. The process's counters gain
+  `flock_helpers_started` and `flock_helpers_ended`, and the store crate the module
+  `flock_wait`. The waits of one process for one lock are now served oldest first; the timeouts
+  and `E_BUSY` are unchanged. The reason: a process that lives for weeks, as the planned
+  service will (M43), must not gather threads behind a holder that hangs.
 - A first `clone` or `fetch` over `so://` of a store with many blobs no longer fails with
   `E_INVALID_ARG: a request line past 1048576 bytes` (`line_too_long`). The client asked for
   the blobs of a batch 10,000 at a time, and each want is two ids, a line of about 1.5 MB the
