@@ -142,6 +142,12 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         e @ (RepoError::Derived { .. }
         | RepoError::DerivedCorrupt { .. }
         | RepoError::PastJournalEnd { .. }) => derive_error(e, message, during),
+        // A land's seal that was refused (M42): the error the seal function gave, as it gave
+        // it. The functions of this crate give an `OpError`; any other is a bug.
+        RepoError::SealRefused(refused) => match refused.0.downcast::<OpError>() {
+            Ok(given) => *given,
+            Err(_) => unmapped(message),
+        },
         // A variant of another crate's enum this build does not know: a bug.
         RepoError::Internal(_) => error(ErrorCode::Internal, message),
         _ => unmapped(message),
@@ -1634,6 +1640,7 @@ fn put_text(found: &mut Map<String, Value>, key: &str, text: String) {
 mod tests {
     use swarmops_core::{ChangesetId, CodecError, ObjectKind};
     use swarmops_repo::OpNotFoundReason;
+    use swarmops_repo::land::SealRefused;
     use swarmops_store::{FileOp, FsMethod, IoFailure, LimitKind};
 
     use super::*;
@@ -1671,6 +1678,28 @@ mod tests {
         maps(past(), During::Op, ErrorCode::InvalidArg);
         let details = repo_error(past(), During::Op).details;
         assert_eq!(details["after"].as_u64(), Some(7));
+    }
+
+    /// A land's seal that was refused comes back as the error the seal function gave, whole: its
+    /// code, its details and its hint. A refusal that holds no operations error is a bug.
+    #[test]
+    fn a_refused_seal_gives_back_the_error_it_holds() {
+        let given = error(ErrorCode::PolicyDenied, "the signer's tool exited with 1")
+            .with_details(details([("reason", "signing_failed".into())]))
+            .with_hint("run the tool by hand with the same key");
+        let refused = || RepoError::SealRefused(SealRefused::new(given.clone()));
+        assert_eq!(op(refused()), given);
+        assert_eq!(
+            repo_error(refused(), During::Open(Utf8Path::new(AT))),
+            given
+        );
+
+        let other = io::Error::other("no operations error");
+        let other = RepoError::SealRefused(SealRefused::new(other));
+        let shown = other.to_string();
+        maps(other, During::Op, ErrorCode::Internal);
+        let expected = "the seal of a land's changeset was refused: no operations error";
+        assert_eq!(shown, expected);
     }
 
     /// The golden error object of `E_UNKNOWN_PARENT` (exit 6): no operation reaches it through
