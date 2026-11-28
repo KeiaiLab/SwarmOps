@@ -9,6 +9,7 @@ reports = [{ format = "junit", path = "target/nextest/default/junit.xml" }]
 argv = ["cargo", "clippy", "--", "-D", "warnings"]
 dir = "crates/app"
 timeout_s = 600
+inputs = ["crates/app/**", "Cargo.toml", "Cargo.lock"]
 
 [check.docs]
 argv = ["python3", "-I", "scripts/check-docs.py"]

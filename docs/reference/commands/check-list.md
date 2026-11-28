@@ -85,7 +85,7 @@ swarmops --repo [tmp]/store check list
           "before-land",
           "after-land"
         ],
-        "line": 13
+        "line": 14
       },
       {
         "name": "lint",
@@ -101,6 +101,11 @@ swarmops --repo [tmp]/store check list
         "definition_digest": "[lint_digest]",
         "stages": [
           "before-land"
+        ],
+        "inputs": [
+          "Cargo.lock",
+          "Cargo.toml",
+          "crates/app/**"
         ],
         "line": 8
       },

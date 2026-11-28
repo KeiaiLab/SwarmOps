@@ -84,7 +84,7 @@ fn a_version_alone_lists_nothing() {
 }
 
 /// The fixture reads as three checks sorted by name, the defaults filled in, each with the line
-/// of its table.
+/// of its table, and `lint` with the inputs it declares, sorted.
 #[test]
 fn the_fixture_reads_sorted_with_its_lines() {
     let read = parse(FIXTURE.as_bytes()).unwrap();
@@ -95,12 +95,16 @@ fn the_fixture_reads_sorted_with_its_lines() {
     assert_eq!(
         shown,
         [
-            ("docs", ".", 900, Some(13)),
+            ("docs", ".", 900, Some(14)),
             ("lint", "crates/app", 600, Some(8)),
             ("unit", ".", 900, Some(4)),
         ]
     );
     assert_eq!(read.checks[2].argv, ["cargo", "test", "--locked"]);
+    let inputs: Vec<&[String]> = read.checks.iter().map(|c| c.inputs.as_slice()).collect();
+    let declared = ["Cargo.lock", "Cargo.toml", "crates/app/**"].map(str::to_owned);
+    let none: &[String] = &[];
+    assert_eq!(inputs, [none, &declared[..], none]);
     let stages: Vec<&[CheckStage]> = read.checks.iter().map(|c| c.stages.as_slice()).collect();
     assert_eq!(
         stages,

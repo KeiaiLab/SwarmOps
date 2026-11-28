@@ -1,13 +1,15 @@
-//! `check list` (M30-1, M30-2) through the binary: the same tree gives the same answer byte for
-//! byte, a tree with no file lists nothing, the directory form says the caller vouched, the
-//! one check `default` is the command `ws land --check` runs, and no link is followed.
+//! `check list` (M30-1, M30-2, M30-3) through the binary: the same tree gives the same answer byte
+//! for byte, a tree with no file lists nothing, the directory form says the caller vouched, the
+//! one check `default` is the command `ws land --check` runs, no link is followed, and a check's
+//! `inputs` are listed, or refused, alike by the command and by the MCP tool.
 
 use std::fs;
 use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::ws::{Lab, Out, inside, main_of, run_in, write};
+use crate::mcp::Server;
+use crate::ws::{AGENT, Lab, Out, inside, main_of, run_in, write};
 
 /// The plan's fixture, and the same file with a key version 1 does not take on line 11.
 const FIXTURE: &str = include_str!("fixtures/check/checks.toml");
@@ -136,6 +138,65 @@ fn the_directory_form_opens_no_store() {
     );
     let nowhere = list_dir(&lab, &lab.beside("missing"));
     assert_eq!(nowhere.err("E_INVALID_ARG", 2)["details"]["reason"], "dir");
+}
+
+/// A check's `inputs` reach the answer sorted bytewise, the same from the store, from a
+/// directory and through the MCP tool, and a check that declares none has no `inputs` there. A
+/// pattern outside the grammar is refused by each of the three as `value`, naming the key, the
+/// pattern and its line.
+#[test]
+fn inputs_are_listed_and_refused_in_every_form() {
+    let lab = Lab::new();
+    let dir = lab.beside("tree");
+    let mut server = Server::start(&["--repo", lab.path(), "--as", AGENT], &[]);
+    server.initialize();
+
+    // 1. Listed: `lint` with its three patterns sorted, `docs` and `unit` without the field.
+    lab.publish(".swarmops/checks.toml", FIXTURE);
+    write(&dir, ".swarmops/checks.toml", FIXTURE);
+    let stored = lab.so(&["check", "list"]).ok();
+    let vouched = list_dir(&lab, &dir).ok();
+    let tool = server.ok("check_list", json!({}));
+    let sorted = json!(["Cargo.lock", "Cargo.toml", "crates/app/**"]);
+    for (form, result) in [
+        ("the store", &stored),
+        ("a directory", &vouched),
+        ("the tool", &tool["result"]),
+    ] {
+        let checks = result["checks"].as_array().unwrap();
+        let inputs: Vec<Option<&Value>> = checks.iter().map(|check| check.get("inputs")).collect();
+        assert_eq!(inputs, [None, Some(&sorted), None], "{form}: {result}");
+    }
+    assert_eq!(tool["result"], stored, "the tool answers as the command");
+
+    // 2. Refused: `src/*.rs`, on line 7, has a `*` beside other bytes.
+    let refused = "version = 1\n\n[check.lint]\nargv = [\"make\"]\ninputs = [\n  \"src/**\",\n  \
+                   \"src/*.rs\",\n]\n";
+    lab.publish(".swarmops/checks.toml", refused);
+    write(&dir, ".swarmops/checks.toml", refused);
+    let stored = lab.so(&["check", "list"]).err("E_CHECK_FILE", 1);
+    let vouched = list_dir(&lab, &dir).err("E_CHECK_FILE", 1);
+    let tool = server.call("check_list", json!({})).envelope;
+    assert_eq!(tool["ok"], false, "{tool}");
+    for (form, error) in [
+        ("the store", &stored),
+        ("a directory", &vouched),
+        ("the tool", &tool["error"]),
+    ] {
+        assert_eq!(error["code"], "E_CHECK_FILE", "{form}: {error}");
+        let details = &error["details"];
+        assert_eq!(
+            (&details["reason"], &details["key"], &details["line"]),
+            (&json!("value"), &json!("check.lint.inputs"), &json!(7)),
+            "{form}: {error}"
+        );
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains(r#""src/*.rs""#), "{form}: {error}");
+        let hint = error["hint"].as_str().unwrap();
+        assert!(hint.contains("inputs"), "{form}: {error}");
+    }
+    assert_eq!(tool["error"]["details"], stored["details"]);
+    server.finish_clean();
 }
 
 /// A symbolic link at `.swarmops/checks.toml` is refused, `not_a_file`, in the tree and in a
